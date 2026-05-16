@@ -286,6 +286,13 @@ def _is_reviewed_legacy(mem: Any) -> bool:
 
 
 def _legacy_review_counts(store: Any) -> dict[str, int]:
+    """统计真实的 legacy_quarantine（v1/v2 历史旧数据），用于决定 UI 是否再次提示用户。
+
+    v4 改动：
+    - 只统计 ``scope='legacy_quarantine'`` 且 ``user_id='legacy'`` 的桶；
+    - lifecycle 后台合成产物现在落到 ``pending_consolidation`` 桶，
+      单独计数（pending_consolidation 字段），UI 不再用它去推 banner。
+    """
     legacy = store.load_all_memories(
         scope="legacy_quarantine",
         scope_owner="",
@@ -295,7 +302,24 @@ def _legacy_review_counts(store: Any) -> dict[str, int]:
     )
     pending = sum(1 for mem in legacy if not _is_reviewed_legacy(mem))
     reviewed = len(legacy) - pending
-    return {"total": len(legacy), "pending": pending, "reviewed": reviewed}
+    try:
+        pending_consolidation = len(
+            store.load_all_memories(
+                scope="pending_consolidation",
+                scope_owner="",
+                user_id=None,
+                workspace_id=None,
+                include_inactive=True,
+            )
+        )
+    except Exception:
+        pending_consolidation = 0
+    return {
+        "total": len(legacy),
+        "pending": pending,
+        "reviewed": reviewed,
+        "pending_consolidation": pending_consolidation,
+    }
 
 
 def _identity_slot_for(subject: str, predicate: str) -> str:
@@ -621,6 +645,10 @@ async def memory_migration_status(request: Request):
         "legacy_quarantine": legacy_counts["total"],
         "legacy_pending": legacy_counts["pending"],
         "legacy_reviewed": legacy_counts["reviewed"],
+        # v4：lifecycle 后台合成产物现在落到独立的 pending_consolidation 桶，
+        # 不再混入 legacy_quarantine 反复触发 UI banner。前端只看
+        # has_recoverable_legacy 决定是否提示。
+        "pending_consolidation": legacy_counts.get("pending_consolidation", 0),
         "semantic": all_counts,
         "graph": graph_counts,
         "has_recoverable_legacy": legacy_counts["pending"] > 0,

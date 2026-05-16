@@ -32,7 +32,7 @@ from .types import normalize_tags
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 # Process-level singleton registry: same db_path → same MemoryStorage instance
 _instance_registry: dict[str, MemoryStorage] = {}
@@ -232,6 +232,8 @@ class MemoryStorage:
                 self._migrate_v1_to_v2(mig_conn, commit=False)
             if from_version < 3:
                 self._migrate_v2_to_v3(mig_conn, commit=False)
+            if from_version < 4:
+                self._migrate_v3_to_v4(mig_conn, commit=False)
 
             self._set_schema_version(_SCHEMA_VERSION, conn=mig_conn, commit=False)
             mig_conn.execute("COMMIT")
@@ -349,6 +351,113 @@ class MemoryStorage:
             END""")
         except sqlite3.OperationalError:
             pass
+        if commit:
+            c.commit()
+
+    def _migrate_v3_to_v4(
+        self,
+        conn: sqlite3.Connection | None = None,
+        *,
+        commit: bool = True,
+    ) -> None:
+        """Phase 0: 把 legacy_quarantine 里的 lifecycle 后台合成产物迁出到
+        pending_consolidation，让真历史旧数据和后台合成数据物理分桶。
+
+        分流规则（保守优先）：
+        - source IN ('daily_consolidation', 'experience_synthesis')
+          → pending_consolidation（lifecycle 自己写的）
+        - 其余 → 留在 legacy_quarantine（视为真历史 v1/v2 数据）
+
+        所有被迁移的记录写入 _memory_scope_audit 表，便于排查和回滚。
+        """
+        c = conn or self._conn
+
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS _memory_scope_audit (
+                memory_id TEXT NOT NULL,
+                old_scope TEXT NOT NULL,
+                new_scope TEXT NOT NULL,
+                old_user_id TEXT DEFAULT '',
+                new_user_id TEXT DEFAULT '',
+                reason TEXT NOT NULL,
+                migrated_at TEXT NOT NULL,
+                migration_version TEXT NOT NULL DEFAULT 'v3_to_v4'
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scope_audit_memory ON _memory_scope_audit(memory_id)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scope_audit_version ON _memory_scope_audit(migration_version)"
+        )
+
+        # session 租户索引表（lifecycle 反查租户用），即使本次 migration
+        # 不写入数据，也要保证表结构存在，避免 LifecycleManager / MemoryManager
+        # 启动期就抛 no such table。
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_tenants (
+                session_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL DEFAULT 'default',
+                workspace_id TEXT NOT NULL DEFAULT 'default',
+                last_updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+        # 关闭 FTS update 触发器，避免 owner-only 字段更新触发 FTS 重建
+        c.execute("DROP TRIGGER IF EXISTS memories_fts_au")
+        now = datetime.now().isoformat()
+
+        # 先记审计：哪些行将被改 scope
+        c.execute(
+            """
+            INSERT INTO _memory_scope_audit
+                (memory_id, old_scope, new_scope, old_user_id, new_user_id, reason, migrated_at, migration_version)
+            SELECT
+                id, scope, 'pending_consolidation',
+                user_id, user_id,
+                'v3_to_v4_source_lifecycle', ?, 'v3_to_v4'
+            FROM memories
+            WHERE scope = 'legacy_quarantine'
+              AND source IN ('daily_consolidation', 'experience_synthesis')
+            """,
+            (now,),
+        )
+
+        cur_update = c.execute(
+            """
+            UPDATE memories
+            SET scope = 'pending_consolidation',
+                updated_at = ?
+            WHERE scope = 'legacy_quarantine'
+              AND source IN ('daily_consolidation', 'experience_synthesis')
+            """,
+            (now,),
+        )
+        moved = cur_update.rowcount if cur_update.rowcount is not None else 0
+        if moved:
+            logger.info(
+                "[MemoryStorage] v3→v4 split: moved %d rows from legacy_quarantine to "
+                "pending_consolidation (audit recorded)",
+                moved,
+            )
+
+        # 恢复 FTS update 触发器
+        try:
+            c.execute(
+                """CREATE TRIGGER IF NOT EXISTS memories_fts_au AFTER UPDATE ON memories BEGIN
+                INSERT INTO memories_fts(memories_fts, rowid, content, subject, predicate, tags)
+                VALUES ('delete', old.rowid, old.content, old.subject, old.predicate, old.tags);
+                INSERT INTO memories_fts(rowid, content, subject, predicate, tags)
+                VALUES (new.rowid, new.content, new.subject, new.predicate, new.tags);
+            END"""
+            )
+        except sqlite3.OperationalError:
+            pass
+
         if commit:
             c.commit()
 
@@ -537,6 +646,33 @@ class MemoryStorage:
             )
         """)
 
+        # v4: session_id → 租户映射，lifecycle 后台批处理用这张表反查
+        # 一条 conversation_turns 的 session_id 属于哪个 (user_id, workspace_id)，
+        # 避免裸用 ContextVar 默认值导致后台合成全部落到 default 共享桶。
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS session_tenants (
+                session_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL DEFAULT 'default',
+                workspace_id TEXT NOT NULL DEFAULT 'default',
+                last_updated_at TEXT NOT NULL
+            )
+        """)
+
+        # v4: 记忆 scope 迁移审计表，记录每条记忆历史上被哪次 migration
+        # 从哪个 scope 移到哪个 scope，含理由和时间戳，便于排查 / 回滚。
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS _memory_scope_audit (
+                memory_id TEXT NOT NULL,
+                old_scope TEXT NOT NULL,
+                new_scope TEXT NOT NULL,
+                old_user_id TEXT DEFAULT '',
+                new_user_id TEXT DEFAULT '',
+                reason TEXT NOT NULL,
+                migrated_at TEXT NOT NULL,
+                migration_version TEXT NOT NULL DEFAULT 'v3_to_v4'
+            )
+        """)
+
         # ==============================================================
         # Phase 2: CREATE INDEX — all tables already exist at this point
         # ==============================================================
@@ -591,6 +727,14 @@ class MemoryStorage:
         c.execute("CREATE INDEX IF NOT EXISTS idx_attach_mime ON attachments(mime_type)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_attach_direction ON attachments(direction)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_attach_created ON attachments(created_at)")
+
+        # session_tenants + _memory_scope_audit (v4)
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scope_audit_memory ON _memory_scope_audit(memory_id)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scope_audit_version ON _memory_scope_audit(migration_version)"
+        )
 
         if include_fts:
             self._create_fts_objects(c)
@@ -1391,6 +1535,126 @@ class MemoryStorage:
                 if _is_db_locked(e):
                     raise
                 logger.error(f"Failed to save scratchpad: {e}")
+
+    # ======================================================================
+    # Session Tenants (v4)
+    # ======================================================================
+
+    def upsert_session_tenant(
+        self,
+        session_id: str,
+        user_id: str,
+        workspace_id: str,
+    ) -> None:
+        """记录 session_id → (user_id, workspace_id) 映射，供 lifecycle 反查租户。
+
+        每次 MemoryManager.start_session 都会被调用一次。重复写入只刷新时间戳，
+        避免后台批处理时拿不到当前会话归属的 user / workspace 而误落 default。
+        """
+        if not self._conn or not session_id:
+            return
+        u = (user_id or "").strip() or "default"
+        w = (workspace_id or "").strip() or "default"
+        ts = datetime.now().isoformat()
+        with self._lock:
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO session_tenants (session_id, user_id, workspace_id, last_updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(session_id) DO UPDATE SET
+                        user_id = excluded.user_id,
+                        workspace_id = excluded.workspace_id,
+                        last_updated_at = excluded.last_updated_at
+                    """,
+                    (session_id, u, w, ts),
+                )
+                self._conn.commit()
+            except Exception as e:
+                if _is_db_locked(e):
+                    raise
+                logger.warning(f"[MemoryStorage] upsert_session_tenant failed: {e}")
+
+    def get_session_tenant(self, session_id: str) -> tuple[str, str] | None:
+        """根据 session_id 查 (user_id, workspace_id)。
+
+        未找到返回 None；调用方应将 None 视为 “租户未知”，把记忆落到
+        pending_consolidation 桶里，避免污染共享 default。
+        """
+        if not self._conn or not session_id:
+            return None
+        try:
+            cur = self._conn.execute(
+                "SELECT user_id, workspace_id FROM session_tenants WHERE session_id = ?",
+                (session_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return (row[0] or "default", row[1] or "default")
+        except Exception as e:
+            logger.debug(f"[MemoryStorage] get_session_tenant failed: {e}")
+            return None
+
+    def list_known_tenants(self) -> list[tuple[str, str]]:
+        """返回所有已知 (user_id, workspace_id) 组合，供 synthesize 等批处理分组。
+
+        排除 ``legacy / system / anonymous / ''`` 这种 **明确表示"不知道是谁"** 的
+        占位身份。``default`` **保留**：在桌面 / CLI 单用户场景，``default`` 就是
+        合法用户身份，不能被当成共享桶过滤掉。
+        """
+        if not self._conn:
+            return []
+        try:
+            cur = self._conn.execute(
+                """
+                SELECT DISTINCT user_id, workspace_id
+                FROM session_tenants
+                WHERE user_id NOT IN ('legacy', 'system', 'anonymous', '')
+                """
+            )
+            return [(r[0] or "default", r[1] or "default") for r in cur.fetchall()]
+        except Exception as e:
+            logger.debug(f"[MemoryStorage] list_known_tenants failed: {e}")
+            return []
+
+    def record_scope_audit(
+        self,
+        memory_id: str,
+        *,
+        old_scope: str,
+        new_scope: str,
+        reason: str,
+        old_user_id: str = "",
+        new_user_id: str = "",
+        migration_version: str = "runtime",
+    ) -> None:
+        """记一条 scope 变更审计。runtime 路径下用 migration_version='runtime'。"""
+        if not self._conn or not memory_id:
+            return
+        with self._lock:
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO _memory_scope_audit
+                        (memory_id, old_scope, new_scope, old_user_id, new_user_id,
+                         reason, migrated_at, migration_version)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        memory_id,
+                        old_scope or "",
+                        new_scope or "",
+                        old_user_id or "",
+                        new_user_id or "",
+                        reason or "",
+                        datetime.now().isoformat(),
+                        migration_version or "runtime",
+                    ),
+                )
+                self._conn.commit()
+            except Exception as e:
+                logger.debug(f"[MemoryStorage] record_scope_audit failed: {e}")
 
     # ======================================================================
     # Conversation Turns

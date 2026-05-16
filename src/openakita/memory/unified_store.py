@@ -458,6 +458,42 @@ class UnifiedStore:
         self.db.save_scratchpad(scratchpad.to_dict())
 
     # ======================================================================
+    # Session Tenants (v4) — lifecycle 反查租户用
+    # ======================================================================
+
+    def upsert_session_tenant(
+        self, session_id: str, user_id: str, workspace_id: str
+    ) -> None:
+        self.db.upsert_session_tenant(session_id, user_id, workspace_id)
+
+    def get_session_tenant(self, session_id: str) -> tuple[str, str] | None:
+        return self.db.get_session_tenant(session_id)
+
+    def list_known_tenants(self) -> list[tuple[str, str]]:
+        return self.db.list_known_tenants()
+
+    def record_scope_audit(
+        self,
+        memory_id: str,
+        *,
+        old_scope: str,
+        new_scope: str,
+        reason: str,
+        old_user_id: str = "",
+        new_user_id: str = "",
+        migration_version: str = "runtime",
+    ) -> None:
+        self.db.record_scope_audit(
+            memory_id,
+            old_scope=old_scope,
+            new_scope=new_scope,
+            reason=reason,
+            old_user_id=old_user_id,
+            new_user_id=new_user_id,
+            migration_version=migration_version,
+        )
+
+    # ======================================================================
     # Conversation Turns
     # ======================================================================
 

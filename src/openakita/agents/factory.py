@@ -88,6 +88,11 @@ class _GlobalStoreSource:
     Used by isolated-memory agents with memory_inherit_global=True to also
     retrieve from the shared global memory during search.
 
+    Phase 2b.1 安全洞修复：必须按当前 (user_id, workspace_id) 透传过滤，
+    否则 isolated agent 在 "继承全局" 模式下会拉到别的用户的记忆。
+    检索仅返回 ``scope="user"`` 范围、且 `user_id/workspace_id` 与
+    isolated MemoryManager 当前租户匹配的记忆，禁止跨用户、跨工作区。
+
     RetrievalEngine._call_external_sources_sync expects:
       - ``source.source_name: str``
       - ``async source.retrieve(query, limit) -> list[dict]``
@@ -96,11 +101,45 @@ class _GlobalStoreSource:
 
     source_name = "global_memory"
 
-    def __init__(self, global_store):
+    def __init__(self, global_store, owner_provider):
+        """
+        Args:
+            global_store: 共享的全局 UnifiedStore
+            owner_provider: 无参可调用对象，返回当前 (user_id, workspace_id) 元组。
+                通常绑定到 isolated MemoryManager._current_owner，以便每次
+                检索时拿到该 Agent 当前会话的真实租户身份。
+        """
         self._store = global_store
+        self._owner_provider = owner_provider
 
     async def retrieve(self, query: str, limit: int = 8) -> list[dict]:
-        memories = self._store.search_semantic(query, limit=limit)
+        try:
+            user_id, workspace_id = self._owner_provider()
+        except Exception as e:
+            logger.warning(
+                "[_GlobalStoreSource] owner_provider failed (%s); refusing cross-user fallback",
+                e,
+            )
+            return []
+        if not user_id or user_id in {"default", "anonymous", "legacy", "system", ""}:
+            logger.debug(
+                "[_GlobalStoreSource] user_id=%r is non-personal; "
+                "skipping global memory inheritance to avoid leaking shared bucket.",
+                user_id,
+            )
+            return []
+        try:
+            memories = self._store.search_semantic(
+                query,
+                limit=limit,
+                scope="user",
+                scope_owner="",
+                user_id=user_id,
+                workspace_id=workspace_id or "default",
+            )
+        except Exception as e:
+            logger.warning("[_GlobalStoreSource] tenant-scoped search failed: %s", e)
+            return []
         results = []
         for mem in memories:
             results.append(
@@ -409,7 +448,12 @@ class AgentFactory:
         if profile.memory_inherit_global:
             global_store = agent.memory_manager.store
             isolated_mm._global_store_ref = global_store
-            isolated_mm.retrieval_engine._external_sources.append(_GlobalStoreSource(global_store))
+            # P2b.1：把 owner_provider 绑定到 isolated_mm 的 _current_owner，
+            # 让全局检索严格按当前 (user_id, workspace_id) 过滤，
+            # 防止 isolated agent 从全局拉到别的用户/工作区的记忆。
+            isolated_mm.retrieval_engine._external_sources.append(
+                _GlobalStoreSource(global_store, isolated_mm._current_owner)
+            )
 
         agent.memory_manager = isolated_mm
 

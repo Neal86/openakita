@@ -383,6 +383,13 @@ class LifecycleManager:
                 logger.info("[Lifecycle] Pausing unextracted turn processing before session %s", session_id)
                 return paused
 
+            # v4：先从 session_tenants 反查这个 session 属于哪个 (user_id, workspace_id)。
+            # 找不到（例如老 session 在 v4 之前创建、或 session 已被回收）时，
+            # 把抽取产物写入 pending_consolidation 桶 — 而不是历史 legacy 桶，
+            # 也不是当前 ContextVar default。pending_consolidation 对用户不可见，
+            # 后续 promote/dedup 流程可以再决定怎么处理。
+            tenant = self._resolve_tenant_for_session(session_id)
+
             conv_turns = [
                 ConversationTurn(
                     role=t["role"],
@@ -420,7 +427,7 @@ class LifecycleManager:
                 try:
                     items = await self.extractor.extract_from_turn_v2(turn_obj)
                     for item in items:
-                        self._save_extracted_item(item, episode.id)
+                        self._save_extracted_item(item, episode.id, tenant=tenant)
                     total += len(items)
                     self.store.mark_turns_extracted(session_id, [turn_data["turn_index"]])
                 except Exception as e:
@@ -442,17 +449,60 @@ class LifecycleManager:
                 tool_calls=item.get("tool_calls") or [],
                 tool_results=item.get("tool_results") or [],
             )
+            queue_session_id = (item.get("session_id") or "").strip()
+            tenant = self._resolve_tenant_for_session(queue_session_id)
             extracted = await self.extractor.extract_from_turn_v2(turn)
             success = len(extracted) > 0
             for e in extracted:
-                self._save_extracted_item(e)
+                self._save_extracted_item(e, tenant=tenant)
                 total += 1
             self.store.complete_extraction(item["id"], success=success)
 
         logger.info(f"[Lifecycle] Processed {total} memories from unextracted turns")
         return {"processed": total, "partial": False} if deadline_monotonic else total
 
-    def _save_extracted_item(self, item: dict, episode_id: str | None = None) -> None:
+    def _resolve_tenant_for_session(self, session_id: str) -> tuple[str, str] | None:
+        """根据 session_id 查归属租户 (user_id, workspace_id)。
+
+        语义（v4 修正版）：
+        - 表里 **登记过** 的 session：信任其登记的 user_id，包括 ``default``。
+          理由：session_tenants 是写入侧登记，单条 session 只属于一个用户；
+          desktop CLI 通过 ``start_session(session_id)`` 启动时 user_id 就是
+          ``default``，这是合法的单用户桌面身份，不能当成共享桶拒绝。
+        - 表里 **没登记** 的 session：返回 None（调用方落 pending_consolidation）。
+        - ``anonymous / legacy / system`` 是占位身份，仍然拒绝（这些是显式
+          表示"不知道是谁"，不能当成有效归属落写入）。
+        """
+        if not session_id:
+            return None
+        try:
+            tenant = self.store.get_session_tenant(session_id)
+        except Exception as e:
+            logger.debug("[Lifecycle] get_session_tenant(%s) failed: %s", session_id, e)
+            return None
+        if not tenant:
+            return None
+        user_id, workspace_id = tenant
+        if not user_id or user_id in {"anonymous", "legacy", "system", ""}:
+            return None
+        return (user_id, workspace_id or "default")
+
+    def _save_extracted_item(
+        self,
+        item: dict,
+        episode_id: str | None = None,
+        *,
+        tenant: tuple[str, str] | None = None,
+    ) -> None:
+        """保存后台抽取出的语义记忆。
+
+        v4 改动：
+        - 如果 ``tenant`` 是 (user_id, workspace_id)，写入该租户的 ``user`` scope，
+          直接成为该用户的跨会话长期记忆候选；
+        - 否则写入 ``pending_consolidation`` 桶（user_id='pending'），
+          UI 默认不展示，不再混进 legacy_quarantine 反复骚扰用户。
+        - 历史 legacy_quarantine 桶不再被后台合成新增内容，保留给真历史旧数据。
+        """
         type_map = {
             "PREFERENCE": MemoryType.PREFERENCE,
             "FACT": MemoryType.FACT,
@@ -467,10 +517,15 @@ class LifecycleManager:
         content = (item.get("content") or "").strip()
         subject = item.get("subject", "")
         predicate = item.get("predicate", "")
-        write_scope = "legacy_quarantine"
-        write_owner = ""
-        write_user = "legacy"
-        write_workspace = "default"
+        if tenant:
+            write_scope = "user"
+            write_owner = ""
+            write_user, write_workspace = tenant
+        else:
+            write_scope = "pending_consolidation"
+            write_owner = ""
+            write_user = "pending"
+            write_workspace = "default"
 
         if importance >= 0.85 or mem_type == MemoryType.RULE:
             priority = MemoryPriority.PERMANENT
@@ -1121,107 +1176,151 @@ class LifecycleManager:
 只输出 JSON 数组。如果没有可归纳的经验，输出 []。"""
 
     async def synthesize_experiences(self) -> int:
-        """Synthesize specific experience memories into general principles."""
+        """Synthesize specific experience memories into general principles.
+
+        v4 改动：必须按 (user_id, workspace_id) 分组合成，禁止跨用户取相似。
+        合成产物写回该租户的 ``user`` scope，不再走 legacy_quarantine。
+        没有任何已知租户时直接 return 0，避免把跨用户经验混淆成一条共享记忆。
+        """
         import json
         import re
 
         exp_types = {MemoryType.EXPERIENCE.value, MemoryType.SKILL.value, MemoryType.ERROR.value}
-        all_mems = self.store.load_all_memories()
-        experiences = [m for m in all_mems if m.type.value in exp_types]
-
-        if len(experiences) < 3:
-            return 0
 
         if not self.extractor or not self.extractor.brain:
             return 0
 
-        exp_text = "\n".join(
-            f"- ID={m.id} | type={m.type.value} | cited={m.access_count} | content={m.content}"
-            for m in experiences[:30]
-        )
-
-        prompt = self.EXPERIENCE_SYNTHESIS_PROMPT.format(experience_memories=exp_text)
-
         try:
-            response = await self.extractor.brain.think(
-                prompt,
-                system="你是经验归纳专家。只输出 JSON 数组。",
-                enable_thinking=False,
-            )
-            text = (getattr(response, "content", None) or str(response)).strip()
-            json_match = re.search(r"\[[\s\S]*\]", text)
-            if not json_match:
-                return 0
-
-            syntheses = json.loads(json_match.group())
-            if not isinstance(syntheses, list):
-                return 0
-
-            saved = 0
-            for synth in syntheses:
-                if not isinstance(synth, dict):
-                    continue
-                content = (synth.get("content") or "").strip()
-                source_ids = synth.get("synthesized_from", [])
-                if len(content) < 10 or len(source_ids) < 2:
-                    continue
-
-                # Dedup: skip if a similar experience already exists
-                dup_target: SemanticMemory | None = None
-                try:
-                    similar = self.store.search_semantic(
-                        content,
-                        limit=3,
-                        scope="legacy_quarantine",
-                        user_id="legacy",
-                        workspace_id="default",
-                    )
-                    for s in similar:
-                        if s.superseded_by:
-                            continue
-                        if _fast_content_dedup(content, s.content or "") == "exact":
-                            dup_target = s
-                            break
-                except Exception:
-                    pass
-
-                if dup_target is not None:
-                    for sid in source_ids:
-                        self.store.update_semantic(sid, {"superseded_by": dup_target.id})
-                    logger.debug(f"[Lifecycle] Synthesis dedup: reused {dup_target.id[:8]}")
-                    continue
-
-                mem = SemanticMemory(
-                    type=MemoryType.EXPERIENCE,
-                    priority=MemoryPriority.LONG_TERM,
-                    content=content,
-                    source="experience_synthesis",
-                    subject=(synth.get("subject") or "").strip(),
-                    predicate=(synth.get("predicate") or "").strip(),
-                    importance_score=min(1.0, max(0.7, float(synth.get("importance", 0.85)))),
-                    confidence=0.8,
-                )
-                self.store.save_semantic(
-                    mem,
-                    scope="legacy_quarantine",
-                    user_id="legacy",
-                    workspace_id="default",
-                )
-                saved += 1
-
-                # Mark source memories as superseded
-                for sid in source_ids:
-                    self.store.update_semantic(sid, {"superseded_by": mem.id})
-
-            if saved:
-                logger.info(
-                    f"[Lifecycle] Synthesized {saved} experience principles from {len(experiences)} memories"
-                )
-            return saved
-
+            tenants = self.store.list_known_tenants()
         except Exception as e:
-            logger.error(f"[Lifecycle] Experience synthesis failed: {e}")
+            logger.warning("[Lifecycle] list_known_tenants failed: %s", e)
             return 0
+        if not tenants:
+            logger.debug("[Lifecycle] No known tenants; skipping cross-user synthesis")
+            return 0
+
+        total_saved = 0
+        for tenant_user_id, tenant_workspace_id in tenants:
+            try:
+                tenant_experiences = self.store.load_all_memories(
+                    scope="user",
+                    scope_owner="",
+                    user_id=tenant_user_id,
+                    workspace_id=tenant_workspace_id,
+                )
+            except Exception as e:
+                logger.debug(
+                    "[Lifecycle] load_all_memories for tenant (%s, %s) failed: %s",
+                    tenant_user_id, tenant_workspace_id, e,
+                )
+                continue
+
+            experiences = [m for m in tenant_experiences if m.type.value in exp_types]
+            if len(experiences) < 3:
+                continue
+
+            exp_text = "\n".join(
+                f"- ID={m.id} | type={m.type.value} | cited={m.access_count} | content={m.content}"
+                for m in experiences[:30]
+            )
+
+            prompt = self.EXPERIENCE_SYNTHESIS_PROMPT.format(experience_memories=exp_text)
+
+            try:
+                response = await self.extractor.brain.think(
+                    prompt,
+                    system="你是经验归纳专家。只输出 JSON 数组。",
+                    enable_thinking=False,
+                )
+                text = (getattr(response, "content", None) or str(response)).strip()
+                json_match = re.search(r"\[[\s\S]*\]", text)
+                if not json_match:
+                    continue
+
+                syntheses = json.loads(json_match.group())
+                if not isinstance(syntheses, list):
+                    continue
+
+                saved = 0
+                for synth in syntheses:
+                    if not isinstance(synth, dict):
+                        continue
+                    content = (synth.get("content") or "").strip()
+                    source_ids = synth.get("synthesized_from", [])
+                    if len(content) < 10 or len(source_ids) < 2:
+                        continue
+
+                    # Dedup: skip if a similar experience already exists in this tenant
+                    dup_target: SemanticMemory | None = None
+                    try:
+                        similar = self.store.search_semantic(
+                            content,
+                            limit=3,
+                            scope="user",
+                            scope_owner="",
+                            user_id=tenant_user_id,
+                            workspace_id=tenant_workspace_id,
+                        )
+                        for s in similar:
+                            if s.superseded_by:
+                                continue
+                            if _fast_content_dedup(content, s.content or "") == "exact":
+                                dup_target = s
+                                break
+                    except Exception:
+                        pass
+
+                    if dup_target is not None:
+                        for sid in source_ids:
+                            self.store.update_semantic(sid, {"superseded_by": dup_target.id})
+                        logger.debug(
+                            "[Lifecycle] Synthesis dedup (tenant=%s/%s): reused %s",
+                            tenant_user_id, tenant_workspace_id, dup_target.id[:8],
+                        )
+                        continue
+
+                    mem = SemanticMemory(
+                        type=MemoryType.EXPERIENCE,
+                        priority=MemoryPriority.LONG_TERM,
+                        content=content,
+                        source="experience_synthesis",
+                        subject=(synth.get("subject") or "").strip(),
+                        predicate=(synth.get("predicate") or "").strip(),
+                        importance_score=min(1.0, max(0.7, float(synth.get("importance", 0.85)))),
+                        confidence=0.8,
+                    )
+                    self.store.save_semantic(
+                        mem,
+                        scope="user",
+                        scope_owner="",
+                        user_id=tenant_user_id,
+                        workspace_id=tenant_workspace_id,
+                    )
+                    saved += 1
+
+                    for sid in source_ids:
+                        self.store.update_semantic(sid, {"superseded_by": mem.id})
+
+                if saved:
+                    logger.info(
+                        "[Lifecycle] Synthesized %d experience principles for tenant (%s, %s) "
+                        "from %d memories",
+                        saved, tenant_user_id, tenant_workspace_id, len(experiences),
+                    )
+                total_saved += saved
+            except Exception as e:
+                logger.warning(
+                    "[Lifecycle] Synthesis failed for tenant (%s, %s): %s",
+                    tenant_user_id, tenant_workspace_id, e,
+                )
+                continue
+
+        if total_saved:
+            logger.info(
+                "[Lifecycle] Total synthesized %d experience principles across %d tenants",
+                total_saved, len(tenants),
+            )
+        return total_saved
 
     # ==================================================================
     # Refresh MEMORY.md (post-review, no keyword filter needed)
@@ -1236,7 +1335,11 @@ class LifecycleManager:
         - 同一 (type, content_hash) 仅保留一条，避免 manual / session_extraction /
           daily_consolidation 三份重复同时写入。
         """
-        memories = self.store.query_semantic(min_importance=0.5, limit=200)
+        # v4：限定 scope='user'，防止 pending_consolidation / legacy_quarantine
+        # 里的未审查内容直接写进 MEMORY.md（之前未过滤 scope 会跨用户污染）。
+        memories = self.store.query_semantic(
+            scope="user", min_importance=0.5, limit=200
+        )
 
         try:
             from ..core.feature_flags import is_enabled as _ff_enabled

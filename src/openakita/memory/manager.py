@@ -510,6 +510,16 @@ class MemoryManager:
             self._current_user_id = str(user_id).strip() if user_id else "anonymous"
         if workspace_id is not _UNSET_OWNER:
             self._current_workspace_id = str(workspace_id).strip() if workspace_id else "default"
+        # v4：把 session_id → (user_id, workspace_id) 的映射写进 session_tenants 表，
+        # 让凌晨 LifecycleManager 批处理时可以反查每条 conversation_turn 到底
+        # 属于哪个租户，而不是无脑落到 ContextVar 默认值 default/default。
+        if session_id:
+            with contextlib.suppress(Exception):
+                self.store.upsert_session_tenant(
+                    session_id,
+                    self._current_user_id or "default",
+                    self._current_workspace_id or "default",
+                )
         # P1-5：每次切换会话时显式记录当前 (user_id, workspace_id) 范围，
         # 让运维能从日志直接看出"本会话能看见的长期记忆来自哪个租户"，
         # 排查跨用户串扰时不必再去翻代码或 DB。
