@@ -34,11 +34,18 @@ from openakita.memory.unified_store import UnifiedStore
 # ----------------------------------------------------------------------
 
 
-def _build_v3_db_with_legacy_rows(db_path: Path) -> dict[str, str]:
+def _build_v3_db_with_legacy_rows(
+    db_path: Path,
+    *,
+    extra_turn_sessions: list[str] | None = None,
+) -> dict[str, str]:
     """直接造一个 v3 schema 的 sqlite 数据库，预置两条 legacy_quarantine 记忆：
 
     - mem-lifecycle：``source='daily_consolidation'``，应被 v4 迁出。
     - mem-true-legacy：``source='manual'``，应继续留在 legacy_quarantine。
+
+    可选 ``extra_turn_sessions`` 用于在 conversation_turns 里插入若干 session_id，
+    模拟 v3 库中已有未抽取对话，验证 v4 backfill session_tenants 行为。
 
     返回 {"lifecycle_id": ..., "true_legacy_id": ...}。
     """
@@ -79,6 +86,25 @@ def _build_v3_db_with_legacy_rows(db_path: Path) -> dict[str, str]:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE conversation_turns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                turn_index INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT,
+                tool_calls TEXT,
+                tool_results TEXT,
+                has_tool_calls BOOLEAN DEFAULT FALSE,
+                timestamp TEXT NOT NULL,
+                token_estimate INTEGER,
+                episode_id TEXT,
+                extracted BOOLEAN DEFAULT FALSE,
+                UNIQUE(session_id, turn_index)
+            )
+            """
+        )
         now = datetime.now().isoformat()
         conn.execute(
             """
@@ -102,6 +128,15 @@ def _build_v3_db_with_legacy_rows(db_path: Path) -> dict[str, str]:
             """,
             ("mem-true-legacy", now, now),
         )
+        for idx, sess in enumerate(extra_turn_sessions or []):
+            conn.execute(
+                """
+                INSERT INTO conversation_turns
+                    (session_id, turn_index, role, content, timestamp, extracted)
+                VALUES (?, 0, 'user', 'hello', ?, FALSE)
+                """,
+                (sess, now),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -142,9 +177,73 @@ def test_v3_to_v4_split_legacy_to_pending(tmp_path: Path):
     assert moved[3] == "v3_to_v4"
     assert moved[4] == "v3_to_v4_source_lifecycle"
 
-    # session_tenants 表存在但为空
+    # session_tenants 表存在但为空（本测试没插任何 conversation_turns）
     cnt = storage._conn.execute("SELECT COUNT(*) FROM session_tenants").fetchone()[0]
     assert cnt == 0
+
+
+def test_v3_to_v4_backfills_session_tenants_from_conversation_turns(tmp_path: Path):
+    """v3→v4 升级时，conversation_turns 里出现过的 session_id 都应在
+    session_tenants 中得到登记，避免老 unextracted turn 升级后被误落
+    pending_consolidation。
+
+    解析规则：
+    - IM 通道 conversation_safe_id 形如 ``ns__chat__user[__thread]`` →
+      取第 3 段作 user_id；
+    - 桌面 / CLI 形如 ``YYYYMMDD_HHMMSS_xxx`` 单段 → default。
+    """
+    db_path = tmp_path / "openakita.db"
+    _build_v3_db_with_legacy_rows(
+        db_path,
+        extra_turn_sessions=[
+            "telegram__chat-100__alice",
+            "telegram__chat-200__bob__thread-1",
+            "20251115_120000_abc12345",          # desktop CLI 单段
+            "feishu__group-7__default",           # IM 但 user 段是 default
+            "feishu__group-9__anonymous",         # 占位身份
+            "",                                   # 空 session_id（不应入表）
+        ],
+    )
+
+    storage = MemoryStorage(db_path, _register=False)
+
+    rows = storage._conn.execute(
+        "SELECT session_id, user_id, workspace_id FROM session_tenants "
+        "ORDER BY session_id"
+    ).fetchall()
+    mapping = {sid: (u, w) for sid, u, w in rows}
+
+    # IM 通道里 user 段是真实身份的 → 取出来
+    assert mapping["telegram__chat-100__alice"] == ("alice", "default")
+    assert mapping["telegram__chat-200__bob__thread-1"] == ("bob", "default")
+    # IM 但 user 段是 default / anonymous → 降级为 default
+    assert mapping["feishu__group-7__default"] == ("default", "default")
+    assert mapping["feishu__group-9__anonymous"] == ("default", "default")
+    # desktop CLI 单段 → default
+    assert mapping["20251115_120000_abc12345"] == ("default", "default")
+    # 空 session_id 不入表
+    assert "" not in mapping
+
+
+def test_v3_to_v4_backfill_is_idempotent(tmp_path: Path):
+    """重复打开同一个已迁移到 v4 的库不应再次 backfill 或动数据。"""
+    db_path = tmp_path / "openakita.db"
+    _build_v3_db_with_legacy_rows(
+        db_path, extra_turn_sessions=["telegram__a__alice"]
+    )
+
+    s1 = MemoryStorage(db_path, _register=False)
+    rows_before = s1._conn.execute(
+        "SELECT session_id, user_id, last_updated_at FROM session_tenants"
+    ).fetchall()
+    s1.close()
+
+    # 再次打开（已经是 v4，不会再走 migration）
+    s2 = MemoryStorage(db_path, _register=False)
+    rows_after = s2._conn.execute(
+        "SELECT session_id, user_id, last_updated_at FROM session_tenants"
+    ).fetchall()
+    assert rows_before == rows_after
 
 
 # ----------------------------------------------------------------------

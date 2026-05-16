@@ -445,6 +445,58 @@ class MemoryStorage:
                 moved,
             )
 
+        # v4 backfill：从 conversation_turns 里出现过的所有 session_id 反推登记
+        # session_tenants，避免 v4 升级后旧 unextracted turn 被 lifecycle 误落
+        # 到 pending_consolidation（再被 SHORT_TERM 自清规则 3 天后删掉）。
+        #
+        # 推断策略：
+        # - session_id 形如 ``ns__chat_id__user_id[__thread]``（IM 通道的
+        #   conversation_safe_id 标准形式）→ 取第 3 段当 user_id，workspace 仍
+        #   默认 default（workspace_id 的真值要等 Phase 2a 才会出现）。
+        # - 不符合此格式（如 desktop CLI 的 ``YYYYMMDD_HHMMSS_xxx`` 单段）→
+        #   登记成 (default, default)。Phase 0 的语义已经接受 default 作为
+        #   合法的单用户身份，lifecycle 会正确归属到该用户。
+        # - user_id 段落是 ``default / anonymous / system / legacy / ''`` 时
+        #   也降级为 (default, default)，避免把占位身份当真用户。
+        #
+        # 这一步只补 session_tenants，**不动** memories 表本身，零数据丢失风险。
+        existing_sessions = {
+            row[0]
+            for row in c.execute("SELECT session_id FROM session_tenants").fetchall()
+        }
+        backfill_rows: list[tuple[str, str, str, str]] = []
+        for (session_id,) in c.execute(
+            "SELECT DISTINCT session_id FROM conversation_turns WHERE session_id IS NOT NULL "
+            "AND session_id != ''"
+        ).fetchall():
+            if not session_id or session_id in existing_sessions:
+                continue
+            parts = session_id.split("__")
+            if len(parts) >= 3 and parts[2] and parts[2] not in {
+                "default", "anonymous", "system", "legacy", ""
+            }:
+                user_id = parts[2]
+            else:
+                user_id = "default"
+            backfill_rows.append((session_id, user_id, "default", now))
+
+        if backfill_rows:
+            c.executemany(
+                """
+                INSERT OR IGNORE INTO session_tenants
+                    (session_id, user_id, workspace_id, last_updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                backfill_rows,
+            )
+            logger.info(
+                "[MemoryStorage] v3→v4 backfill: registered %d sessions in session_tenants "
+                "(IM-style parsed: %d, default fallback: %d)",
+                len(backfill_rows),
+                sum(1 for r in backfill_rows if r[1] != "default"),
+                sum(1 for r in backfill_rows if r[1] == "default"),
+            )
+
         # 恢复 FTS update 触发器
         try:
             c.execute(
