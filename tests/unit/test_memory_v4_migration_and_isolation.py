@@ -225,6 +225,159 @@ def test_v3_to_v4_backfills_session_tenants_from_conversation_turns(tmp_path: Pa
     assert "" not in mapping
 
 
+def test_iter_cached_excludes_isolated_buckets_by_default(tmp_path: Path):
+    """Phase 1B：iter_cached 默认排除 legacy_quarantine / pending_consolidation；
+    显式 include_isolated=True 才能看到。"""
+    from openakita.memory.manager import MemoryManager
+
+    manager = MemoryManager(
+        data_dir=tmp_path / "memory",
+        memory_md_path=tmp_path / "MEMORY.md",
+        search_backend="fts5",
+    )
+    # 直接走 store 写入三种 scope
+    for scope, user_id, content in [
+        ("user", "alice", "alice cached visible note"),
+        ("legacy_quarantine", "legacy", "legacy hidden note"),
+        ("pending_consolidation", "pending", "pending hidden note"),
+    ]:
+        mem = SemanticMemory(
+            type=MemoryType.FACT,
+            priority=MemoryPriority.LONG_TERM,
+            content=content,
+        )
+        manager.store.save_semantic(
+            mem, scope=scope, scope_owner="", user_id=user_id, workspace_id="default"
+        )
+    # 重新读 SQLite 到缓存
+    manager._reload_from_sqlite()
+
+    visible = [m.content for m in manager.iter_cached()]
+    assert "alice cached visible note" in visible
+    assert "legacy hidden note" not in visible
+    assert "pending hidden note" not in visible
+
+    all_seen = [m.content for m in manager.iter_cached(include_isolated=True)]
+    assert "legacy hidden note" in all_seen
+    assert "pending hidden note" in all_seen
+
+
+def test_keyword_search_never_returns_isolated(tmp_path: Path):
+    """Phase 1B：_keyword_search fallback 不能返回 legacy_quarantine /
+    pending_consolidation 桶内容，防止搜索后端失败时泄漏到提示词。"""
+    from openakita.memory.manager import MemoryManager
+
+    manager = MemoryManager(
+        data_dir=tmp_path / "memory",
+        memory_md_path=tmp_path / "MEMORY.md",
+        search_backend="fts5",
+    )
+    for scope, user_id, content in [
+        ("user", "alice", "watermelon visible to keyword search"),
+        ("legacy_quarantine", "legacy", "watermelon should stay isolated"),
+        ("pending_consolidation", "pending", "watermelon also isolated"),
+    ]:
+        mem = SemanticMemory(
+            type=MemoryType.FACT,
+            priority=MemoryPriority.LONG_TERM,
+            content=content,
+        )
+        manager.store.save_semantic(
+            mem, scope=scope, scope_owner="", user_id=user_id, workspace_id="default"
+        )
+    manager._reload_from_sqlite()
+
+    hits = manager._keyword_search("watermelon visible", limit=10)
+    contents = [m.content for m in hits]
+    assert "watermelon visible to keyword search" in contents
+    assert all("isolated" not in c for c in contents)
+
+
+def test_dual_write_is_no_op_after_v4(tmp_path: Path):
+    """Phase 1A：_save_memories 不再 dual-write 到 memories.json。"""
+    from openakita.memory.manager import MemoryManager
+
+    manager = MemoryManager(
+        data_dir=tmp_path / "memory",
+        memory_md_path=tmp_path / "MEMORY.md",
+        search_backend="fts5",
+    )
+    json_file = manager.memories_file
+    # 触发显式调用，模拟旧代码路径
+    manager._save_memories()
+    # backfill 时如果没有 memories.json 应留下 sentinel 但不创建新 json
+    assert not json_file.exists()
+    assert manager.store.get_meta(
+        manager._LEGACY_JSON_BACKFILL_SENTINEL
+    ) is not None
+
+
+def test_backfill_sentinel_archives_legacy_json_once(tmp_path: Path):
+    """Phase 1A：第一次启动看到 memories.json 时执行 backfill，归档文件，写
+    sentinel；第二次启动不再读取原文件，也不需要重做 backfill。"""
+    import json as _json
+    from openakita.memory.manager import MemoryManager
+
+    data_dir = tmp_path / "memory"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    legacy = [
+        {
+            "id": "leg-1",
+            "content": "user prefers concise replies",
+            "type": "preference",
+            "priority": "long_term",
+            "source": "manual",
+            "importance_score": 0.7,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+        }
+    ]
+    (data_dir / "memories.json").write_text(
+        _json.dumps(legacy, ensure_ascii=False), encoding="utf-8"
+    )
+
+    manager = MemoryManager(
+        data_dir=data_dir,
+        memory_md_path=tmp_path / "MEMORY.md",
+        search_backend="fts5",
+    )
+
+    # 原始 memories.json 应被改名归档
+    archived = sorted(data_dir.glob("memories.json.archived.*"))
+    assert len(archived) == 1
+    assert not (data_dir / "memories.json").exists()
+
+    # sentinel 设置完成
+    sentinel = manager.store.get_meta(manager._LEGACY_JSON_BACKFILL_SENTINEL)
+    assert sentinel is not None
+    assert "backfilled" in sentinel or sentinel == "no_legacy_file"
+
+    # 第二次启动：放回一份新 memories.json（模拟用户复制旧库回来）—— 不应再次读取或归档
+    second_json = [{"id": "leg-2", "content": "ghost", "type": "fact",
+                    "priority": "short_term", "created_at": datetime.now().isoformat(),
+                    "updated_at": datetime.now().isoformat()}]
+    (data_dir / "memories.json").write_text(
+        _json.dumps(second_json, ensure_ascii=False), encoding="utf-8"
+    )
+    # 强制重建 manager 以模拟新进程启动
+    from openakita.memory.storage import _instance_registry
+    _instance_registry.clear()
+    manager2 = MemoryManager(
+        data_dir=data_dir,
+        memory_md_path=tmp_path / "MEMORY.md",
+        search_backend="fts5",
+    )
+    # 第二次启动后 memories.json 仍然存在（未被归档，因为 sentinel 已存在 → 直接跳过）
+    assert (data_dir / "memories.json").exists()
+    # 不应导入到 SQLite
+    assert manager2.store.get_meta(manager2._LEGACY_JSON_BACKFILL_SENTINEL) is not None
+    leg2_visible = manager2.store.load_all_memories(
+        scope="legacy_quarantine", scope_owner="", user_id="legacy",
+        workspace_id=None, include_inactive=True,
+    )
+    assert all(m.content != "ghost" for m in leg2_visible)
+
+
 def test_v3_to_v4_backfill_is_idempotent(tmp_path: Path):
     """重复打开同一个已迁移到 v4 的库不应再次 backfill 或动数据。"""
     db_path = tmp_path / "openakita.db"

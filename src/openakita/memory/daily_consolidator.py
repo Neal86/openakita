@@ -132,10 +132,11 @@ class DailyConsolidator:
             是否成功
         """
         try:
-            # 获取所有记忆
+            # 获取所有记忆（Phase 1B：通过 iter_cached 排除隔离桶，
+            # 避免 legacy_quarantine / pending_consolidation 内容混进 MEMORY.md）
             memories = []
             if self.memory_manager:
-                memories = list(self.memory_manager._memories.values())
+                memories = list(self.memory_manager.iter_cached())
 
             # 按类型和优先级分组
             by_type = {
@@ -332,8 +333,10 @@ class DailyConsolidator:
         user_custom_path = persona_dir / "user_custom.md"
 
         # 1. 筛选 PERSONA_TRAIT 类型记忆
+        # Phase 1B：用 iter_cached 排除隔离桶，避免 pending_consolidation 里
+        # 未审查的 persona_trait 被注入 user_custom.md
         persona_memories = []
-        for mem in self.memory_manager._memories.values():
+        for mem in self.memory_manager.iter_cached():
             if mem.type == MemoryType.PERSONA_TRAIT:
                 persona_memories.append(mem)
 
@@ -476,7 +479,9 @@ class DailyConsolidator:
         if not self.memory_manager:
             return 0
 
-        memories = list(self.memory_manager._memories.values())
+        # Phase 1B：去重只对正常可见桶做，隔离桶（legacy_quarantine、
+        # pending_consolidation）有独立的 promotion 流程不参与。
+        memories = list(self.memory_manager.iter_cached())
         if len(memories) < 2:
             return 0
 

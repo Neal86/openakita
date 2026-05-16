@@ -358,11 +358,17 @@ class MemoryManager:
         self.memory_md_path.write_text(default_content, encoding="utf-8")
         logger.info(f"Created default MEMORY.md at {self.memory_md_path}")
 
+    # v4 sentinel：标记 memories.json → SQLite 一次性 backfill 已经做完，
+    # 之后不再读取、也不再写出 memories.json，让 SQLite 成为唯一真相源。
+    _LEGACY_JSON_BACKFILL_SENTINEL = "legacy_json_backfill_done"
+
     def _load_memories(self) -> None:
         """Load memories from SQLite (authoritative source) into in-memory cache.
 
-        memories.json is kept as a secondary copy for backward compat,
-        and legacy JSON will be backfilled into SQLite when needed.
+        v4：SQLite 是唯一真相源。``memories.json`` 仅作为从旧版本升级时
+        一次性导入兼容入口；backfill 完成后通过 _schema_meta 里的
+        ``legacy_json_backfill_done`` sentinel 标记，并把 ``memories.json``
+        改名归档，``_save_memories`` 退化为 no-op，不再 dual-write。
         """
         try:
             all_mems = self.store.load_all_memories()
@@ -376,18 +382,33 @@ class MemoryManager:
                 logger.info(f"Loaded {len(all_mems)} memories from SQLite")
         except Exception as e:
             logger.warning(f"[Manager] Failed to load from SQLite: {e}")
-
-        # Sync in-memory cache → JSON (keep JSON in sync, not the other way around)
-        if self._memories:
-            self._save_memories()
+        # v4：_save_memories 已退化为 no-op；不再启动期写 memories.json。
 
     def _backfill_legacy_json_memories(self, existing_mems: list[Memory]) -> int:
-        """Backfill old memories.json into SQLite when SQLite is incomplete.
+        """One-shot import of legacy ``memories.json`` into SQLite.
 
-        This protects users upgrading from old versions where memories were
-        primarily persisted in JSON.
+        v4 改造点：
+        - 用 _schema_meta 里的 ``legacy_json_backfill_done`` sentinel 做幂等。
+          一旦标记设置完成，后续启动会跳过整个 backfill 流程，**不再读取
+          memories.json 内容**。
+        - 成功 backfill 后把 ``memories.json`` 改名为
+          ``memories.json.archived.<timestamp>``，让用户能在文件层看到这是
+          已归档的历史副本，同时彻底切断 dual-write 路径。
+        - 移除原来 ``len(existing_ids) >= len(raw)`` 的脆弱启发式：有了
+          sentinel 后我们不再需要它来"猜"是否已经导过。
         """
+        # Sentinel 设置过 → 一次性 backfill 已完成，直接跳过。
+        try:
+            if self.store.get_meta(self._LEGACY_JSON_BACKFILL_SENTINEL):
+                return 0
+        except Exception:
+            pass
+
         if not self.memories_file.exists():
+            # 没有 memories.json 也算 backfill 完成，标记 sentinel 避免每次
+            # 启动都走 file.exists 判断。
+            with contextlib.suppress(Exception):
+                self.store.set_meta(self._LEGACY_JSON_BACKFILL_SENTINEL, "no_legacy_file")
             return 0
 
         try:
@@ -396,12 +417,19 @@ class MemoryManager:
             logger.warning(f"[Manager] Failed to read legacy memories.json: {e}")
             return 0
 
-        if not isinstance(raw, list) or not raw:
+        if not isinstance(raw, list):
+            # JSON 不合法或不是 list，直接归档不再尝试，避免每次重试。
+            self._archive_legacy_memories_json("invalid_format")
+            with contextlib.suppress(Exception):
+                self.store.set_meta(self._LEGACY_JSON_BACKFILL_SENTINEL, "invalid_format")
+            return 0
+        if not raw:
+            self._archive_legacy_memories_json("empty_file")
+            with contextlib.suppress(Exception):
+                self.store.set_meta(self._LEGACY_JSON_BACKFILL_SENTINEL, "empty_file")
             return 0
 
         existing_ids = {m.id for m in existing_mems if getattr(m, "id", "")}
-        if len(existing_ids) >= len(raw):
-            return 0
 
         existing_fingerprints = {
             (
@@ -466,34 +494,46 @@ class MemoryManager:
                 f"[Manager] Backfilled {migrated} memories from legacy JSON "
                 f"(skipped={skipped}, sqlite_before={len(existing_mems)}, json_total={len(raw)})"
             )
+
+        # backfill 流程完成（无论是否真的导入了行）→ 归档 memories.json 文件 +
+        # 写入 sentinel，永久切断 dual-write 路径。
+        self._archive_legacy_memories_json(
+            f"backfilled_{migrated}_skipped_{skipped}"
+        )
+        with contextlib.suppress(Exception):
+            self.store.set_meta(
+                self._LEGACY_JSON_BACKFILL_SENTINEL,
+                f"backfilled={migrated},skipped={skipped},total={len(raw)}",
+            )
         return migrated
 
-    def _save_memories(self) -> None:
-        """Save to memories.json (backward compat, dual-write)"""
-        import tempfile
-
+    def _archive_legacy_memories_json(self, reason: str) -> None:
+        """把旧 ``memories.json`` 改名到 ``memories.json.archived.<ts>`` 防止被
+        重新读取或被新版 dual-write 覆盖。
+        """
         try:
-            with self._memories_lock:
-                data = [m.to_dict() for m in self._memories.values()]
-            target_dir = self.memories_file.parent
-            fd, tmp_path = tempfile.mkstemp(
-                suffix=".tmp", prefix="memories_", dir=target_dir
+            if not self.memories_file.exists():
+                return
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            archived = self.memories_file.with_name(
+                f"{self.memories_file.name}.archived.{ts}"
             )
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                os.replace(tmp_path, self.memories_file)
-            except BaseException:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-                raise
+            os.replace(self.memories_file, archived)
+            logger.info(
+                "[Manager] Archived legacy memories.json → %s (reason=%s)",
+                archived.name, reason,
+            )
         except Exception as e:
-            logger.error(f"Failed to save memories.json: {e}")
+            logger.warning(f"[Manager] Failed to archive legacy memories.json: {e}")
+
+    def _save_memories(self) -> None:
+        """v4：dual-write 已禁用。SQLite 是唯一真相源；此函数保留兼容旧调用站点，
+        改为 no-op。需要持久化记忆时直接调用 ``self.store.*`` 写 SQLite。
+        """
+        return
 
     async def _save_memories_async(self) -> None:
-        await asyncio.to_thread(self._save_memories)
+        return
 
     # ==================== Session Management ====================
 
@@ -1958,13 +1998,65 @@ class MemoryManager:
             700,
         )
 
+    # Phase 1B：明确"绝不可从缓存直接返回给上层"的隔离桶。
+    # 走 `iter_cached`/`_keyword_search`/`get_stats` 这些会被注入提示词或
+    # 展示给用户的路径都必须排除它们；只有显式 scope 查询（点名要这些桶）
+    # 才能看到内容。
+    _ISOLATED_CACHE_SCOPES: frozenset[str] = frozenset(
+        {"legacy_quarantine", "pending_consolidation"}
+    )
+
+    def iter_cached(
+        self,
+        *,
+        scope: str | None = None,
+        scope_owner: str | None = None,
+        user_id: str | None = None,
+        workspace_id: str | None = None,
+        include_isolated: bool = False,
+    ):
+        """带 scope 过滤的 _memories 缓存迭代器（Phase 1B）。
+
+        这是新版**唯一推荐的**直接读缓存入口。和 ``self._memories.values()``
+        相比的关键差异：
+
+        - 默认会过滤掉 ``legacy_quarantine`` 和 ``pending_consolidation`` 两个
+          隔离桶，避免它们被注入提示词或返回到检索 / 统计接口；
+        - 可选按 (scope, scope_owner, user_id, workspace_id) 精确过滤；
+        - ``include_isolated=True`` 时才会放出隔离桶内容（只给特定迁徙工具用）。
+        """
+        with self._memories_lock:
+            for memory in self._memories.values():
+                mem_scope = getattr(memory, "scope", "user") or "user"
+                if not include_isolated and mem_scope in self._ISOLATED_CACHE_SCOPES:
+                    continue
+                if scope is not None and mem_scope != scope:
+                    continue
+                if scope_owner is not None and (
+                    getattr(memory, "scope_owner", "") or ""
+                ) != scope_owner:
+                    continue
+                if user_id is not None and (
+                    getattr(memory, "user_id", "default") or "default"
+                ) != user_id:
+                    continue
+                if workspace_id is not None and (
+                    getattr(memory, "workspace_id", "default") or "default"
+                ) != workspace_id:
+                    continue
+                yield memory
+
     def _keyword_search(self, query: str, limit: int = 5) -> list[Memory]:
+        """Phase 1B：本地关键词回退检索，强制排除隔离桶（legacy_quarantine
+        和 pending_consolidation），避免被搜索后端失败时把这些桶的内容
+        泄漏到提示词。
+        """
         keywords = [kw for kw in query.lower().split() if len(kw) > 2]
         if not keywords:
             return []
         results = []
-        for memory in self._memories.values():
-            content_lower = memory.content.lower()
+        for memory in self.iter_cached():
+            content_lower = (memory.content or "").lower()
             if any(kw in content_lower for kw in keywords):
                 results.append(memory)
         results.sort(key=lambda m: m.importance_score, reverse=True)
@@ -2130,9 +2222,16 @@ class MemoryManager:
     # ==================== Stats ====================
 
     def get_stats(self, scope: str = "global", scope_owner: str = "") -> dict:
+        """Phase 1B：统计入口默认排除隔离桶（legacy_quarantine、
+        pending_consolidation），避免前端"记忆总数"被未审查内容污染。
+
+        如果调用方显式指定 ``scope='legacy_quarantine'`` /
+        ``'pending_consolidation'`` 来查这些桶时，仍可拿到对应统计。
+        """
         type_counts: dict[str, int] = {}
         priority_counts: dict[str, int] = {}
-        for memory in self._memories.values():
+        wants_isolated = scope in self._ISOLATED_CACHE_SCOPES
+        for memory in self.iter_cached(include_isolated=wants_isolated):
             if scope != "global" or scope_owner:
                 mem_scope = getattr(memory, "scope", "global") or "global"
                 mem_owner = getattr(memory, "scope_owner", "") or ""

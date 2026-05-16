@@ -494,6 +494,16 @@ class UnifiedStore:
         )
 
     # ======================================================================
+    # _schema_meta 通用键值（持久化 sentinel 用）
+    # ======================================================================
+
+    def get_meta(self, key: str) -> str | None:
+        return self.db.get_meta(key)
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.db.set_meta(key, value)
+
+    # ======================================================================
     # Conversation Turns
     # ======================================================================
 

@@ -194,6 +194,43 @@ class MemoryStorage:
             logger.warning(f"[MemoryStorage] Could not read schema version, assuming v0: {e}")
             return 0
 
+    # ----------------------------------------------------------------
+    # 通用 meta 键值（复用 _schema_meta 表，避免再开一张 _meta 表）
+    # 用于持久化"一次性 sentinel"，如 legacy_json_backfill_done 等。
+    # ----------------------------------------------------------------
+
+    def get_meta(self, key: str) -> str | None:
+        """读取 _schema_meta 里的一个键。不存在返回 None。"""
+        if self._conn is None or not key:
+            return None
+        try:
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT)"
+            )
+            cur = self._conn.execute("SELECT value FROM _schema_meta WHERE key = ?", (key,))
+            row = cur.fetchone()
+            return row[0] if row else None
+        except Exception as e:
+            logger.debug(f"[MemoryStorage] get_meta({key!r}) failed: {e}")
+            return None
+
+    def set_meta(self, key: str, value: str) -> None:
+        """写 _schema_meta 里的一个键。"""
+        if self._conn is None or not key:
+            return
+        with self._lock:
+            try:
+                self._conn.execute(
+                    "CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT)"
+                )
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES (?, ?)",
+                    (key, str(value)),
+                )
+                self._conn.commit()
+            except Exception as e:
+                logger.warning(f"[MemoryStorage] set_meta({key!r}) failed: {e}")
+
     def _set_schema_version(
         self,
         version: int,
