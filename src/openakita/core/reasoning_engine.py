@@ -1651,6 +1651,39 @@ class ReasoningEngine:
                     )
                     item["compacted_after_token_anomaly"] = True
 
+    @staticmethod
+    def _is_pending_confirm_result(result: Any) -> bool:
+        """True when a tool_result represents a CONFIRM placeholder.
+
+        PolicyEngineV2 → ToolExecutor 拦截到 CONFIRM 决策时会返回一个
+        ``is_error=True`` 的占位 tool_result。两条等价路径：
+
+        * 有人值守 / 兜底 confirm：dict 带 ``_security_confirm`` metadata，
+          body 是"⚠️ 需要用户确认 …"。
+        * 无人值守 unattended_strategy（``ask_owner`` / ``defer_to_inbox`` /
+          ``defer_to_owner``）：dict 带 ``_deferred_approval_id``，body 是
+          "⏸️ 工具调用 ... 需要 owner 批准 ..."。
+
+        从 ReAct 的角度，这不是"工具失败"，而是"工具被推迟到用户/owner
+        决策之后"，不应被记入 ``_tool_failure_counter`` 或触发
+        ``本轮所有工具调用均失败`` 的回滚——否则 LLM 会反复重试同一条
+        调用、被 Supervisor 当成死循环终止，或者整个组织 chain 被回滚到
+        不可恢复的位置。
+        """
+        if not isinstance(result, dict):
+            return False
+        if result.get("_security_confirm"):
+            return True
+        if result.get("_deferred_approval_id"):
+            return True
+        content = str(result.get("content", ""))
+        return (
+            "⚠️ 需要用户确认" in content
+            or "已向用户发送确认请求" in content
+            or "需要 owner 批准" in content
+            or content.startswith("⏸️")
+        )
+
     def _should_rollback(
         self,
         tool_results: list[dict],
@@ -1667,6 +1700,9 @@ class ReasoningEngine:
         ``tool_results`` 对齐），用于把 plan/todo 家族工具的 ❌ 入参校验
         反馈从"批失败"中剔除——否则只调用了一个 update_todo_step 又恰好
         触发了字段校验提示，就会被算作"本轮所有工具调用均失败"而触发回滚。
+
+        CONFIRM 占位（``_security_confirm`` metadata）也跳过批失败统计：
+        这类结果代表"等用户/owner 决策"，不是工具失败本身。
 
         Returns:
             (should_rollback, reason)
@@ -1690,6 +1726,10 @@ class ReasoningEngine:
             # 避免回滚注入"请尝试完全不同的方法"覆盖工具的"禁止替代"指引
             if "[行为指引]" in content:
                 return False, ""
+
+            # CONFIRM 占位不是失败，是"等用户决策"。从批失败统计里剔除。
+            if self._is_pending_confirm_result(result):
+                continue
 
             # Plan/todo 家族工具的 ❌ 是 schema 校验提示，不计入批失败
             if tool_calls and i < len(tool_calls):
@@ -3003,8 +3043,10 @@ class ReasoningEngine:
                     _tc_name = tc.get("name", "")
                     result_content = ""
                     is_error = False
+                    raw_result: Any = None
                     if i < len(tool_results):
-                        r = tool_results[i]
+                        raw_result = tool_results[i]
+                        r = raw_result
                         result_content = (
                             str(r.get("content", "")) if isinstance(r, dict) else str(r)
                         )
@@ -3016,14 +3058,23 @@ class ReasoningEngine:
                             m in result_content
                             for m in ["❌", "⚠️ 工具执行错误", "错误类型:", "⚠️ 策略拒绝:"]
                         )
-                    self._record_tool_result(
-                        _tc_name,
-                        success=not is_error,
-                        tool_args=tc.get("input", tc.get("arguments", {})),
-                    )
+                    pending_confirm = self._is_pending_confirm_result(raw_result)
+                    if not pending_confirm:
+                        # CONFIRM 占位不是工具失败，不更新失败计数器；
+                        # 否则同一个 org_freeze_node 调用会被一个"等审批"占位
+                        # 连刷 3 次失败 → 触发回滚到不可恢复的位置。
+                        self._record_tool_result(
+                            _tc_name,
+                            success=not is_error,
+                            tool_args=tc.get("input", tc.get("arguments", {})),
+                        )
                     _r_summary = self._summarize_tool_result(_tc_name, result_content)
                     if _r_summary:
-                        _icon = "❌" if is_error else "✅"
+                        _icon = (
+                            "🕒"
+                            if pending_confirm
+                            else ("❌" if is_error else "✅")
+                        )
                         await _emit_progress(f"{_icon} {_r_summary}")
 
                 if receipts:
@@ -5712,12 +5763,19 @@ class ReasoningEngine:
                             self._budget.record_tool_calls(len(_non_denied_tool_names))
 
                         # 记录工具成功/失败状态（遍历 decision.tool_calls 保持索引对齐，
-                        # 包含策略拒绝的工具，与 run() 一致）
+                        # 包含策略拒绝的工具，与 run() 一致）。
+                        # CONFIRM 占位（``_security_confirm`` metadata）跳过统计，
+                        # 不计入失败计数器，避免后续被错误判定为"连续失败"或
+                        # "本轮全失败"触发回滚。
                         for i, tc_rec in enumerate(decision.tool_calls):
                             _tc_name = tc_rec.get("name", "")
                             r_content = ""
+                            raw_r: Any = None
                             if i < len(tool_results_for_msg):
-                                r_content = str(tool_results_for_msg[i].get("content", ""))
+                                raw_r = tool_results_for_msg[i]
+                                r_content = str(raw_r.get("content", "")) if isinstance(raw_r, dict) else str(raw_r)
+                            if self._is_pending_confirm_result(raw_r):
+                                continue
                             is_error = any(
                                 m in r_content
                                 for m in ["❌", "⚠️ 工具执行错误", "错误类型:", "⚠️ 策略拒绝:"]

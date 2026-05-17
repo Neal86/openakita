@@ -92,6 +92,63 @@ _HEURISTIC_EXACT_MATCH: dict[str, ApprovalClass] = {
     # C6 新增 —— 多 agent 协调（CONTROL_PLANE 在 trust 模式 ALLOW，default CONFIRM）
     "delegate_to_agent": ApprovalClass.CONTROL_PLANE,
     "delegate_parallel": ApprovalClass.CONTROL_PLANE,
+    # P2 —— org_* 工具精细映射（覆盖 ``org_`` 前缀启发式）。
+    # OrgRuntime 在每个节点 Agent 启动时把这些工具直接挂到 ``agent._tools``，
+    # 不走 HandlerRegistry，所以无法依赖 ``TOOL_CLASSES`` / ``register(tool_classes=)``
+    # 注入；这里用 exact match 表显式登记，比 ``("org_", INTERACTIVE)`` 前缀
+    # 更精确，安全相关操作（freeze / clone / recruit / grant_tools / propose_policy
+    # …）一律落到 CONTROL_PLANE，由 step 11 unattended strategy / step 12 finalize
+    # 把决定权交给 owner。
+    #
+    # READONLY_GLOBAL —— 只读组织信息 / 任务进度 / 黑板 / 制度。
+    "org_get_org_chart": ApprovalClass.READONLY_GLOBAL,
+    "org_get_org_status": ApprovalClass.READONLY_GLOBAL,
+    "org_get_node_status": ApprovalClass.READONLY_GLOBAL,
+    "org_list_my_tasks": ApprovalClass.READONLY_GLOBAL,
+    "org_list_delegated_tasks": ApprovalClass.READONLY_GLOBAL,
+    "org_list_project_tasks": ApprovalClass.READONLY_GLOBAL,
+    "org_list_my_schedules": ApprovalClass.READONLY_GLOBAL,
+    "org_list_policies": ApprovalClass.READONLY_GLOBAL,
+    "org_read_policy": ApprovalClass.READONLY_GLOBAL,
+    "org_read_blackboard": ApprovalClass.READONLY_GLOBAL,
+    "org_read_dept_memory": ApprovalClass.READONLY_GLOBAL,
+    "org_read_node_memory": ApprovalClass.READONLY_GLOBAL,
+    "org_get_task_progress": ApprovalClass.READONLY_GLOBAL,
+    "org_wait_for_deliverable": ApprovalClass.READONLY_GLOBAL,
+    # READONLY_SEARCH —— 按关键词在组织 / 制度库中查找。
+    "org_find_colleague": ApprovalClass.READONLY_SEARCH,
+    "org_search_policy": ApprovalClass.READONLY_SEARCH,
+    # EXEC_LOW_RISK —— 节点间通讯 / 派单 / 交付 / 黑板写入（trust 模式 ALLOW，
+    # default 也 ALLOW，因为这些是组织内 AI 之间的正常协作，不影响组织结构）。
+    "org_send_message": ApprovalClass.EXEC_LOW_RISK,
+    "org_reply_message": ApprovalClass.EXEC_LOW_RISK,
+    "org_delegate_task": ApprovalClass.EXEC_LOW_RISK,
+    "org_submit_deliverable": ApprovalClass.EXEC_LOW_RISK,
+    "org_accept_deliverable": ApprovalClass.EXEC_LOW_RISK,
+    "org_reject_deliverable": ApprovalClass.EXEC_LOW_RISK,
+    "org_escalate": ApprovalClass.EXEC_LOW_RISK,
+    "org_broadcast": ApprovalClass.EXEC_LOW_RISK,
+    "org_write_blackboard": ApprovalClass.EXEC_LOW_RISK,
+    "org_write_dept_memory": ApprovalClass.EXEC_LOW_RISK,
+    "org_write_node_memory": ApprovalClass.EXEC_LOW_RISK,
+    "org_report_progress": ApprovalClass.EXEC_LOW_RISK,
+    "org_update_project_task": ApprovalClass.EXEC_LOW_RISK,
+    "org_create_project_task": ApprovalClass.EXEC_LOW_RISK,
+    "org_request_meeting": ApprovalClass.EXEC_LOW_RISK,
+    "org_create_schedule": ApprovalClass.EXEC_LOW_RISK,
+    # CONTROL_PLANE —— 改变组织结构、岗位、权限、制度的操作；
+    # 由 owner 决策（step 11 unattended_strategy "ask_owner" 在
+    # autonomous 节点里会写 PendingApproval 等批准）。
+    "org_freeze_node": ApprovalClass.CONTROL_PLANE,
+    "org_unfreeze_node": ApprovalClass.CONTROL_PLANE,
+    "org_request_clone": ApprovalClass.CONTROL_PLANE,
+    "org_request_recruit": ApprovalClass.CONTROL_PLANE,
+    "org_dismiss_node": ApprovalClass.CONTROL_PLANE,
+    "org_assign_schedule": ApprovalClass.CONTROL_PLANE,
+    "org_grant_tools": ApprovalClass.CONTROL_PLANE,
+    "org_revoke_tools": ApprovalClass.CONTROL_PLANE,
+    "org_propose_policy": ApprovalClass.CONTROL_PLANE,
+    "org_request_tools": ApprovalClass.CONTROL_PLANE,
 }
 
 # 前缀按"严格度高者优先"排：DESTRUCTIVE > CONTROL_PLANE > EXEC_CAPABLE > MUTATING > 只读
