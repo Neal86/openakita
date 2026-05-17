@@ -12,6 +12,7 @@ import { SpinnerTipDisplay } from "./SpinnerTipDisplay";
 import { SourceStrip } from "./SourceStrip";
 import { PlanCard } from "./PlanCard";
 import { MCPCallStrip } from "./MCPCallStrip";
+import { MarkdownContent } from "./MarkdownContent";
 import { useSourceTagFormatter, extractTrailingSourceTag, SourceBadge } from "./SourceBadge";
 import { IconClipboard, IconEdit, IconRefresh, IconRewind } from "../../../icons";
 
@@ -114,15 +115,12 @@ export const MessageBubble = memo(function MessageBubble({
         )}
 
         {bodyContent && (
-          <div className={isUser ? "chatMdContent chatMdContentUser" : "chatMdContent"}>
-            {mdModules ? (
-              <mdModules.ReactMarkdown remarkPlugins={mdModules.remarkPlugins} rehypePlugins={mdModules.rehypePlugins}>
-                {formatSourceTags(bodyContent)}
-              </mdModules.ReactMarkdown>
-            ) : (
-              <div style={{ whiteSpace: "pre-wrap" }}>{bodyContent}</div>
-            )}
-          </div>
+          <MarkdownContent
+            content={formatSourceTags(bodyContent)}
+            mdModules={mdModules}
+            className={isUser ? "chatMdContent chatMdContentUser" : "chatMdContent"}
+            streaming={!!msg.streaming}
+          />
         )}
 
         {msg.streaming && !msg.content && (!msg.thinkingChain || msg.thinkingChain.length === 0) && (

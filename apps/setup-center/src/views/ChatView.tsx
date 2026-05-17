@@ -63,7 +63,7 @@ import {
   IDLE_THRESHOLD_MS, IDLE_TOKEN_THRESHOLD, PASTE_CHAR_THRESHOLD, UNDO_MAX_STEPS,
   exportConversation, appendAuthToken, stripLegacySummary,
   sanitizeStoredMessages, loadMessagesFromStorage, saveMessagesToStorage, STORED_MESSAGE_WINDOW,
-  buildChainFromSummary, formatAskUserAnswer, patchMessagesWithBackend,
+  buildChainFromSummary, formatAskUserAnswer, patchMessagesWithBackend, patchMessagesWithBackendDetailed,
   classifyError, basename, formatToolDescription, generateGroupSummary,
   ERROR_META, SVG_PATHS, getNextSpinnerTip, shouldRenderConversationMessages,
 } from "./chat/utils/chatHelpers";
@@ -2464,6 +2464,30 @@ export function ChatView({
       let currentThinking = "";
       let isThinking = false;
       let currentToolCalls: ChatToolCall[] = [];
+      const currentToolCallsByKey = new Map<string, ChatToolCall>();
+      const currentToolCallOrder: string[] = [];
+      const syncCurrentToolCalls = () => {
+        currentToolCalls = currentToolCallOrder
+          .map((key) => currentToolCallsByKey.get(key))
+          .filter((tc): tc is ChatToolCall => Boolean(tc));
+      };
+      const upsertToolCall = (key: string, tc: ChatToolCall) => {
+        if (!currentToolCallsByKey.has(key)) currentToolCallOrder.push(key);
+        currentToolCallsByKey.set(key, tc);
+        syncCurrentToolCalls();
+      };
+      const findToolCallKey = (toolName: string, callId?: string) => {
+        if (callId) {
+          const byId = currentToolCallOrder.find((key) => currentToolCallsByKey.get(key)?.id === callId);
+          if (byId) return byId;
+        }
+        for (let i = currentToolCallOrder.length - 1; i >= 0; i -= 1) {
+          const key = currentToolCallOrder[i];
+          const tc = currentToolCallsByKey.get(key);
+          if (tc?.tool === toolName && tc.status === "running") return key;
+        }
+        return null;
+      };
       let currentPlan: ChatTodo | null = null;
       let currentAsk: ChatAskUser | null = null;
       let currentAgent: string | null = null;
@@ -2846,8 +2870,9 @@ export function ChatView({
                   sctx.pollingTimer = setInterval(doFetch, 5000);
                 }
 
-                currentToolCalls = [...currentToolCalls, { tool: toolName, args: event.args, status: "running", id: callId }];
                 const _tcId = callId || genId();
+                const toolCallKey = `${thisConvId}:${assistantMsg.id}:${_tcId}`;
+                upsertToolCall(toolCallKey, { tool: toolName, args: event.args, status: "running", id: _tcId });
                 const _desc = formatToolDescription(toolName, event.args);
                 const newTc: ChainToolCall = { toolId: _tcId, tool: toolName, args: event.args, status: "running", description: _desc };
                 if (currentChainGroup) {
@@ -2904,14 +2929,20 @@ export function ChatView({
                     .then((data) => { if (data?.profiles) setAgentProfiles(data.profiles); })
                     .catch(() => {});
                 }
-                let matched = false;
-                currentToolCalls = currentToolCalls.map((tc) => {
-                  if (matched) return tc;
-                  const idMatch = callId && tc.id && tc.id === callId;
-                  const nameMatch = !callId && tc.tool === toolName && tc.status === "running";
-                  if (idMatch || nameMatch) { matched = true; return { ...tc, result: event.result, status: "done" as const }; }
-                  return tc;
-                });
+                const toolCallKey = findToolCallKey(toolName, callId);
+                if (toolCallKey) {
+                  const prev = currentToolCallsByKey.get(toolCallKey);
+                  if (prev) upsertToolCall(toolCallKey, { ...prev, result: event.result, status: "done" as const });
+                } else {
+                  const fallbackId = callId || genId();
+                  upsertToolCall(`${thisConvId}:${assistantMsg.id}:${fallbackId}`, {
+                    id: fallbackId,
+                    tool: toolName,
+                    args: {},
+                    result: event.result,
+                    status: "done",
+                  });
+                }
                 if (currentChainGroup) {
                   const grp: ChainGroup = currentChainGroup;
                   let chainMatched = false;
@@ -2973,11 +3004,14 @@ export function ChatView({
                 // strings, ``"" === ""`` would match every id-less tool call.
                 // In practice ``tool_id`` is always a UUID, but guard anyway.
                 if (hintToolUseId) {
-                  currentToolCalls = currentToolCalls.map((tc) => {
-                    if (tc.id !== hintToolUseId) return tc;
-                    const existing = tc.configHints || [];
-                    return { ...tc, configHints: [...existing, hintPayload] };
-                  });
+                  const toolCallKey = findToolCallKey("", hintToolUseId);
+                  if (toolCallKey) {
+                    const tc = currentToolCallsByKey.get(toolCallKey);
+                    if (tc) {
+                      const existing = tc.configHints || [];
+                      upsertToolCall(toolCallKey, { ...tc, configHints: [...existing, hintPayload] });
+                    }
+                  }
                 }
                 // ── 2) thinkingChain entry — visible in the default UX ──
                 // We append even if currentChainGroup is missing thinking;
@@ -3492,12 +3526,19 @@ export function ChatView({
               const rows = Array.isArray(data?.messages) ? data.messages : [];
               if (!rows.length) return;
               setMessages((prev) => {
-                const patched = patchMessagesWithBackend(prev, rows);
-                const noop = patched === prev;
+                const patchResult = patchMessagesWithBackendDetailed(prev, rows);
+                const patched = patchResult.messages;
+                const noop = !patchResult.changed;
+                const assistant = prev.find((m) => m.id === assistantMsg.id);
                 logger.info("Chat", "history_patch", {
                   convId,
                   rows: rows.length,
                   applied: !noop,
+                  fallback: patchResult.stats.matchedByFallback,
+                  byId: patchResult.stats.matchedById,
+                  byHistoryIndex: patchResult.stats.matchedByHistoryIndex,
+                  patched: patchResult.stats.patched,
+                  localAssistantEmpty: Boolean(assistant && !assistant.content && !assistant.askUser),
                 });
                 if (noop) return prev;
                 const liveCtx = streamContexts.current.get(thisConvId);

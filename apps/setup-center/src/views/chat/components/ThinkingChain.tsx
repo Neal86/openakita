@@ -8,6 +8,13 @@ import {
 import { TextWithSourceBadges } from "./SourceBadge";
 import ConfigHintCard, { type ConfigHintPayload } from "../../../components/ConfigHintCard";
 
+const TOOL_RESULT_PREVIEW_CHAR_LIMIT = 120_000;
+
+function previewLongText(text: string, limit = TOOL_RESULT_PREVIEW_CHAR_LIMIT): string {
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit)}\n\n... 已截断 ${text.length - limit} 字符（总计 ${text.length} 字符）。`;
+}
+
 // ── ThinkingBlock: legacy bubble mode ──
 
 export function ThinkingBlock({ content, defaultOpen }: { content: string; defaultOpen?: boolean }) {
@@ -63,7 +70,7 @@ export function ToolCallDetail({ tc }: { tc: ChatToolCall }) {
             <>
               <div style={{ fontWeight: 700, marginTop: 8, marginBottom: 4 }}>{t("chat.result")}</div>
               <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: 11, maxHeight: 200, overflow: "auto" }}>
-                {typeof tc.result === "string" ? tc.result : JSON.stringify(tc.result, null, 2)}
+                {previewLongText(typeof tc.result === "string" ? tc.result : JSON.stringify(tc.result, null, 2))}
               </pre>
             </>
           )}
@@ -155,7 +162,7 @@ function ToolResultBlock({ result }: { result: string }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   if (!result) return null;
-  const safeResult = typeof result === "string" ? result : JSON.stringify(result, null, 2);
+  const safeResult = previewLongText(typeof result === "string" ? result : JSON.stringify(result, null, 2));
   const isShort = safeResult.length < 120;
   if (isShort) return <span className="chainToolResultInline">{safeResult}</span>;
   return (

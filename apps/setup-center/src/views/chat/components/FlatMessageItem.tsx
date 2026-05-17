@@ -12,6 +12,7 @@ import { SpinnerTipDisplay } from "./SpinnerTipDisplay";
 import { SourceStrip } from "./SourceStrip";
 import { PlanCard } from "./PlanCard";
 import { MCPCallStrip } from "./MCPCallStrip";
+import { MarkdownContent } from "./MarkdownContent";
 import { useSourceTagFormatter, extractTrailingSourceTag, SourceBadge } from "./SourceBadge";
 import { IconClipboard, IconEdit, IconRefresh, IconRewind } from "../../../icons";
 
@@ -84,15 +85,12 @@ export const FlatMessageItem = memo(function FlatMessageItem({
               ))}
             </div>
           )}
-          <div className="chatMdContent">
-            {mdModules ? (
-              <mdModules.ReactMarkdown remarkPlugins={mdModules.remarkPlugins} rehypePlugins={mdModules.rehypePlugins}>
-                {formatSourceTags(msg.content)}
-              </mdModules.ReactMarkdown>
-            ) : (
-              <div style={{ whiteSpace: "pre-wrap" }}>{msg.content}</div>
-            )}
-          </div>
+          <MarkdownContent
+            content={formatSourceTags(msg.content)}
+            mdModules={mdModules}
+            className="chatMdContent"
+            streaming={!!msg.streaming}
+          />
         </div>
       )}
 
@@ -135,15 +133,12 @@ export const FlatMessageItem = memo(function FlatMessageItem({
           )}
 
           {bodyContent && (
-            <div className="chatMdContent">
-              {mdModules ? (
-                <mdModules.ReactMarkdown remarkPlugins={mdModules.remarkPlugins} rehypePlugins={mdModules.rehypePlugins}>
-                  {formatSourceTags(bodyContent)}
-                </mdModules.ReactMarkdown>
-              ) : (
-                <div style={{ whiteSpace: "pre-wrap" }}>{bodyContent}</div>
-              )}
-            </div>
+            <MarkdownContent
+              content={formatSourceTags(bodyContent)}
+              mdModules={mdModules}
+              className="chatMdContent"
+              streaming={!!msg.streaming}
+            />
           )}
 
           {msg.toolCalls && msg.toolCalls.length > 0 && (!msg.thinkingChain || msg.thinkingChain.length === 0) && (
