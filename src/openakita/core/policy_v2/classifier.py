@@ -112,6 +112,15 @@ _HEURISTIC_PREFIXES: tuple[tuple[str, ApprovalClass], ...] = (
     ("execute_", ApprovalClass.EXEC_CAPABLE),
     ("spawn_", ApprovalClass.EXEC_CAPABLE),
     ("kill_", ApprovalClass.EXEC_CAPABLE),
+    # ORG (intra-organization RPCs: send_message / delegate_task / read_blackboard /
+    # write_blackboard / submit_deliverable …)
+    # 这些工具是 OrgRuntime 注入的"节点间通讯/记忆"原语，
+    # 等价于 IM 内部 chat（INTERACTIVE 在 trust/agent 模式默认 ALLOW），
+    # 不应卡在 UNKNOWN→CONFIRM。少数真正控制平面的工具
+    # （org_freeze_node / org_request_clone / org_dismiss_node / org_grant_tools /
+    # org_revoke_tools / org_propose_policy / org_assign_schedule / org_create_schedule）
+    # 由 OrgRuntime 在节点级显式覆盖到 CONTROL_PLANE。
+    ("org_", ApprovalClass.INTERACTIVE),
     # MUTATING_SCOPED（跨盘升级在 _refine_with_params 处理）
     ("write_", ApprovalClass.MUTATING_SCOPED),
     ("edit_", ApprovalClass.MUTATING_SCOPED),

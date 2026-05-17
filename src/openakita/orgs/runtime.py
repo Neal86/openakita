@@ -2260,9 +2260,58 @@ class OrgRuntime:
                 0, int(getattr(_settings, "force_tool_call_max_retries", 0))
             )
 
+        # 组织节点是自治 AI Agent，没有人挂在交互回路里——预先建立一个
+        # ``is_unattended=True`` 的 CLI Session，让 PolicyEngineV2 step 11 的
+        # unattended 分支能正常工作；否则 org_* 工具的 CONFIRM 决策会一直没人
+        # 应答，整个任务卡在"等用户确认"的死路径。
+        # 同时把 channel 标成 ``org``，便于 audit log 区分内部 RPC 与 desktop。
+        self._prepare_unattended_session(agent, org, node)
+
         self._register_org_tool_handler(agent, org.id, node.id)
 
         return agent
+
+    @staticmethod
+    def _prepare_unattended_session(
+        agent: Any, org: Organization, node: OrgNode
+    ) -> None:
+        """Pre-create the agent's CLI session marked as unattended.
+
+        Organization nodes are autonomous AI agents — no human is waiting to
+        click "Allow" in the UI. Without this flag, PolicyEngineV2 step 12
+        terminates any UNKNOWN/CONTROL_PLANE/EXEC_CAPABLE call with a
+        synthetic "⚠️ 需要用户确认" tool_result, which the ReAct loop counts
+        as failure and rolls back — so org_delegate_task / org_send_message
+        / org_write_blackboard etc. all die at the first invocation.
+
+        Setting ``is_unattended=True`` routes the same calls to step 11's
+        unattended strategy (auto_approve / defer_to_owner depending on
+        config), unblocking the autonomous loop. We also set the channel to
+        ``org:{org_id}`` so audit logs can distinguish intra-org RPC from
+        user-driven desktop calls.
+        """
+        try:
+            from ..sessions.session import Session
+
+            sess = Session.create(
+                channel=f"org:{org.id}",
+                chat_id=f"node:{node.id}",
+                user_id=f"agent:{node.id}",
+            )
+            sess.is_unattended = True
+            sess.unattended_strategy = ""
+            sess.set_metadata("channel", f"org:{org.id}")
+            sess.set_metadata("is_unattended", True)
+            sess.set_metadata("org_id", org.id)
+            sess.set_metadata("node_id", node.id)
+            sess.set_metadata("_memory_manager", agent.memory_manager)
+            agent._cli_session = sess
+        except Exception:
+            logger.debug(
+                "[OrgRuntime] failed to pre-create unattended session "
+                "for node %s in org %s",
+                node.id, org.id, exc_info=True,
+            )
 
     @staticmethod
     def _build_workbench_prompt_section(
