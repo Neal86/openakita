@@ -916,6 +916,62 @@ def test_agent_profile_memory_isolation_alias_phase_2b2():
     assert p4.memory_isolation == "isolated"
 
 
+def test_get_stats_owner_filter_phase_2b5_audit(tmp_path: Path):
+    """三次审计：get_stats 也是 LLM 工具可触达接口，counts 必须按 owner 收敛。
+
+    多用户 IM 部署下不收敛会让 alice 看到"系统总记忆 1000"从而推断出存在
+    其他用户（信息泄漏，不是内容泄漏，但仍是 leak）。
+    """
+    from openakita.memory.manager import MemoryManager
+
+    mm = MemoryManager(
+        data_dir=tmp_path / "memory",
+        memory_md_path=tmp_path / "MEMORY.md",
+        search_backend="fts5",
+    )
+    mm.store.upsert_session_tenant("sess-alice", "alice", "proj-a")
+    mm.store.upsert_session_tenant("sess-bob", "bob", "proj-a")
+
+    for content in ("alice fact 1", "alice fact 2", "alice fact 3"):
+        mm.store.save_semantic(
+            SemanticMemory(
+                type=MemoryType.FACT,
+                priority=MemoryPriority.LONG_TERM,
+                content=content,
+            ),
+            scope="user", scope_owner="",
+            user_id="alice", workspace_id="proj-a",
+        )
+    for content in ("bob fact 1", "bob fact 2"):
+        mm.store.save_semantic(
+            SemanticMemory(
+                type=MemoryType.FACT,
+                priority=MemoryPriority.LONG_TERM,
+                content=content,
+            ),
+            scope="user", scope_owner="",
+            user_id="bob", workspace_id="proj-a",
+        )
+    if hasattr(mm, "_reload_from_sqlite"):
+        mm._reload_from_sqlite()
+
+    # 不传 owner → 兼容旧行为，看到所有 5 条
+    all_stats = mm.get_stats()
+    assert all_stats["total"] == 5
+
+    # 传 alice owner → 只看到 alice 的 3 条
+    alice_stats = mm.get_stats(user_id="alice", workspace_id="proj-a")
+    assert alice_stats["total"] == 3
+
+    # 传 bob owner → 只看到 bob 的 2 条
+    bob_stats = mm.get_stats(user_id="bob", workspace_id="proj-a")
+    assert bob_stats["total"] == 2
+
+    # 不存在的用户 → 空
+    ghost_stats = mm.get_stats(user_id="ghost", workspace_id="proj-a")
+    assert ghost_stats["total"] == 0
+
+
 def test_iter_owned_session_ids_phase_2b5_audit(tmp_path: Path):
     """二次审计：iter_owned_session_ids 是 JSONL/react_traces 文件级过滤的核心
     依赖；只能返回该 user_id（可选 workspace）的 session_id 集合。"""
@@ -973,19 +1029,45 @@ def test_trace_memory_blocks_cross_owner_access(tmp_path: Path):
 
 
 def test_stem_matches_session_allow_set():
-    """二次审计：allow-set 子串包含匹配的行为契约。"""
+    """三次审计：allow-set 的边界匹配契约。
+
+    必须用**边界感知**匹配，否则 alice 的 sid="user_alice" 会误命中
+    bob 的 stem="trace_user_alice2_<ts>"（user_alice 是 user_alice2 的子串）。
+    """
     from openakita.tools.handlers.memory import MemoryHandler
 
     fn = MemoryHandler._stem_matches_session_allow_set
 
-    # 空 allow-set → 默认拒绝（防止 owner 没 session 时仍读到文件）
+    # 空 allow-set / None → 默认拒绝（owner 已知但没 owned session，安全侧）
     assert fn("trace_anything_123.json", set()) is False
     assert fn("trace_anything_123.json", None) is False
 
-    # session_id 作为子串命中
+    # 正常命中：session_id 在 stem 里被 _ 分隔包围
     allowed = {"im_telegram__chat__user_alice"}
     assert fn("trace_im_telegram__chat__user_alice_1716000000.json", allowed) is True
     assert fn("trace_im_telegram__chat__user_bob_1716000000.json", allowed) is False
+
+    # ★ 边界绕过攻击：alice 的 sid 是 bob 文件名里 sid 的**严格前缀**
+    # 子串匹配会让 alice 误读到 bob 的文件 —— 这就是修复的关键。
+    allowed_alice = {"user_alice"}
+    assert fn("trace_user_alice_1716000000", allowed_alice) is True  # 真 alice
+    assert fn("trace_user_alice2_1716000000", allowed_alice) is False  # bob 的伪装
+    assert fn("trace_xuser_alice_1716000000", allowed_alice) is False  # 前缀也要拒
+    assert fn("trace_user_alicex_1716000000", allowed_alice) is False  # 后缀也要拒
+
+    # 桌面 desktop 格式 session 也要正确边界
+    allowed_desk = {"20260517_103000_abc"}
+    assert fn("trace_20260517_103000_abc_1716000000", allowed_desk) is True
+    assert fn("trace_20260517_103000_abc1_1716000000", allowed_desk) is False
+    # session_id 出现在 stem 开头（罕见但合法）
+    assert fn("20260517_103000_abc.jsonl", allowed_desk) is True
+    # session_id 出现在 stem 结尾
+    assert fn("conversation_20260517_103000_abc", allowed_desk) is True
+
+    # 含非 ASCII 字符的 session_id 也要工作
+    allowed_unicode = {"用户_alice"}
+    assert fn("trace_用户_alice_1716", allowed_unicode) is True
+    assert fn("trace_用户_alice2_1716", allowed_unicode) is False
 
 
 def test_search_episodes_tenant_filter_phase_2b5(tmp_path: Path):

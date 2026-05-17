@@ -761,7 +761,13 @@ class MemoryHandler:
 
     def _get_memory_stats(self, params: dict) -> str:
         """获取记忆统计"""
-        stats = self.agent.memory_manager.get_stats()
+        # 三次审计：counts 也是信息泄漏 —— alice 看到"系统总记忆 1000"会推断
+        # 出存在其它用户。把 stats 收敛到当前 owner 视角。desktop 单用户场景
+        # owner 是 default/default，行为不变。
+        owner_uid, owner_wsid = self._current_owner_pair()
+        stats = self.agent.memory_manager.get_stats(
+            user_id=owner_uid, workspace_id=owner_wsid
+        )
 
         output = f"""记忆系统统计:
 
@@ -1243,27 +1249,50 @@ class MemoryHandler:
         except Exception:
             return False
 
-    @staticmethod
+    # session_id 在 stem 里出现时，前后必须是这些边界字符之一（或字符串两端）。
+    # 字母/数字/Unicode 文字都视为 token 内部字符，绝对不能让 "user_alice" 误
+    # 命中 "user_alice2"（substring 攻击面）。
+    # 注：`_` 必须算"边界"——session_id 自己会含 `_`，但 stem 把多个字段用 `_`
+    # 拼起来（如 ``trace_<sid>_<ts>``），所以紧贴 `_` 的位置是合法分隔点。
+    # 同理 `.`（扩展名分隔）和 `-`。
+    _ALLOW_SET_BOUNDARY_CHARS = frozenset("_-.")
+
+    @classmethod
     def _stem_matches_session_allow_set(
+        cls,
         stem: str,
         allowed_session_ids: set[str] | None,
     ) -> bool:
-        """文件名 stem 是否对应 allow-set 里的某个 session_id（子串包含即可）。
+        """文件名 stem 是否对应 allow-set 里某个 session_id —— **边界感知**匹配。
 
-        session_id 在不同通道下格式不一（如 IM 用 ``ns__chat__user`` 长串、
-        desktop 用 ``YYYYMMDD_HHMMSS_xxx``），文件名 stem 通常是 trace_<sid>
-        或 conversation_<sid> 之类，所以这里采用**子串包含**判断：
-        - 如果 allow-set 为空 → False（owner 显式表明无 owned session）；
-        - 任一 session_id 是 stem 的子串 → True；
-        - 都不是 → False（拒绝读取该文件）。
+        三次审计修正：纯子串匹配会被前缀 / 后缀绕过（alice 的 ``user_alice``
+        会命中 bob 的 ``user_alice2``）。这里要求 session_id 在 stem 里出现时
+        其前后字符必须是 ``_`` / ``-`` / ``.`` 中的一个（或 stem 边界）。
 
-        放宽到子串而不是完全相等，是因为 conversation_id 可能带前缀/后缀
-        （比如 trace_<sid>_<ts>.json）。安全侧：宁可漏一两个边界情况文件，
-        也不能让别人的对话漏给当前 user。
+        - allow-set 为空 / None → False（owner 已知但没 owned session，安全侧）；
+        - 任一 session_id 以边界方式出现在 stem 里 → True；
+        - 否则 → False（拒绝读取该文件，宁可错杀）。
         """
         if not allowed_session_ids:
             return False
-        return any(sid and sid in stem for sid in allowed_session_ids)
+        boundary = cls._ALLOW_SET_BOUNDARY_CHARS
+        for sid in allowed_session_ids:
+            if not sid:
+                continue
+            start = 0
+            slen = len(sid)
+            stem_len = len(stem)
+            while True:
+                pos = stem.find(sid, start)
+                if pos < 0:
+                    break
+                left_ok = pos == 0 or stem[pos - 1] in boundary
+                end = pos + slen
+                right_ok = end == stem_len or stem[end] in boundary
+                if left_ok and right_ok:
+                    return True
+                start = pos + 1
+        return False
 
     def _search_react_traces(
         self,

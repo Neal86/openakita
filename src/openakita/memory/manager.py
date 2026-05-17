@@ -2254,17 +2254,35 @@ class MemoryManager:
 
     # ==================== Stats ====================
 
-    def get_stats(self, scope: str = "global", scope_owner: str = "") -> dict:
+    def get_stats(
+        self,
+        scope: str = "global",
+        scope_owner: str = "",
+        *,
+        user_id: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict:
         """Phase 1B：统计入口默认排除隔离桶（legacy_quarantine、
         pending_consolidation），避免前端"记忆总数"被未审查内容污染。
 
         如果调用方显式指定 ``scope='legacy_quarantine'`` /
         ``'pending_consolidation'`` 来查这些桶时，仍可拿到对应统计。
+
+        三次审计新增 ``user_id`` / ``workspace_id``（Phase 2b.5 二次扩展）：
+        多用户 IM 部署下 LLM 工具 ``get_memory_stats`` 之前会暴露**总条数**
+        ——即便不暴露内容，counts 也是信息泄漏（"系统里一共有 1000 条记忆"
+        让 alice 推断出有其他用户）。这里收敛到 owner 视角。
+
+        不传时保持旧行为（desktop / 老 API 调用零感知）。
         """
         type_counts: dict[str, int] = {}
         priority_counts: dict[str, int] = {}
         wants_isolated = scope in self._ISOLATED_CACHE_SCOPES
-        for memory in self.iter_cached(include_isolated=wants_isolated):
+        for memory in self.iter_cached(
+            include_isolated=wants_isolated,
+            user_id=user_id,
+            workspace_id=workspace_id,
+        ):
             if scope != "global" or scope_owner:
                 mem_scope = getattr(memory, "scope", "global") or "global"
                 mem_owner = getattr(memory, "scope_owner", "") or ""
