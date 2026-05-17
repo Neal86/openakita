@@ -3169,11 +3169,56 @@ function TasksTab({ onOpenStoryboard }) {
 
   useEffect(() => {
     refresh();
-    const sse = new EventSource(apiBase() + "/sse");
-    sse.addEventListener("task_update", () => refresh());
-    sse.addEventListener("chain_update", () => refresh());
-    return () => sse.close();
+    let sse = null;
+    let reconnectTimer = null;
+    let stopped = false;
+
+    const onTaskEvt = () => refresh();
+
+    const connect = () => {
+      if (stopped) return;
+      try {
+        sse = new EventSource(apiBase() + "/sse");
+        sse.addEventListener("task_update", onTaskEvt);
+        sse.addEventListener("chain_update", onTaskEvt);
+        sse.onerror = () => {
+          // P8.1: SSE 断了别让列表永远停滞，3 秒后重连一次。
+          // EventSource 在 disconnect 时会自己重试，但 onerror 触发说明
+          // 上一次 connect 出错（如组织重启）——主动 close + 重连可以更快
+          // 把界面状态恢复到正常。
+          try { sse && sse.close(); } catch (_) {}
+          sse = null;
+          if (stopped) return;
+          if (reconnectTimer) clearTimeout(reconnectTimer);
+          reconnectTimer = setTimeout(connect, 3000);
+        };
+      } catch (_) {
+        if (stopped) return;
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(connect, 3000);
+      }
+    };
+    connect();
+
+    return () => {
+      stopped = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      try { sse && sse.close(); } catch (_) {}
+    };
   }, [refresh]);
+
+  // P8.1: HTTP 兜底轮询。SSE 事件有时会丢（网络抖动 / 反代 buffer / 浏览器后台
+  // 节流），但已经在跑的任务不该让用户面对"永远生成中"。只在还有未终态任务时
+  // 每 4 秒主动拉一次，全部 终态后停止 — 静默列表不会带来后端压力。
+  useEffect(() => {
+    const hasActive = tasks.some((t) => {
+      const s = String(t.status || "").toLowerCase();
+      return s === "pending" || s === "running" || s === "processing" || s === "submitted";
+    });
+    if (!hasActive) return;
+    const id = setInterval(() => { refresh(); }, 4000);
+    return () => clearInterval(id);
+  }, [tasks, refresh]);
 
   useEffect(() => {
     if (!selectedId && tasks.length > 0) setSelectedId(taskIdOf(tasks[0]));

@@ -55,6 +55,8 @@ interface TimelineSegment {
   done: boolean;
   /** 上一次 push line 的时间戳（毫秒）；用于抑制 1s 内同行重复 */
   lastPushAt?: number;
+  /** segment 标记为 done 的时间戳（毫秒），用于 30s 内的 busy 复用 */
+  doneAt?: number;
   /** 已加入 files 的 file_path 集合，按 path 去重 */
   filePaths?: Set<string>;
   resultPreview?: string;
@@ -630,13 +632,31 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
 
     const segments: TimelineSegment[] = [];
     const activeSegIdx = new Map<string, number>();
+    // P8.2: (node_id|tool_name|status) -> last emit ts ms，用于 2s 滑窗去重
+    const wbToolStatusDedupe = new Map<string, number>();
     const cmdStartTime = Date.now();
     const activity = { last: Date.now() };
     let lastBlockerSummary = "";
 
+    // P8.2: 30s 内复用 done segment，避免 wb-hh-* 节点 busy → idle → busy
+    // 频繁切换时把一条任务被切成多个碎片。done 之后第一次再 busy 起来
+    // 通常是上游的 fan-out 通知（如 task_accepted 后跟一条 workbench_tool
+    // 重启），保留在同一 segment 里更可读。超过 SEG_REUSE_AFTER_DONE_MS
+    // 还有新 busy 才认为是一段全新的工作。
+    const SEG_REUSE_AFTER_DONE_MS = 30_000;
+
     function findOrCreateSeg(nodeId: string): TimelineSegment {
-      let idx = activeSegIdx.get(nodeId);
-      if (idx != null && !segments[idx].done) return segments[idx];
+      const idx = activeSegIdx.get(nodeId);
+      if (idx != null) {
+        const cur = segments[idx];
+        if (!cur.done) return cur;
+        const sinceDone = Date.now() - (cur.doneAt ?? 0);
+        if (sinceDone <= SEG_REUSE_AFTER_DONE_MS) {
+          cur.done = false;
+          cur.doneAt = undefined;
+          return cur;
+        }
+      }
       const seg: TimelineSegment = {
         nodeId,
         nodeName: nn(nodeId),
@@ -739,7 +759,7 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
           const idx = activeSegIdx.get(nid);
           if (idx != null && segments[idx]) {
             const seg = segments[idx];
-            seg.done = true;
+            seg.done = true; seg.doneAt = Date.now();
             seg.exitReason = exitReason;
             // 软退出在用户界面按完成/等待处理；真正异常交给后续事件显示极简状态。
             if (isSoftOrgExitReason(exitReason)) {
@@ -752,7 +772,7 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
           updatePreview();
         } else if (st === "error") {
           const seg = findOrCreateSeg(nid);
-          seg.done = true;
+          seg.done = true; seg.doneAt = Date.now();
           pushSegLine(seg, t("org.chat.errored", { name: `**${nn(nid)}**` }));
           updatePreview();
         }
@@ -782,7 +802,7 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
         const idx = activeSegIdx.get(nid);
         if (idx != null && segments[idx]) {
           const seg = segments[idx];
-          seg.done = true;
+          seg.done = true; seg.doneAt = Date.now();
           seg.resultPreview = preview;
           seg.exitReason = reason;
           seg.failed = true;
@@ -797,7 +817,7 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
         const idx = activeSegIdx.get(nid);
         if (idx != null && segments[idx]) {
           const seg = segments[idx];
-          seg.done = true;
+          seg.done = true; seg.doneAt = Date.now();
           seg.resultPreview = preview;
           seg.exitReason = reason;
           if (isSoftOrgExitReason(reason)) {
@@ -849,6 +869,16 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
         const status = (d.status || "") as string;
         const toolName = (d.tool_name || "") as string;
         const error = (d.error || "") as string;
+        // P8.2: 2s 滑窗去重。后端 fan-out + 偶发 retry 会让同一个 (node,
+        // tool, status) 在很短间隔内连续 emit；既会让进度行刷屏也会让
+        // segment 被反复"重启"。同窗口内重复直接跳过。
+        const wbKey = `${nid}|${toolName}|${status}`;
+        const now = Date.now();
+        const lastEmit = wbToolStatusDedupe.get(wbKey) || 0;
+        if (now - lastEmit < 2000) {
+          return;
+        }
+        wbToolStatusDedupe.set(wbKey, now);
         const seg = findOrCreateSeg(nid);
         const line =
           status === "running"
