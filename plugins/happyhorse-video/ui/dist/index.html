@@ -23,6 +23,44 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // ── Helpers ─────────────────────────────────────────────────────────
 
 const PLUGIN_ID = "happyhorse-video";
+const STORYBOARD_DRAFT_KEY = `${PLUGIN_ID}:storyboard:draft`;
+// The storyboard decomposition and long-video chain are two stages of the
+// same storyboard flow. They share a single "分镜长视频" filter button in
+// the Tasks tab so users see one unified category instead of two.
+const STORYBOARD_TASK_MODES = new Set(["long_video", "storyboard_decompose", "long_video_concat"]);
+// Friendly display names for task modes that intentionally do NOT appear
+// as standalone filter chips (so they roll up under another category).
+const EXTRA_MODE_LABELS = {
+  storyboard_decompose: "分镜草稿",
+  long_video_concat: "完整长视频",
+};
+
+const TASK_STATUS_LABELS = {
+  pending: "排队中",
+  queued: "排队中",
+  running: "生成中",
+  processing: "处理中",
+  succeeded: "已完成",
+  done: "已完成",
+  completed: "已完成",
+  downloaded: "已完成",
+  failed: "失败",
+  timeout: "超时",
+  cancelled: "已取消",
+  canceled: "已取消",
+};
+
+const TASK_MODE_LABELS = {
+  t2v: "文生视频",
+  i2v: "图生视频",
+  i2v_end: "首尾帧视频",
+  video_extend: "视频续写",
+  r2v: "参考图视频",
+  video_edit: "视频编辑",
+  long_video: "分镜长视频",
+  storyboard_decompose: "分镜草稿",
+  long_video_concat: "完整长视频",
+};
 
 function apiBase() {
   const meta = (window.OpenAkita && window.OpenAkita.meta) || {};
@@ -47,6 +85,159 @@ async function api(method, path, body) {
   }
   return res.json();
 }
+
+function stableTaskStringify(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableTaskStringify(item)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .filter((key) => value[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableTaskStringify(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function contentFingerprint(prefix, payload) {
+  const raw = stableTaskStringify(payload);
+  let hash = 2166136261;
+  for (let i = 0; i < raw.length; i += 1) {
+    hash ^= raw.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${prefix}_${(hash >>> 0).toString(36)}_${raw.length.toString(36)}`;
+}
+
+function readStoryboardDraft() {
+  try {
+    const raw = window.localStorage?.getItem(STORYBOARD_DRAFT_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function writeStoryboardDraft(draft) {
+  try {
+    window.localStorage?.setItem(STORYBOARD_DRAFT_KEY, JSON.stringify(draft || {}));
+  } catch (_) {}
+}
+
+function normalizeStoryboardTransition(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (["crossfade", "fade", "xfade", "dissolve"].includes(raw)) return "crossfade";
+  if (["ai_extend", "extend", "match", "motion_match"].includes(raw)) return "ai_extend";
+  return "cut";
+}
+
+function storyboardTransitionLabel(value) {
+  const normalized = normalizeStoryboardTransition(value);
+  if (normalized === "crossfade") return "交叉淡化";
+  if (normalized === "ai_extend") return "动作承接";
+  return "直接切";
+}
+
+const storyboardManager = (() => {
+  const subscribers = new Set();
+  let job = null;
+  let lastStatus = null;
+
+  const notify = (state) => {
+    if (state) lastStatus = state;
+    subscribers.forEach((cb) => {
+      try { cb(state); } catch (_) {}
+    });
+  };
+
+  const snapshot = () => ({
+    busy: !!job,
+    startedAt: job?.startedAt || 0,
+    status: lastStatus,
+  });
+
+  const subscribe = (cb) => {
+    subscribers.add(cb);
+    return () => subscribers.delete(cb);
+  };
+
+  const start = (request) => {
+    if (job) return job.promise;
+    const startedAt = Date.now();
+    notify({
+      kind: "info",
+      busy: true,
+      text: "正在提交分镜草稿任务，提交后可到「任务」Tab 查看进度。",
+    });
+    const promise = (async () => {
+      try {
+        const r = await api("POST", "/storyboard/decompose", {
+          story: request.story,
+          total_duration: request.total_duration,
+          segment_duration: request.segment_duration,
+        });
+        if (r.ok && r.status === "running") {
+          notify({
+            kind: "info",
+            busy: false,
+            taskId: r.task_id || "",
+            signature: request.signature || "",
+            text: "分镜草稿任务已提交，主程序大模型正在后台拆分镜。可前往「任务」Tab 查看进度，完成后点开任务并应用到编辑分镜。",
+          });
+          return {
+            ok: true,
+            taskId: r.task_id || "",
+            pending: true,
+            signature: request.signature || "",
+          };
+        }
+        if (r.ok) {
+          const nextSegments = (r.segments || []).map((seg, idx) => ({
+            ...seg,
+            index: seg.index || idx + 1,
+            transition_to_next: normalizeStoryboardTransition(seg.transition_to_next),
+          }));
+          const draft = readStoryboardDraft();
+          writeStoryboardDraft({
+            ...draft,
+            story: request.story,
+            totalDuration: request.total_duration,
+            segDuration: request.segment_duration,
+            segments: nextSegments,
+            activeStep: "segments",
+          });
+          notify({
+            kind: "success",
+            busy: false,
+            taskId: r.task_id || "",
+            signature: request.signature || "",
+            text: `已按当前大纲生成 ${nextSegments.length} 段分镜，已自动进入「编辑分镜」。`,
+            segments: nextSegments,
+          });
+          return { ok: true, segments: nextSegments, signature: request.signature || "" };
+        }
+        notify({
+          kind: "danger",
+          busy: false,
+          taskId: r.task_id || "",
+          text: r.error || "拆分镜失败，请稍后重试。",
+        });
+        return { ok: false, error: r.error || "拆分镜失败" };
+      } catch (e) {
+        const msg = `拆分镜失败：${e.message || e}`;
+        notify({ kind: "danger", busy: false, text: msg });
+        return { ok: false, error: msg };
+      } finally {
+        job = null;
+      }
+    })();
+    job = { promise, request, startedAt };
+    return promise;
+  };
+
+  return { start, subscribe, snapshot };
+})();
 
 function friendlyApiMessage(error, fallback) {
   const msg = String(error?.message || error || "");
@@ -119,6 +310,9 @@ const ICONIFY_ICONS = {
   "mic-off": '<line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><path d="M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M17 16.95A7 7 0 0 1 5 12v-2"/><path d="M19 10v2a7 7 0 0 1-.11 1.23"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>',
   "user-plus": '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/>',
   check: '<polyline points="20 6 9 17 4 12"/>',
+  copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  "external-link": '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+  x: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
   save: '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>',
 };
 
@@ -211,6 +405,19 @@ const VOICE_SOURCE_META = {
 
 const voiceValue = (voice) => voice?.dashscope_voice_id || voice?.id || "";
 
+function voiceEngineOf(voiceOrId) {
+  if (voiceOrId && typeof voiceOrId === "object") {
+    if (voiceOrId.engine === "edge" || voiceOrId.engine === "cosyvoice") return voiceOrId.engine;
+    return voiceEngineOf(voiceValue(voiceOrId));
+  }
+  return String(voiceOrId || "").startsWith("zh-") ? "edge" : "cosyvoice";
+}
+
+function voicesForEngine(voices, engine) {
+  const selected = engine === "edge" ? "edge" : "cosyvoice";
+  return (voices || []).filter((voice) => voiceEngineOf(voice) === selected);
+}
+
 const DEFAULT_CATALOG = {
   modes: [
     { id: "t2v", label_zh: "文生视频", label_en: "Text to Video", icon: "video", group: "video", required_assets: ["prompt"], description_zh: "一句描述生成 3-15 秒视频。" },
@@ -261,8 +468,8 @@ const DEFAULT_CATALOG = {
       { id: "image_text2img", label_zh: "文生图片", icon: "image", required_assets: ["prompt"], description_zh: "用文字生成关键帧、海报或分镜图。" },
       { id: "image_edit", label_zh: "图像编辑", icon: "wand-sparkles", required_assets: ["prompt", "images"], description_zh: "上传参考图后按提示词改图。" },
       { id: "image_style_repaint", label_zh: "风格重绘", icon: "palette", required_assets: ["images"], description_zh: "将图片转换为不同视觉风格。" },
-      { id: "image_background", label_zh: "背景生成", icon: "layers", required_assets: ["images"], description_zh: "保留主体并生成新背景。" },
-      { id: "image_outpaint", label_zh: "画面扩展", icon: "expand", required_assets: ["images"], description_zh: "扩展图片画幅和比例。" },
+      { id: "image_background", label_zh: "背景生成", icon: "layers", required_assets: ["images"], description_zh: "需上传透明背景 PNG 抠图，保留主体并生成新背景。" },
+      { id: "image_outpaint", label_zh: "画面扩展", icon: "expand", required_assets: ["images"], description_zh: "按比例或画幅扩展图片边缘，不按提示词重写背景。" },
       { id: "image_sketch", label_zh: "涂鸦作画", icon: "pen-tool", required_assets: ["prompt", "images"], description_zh: "草图加文字生成完整图片。" },
       { id: "image_ecommerce", label_zh: "电商场景图", icon: "shopping-bag", required_assets: ["prompt"], description_zh: "生成商品主图和场景图。" },
     ],
@@ -328,6 +535,294 @@ const DEFAULT_PROMPT_GUIDE = {
   },
 };
 
+const PROMPT_ASSIST_GROUPS = [
+  {
+    id: "subject",
+    label: "主体",
+    items: ["单人主持人", "橙色小马吉祥物", "科技产品", "数字人主播", "多角色互动"],
+  },
+  {
+    id: "scene",
+    label: "场景",
+    items: ["未来感工作室", "科技发布会舞台", "白色展厅", "直播间", "城市街角", "电商棚拍背景"],
+  },
+  {
+    id: "camera",
+    label: "镜头",
+    items: ["中景构图", "浅景深特写", "缓慢推进", "平稳横移", "环绕镜头", "固定机位"],
+  },
+  {
+    id: "light",
+    label: "光线",
+    items: ["柔和自然光", "蓝紫科技光", "棚拍柔光", "金色夕阳", "高对比轮廓光"],
+  },
+  {
+    id: "style",
+    label: "风格",
+    items: ["真实摄影", "电影感", "商业广告", "极简高级", "温暖治愈", "科技未来感"],
+  },
+  {
+    id: "quality",
+    label: "质量",
+    items: ["主体清晰", "构图稳定", "细节丰富", "运动自然", "材质高级", "无文字水印"],
+  },
+];
+
+const NEGATIVE_PROMPT_PRESETS = [
+  "模糊",
+  "低清",
+  "文字水印",
+  "人物变形",
+  "脸部崩坏",
+  "多余手指",
+  "画面抖动",
+  "强闪烁",
+  "过曝",
+  "主体消失",
+];
+
+const COMMON_ASPECTS = [
+  { id: "16:9", label: "16:9 横版", hint: "适合视频、封面、分镜" },
+  { id: "9:16", label: "9:16 竖版", hint: "适合短视频/手机屏" },
+  { id: "1:1", label: "1:1 方图", hint: "适合头像/商品主图" },
+  { id: "4:3", label: "4:3 标准", hint: "适合演示和文档" },
+  { id: "21:9", label: "21:9 宽银幕", hint: "适合电影感画面" },
+];
+
+function appendPromptText(current, chunk) {
+  const text = String(chunk || "").trim();
+  if (!text) return current || "";
+  const base = String(current || "").trim();
+  if (!base) return text;
+  if (base.includes(text)) return base;
+  return `${base}，${text}`;
+}
+
+function appendListText(setter, chunk) {
+  setter((prev) => appendPromptText(prev, chunk));
+}
+
+function removePromptText(current, chunk) {
+  const text = String(chunk || "").trim();
+  if (!text) return current || "";
+  return String(current || "")
+    .replaceAll(text, "")
+    .replace(/[，,、]\s*[，,、]+/g, "，")
+    .replace(/^[\s，,、]+|[\s，,、]+$/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function toggleListText(setter, current, chunk) {
+  const text = String(chunk || "").trim();
+  if (!text) return;
+  if (String(current || "").includes(text)) {
+    setter((prev) => removePromptText(prev, text));
+  } else {
+    setter((prev) => appendPromptText(prev, text));
+  }
+}
+
+function parseSizeAspect(size) {
+  const match = String(size || "").match(/^(\d+)\*(\d+)$/);
+  if (!match) return "";
+  const w = Number(match[1]);
+  const h = Number(match[2]);
+  if (!w || !h) return "";
+  const ratio = w / h;
+  const known = [
+    ["21:9", 21 / 9],
+    ["16:9", 16 / 9],
+    ["4:3", 4 / 3],
+    ["1:1", 1],
+    ["3:4", 3 / 4],
+    ["9:16", 9 / 16],
+  ];
+  const found = known.find(([, value]) => Math.abs(ratio - value) < 0.04);
+  return found?.[0] || "";
+}
+
+function PromptAssistPanel({
+  prompt,
+  setPrompt,
+  negativePrompt,
+  setNegativePrompt,
+  showNegative = true,
+  aspect,
+  setAspect,
+  allowedAspects = [],
+  imageSize,
+  setImageSize,
+  imageSizes = [],
+  outputRatio,
+  setOutputRatio,
+  compact = false,
+}) {
+  const [customPrompt, setCustomPrompt] = useState("");
+  const [customNegative, setCustomNegative] = useState("");
+  const imageAspectMap = useMemo(() => {
+    const map = {};
+    (imageSizes || []).forEach((s) => {
+      const a = parseSizeAspect(s);
+      if (a && !map[a]) map[a] = s;
+    });
+    return map;
+  }, [imageSizes]);
+  const aspectOptions = useMemo(() => {
+    if (allowedAspects.length) {
+      return COMMON_ASPECTS.filter((a) => allowedAspects.includes(a.id));
+    }
+    if (setOutputRatio) {
+      return COMMON_ASPECTS.filter((a) => ["1:1", "16:9", "9:16", "4:3"].includes(a.id));
+    }
+    if (setImageSize && Object.keys(imageAspectMap).length) {
+      return COMMON_ASPECTS.filter((a) => imageAspectMap[a.id]);
+    }
+    return [];
+  }, [allowedAspects, imageAspectMap, setImageSize, setOutputRatio]);
+
+  const aspectText = (item) => item.label;
+  const removeAllAspectText = (value) => {
+    let next = value || "";
+    for (const item of COMMON_ASPECTS) {
+      next = removePromptText(next, item.label);
+      next = removePromptText(next, `${item.id} ${item.hint}`);
+    }
+    return next;
+  };
+
+  const chooseAspect = (item) => {
+    const text = aspectText(item);
+    const alreadyInPrompt = String(prompt || "").includes(text);
+    if (setAspect && (!allowedAspects.length || allowedAspects.includes(item.id))) {
+      setAspect(item.id);
+      setPrompt((prev) => (
+        alreadyInPrompt
+          ? removePromptText(prev, text)
+          : appendPromptText(removeAllAspectText(prev), text)
+      ));
+      return;
+    }
+    if (setOutputRatio) {
+      setOutputRatio(item.id);
+      setPrompt((prev) => (
+        alreadyInPrompt
+          ? removePromptText(prev, text)
+          : appendPromptText(removeAllAspectText(prev), text)
+      ));
+      return;
+    }
+    if (setImageSize && imageAspectMap[item.id]) {
+      setImageSize(imageAspectMap[item.id]);
+      setPrompt((prev) => (
+        alreadyInPrompt
+          ? removePromptText(prev, text)
+          : appendPromptText(removeAllAspectText(prev), text)
+      ));
+      return;
+    }
+  };
+
+  return (
+    <div className={"prompt-assist" + (compact ? " prompt-assist--compact" : "")}>
+      <div className="prompt-assist__head">
+        <strong>创作参数助手</strong>
+        <span>常见检查项可直接点选；需要更细的要求仍可在提示词里自定义。</span>
+      </div>
+      {!!aspectOptions.length && (
+        <div className="prompt-assist__group">
+          <div className="prompt-assist__label">比例 / 构图</div>
+          <div className="prompt-assist__chips">
+            {aspectOptions.map((item) => {
+              const mappedSize = imageAspectMap[item.id];
+              const active = String(prompt || "").includes(aspectText(item));
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={"keyword-chip keyword-chip--button" + (active ? " active" : "")}
+                  title={mappedSize ? `${item.hint}；对应尺寸 ${mappedSize}` : item.hint}
+                  onClick={() => chooseAspect(item)}
+                >
+                  {item.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      {PROMPT_ASSIST_GROUPS.map((group) => (
+        <div key={group.id} className="prompt-assist__group">
+          <div className="prompt-assist__label">{group.label}</div>
+          <div className="prompt-assist__chips">
+            {group.items.map((item) => (
+              <button
+                key={item}
+                type="button"
+                className={"keyword-chip keyword-chip--button" + (String(prompt || "").includes(item) ? " active" : "")}
+                onClick={() => toggleListText(setPrompt, prompt, item)}
+              >
+                {item}
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+      <div className="prompt-assist__custom">
+        <input
+          value={customPrompt}
+          onChange={(e) => setCustomPrompt(e.target.value)}
+          placeholder="自定义补充，例如：品牌色为橙色、镜头不要切换、角色始终看向镜头"
+        />
+        <button
+          type="button"
+          className="btn btn-sm btn-ghost"
+          onClick={() => {
+            appendListText(setPrompt, customPrompt);
+            setCustomPrompt("");
+          }}
+        >
+          加入提示词
+        </button>
+      </div>
+      {showNegative && setNegativePrompt && (
+        <div className="prompt-assist__group prompt-assist__group--negative">
+          <div className="prompt-assist__label">反向提示词</div>
+          <div className="prompt-assist__chips">
+            {NEGATIVE_PROMPT_PRESETS.map((item) => (
+              <button
+                key={item}
+                type="button"
+                className={"keyword-chip keyword-chip--button" + (String(negativePrompt || "").includes(item) ? " active" : "")}
+                onClick={() => toggleListText(setNegativePrompt, negativePrompt, item)}
+              >
+                {item}
+              </button>
+            ))}
+          </div>
+          <div className="prompt-assist__custom">
+            <input
+              value={customNegative}
+              onChange={(e) => setCustomNegative(e.target.value)}
+              placeholder="自定义不想出现的内容，例如：不要字幕、不要 logo、不要畸形手"
+            />
+            <button
+              type="button"
+              className="btn btn-sm btn-ghost"
+              onClick={() => {
+                appendListText(setNegativePrompt, customNegative);
+                setCustomNegative("");
+              }}
+            >
+              加入反向
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 const FALLBACK_PYTHON_DEPS = [
   {
     id: "oss2",
@@ -362,8 +857,12 @@ const FALLBACK_PYTHON_DEPS = [
 function statusKind(status) {
   if (["succeeded", "done", "completed", "downloaded"].includes(status)) return "success";
   if (["running", "processing", "pending", "queued"].includes(status)) return "info";
-  if (status === "cancelled") return "warning";
+  if (["cancelled", "canceled", "timeout"].includes(status)) return "warning";
   return "danger";
+}
+
+function statusLabel(status) {
+  return TASK_STATUS_LABELS[status] || status || "排队中";
 }
 
 // ── Header navigation ────────────────────────────────────────────────
@@ -477,13 +976,139 @@ function taskImageUrls(task) {
   return [];
 }
 
+function taskImagePaths(task) {
+  const assetPaths = task?.asset_paths || {};
+  const paths = assetPaths.image_paths || task?.image_paths || [];
+  return Array.isArray(paths) ? paths.filter(Boolean) : [];
+}
+
+function taskLocalFile(task) {
+  if (!task) return "";
+  if (task.video_path) return String(task.video_path);
+  const imgs = taskImagePaths(task);
+  if (imgs.length) return String(imgs[0]);
+  const audio = task?.asset_paths?.audio_path || task?.audio_path || "";
+  return audio ? String(audio) : "";
+}
+
+function pickFileExtension(url, fallback) {
+  const cleaned = String(url || "").split("?")[0].split("#")[0];
+  const m = cleaned.match(/\.([a-zA-Z0-9]{1,6})$/);
+  return (m && m[1]) || fallback;
+}
+
+function taskDownloadDescriptor(task) {
+  const tid = taskIdOf(task) || "task";
+  const mode = task?.mode || "task";
+  const localPath = taskLocalFile(task);
+  const video = taskVideoUrl(task);
+  if (video) {
+    const ext = pickFileExtension(video, "mp4");
+    return {
+      url: video,
+      localPath,
+      kind: "video",
+      filename: `${mode}_${tid}.${ext}`,
+      acceptMime: { "video/*": [`.${ext}`, ".mp4", ".mov", ".webm"] },
+    };
+  }
+  const imageUrl = taskImageUrls(task)[0];
+  if (imageUrl) {
+    const ext = pickFileExtension(imageUrl, "png");
+    return {
+      url: imageUrl,
+      localPath,
+      kind: "image",
+      filename: `${mode}_${tid}.${ext}`,
+      acceptMime: { "image/*": [`.${ext}`, ".png", ".jpg", ".jpeg", ".webp"] },
+    };
+  }
+  if (localPath) {
+    const base = String(localPath).split(/[\\/]/).pop() || `${mode}_${tid}`;
+    const ext = pickFileExtension(base, "mp4");
+    return {
+      url: "",
+      localPath,
+      kind: /\.(png|jpe?g|webp|gif)$/i.test(base) ? "image" : "video",
+      filename: base || `${mode}_${tid}.${ext}`,
+      acceptMime: { "*/*": [`.${ext}`] },
+    };
+  }
+  return { url: "", localPath: "", kind: "", filename: "", acceptMime: {} };
+}
+
+function taskParams(task) {
+  return task?.params && typeof task.params === "object" ? task.params : {};
+}
+
+function taskSegmentIndex(task, fallback = null) {
+  const params = taskParams(task);
+  const raw = task?.chain_index ?? params.segment_index ?? params.chain_index ?? fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function isStoryboardSegmentTask(task) {
+  return !!task?.chain_group_id && task?.mode !== "long_video";
+}
+
+function taskModeLabel(task, modeLabelMap = null) {
+  return (
+    modeLabelMap?.get?.(task?.mode) ||
+    TASK_MODE_LABELS[task?.mode] ||
+    EXTRA_MODE_LABELS[task?.mode] ||
+    task?.mode ||
+    "未知模式"
+  );
+}
+
+function compactText(text, max = 72) {
+  const s = String(text || "").replace(/\s+/g, " ").trim();
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
+function taskDisplayTitle(task, modeLabelMap = null, fallbackIndex = null) {
+  const modeLabel = taskModeLabel(task, modeLabelMap);
+  const index = taskSegmentIndex(task, fallbackIndex);
+  if (isStoryboardSegmentTask(task) && index) {
+    return `第 ${index} 段 · ${modeLabel}`;
+  }
+  return modeLabel;
+}
+
+function taskDisplaySubtitle(task) {
+  const params = taskParams(task);
+  const id = taskIdOf(task);
+  const model = task?.model_id || params.model || "";
+  const bits = [];
+  if (model) bits.push(model);
+  if (id) bits.push(id);
+  return bits.join(" · ") || "—";
+}
+
+function taskPromptSummary(task, fallback = "") {
+  const params = taskParams(task);
+  return compactText(task?.prompt || params.prompt || fallback || taskIdOf(task), 96);
+}
+
+function segmentResultTitle(task, fallbackIndex = null) {
+  const index = taskSegmentIndex(task, fallbackIndex);
+  return index ? `第 ${index} 段成片` : "分段成片";
+}
+
+function segmentResultState(task) {
+  if (task?.video_url || task?.video_path) return "可用于拼接";
+  if (["succeeded", "done", "completed", "downloaded"].includes(task?.status)) return "等待本地视频";
+  return "等待生成完成";
+}
+
 function formatTaskTime(ts) {
   if (!ts) return "—";
   return new Date(ts * 1000).toLocaleString();
 }
 
 function TaskStatusBadge({ status }) {
-  return <Tag kind={statusKind(status)}>{status || "pending"}</Tag>;
+  return <Tag kind={statusKind(status)}>{statusLabel(status)}</Tag>;
 }
 
 function useTaskHeartbeat(taskId) {
@@ -581,6 +1206,17 @@ function UploadUrlField({ label, value, onChange, accept = "*/*", kind = "image"
   const [uploading, setUploading] = useState(false);
   const [asset, setAsset] = useState(null);
   const inputRef = useRef(null);
+  const publicUrlWarning = (r) => {
+    const reason = r?.oss_error
+      ? `\n\nOSS 返回错误：${r.oss_error}`
+      : "";
+    return (
+      "素材已保存为本地预览，但没有生成 DashScope 可读取的公网 URL。\n\n" +
+      "DashScope 需要公网可访问的 URL；请检查「设置 → OSS」里的 Endpoint、Bucket、AccessKey ID、AccessKey Secret，" +
+      "或手动粘贴一个公网 URL 后再提交任务。" +
+      reason
+    );
+  };
 
   const upload = async (file) => {
     if (!file) return;
@@ -594,7 +1230,7 @@ function UploadUrlField({ label, value, onChange, accept = "*/*", kind = "image"
       setAsset(r);
       if (!r.oss_url) {
         onChange("");
-        alert("素材已上传到本地预览，但未配置 OSS，DashScope 无法读取该文件。请先在设置中配置 OSS，或手动粘贴公网 URL。");
+        alert(publicUrlWarning(r));
         return;
       }
       onChange(r.oss_url);
@@ -663,6 +1299,11 @@ function UploadUrlField({ label, value, onChange, accept = "*/*", kind = "image"
           已上传：{probeSummary}
         </div>
       )}
+      {asset && !asset.oss_url && (
+        <div className="upload-probe-meta" style={{ fontSize: 12, color: "var(--danger)", marginTop: 4 }}>
+          未生成公网 URL，不能提交给 DashScope。请修正 OSS 配置后重新上传，或在下方粘贴公网 URL。
+        </div>
+      )}
       <input value={value} onChange={(e) => onChange(e.target.value)} placeholder="https://..." />
     </div>
   );
@@ -692,16 +1333,18 @@ function MultiUploadUrlField({ label, values, onChange, accept = "*/*", kind = "
       <label>{label}</label>
       {rows.map((url, idx) => (
         <div key={idx} className="multi-upload-row">
-          <UploadUrlField
-            label={`#${idx + 1}`}
-            value={url}
-            onChange={(v) => setAt(idx, v)}
-            accept={accept}
-            kind={kind}
-            hint={idx === 0 ? hint : ""}
-          />
+          <div className="multi-upload-row__main">
+            <UploadUrlField
+              label={`#${idx + 1}`}
+              value={url}
+              onChange={(v) => setAt(idx, v)}
+              accept={accept}
+              kind={kind}
+              hint={idx === 0 ? hint : ""}
+            />
+          </div>
           {rows.length > 1 && (
-            <button type="button" className="btn btn-ghost btn-sm" onClick={() => removeAt(idx)}>
+            <button type="button" className="btn btn-ghost btn-sm multi-upload-row__delete" onClick={() => removeAt(idx)}>
               <Icon name="trash" size={12} /> 删除
             </button>
           )}
@@ -716,9 +1359,95 @@ function MultiUploadUrlField({ label, values, onChange, accept = "*/*", kind = "
   );
 }
 
+function figureDetectStatus(f) {
+  if (f?.detect_status) return f.detect_status;
+  if (f?.detect_pass === true || f?.detect_pass === 1) return "pass";
+  if (f?.detect_pass === false || f?.detect_pass === 0) return "pending";
+  return "skipped";
+}
+
+function FigureLibraryPicker({ figures = [], selectedUrl = "", onPick, onGoFigures }) {
+  const usable = figures.filter((f) => figureDetectStatus(f) === "pass" && f.oss_url);
+  const pendingCount = figures.filter((f) => figureDetectStatus(f) === "pending").length;
+
+  if (!figures.length) {
+    return (
+      <div className="figure-picker-empty">
+        <Icon name="user-square" size={16} />
+        <span>形象库还没有素材。可以先到「形象」上传并预检，或继续在下方直接上传。</span>
+        {onGoFigures && (
+          <button type="button" className="btn btn-sm btn-ghost" onClick={onGoFigures}>
+            去上传形象
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="figure-picker">
+      <div className="figure-picker__head">
+        <div>
+          <strong>从形象库选择</strong>
+          <span>
+            选择后会回填为当前任务的人脸 / 形象图（image_url），提交时直接使用该素材的 OSS 公网 URL。
+          </span>
+        </div>
+        <small>{usable.length} 个可用{pendingCount ? `，${pendingCount} 个预检中` : ""}</small>
+      </div>
+      {usable.length ? (
+        <div className="figure-picker__grid">
+          {usable.map((f) => {
+            const url = f.oss_url || "";
+            const active = selectedUrl && selectedUrl === url;
+            return (
+              <button
+                key={f.id || url}
+                type="button"
+                className={"figure-picker-card" + (active ? " active" : "")}
+                onClick={() => onPick?.(url, f)}
+                title={f.label}
+              >
+                {f.preview_url ? (
+                  <img src={f.preview_url} alt={f.label || "形象"} />
+                ) : (
+                  <span className="fig-thumb-placeholder"><Icon name="user-square" size={22} /></span>
+                )}
+                <span>{f.label || "未命名形象"}</span>
+                <small>{active ? "已选用" : "点击选用"}</small>
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="figure-picker-empty">
+          <Icon name="info" size={16} />
+          <span>形象库里还没有通过预检的素材。请等待预检完成，或到「形象」重新上传清晰正面照。</span>
+          {onGoFigures && (
+            <button type="button" className="btn btn-sm btn-ghost" onClick={onGoFigures}>
+              查看形象库
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FileUploadCard({ accept, kind, value, onUploaded, hint }) {
   const [uploading, setUploading] = useState(false);
   const inputRef = useRef(null);
+  const publicUrlWarning = (r) => {
+    const reason = r?.oss_error
+      ? `\n\nOSS 返回错误：${r.oss_error}`
+      : "";
+    return (
+      "素材已保存为本地预览，但没有生成 DashScope 可读取的公网 URL。\n\n" +
+      "DashScope 需要公网可访问的 URL；请检查「设置 → OSS」里的 Endpoint、Bucket、AccessKey ID、AccessKey Secret，" +
+      "或手动粘贴一个公网 URL 后再提交任务。" +
+      reason
+    );
+  };
 
   const upload = async (file) => {
     if (!file) return;
@@ -730,15 +1459,8 @@ function FileUploadCard({ accept, kind, value, onUploaded, hint }) {
       const r = await res.json();
       if (!r.ok) throw new Error(r.error || "upload failed");
       onUploaded(r);
-      // Mirror UploadUrlField's OSS-missing warning so the user knows
-      // the asset is local-only and DashScope models that need a public
-      // URL (face-detect, s2v, videoretalk, animate-mix) will fail.
       if (!r.oss_url) {
-        alert(
-          "素材已上传到本地预览，但未配置 OSS。\n\n" +
-          "DashScope 需要公网可访问的 URL；请先在「设置 → OSS」配置 endpoint/bucket/key/secret，" +
-          "或手动输入一个公网 URL 后再提交任务。"
-        );
+        alert(publicUrlWarning(r));
       }
     } catch (e) {
       alert(`上传失败：${e.message}`);
@@ -785,11 +1507,255 @@ function FileUploadCard({ accept, kind, value, onUploaded, hint }) {
   );
 }
 
-function TaskPreviewPane({ taskId, task, costPreview, onGoTasks, showCost = true }) {
+function isDashScopeReadableUrl(url) {
+  const s = String(url || "").trim();
+  return /^https?:\/\//i.test(s) && !/\/uploads\/happyhorse-video\//i.test(s);
+}
+
+function requireDashScopeUrl(label, url) {
+  if (isDashScopeReadableUrl(url)) return true;
+  alert(
+    `${label} 还不是 DashScope 可读取的公网 URL。\n\n` +
+    "DashScope 需要公网可访问的 URL；请先修正「设置 → OSS」后重新上传素材，" +
+    "或手动粘贴一个 http/https 公网 URL。不能提交本地路径或仅本地预览文件。"
+  );
+  return false;
+}
+
+function bridgeRequest(type, payload, ackType, timeoutMs = 1800) {
+  if (window.parent === window) return Promise.resolve({ ok: false, error: "not embedded" });
+  return new Promise((resolve) => {
+    const requestId = `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    let done = false;
+    const cleanup = () => window.removeEventListener("message", onMessage);
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve(value || { ok: false });
+    };
+    const onMessage = (event) => {
+      if (event.source !== window.parent) return;
+      const data = event.data || {};
+      if (data.__akita_bridge === true && data.type === ackType && data.requestId === requestId) {
+        finish(data.payload || { ok: true });
+      }
+    };
+    window.addEventListener("message", onMessage);
+    try {
+      window.parent.postMessage(
+        { __akita_bridge: true, version: 1, type, requestId, payload },
+        "*"
+      );
+    } catch (e) {
+      finish({ ok: false, error: String(e) });
+    }
+    setTimeout(() => finish({ ok: false, error: "timeout" }), timeoutMs);
+  });
+}
+
+async function downloadTaskArtifact(task) {
+  const dl = taskDownloadDescriptor(task);
+  if (!dl.url && !dl.localPath) {
+    throw new Error("该任务尚无可下载的成品文件。");
+  }
+
+  const bridgePayload = {
+    url: dl.url || "",
+    filename: dl.filename,
+    localPath: dl.localPath || "",
+  };
+  const bridged = await bridgeRequest(
+    "bridge:download",
+    bridgePayload,
+    "bridge:download-ack",
+    600000
+  );
+  if (bridged?.ok) return bridged;
+
+  if (window.OpenAkita?.download && dl.url) {
+    const r = await window.OpenAkita.download(dl.url, dl.filename);
+    if (r?.ok) return r;
+  }
+
+  if (!dl.url) {
+    throw new Error(bridged?.error || "安装版下载失败，且该任务没有可回退的下载链接。");
+  }
+
+  if (window.showSaveFilePicker) {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: dl.filename,
+        types: [
+          {
+            description: dl.kind === "image" ? "图片" : "视频",
+            accept: dl.acceptMime,
+          },
+        ],
+      });
+      const writable = await handle.createWritable();
+      const resp = await fetch(dl.url, { credentials: "include" });
+      if (!resp.ok) throw new Error(`下载失败 ${resp.status}`);
+      await resp.body.pipeTo(writable);
+      return { ok: true };
+    } catch (e) {
+      if (e?.name === "AbortError") return { ok: true, cancelled: true };
+      throw e;
+    }
+  }
+
+  const a = document.createElement("a");
+  a.href = dl.url;
+  a.download = dl.filename;
+  a.target = "_blank";
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  return { ok: true };
+}
+
+function TaskPreviewPane({ taskId, task, costPreview, onGoTasks, onOpenStoryboard, showCost = true }) {
   const liveTask = task || null;
   const videoUrl = taskVideoUrl(liveTask);
   const imageUrls = taskImageUrls(liveTask);
   const status = liveTask?.status;
+  const isStoryboardDraft = liveTask?.mode === "storyboard_decompose";
+  const storyboardSegments = isStoryboardDraft && Array.isArray(liveTask?.params?.segments)
+    ? liveTask.params.segments
+    : [];
+  const storyboardOutline = isStoryboardDraft
+    ? (liveTask?.params?.story || liveTask?.prompt || "")
+    : "";
+  const [copiedUrl, setCopiedUrl] = useState("");
+  const [openStatus, setOpenStatus] = useState({});
+  const [storyboardApplied, setStoryboardApplied] = useState(false);
+  const [artifactBusy, setArtifactBusy] = useState("");
+
+  useEffect(() => {
+    setStoryboardApplied(false);
+  }, [taskId]);
+
+  const applyStoryboardDraft = () => {
+    if (!storyboardSegments.length) return;
+    const normalizedSegments = storyboardSegments.map((seg, idx) => ({
+      ...seg,
+      index: seg.index || idx + 1,
+      transition_to_next: normalizeStoryboardTransition(seg.transition_to_next),
+    }));
+    const existing = readStoryboardDraft();
+    writeStoryboardDraft({
+      ...existing,
+      story: storyboardOutline,
+      totalDuration: liveTask?.params?.total_duration || existing.totalDuration || 60,
+      segDuration: liveTask?.params?.segment_duration || existing.segDuration || 10,
+      segments: normalizedSegments,
+      activeStep: "segments",
+    });
+    setStoryboardApplied(true);
+    window.OpenAkita?.notify?.({
+      type: "success",
+      title: "已应用分镜草稿",
+      body: "已同步到「分镜 → 编辑分镜」，可继续修改并提交生成视频。",
+    });
+    onOpenStoryboard?.();
+  };
+
+  const copyImageUrl = async (url) => {
+    try {
+      if (window.OpenAkita?.clipboard) {
+        const r = await window.OpenAkita.clipboard(url);
+        if (r && r.ok === false) throw new Error(r.error || "bridge clipboard failed");
+      } else {
+        await navigator.clipboard.writeText(url);
+      }
+    } catch (_) {
+      const el = document.createElement("textarea");
+      el.value = url;
+      el.style.position = "fixed";
+      el.style.opacity = "0";
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand("copy");
+      document.body.removeChild(el);
+    }
+    setCopiedUrl(url);
+    setTimeout(() => setCopiedUrl((prev) => (prev === url ? "" : prev)), 1800);
+  };
+
+  const openImageUrl = async (url) => {
+    setOpenStatus((prev) => ({ ...prev, [url]: "opening" }));
+    try {
+      if (window.OpenAkita?.openExternal) {
+        const r = await window.OpenAkita.openExternal(url);
+        if (r?.ok) {
+          setOpenStatus((prev) => ({ ...prev, [url]: "opened" }));
+          setTimeout(() => setOpenStatus((prev) => ({ ...prev, [url]: "" })), 1800);
+          return;
+        }
+      }
+      const bridged = await bridgeRequest(
+        "bridge:open-external",
+        { url },
+        "bridge:open-external-ack"
+      );
+      if (bridged?.ok) {
+        setOpenStatus((prev) => ({ ...prev, [url]: "opened" }));
+        setTimeout(() => setOpenStatus((prev) => ({ ...prev, [url]: "" })), 1800);
+        return;
+      }
+      const popup = window.open(url, "_blank", "noopener,noreferrer");
+      if (popup) {
+        setOpenStatus((prev) => ({ ...prev, [url]: "opened" }));
+        setTimeout(() => setOpenStatus((prev) => ({ ...prev, [url]: "" })), 1800);
+        return;
+      }
+      throw new Error("popup blocked");
+    } catch (_) {
+      await copyImageUrl(url);
+      setOpenStatus((prev) => ({ ...prev, [url]: "copied" }));
+      window.OpenAkita?.notify?.({
+        type: "warning",
+        title: "无法直接打开链接",
+        body: "安装版未能弹出浏览器，图片 URL 已复制到剪贴板。",
+      });
+      setTimeout(() => setOpenStatus((prev) => ({ ...prev, [url]: "" })), 2400);
+    }
+  };
+
+  const openTaskArtifactFolder = async () => {
+    const localPath = taskLocalFile(liveTask);
+    if (!localPath) {
+      alert("该任务没有本地输出文件，无法打开存储目录。");
+      return;
+    }
+    setArtifactBusy("open");
+    try {
+      await api("POST", "/storage/open-folder", { file_path: localPath });
+    } catch (e) {
+      alert(`打开目录失败：${e.message || e}`);
+    } finally {
+      setArtifactBusy("");
+    }
+  };
+
+  const downloadTaskArtifactFromPreview = async () => {
+    setArtifactBusy("download");
+    try {
+      const r = await downloadTaskArtifact(liveTask);
+      if (!r?.cancelled) {
+        window.OpenAkita?.notify?.({
+          type: "success",
+          title: "下载已开始",
+          body: r?.path ? `已保存到：${r.path}` : "已交给系统下载处理。",
+        });
+      }
+    } catch (e) {
+      alert(`下载失败：${e.message || e}`);
+    } finally {
+      setArtifactBusy("");
+    }
+  };
 
   if (!taskId) {
     return (
@@ -813,8 +1779,24 @@ function TaskPreviewPane({ taskId, task, costPreview, onGoTasks, showCost = true
           <h3 className="card-title">本次任务</h3>
           <div className="text-xs text-muted font-mono">{taskId}</div>
         </div>
-        <div className="flex gap-2 items-center">
+        <div className="task-preview-actions">
           <TaskStatusBadge status={status || "pending"} />
+          <button
+            className="btn btn-sm btn-ghost"
+            onClick={openTaskArtifactFolder}
+            disabled={!!artifactBusy || !taskLocalFile(liveTask)}
+            title={taskLocalFile(liveTask) ? "在文件管理器中打开成品所在目录" : "暂无本地输出文件"}
+          >
+            {artifactBusy === "open" ? <Spinner /> : <Icon name="folder" size={12} />} 打开
+          </button>
+          <button
+            className="btn btn-sm btn-ghost"
+            onClick={downloadTaskArtifactFromPreview}
+            disabled={!!artifactBusy || !(taskDownloadDescriptor(liveTask).url || taskDownloadDescriptor(liveTask).localPath)}
+            title="下载成品到本地下载目录"
+          >
+            {artifactBusy === "download" ? <Spinner /> : <Icon name="download" size={12} />} 下载
+          </button>
           {onGoTasks && (
             <button className="btn btn-sm btn-ghost" onClick={onGoTasks}>
               <Icon name="list" size={12} /> 任务详情
@@ -828,17 +1810,91 @@ function TaskPreviewPane({ taskId, task, costPreview, onGoTasks, showCost = true
       )}
 
       {(status === "succeeded" || status === "done") && (
-        videoUrl ? (
+        isStoryboardDraft && storyboardSegments.length ? (
+          <div className="card storyboard-task-result">
+            <div className="storyboard-task-result__head">
+              <div>
+                <h3><Icon name="list" size={14} /> 分镜草稿结果</h3>
+                <span>共 {storyboardSegments.length} 段，确认后可继续生成长视频。</span>
+              </div>
+              <div className="storyboard-task-result__actions">
+                <button className="btn" onClick={applyStoryboardDraft}>
+                  <Icon name={storyboardApplied ? "check" : "arrow-right"} size={13} />
+                  {storyboardApplied ? "已应用到编辑分镜" : "应用到编辑分镜"}
+                </button>
+              </div>
+            </div>
+            {storyboardOutline && (
+              <div className="storyboard-task-result__outline">
+                <div className="storyboard-task-result__label">
+                  <Icon name="file-text" size={12} /> 输入大纲
+                </div>
+                <p>{storyboardOutline}</p>
+              </div>
+            )}
+            <div className="storyboard-task-result__list">
+              {storyboardSegments.map((seg, idx) => (
+                <div key={idx} className="storyboard-task-segment">
+                  <div className="storyboard-task-segment__index">#{idx + 1}</div>
+                  <div>
+                    <div className="storyboard-task-segment__title">
+                      <strong>第 {idx + 1} 段</strong>
+                      <span>{seg.duration || liveTask?.params?.segment_duration || 10} 秒</span>
+                    </div>
+                    <p>{seg.prompt || seg.description || "暂无分镜描述"}</p>
+                    {seg.transition_to_next && (
+                      <div className="storyboard-task-segment__meta">
+                        <span>转场：{storyboardTransitionLabel(seg.transition_to_next)}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : videoUrl ? (
           <div className="video-player-wrap">
             <video src={videoUrl} controls loop />
           </div>
         ) : imageUrls.length ? (
           <div className={"image-result-grid" + (imageUrls.length === 1 ? " image-result-grid--single" : "")}>
             {imageUrls.map((url, idx) => (
-              <a key={url + idx} href={url} target="_blank" rel="noreferrer" className="image-result-card">
-                <img src={url} alt={`生成图片 ${idx + 1}`} />
-                <span>图片 {idx + 1}</span>
-              </a>
+              <div key={url + idx} className="image-result-card">
+                <button
+                  type="button"
+                  className="image-result-card__preview"
+                  onClick={() => openImageUrl(url)}
+                  title="打开图片链接"
+                >
+                  <img src={url} alt={`生成图片 ${idx + 1}`} />
+                </button>
+                <div className="image-result-card__meta">
+                  <div className="image-result-card__label">图片 {idx + 1}</div>
+                  <div className="image-result-card__url" title={url}>{url}</div>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-ghost image-result-card__copy"
+                    onClick={() => openImageUrl(url)}
+                  >
+                    <Icon name={openStatus[url] === "opened" ? "check" : "external-link"} size={12} />
+                    {openStatus[url] === "opening"
+                      ? "打开中…"
+                      : openStatus[url] === "opened"
+                        ? "已打开"
+                        : openStatus[url] === "copied"
+                          ? "已复制"
+                          : "打开链接"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-ghost image-result-card__copy"
+                    onClick={() => copyImageUrl(url)}
+                  >
+                    <Icon name={copiedUrl === url ? "check" : "copy"} size={12} />
+                    {copiedUrl === url ? "已复制" : "复制链接"}
+                  </button>
+                </div>
+              </div>
             ))}
           </div>
         ) : (
@@ -851,7 +1907,7 @@ function TaskPreviewPane({ taskId, task, costPreview, onGoTasks, showCost = true
       {(status === "failed" || status === "cancelled" || status === "timeout") && (
         <div className="card">
           <Banner kind="danger">
-            {friendlyTaskError(liveTask?.error_message, `任务状态：${status}`)}
+            {friendlyTaskError(liveTask?.error_message, `任务状态：${statusLabel(status)}`)}
           </Banner>
         </div>
       )}
@@ -888,6 +1944,7 @@ function CreateTab({
   settings,
   onSubmit,
   onSettings,
+  onGoFigures,
   initialMode = "t2v",
   title = "视频生成",
   subtitle = "按左侧步骤补齐素材、提示词和输出参数，右侧查看成本、进度与预览。",
@@ -920,12 +1977,14 @@ function CreateTab({
   const [watermark, setWatermark] = useState(false);
   const [shotType, setShotType] = useState("");
   const [drivingAudioUrl, setDrivingAudioUrl] = useState("");
+  const [modePro, setModePro] = useState(false);
   // ``audioEnabled`` only affects Wan 2.6 *-flash; null = inherit
   // default (the model decides). We initialise to null on first paint.
   const [audioEnabled, setAudioEnabled] = useState(null);
   const [costPreview, setCostPreview] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [previewTaskId, setPreviewTaskId] = useState("");
+  const [figures, setFigures] = useState([]);
   const modeIdSet = useMemo(() => (modeIds ? new Set(modeIds) : null), [modeIds]);
   const visibleModeGroups = useMemo(
     () => MODE_GROUPS
@@ -938,6 +1997,17 @@ function CreateTab({
     setMode(initialMode);
     setPreviewTaskId("");
   }, [initialMode]);
+
+  const loadFigures = useCallback(() => {
+    api("GET", "/figures").then((r) => setFigures(r.figures || [])).catch(() => setFigures([]));
+  }, []);
+  useEffect(() => { loadFigures(); }, [loadFigures]);
+  useEffect(() => {
+    const hasPending = figures.some((f) => figureDetectStatus(f) === "pending");
+    if (!hasPending) return undefined;
+    const timer = setInterval(loadFigures, 4000);
+    return () => clearInterval(timer);
+  }, [figures, loadFigures]);
 
   const modeSpec = useMemo(
     () => (catalog?.modes || []).find((m) => m.id === mode),
@@ -979,6 +2049,18 @@ function CreateTab({
     const range = modelEntry?.duration_range;
     return Array.isArray(range) && range.length === 2 ? range : [3, 15];
   }, [modelEntry]);
+  const requiredAssets = modeSpec?.required_assets || [];
+  const needsAudioOrText = requiredAssets.includes("audio_or_text");
+  const promptEffectiveModes = new Set(["t2v", "i2v", "i2v_end", "video_extend", "r2v", "video_edit", "avatar_compose"]);
+  const promptEffective = promptEffectiveModes.has(mode);
+  const avatarComposeMode = mode === "avatar_compose";
+  const animateMode = mode === "video_reface" || mode === "pose_drive";
+  const videoSynthesisMode = ["t2v", "i2v", "i2v_end", "video_extend", "r2v", "video_edit"].includes(mode);
+  const showDurationField = videoSynthesisMode;
+  const showAspectField = videoSynthesisMode;
+  const showResolutionField = videoSynthesisMode || mode === "photo_speak" || mode === "avatar_compose";
+  const materialSectionTitle = needsAudioOrText ? "素材与配音" : "素材";
+  const materialSectionHint = needsAudioOrText ? "提供形象素材和配音方式" : "仅显示当前模式需要的素材";
 
   useEffect(() => {
     if (allowedResolutions.length && !allowedResolutions.includes(resolution)) {
@@ -996,26 +2078,104 @@ function CreateTab({
     else if (duration > hi) setDuration(hi);
   }, [allowedDuration]);
 
+  const preferredTtsEngine = settings?.tts_engine === "edge" ? "edge" : "cosyvoice";
+  const allVoiceOptions = useMemo(
+    () => ((catalog.voices || []).length ? catalog.voices : FALLBACK_SYSTEM_VOICES),
+    [catalog.voices]
+  );
+  const ttsVoiceOptions = useMemo(
+    () => voicesForEngine(allVoiceOptions, preferredTtsEngine),
+    [allVoiceOptions, preferredTtsEngine]
+  );
+
   useEffect(() => {
-    if (voiceId) return;
-    const voices = (catalog.voices || []).length ? catalog.voices : FALLBACK_SYSTEM_VOICES;
-    setVoiceId(settings?.default_voice || voiceValue(voices[0]) || "");
-  }, [catalog, settings, voiceId]);
+    const currentMatches = voiceId && voiceEngineOf(voiceId) === preferredTtsEngine;
+    if (currentMatches) return;
+    const preferredDefault = settings?.default_voice && voiceEngineOf(settings.default_voice) === preferredTtsEngine
+      ? settings.default_voice
+      : "";
+    setVoiceId(preferredDefault || voiceValue(ttsVoiceOptions[0]) || "");
+  }, [preferredTtsEngine, settings?.default_voice, voiceId, ttsVoiceOptions]);
 
   // Engine is fully derived from the chosen voice; centralize the rule
   // so cost preview and submit can never disagree (and tests can target
   // a single source).
   const ttsEngine = useMemo(
-    () => (voiceId.startsWith("zh-") ? "edge" : "cosyvoice"),
-    [voiceId]
+    () => (voiceId ? voiceEngineOf(voiceId) : preferredTtsEngine),
+    [preferredTtsEngine, voiceId]
   );
 
-  // Stable idempotency token per form lifetime — reset after each
-  // successful submission. Without this, the previous `web_${Date.now()}`
-  // form generated a fresh token on every click, defeating the backend's
-  // ``client_request_id`` double-submit guard for rapid double-clicks.
-  const requestIdRef = useRef(`web_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
-
+  const videoSubmitBody = useMemo(() => {
+    const body = {
+      mode,
+      model_id: modelId,
+      prompt: promptEffective ? prompt : "",
+      duration: showDurationField ? duration : undefined,
+      resolution: showResolutionField ? resolution : "",
+      aspect_ratio: showAspectField ? aspect : "",
+      voice_id: needsAudioOrText ? voiceId : "",
+      tts_engine: needsAudioOrText ? ttsEngine : "",
+      text: needsAudioOrText ? text : "",
+      first_frame_url: requiredAssets.includes("first_frame_url") ? firstFrame : "",
+      last_frame_url: requiredAssets.includes("last_frame_url") ? lastFrame : "",
+      source_video_url: requiredAssets.includes("source_video_url") ? sourceVideo : "",
+      image_url: requiredAssets.includes("image_url") ? imageUrl : "",
+      image_urls: requiredAssets.includes("image_urls")
+        ? (imageUrls || []).map((s) => (s || "").trim()).filter(Boolean)
+        : [],
+      reference_urls: requiredAssets.includes("reference_urls")
+        ? (referenceUrls || []).map((s) => (s || "").trim()).filter(Boolean)
+        : [],
+      audio_url: needsAudioOrText ? audioUrl : "",
+    };
+    if (modelEntry?.supports_prompt_extend) body.prompt_extend = !!promptExtend;
+    if (modelEntry?.supports_negative_prompt) body.negative_prompt = (negativePrompt || "").trim();
+    if (modelEntry?.supports_watermark || animateMode) body.watermark = !!watermark;
+    if ((modelEntry?.shot_types || []).length) body.shot_type = (shotType || "").trim();
+    if (modelEntry?.supports_audio_url) body.driving_audio_url = (drivingAudioUrl || "").trim();
+    if (audioEnabled !== null && modelEntry?.model_id && /flash/.test(modelEntry.model_id)) body.audio = audioEnabled;
+    if (animateMode) body.mode_pro = !!modePro;
+    if (avatarComposeMode && prompt.trim()) body.compose_prompt = prompt.trim();
+    return body;
+  }, [
+    mode,
+    modelId,
+    prompt,
+    duration,
+    resolution,
+    aspect,
+    voiceId,
+    ttsEngine,
+    text,
+    firstFrame,
+    lastFrame,
+    sourceVideo,
+    imageUrl,
+    imageUrls,
+    referenceUrls,
+    audioUrl,
+    needsAudioOrText,
+    requiredAssets,
+    promptEffective,
+    showDurationField,
+    showResolutionField,
+    showAspectField,
+    promptExtend,
+    negativePrompt,
+    watermark,
+    shotType,
+    drivingAudioUrl,
+    audioEnabled,
+    animateMode,
+    modePro,
+    avatarComposeMode,
+  ]);
+  const currentSubmitSignature = useMemo(
+    () => contentFingerprint("video", videoSubmitBody),
+    [videoSubmitBody]
+  );
+  const [lastSubmittedSignature, setLastSubmittedSignature] = useState("");
+  const duplicateSubmit = lastSubmittedSignature === currentSubmitSignature;
   // Cost preview (debounced). The dependency array intentionally includes
   // ``ttsEngine`` so switching from a cosyvoice voice to an Edge-TTS
   // voice (or vice versa) re-runs the preview — both engines have
@@ -1030,63 +2190,72 @@ function CreateTab({
           duration,
           resolution,
           aspect_ratio: aspect,
-          text,
-          tts_engine: ttsEngine,
+          text: needsAudioOrText ? text : "",
+          tts_engine: needsAudioOrText ? ttsEngine : "",
           // ``audio`` / ``driving_audio_url`` shift the price tier for
           // Wan 2.6 -flash variants; include them so the preview tracks
           // the real cost as the user toggles "background audio".
-          ...(audioEnabled !== null ? { audio: audioEnabled } : {}),
-          ...(drivingAudioUrl ? { driving_audio_url: drivingAudioUrl } : {}),
+          ...(audioEnabled !== null && modelEntry?.model_id && /flash/.test(modelEntry.model_id) ? { audio: audioEnabled } : {}),
+          ...(modelEntry?.supports_audio_url && drivingAudioUrl ? { driving_audio_url: drivingAudioUrl } : {}),
         });
         setCostPreview(r);
       } catch (_) {}
     }, 300);
     return () => clearTimeout(t);
-  }, [mode, modelId, duration, resolution, aspect, text, ttsEngine, audioEnabled, drivingAudioUrl]);
+  }, [mode, modelId, duration, resolution, aspect, text, ttsEngine, audioEnabled, drivingAudioUrl, needsAudioOrText, modelEntry]);
 
   const submit = async () => {
+    const required = requiredAssets;
+    if (required.includes("first_frame_url") && !requireDashScopeUrl("首帧素材", firstFrame)) return;
+    if (required.includes("last_frame_url") && !requireDashScopeUrl("尾帧素材", lastFrame)) return;
+    if (required.includes("source_video_url") && !requireDashScopeUrl("源视频素材", sourceVideo)) return;
+    if (required.includes("image_url") && !requireDashScopeUrl("人脸 / 形象图", imageUrl)) return;
+    if (required.includes("image_urls")) {
+      const urls = (imageUrls || []).map((s) => (s || "").trim()).filter(Boolean);
+      if (!urls.length) {
+        alert("当前模式需要额外参考图。请上传素材并确保生成 OSS 公网 URL，或手动粘贴公网 URL。");
+        return;
+      }
+      for (const [idx, url] of urls.entries()) {
+        if (!requireDashScopeUrl(`额外参考图 #${idx + 1}`, url)) return;
+      }
+    }
+    if (required.includes("reference_urls")) {
+      const urls = (referenceUrls || []).map((s) => (s || "").trim()).filter(Boolean);
+      if (!urls.length) {
+        alert("当前模式需要参考人物图。请上传素材并确保生成 OSS 公网 URL，或手动粘贴公网 URL。");
+        return;
+      }
+      for (const [idx, url] of urls.entries()) {
+        if (!requireDashScopeUrl(`参考人物图 #${idx + 1}`, url)) return;
+      }
+    }
+    if (required.includes("audio_or_text") && !text.trim() && !audioUrl.trim()) {
+      alert("当前模式需要台词或音频。请填写台词，或上传/粘贴 DashScope 可读取的公网音频 URL。");
+      return;
+    }
+    if (needsAudioOrText && audioUrl.trim() && !requireDashScopeUrl("音频素材", audioUrl)) return;
+    if (modelEntry?.supports_audio_url && drivingAudioUrl.trim() && !requireDashScopeUrl("背景 / 驱动音频", drivingAudioUrl)) return;
+
     const approved = !costPreview?.exceeds_threshold || window.confirm(
       `本次预估成本为 ${costPreview.formatted_total || "较高"}，已超过阈值。确认继续提交吗？`
     );
     if (!approved) return;
+    if (duplicateSubmit) {
+      alert("任务内容没有变化，不能重复提交。请修改提示词、素材或参数后再提交。");
+      return;
+    }
     setSubmitting(true);
     try {
       const body = {
-        mode,
-        model_id: modelId,
-        prompt,
-        duration,
-        resolution,
-        aspect_ratio: aspect,
-        voice_id: voiceId,
-        tts_engine: ttsEngine,
-        text,
-        first_frame_url: firstFrame,
-        last_frame_url: lastFrame,
-        source_video_url: sourceVideo,
-        image_url: imageUrl,
-        image_urls: (imageUrls || []).map((s) => (s || "").trim()).filter(Boolean),
-        reference_urls: (referenceUrls || []).map((s) => (s || "").trim()).filter(Boolean),
-        audio_url: audioUrl,
-        // ── Advanced (Wan 2.6 / 2.7) parameters ──────────────────────
-        // Always sent; the backend silently drops fields the selected
-        // model doesn't advertise via ``supports_*``, so the wire
-        // payload is consistent regardless of model.
-        prompt_extend: !!promptExtend,
-        negative_prompt: (negativePrompt || "").trim(),
-        watermark: !!watermark,
-        shot_type: (shotType || "").trim(),
-        driving_audio_url: (drivingAudioUrl || "").trim(),
-        ...(audioEnabled !== null ? { audio: audioEnabled } : {}),
+        ...videoSubmitBody,
         cost_approved: !!costPreview?.exceeds_threshold,
-        client_request_id: requestIdRef.current,
+        client_request_id: currentSubmitSignature,
       };
       const r = await api("POST", "/tasks", body);
       const tid = r.task?.task_id || r.task?.id || "";
       if (tid) setPreviewTaskId(tid);
-      // Reset the token so the next legitimate submit doesn't reuse this
-      // one (which would short-circuit to the just-created task row).
-      requestIdRef.current = `web_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      setLastSubmittedSignature(currentSubmitSignature);
       if (tid) onSubmit?.({ taskId: tid, label: "视频任务" });
     } catch (e) {
       alert(`提交失败: ${e.message}`);
@@ -1108,8 +2277,8 @@ function CreateTab({
     "pose_drive",
     "avatar_compose",
   ]);
-  const promptRequired = !PROMPT_OPTIONAL_MODES.has(mode);
-  const submitDisabled = submitting || (promptRequired && !prompt.trim());
+  const promptRequired = promptEffective && !PROMPT_OPTIONAL_MODES.has(mode);
+  const submitDisabled = submitting || duplicateSubmit || (promptRequired && !prompt.trim());
 
   return (
     <div className="split-layout workbench-layout">
@@ -1156,7 +2325,7 @@ function CreateTab({
 
         <section className="card create-section">
           <div className="create-section__head">
-            <h3><Icon name="settings" size={14} /> 模型与提示词</h3>
+            <h3><Icon name="settings" size={14} /> {promptEffective ? "模型与提示词" : "模型"}</h3>
             <span>{modeSpec?.label_zh || mode}</span>
           </div>
           <div className="field">
@@ -1171,20 +2340,39 @@ function CreateTab({
             </select>
           </div>
 
-          <div className="field">
-            <label>提示词 (prompt)</label>
-            <textarea
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder="例如：电影级画质，5秒，16:9，温暖治愈\n0-2秒：中景，主角推开门\n2-5秒：跟镜头，主角走进花园\n【声音】轻柔钢琴 + 鸟鸣"
-            />
-          </div>
+          {promptEffective ? (
+            <>
+              <div className="field">
+                <label>{avatarComposeMode ? "合成提示词 (compose_prompt)" : "提示词 (prompt)"}</label>
+                <textarea
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                  placeholder={avatarComposeMode
+                    ? "描述人物如何融合到参考场景中，例如：半身构图，未来感工作室背景，人物自然看向镜头"
+                    : "例如：电影级画质，5秒，16:9，温暖治愈\n0-2秒：中景，主角推开门\n2-5秒：跟镜头，主角走进花园\n【声音】轻柔钢琴 + 鸟鸣"}
+                />
+              </div>
+              <PromptAssistPanel
+                prompt={prompt}
+                setPrompt={setPrompt}
+                negativePrompt={negativePrompt}
+                setNegativePrompt={setNegativePrompt}
+                aspect={aspect}
+                setAspect={setAspect}
+                allowedAspects={allowedAspects}
+              />
+            </>
+          ) : (
+            <div className="compact-empty-note">
+              当前模式不读取普通提示词，只使用下方显示的素材、台词或专用参数。
+            </div>
+          )}
         </section>
 
         <section className="card create-section">
           <div className="create-section__head">
-            <h3><Icon name="image-up" size={14} /> 素材与台词</h3>
-            <span>按当前模式显示必填项</span>
+            <h3><Icon name="image-up" size={14} /> {materialSectionTitle}</h3>
+            <span>{materialSectionHint}</span>
           </div>
           {(modeSpec?.required_assets || []).includes("first_frame_url") && (
             <UploadUrlField
@@ -1217,14 +2405,22 @@ function CreateTab({
             />
           )}
           {(modeSpec?.required_assets || []).includes("image_url") && (
-            <UploadUrlField
-              label="人脸 / 形象图 (image_url)"
-              value={imageUrl}
-              onChange={setImageUrl}
-              accept="image/*"
-              kind="image"
-              hint="正面单人照效果最佳"
-            />
+            <>
+              <FigureLibraryPicker
+                figures={figures}
+                selectedUrl={imageUrl}
+                onPick={(url) => setImageUrl(url)}
+                onGoFigures={onGoFigures}
+              />
+              <UploadUrlField
+                label="人脸 / 形象图 (image_url)"
+                value={imageUrl}
+                onChange={setImageUrl}
+                accept="image/*"
+                kind="image"
+                hint="可从上方形象库选择，也可以上传新的正面单人照"
+              />
+            </>
           )}
           {(modeSpec?.required_assets || []).includes("image_urls") && (
             <MultiUploadUrlField
@@ -1246,8 +2442,13 @@ function CreateTab({
               hint="r2v / long_video 接受多张参考人物图，多角色互动时建议每个角色一张"
             />
           )}
+          {!needsAudioOrText && mode === "t2v" && (
+            <div className="compact-empty-note">
+              文生视频无需上传素材；画面、动作、镜头和声音氛围都写在上方提示词里。
+            </div>
+          )}
 
-          {!modeSpec?.native_audio_sync && (
+          {needsAudioOrText && (
             <div className="create-audio-grid">
               <div className="create-audio-card create-audio-card--tts">
                 <div className="create-audio-card__head">
@@ -1262,12 +2463,15 @@ function CreateTab({
                     <label>音色</label>
                     <select value={voiceId} onChange={(e) => setVoiceId(e.target.value)}>
                       <option value="">(无)</option>
-                      {((catalog.voices || []).length ? catalog.voices : FALLBACK_SYSTEM_VOICES).map((v) => (
+                      {ttsVoiceOptions.map((v) => (
                         <option key={v.id} value={voiceValue(v)}>
-                          [{v.engine}] {v.label_zh || v.label}
+                          {v.label_zh || v.label}
                         </option>
                       ))}
                     </select>
+                    <div className="field-hint">
+                      当前使用 {preferredTtsEngine === "edge" ? "Edge-TTS（免费）" : "CosyVoice（百炼付费）"}，这里只显示匹配的音色。
+                    </div>
                   </div>
                   <div className="field">
                     <label>台词</label>
@@ -1284,8 +2488,8 @@ function CreateTab({
                 <div className="create-audio-card__head">
                   <Icon name="upload" size={16} />
                   <div>
-                    <strong>上传成品音频</strong>
-                    <span>已有配音时上传音频，会优先于左侧 TTS 使用。</span>
+                    <strong>上传成品配音（可选）</strong>
+                    <span>已有录音时可直接上传；留空则使用左侧文字合成。</span>
                   </div>
                 </div>
                 <UploadUrlField
@@ -1294,12 +2498,12 @@ function CreateTab({
                   onChange={setAudioUrl}
                   accept="audio/*"
                   kind="audio"
-                  hint="上传配音音频，或粘贴音频 URL"
+                  hint="上传配音音频，或粘贴公网音频 URL"
                 />
               </div>
             </div>
           )}
-          {modeSpec?.native_audio_sync && !(modeSpec?.required_assets || []).length && (
+          {!needsAudioOrText && !(modeSpec?.required_assets || []).length && (
             <div className="compact-empty-note">当前模式仅需要提示词和输出参数，无额外素材。</div>
           )}
         </section>
@@ -1309,42 +2513,76 @@ function CreateTab({
             <h3><Icon name="settings" size={14} /> 输出参数</h3>
             <span>控制视频规格</span>
           </div>
-          <div className="settings-grid three">
-            <div className="field">
-              <label>时长 (秒)</label>
-              <input
-                type="number"
-                value={duration}
-                onChange={(e) => {
-                  const [lo, hi] = allowedDuration;
-                  const v = parseInt(e.target.value, 10);
-                  if (Number.isFinite(v)) {
-                    setDuration(Math.max(lo, Math.min(hi, v)));
-                  } else {
-                    setDuration(lo);
-                  }
-                }}
-                min={allowedDuration[0]}
-                max={allowedDuration[1]}
-              />
+          {(showDurationField || showResolutionField || showAspectField || animateMode) ? (
+            <div className="settings-grid three">
+              {showDurationField && (
+                <div className="field">
+                  <label>时长 (秒)</label>
+                  <input
+                    type="number"
+                    value={duration}
+                    onChange={(e) => {
+                      const [lo, hi] = allowedDuration;
+                      const v = parseInt(e.target.value, 10);
+                      if (Number.isFinite(v)) {
+                        setDuration(Math.max(lo, Math.min(hi, v)));
+                      } else {
+                        setDuration(lo);
+                      }
+                    }}
+                    min={allowedDuration[0]}
+                    max={allowedDuration[1]}
+                  />
+                </div>
+              )}
+              {showResolutionField && (
+                <div className="field">
+                  <label>分辨率</label>
+                  <select value={resolution} onChange={(e) => setResolution(e.target.value)}>
+                    {allowedResolutions.map((r) => (
+                      <option key={r}>{r}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              {showAspectField && (
+                <div className="field">
+                  <label>比例</label>
+                  <select value={aspect} onChange={(e) => setAspect(e.target.value)}>
+                    {allowedAspects.map((a) => (
+                      <option key={a}>{a}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              {animateMode && (
+                <>
+                  <div className="field">
+                    <label>生成档位</label>
+                    <select value={modePro ? "pro" : "std"} onChange={(e) => setModePro(e.target.value === "pro")}>
+                      <option value="std">标准 wan-std</option>
+                      <option value="pro">增强 wan-pro</option>
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={!!watermark}
+                        onChange={(e) => setWatermark(e.target.checked)}
+                        style={{ marginRight: 6 }}
+                      />
+                      显示水印
+                    </label>
+                  </div>
+                </>
+              )}
             </div>
-            <div className="field">
-              <label>分辨率</label>
-              <select value={resolution} onChange={(e) => setResolution(e.target.value)}>
-                {allowedResolutions.map((r) => (
-                  <option key={r}>{r}</option>
-                ))}
-              </select>
+          ) : (
+            <div className="compact-empty-note">
+              当前模式的时长、比例和分辨率由源素材或音频决定，不需要额外设置。
             </div>
-            <div className="field">
-              <label>比例</label>
-              <select value={aspect} onChange={(e) => setAspect(e.target.value)}>
-                {allowedAspects.map((a) => (
-                  <option key={a}>{a}</option>
-                ))}
-              </select>
-            </div>
-          </div>
+          )}
         </section>
 
         {/*
@@ -1356,12 +2594,12 @@ function CreateTab({
           hidden when no advanced field is supported, so the UI stays
           clean for HappyHorse users.
         */}
-        {modelEntry && (
+        {videoSynthesisMode && modelEntry && (
           modelEntry.supports_prompt_extend ||
           modelEntry.supports_negative_prompt ||
           modelEntry.supports_watermark ||
           modelEntry.supports_audio_url ||
-          (modelEntry.shot_types && modelEntry.shot_types.length)
+          ((modelEntry.shot_types || []).length > 0)
         ) && (
           <section className="card create-section">
             <div className="create-section__head">
@@ -1440,7 +2678,7 @@ function CreateTab({
                     </select>
                   </div>
                 )}
-                {modelEntry.supports_audio_url && (
+                {modelEntry.supports_audio_url && mode !== "t2v" && (
                   <div className="field" style={{ gridColumn: "1 / -1" }}>
                     <UploadUrlField
                       label="背景 / 驱动音频 URL (driving_audio_url)"
@@ -1469,9 +2707,14 @@ function CreateTab({
         )}
 
         <div className="create-submit-bar">
-          <button className="btn btn-block" onClick={submit} disabled={submitDisabled}>
+          <button
+            className="btn btn-block"
+            onClick={submit}
+            disabled={submitDisabled}
+            title={duplicateSubmit ? "当前任务内容已提交，修改提示词、素材或参数后才能再次提交" : ""}
+          >
             {submitting ? <Spinner /> : <Icon name="rocket" size={14} />}
-            {submitting ? "提交中…" : "提交任务"}
+            {submitting ? "提交中…" : duplicateSubmit ? "内容未变，无需重复提交" : "提交任务"}
           </button>
         </div>
       </div>
@@ -1502,6 +2745,8 @@ function ImageTab({ catalog, settings, onSubmit, onSettings }) {
   const [n, setN] = useState(1);
   const [imageUrls, setImageUrls] = useState("");
   const [styleIndex, setStyleIndex] = useState(0);
+  const [styleRefUrl, setStyleRefUrl] = useState("");
+  const [backgroundRefUrl, setBackgroundRefUrl] = useState("");
   const [outputRatio, setOutputRatio] = useState("");
   const [sketchStyle, setSketchStyle] = useState("<watercolor>");
   const [scenes, setScenes] = useState(["hero", "scene"]);
@@ -1531,35 +2776,93 @@ function ImageTab({ catalog, settings, onSubmit, onSettings }) {
   const sizes = selectedModel?.sizes?.length ? selectedModel.sizes : (imageCatalog.sizes || ["2K"]);
   const modeSpec = modes.find((m) => m.id === mode);
   const requiresImages = (modeSpec?.required_assets || []).includes("images");
+  const supportsPrompt = ["image_text2img", "image_edit", "image_background", "image_sketch", "image_ecommerce"].includes(mode);
+  const supportsModelAndSize = ["image_text2img", "image_edit", "image_sketch", "image_ecommerce"].includes(mode);
+  const supportsNegativePrompt = ["image_text2img", "image_edit"].includes(mode) && !!selectedModel?.supports_negative;
+  const supportsPromptAssist = ["image_text2img", "image_edit", "image_background", "image_sketch", "image_ecommerce"].includes(mode);
+  const supportsCount = ["image_text2img", "image_edit", "image_background", "image_sketch", "image_ecommerce"].includes(mode);
   const parsedImages = imageUrls.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
   const liveTask = useTaskHeartbeat(previewTaskId);
-
-  // Stable per-form-lifetime idempotency token (see CreateTab notes).
-  const imageRequestIdRef = useRef(`web_img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+  const imageSubmitBody = useMemo(() => ({
+    mode,
+    prompt: supportsPrompt ? prompt : "",
+    product_name: mode === "image_ecommerce" ? productName : "",
+    model_id: supportsModelAndSize ? modelId : "",
+    size: supportsModelAndSize ? size : "",
+    negative_prompt: supportsNegativePrompt ? negativePrompt : "",
+    n: supportsCount ? n : 1,
+    images: parsedImages,
+    style_index: mode === "image_style_repaint" ? styleIndex : 0,
+    style_ref_url: mode === "image_style_repaint" ? styleRefUrl : "",
+    ref_image_url: mode === "image_background" ? backgroundRefUrl : "",
+    output_ratio: mode === "image_outpaint" ? outputRatio : "",
+    sketch_style: mode === "image_sketch" ? sketchStyle : "",
+    ecommerce_scenes: mode === "image_ecommerce" ? scenes : [],
+    wait_for_completion: false,
+  }), [
+    mode,
+    supportsPrompt,
+    supportsModelAndSize,
+    supportsNegativePrompt,
+    supportsCount,
+    prompt,
+    productName,
+    modelId,
+    size,
+    negativePrompt,
+    n,
+    imageUrls,
+    styleIndex,
+    styleRefUrl,
+    backgroundRefUrl,
+    outputRatio,
+    sketchStyle,
+    scenes,
+  ]);
+  const currentImageSubmitSignature = useMemo(
+    () => contentFingerprint("image", imageSubmitBody),
+    [imageSubmitBody]
+  );
+  const [lastImageSubmittedSignature, setLastImageSubmittedSignature] = useState("");
+  const duplicateImageSubmit = lastImageSubmittedSignature === currentImageSubmitSignature;
 
   const submit = async () => {
+    if (requiresImages) {
+      if (!parsedImages.length) {
+        alert("当前图片模式需要输入图片。请上传素材并确保生成 OSS 公网 URL，或手动粘贴公网 URL。");
+        return;
+      }
+      for (const [idx, url] of parsedImages.entries()) {
+        if (!requireDashScopeUrl(`输入图片 #${idx + 1}`, url)) return;
+      }
+    }
+    if (mode === "image_style_repaint" && Number(styleIndex) === -1) {
+      if (!styleRefUrl.trim()) {
+        alert("选择「自定义参考风格图」后，需要上传或粘贴一张风格参考图 URL。");
+        return;
+      }
+      if (!requireDashScopeUrl("自定义参考风格图", styleRefUrl)) return;
+    }
+    if (mode === "image_background") {
+      if (!prompt.trim() && !backgroundRefUrl.trim()) {
+        alert("背景生成需要填写背景描述，或上传一张背景参考图。");
+        return;
+      }
+      if (backgroundRefUrl.trim() && !requireDashScopeUrl("背景参考图", backgroundRefUrl)) return;
+    }
+    if (duplicateImageSubmit) {
+      alert("图片任务内容没有变化，不能重复提交。请修改提示词、素材或参数后再提交。");
+      return;
+    }
     setBusy(true);
     try {
       const r = await api("POST", "/image-tasks", {
-        mode,
-        prompt,
-        product_name: productName,
-        model_id: modelId,
-        size,
-        negative_prompt: negativePrompt,
-        n,
-        images: parsedImages,
-        style_index: styleIndex,
-        output_ratio: outputRatio,
-        sketch_style: sketchStyle,
-        ecommerce_scenes: scenes,
-        client_request_id: imageRequestIdRef.current,
-        wait_for_completion: false,
+        ...imageSubmitBody,
+        client_request_id: currentImageSubmitSignature,
       });
       const tid = r.task?.task_id || r.task?.id || "";
       if (tid) setPreviewTaskId(tid);
-      // Roll the token so the next submit is treated as a new request.
-      imageRequestIdRef.current = `web_img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      setLastImageSubmittedSignature(currentImageSubmitSignature);
       if (tid) onSubmit?.({ taskId: tid, label: "图片任务" });
     } catch (e) {
       alert(`提交失败：${e.message}`);
@@ -1568,13 +2871,39 @@ function ImageTab({ catalog, settings, onSubmit, onSettings }) {
     }
   };
 
+  const imageInputLabel =
+    mode === "image_background"
+      ? "主体透明 PNG（RGBA 抠图）"
+      : mode === "image_style_repaint"
+        ? "待重绘图片"
+        : mode === "image_outpaint"
+          ? "待扩展图片"
+          : mode === "image_sketch"
+            ? "草图图片"
+            : "输入图片 URLs（可上传；多个用逗号或换行分隔）";
+  const imageInputHint =
+    mode === "image_background"
+      ? "背景生成不是直接改普通照片；需要主体外侧为透明区域的 PNG，否则模型会保留原背景。普通人像照建议改用「图像编辑」。"
+      : mode === "image_style_repaint"
+        ? "只作为内容主体；风格由下方预设或自定义风格参考图决定。"
+        : mode === "image_outpaint"
+        ? "用于把原图边缘延展到目标比例，适合补宽、补高或改画幅。"
+          : mode === "image_sketch"
+            ? "上传草图或线稿，再用成图提示词描述要生成的完整画面。"
+            : "用于图像编辑、参考融合或草图生成。";
+  const missingContent =
+    (["image_text2img", "image_edit", "image_sketch"].includes(mode) && !prompt.trim()) ||
+    (mode === "image_background" && !prompt.trim() && !backgroundRefUrl.trim()) ||
+    (mode === "image_ecommerce" && !prompt.trim() && !productName.trim());
+  const imageSubmitDisabled = busy || duplicateImageSubmit || missingContent || (requiresImages && !parsedImages.length);
+
   return (
     <div className="split-layout workbench-layout">
       <div className="split-left create-panel">
         <div className="workbench-title">
           <div>
             <h2 className="page-title"><Icon name="image" /> 图片生成</h2>
-            <p className="page-subtitle">先生成分镜图、角色图、电商图，再用 asset_ids 继续图生视频。</p>
+            <p className="page-subtitle">先选择模式，再用比例、风格、镜头和反向提示词等参数助手快速补齐生成要求。</p>
           </div>
         </div>
 
@@ -1595,31 +2924,87 @@ function ImageTab({ catalog, settings, onSubmit, onSettings }) {
 
         <section className="card create-section">
           <div className="create-section__head">
-            <h3><Icon name="settings" size={14} /> 模型与提示词</h3>
+            <h3><Icon name="settings" size={14} /> {supportsModelAndSize ? "模型与提示词" : "功能说明"}</h3>
             <span>{modeSpec?.label_zh || mode}</span>
           </div>
-          <div className="settings-grid two">
-            <div className="field">
-              <label>图片模型</label>
-              <select value={modelId} onChange={(e) => setModelId(e.target.value)}>
-                {models.map((m) => <option key={m.id} value={m.id}>{m.label_zh}</option>)}
-              </select>
+          {supportsModelAndSize ? (
+            <div className="settings-grid two">
+              <div className="field">
+                <label>图片模型</label>
+                <select value={modelId} onChange={(e) => setModelId(e.target.value)}>
+                  {models.map((m) => <option key={m.id} value={m.id}>{m.label_zh}</option>)}
+                </select>
+              </div>
+              <div className="field">
+                <label>尺寸</label>
+                <select value={size} onChange={(e) => setSize(e.target.value)}>
+                  {sizes.map((s) => <option key={s}>{s}</option>)}
+                </select>
+              </div>
             </div>
-            <div className="field">
-              <label>尺寸</label>
-              <select value={size} onChange={(e) => setSize(e.target.value)}>
-                {sizes.map((s) => <option key={s}>{s}</option>)}
-              </select>
+          ) : mode === "image_style_repaint" ? (
+            <div className="library-callout library-callout--compact">
+              <Icon name="info" size={14} />
+              <span>选择一张待重绘图片，再在下方选择预设风格或上传风格参考图。</span>
             </div>
-          </div>
-          <div className="field">
-            <label>{mode === "image_ecommerce" ? "商品/画面提示词" : "提示词"}</label>
-            <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="描述主体、场景、风格、构图、用途和质量要求" />
-          </div>
-          {selectedModel?.supports_negative && (
+          ) : mode === "image_background" ? (
+            <div className="library-callout library-callout--compact">
+              <Icon name="info" size={14} />
+              <span>上传透明 PNG 主体图，然后用背景描述或背景参考图引导新背景。</span>
+            </div>
+          ) : mode === "image_outpaint" ? (
+            <div className="library-callout library-callout--compact">
+              <Icon name="info" size={14} />
+              <span>选择一张图片和目标比例，模型会沿着原图边缘补全画布；需要重设背景时请切换到「图像编辑」。</span>
+            </div>
+          ) : null}
+          {supportsPrompt && (
+            <div className="field">
+              <label>
+                {mode === "image_background"
+                  ? "背景描述 (ref_prompt)"
+                  : mode === "image_ecommerce"
+                    ? "商品/画面提示词"
+                    : mode === "image_sketch"
+                      ? "成图提示词"
+                      : "提示词"}
+              </label>
+              <textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                placeholder={
+                  mode === "image_background"
+                    ? "描述要生成的背景，例如：高级科技展厅，柔和自然光，蓝白色调"
+                    : mode === "image_sketch"
+                      ? "描述草图要变成的完整画面、风格和细节"
+                      : "描述主体、场景、风格、构图、用途和质量要求"
+                }
+              />
+            </div>
+          )}
+          {supportsPromptAssist && (
+            <PromptAssistPanel
+              prompt={prompt}
+              setPrompt={setPrompt}
+              negativePrompt={negativePrompt}
+              setNegativePrompt={setNegativePrompt}
+              showNegative={supportsNegativePrompt}
+              imageSize={size}
+              setImageSize={supportsModelAndSize ? setSize : null}
+              imageSizes={supportsModelAndSize ? sizes : []}
+              outputRatio={outputRatio}
+              setOutputRatio={null}
+              compact
+            />
+          )}
+          {supportsNegativePrompt && (
             <div className="field">
               <label>反向提示词 (negative_prompt)</label>
-              <input value={negativePrompt} onChange={(e) => setNegativePrompt(e.target.value)} placeholder="不想出现的元素" />
+              <input
+                value={negativePrompt}
+                onChange={(e) => setNegativePrompt(e.target.value)}
+                placeholder="不想出现的元素，例如：模糊、低画质、变形、文字水印"
+              />
             </div>
           )}
         </section>
@@ -1631,25 +3016,40 @@ function ImageTab({ catalog, settings, onSubmit, onSettings }) {
           </div>
           {requiresImages && (
             <UploadUrlField
-              label="输入图片 URLs（可上传；多个用逗号或换行分隔）"
+              label={imageInputLabel}
               value={imageUrls}
               onChange={setImageUrls}
               accept="image/*"
               kind="image"
-              hint="用于编辑、重绘、扩图或草图生成"
+              hint={imageInputHint}
             />
           )}
           <div className="settings-grid three">
-            <div className="field">
-              <label>生成张数</label>
-              <input type="number" min="1" max="4" value={n} onChange={(e) => setN(parseInt(e.target.value, 10) || 1)} />
-            </div>
+            {supportsCount && (
+              <div className="field">
+                <label>生成张数</label>
+                <input type="number" min="1" max="4" value={n} onChange={(e) => setN(parseInt(e.target.value, 10) || 1)} />
+              </div>
+            )}
             {mode === "image_style_repaint" && (
               <div className="field">
                 <label>风格</label>
                 <select value={styleIndex} onChange={(e) => setStyleIndex(parseInt(e.target.value, 10) || 0)}>
                   {(imageCatalog.style_presets || []).map((s) => <option key={s.index} value={s.index}>{s.name}</option>)}
+                  <option value={-1}>自定义参考风格图</option>
                 </select>
+              </div>
+            )}
+            {mode === "image_background" && (
+              <div className="field" style={{ gridColumn: "1 / -1" }}>
+                <UploadUrlField
+                  label="背景参考图（可选 ref_image_url）"
+                  value={backgroundRefUrl}
+                  onChange={setBackgroundRefUrl}
+                  accept="image/*"
+                  kind="image"
+                  hint="可选：上传一张背景参考图，引导背景空间和光线。只填写背景描述也可以生成。"
+                />
               </div>
             )}
             {mode === "image_outpaint" && (
@@ -1673,6 +3073,16 @@ function ImageTab({ catalog, settings, onSubmit, onSettings }) {
               </div>
             )}
           </div>
+          {mode === "image_style_repaint" && Number(styleIndex) === -1 && (
+            <UploadUrlField
+              label="自定义参考风格图 (style_ref_url)"
+              value={styleRefUrl}
+              onChange={setStyleRefUrl}
+              accept="image/*"
+              kind="image"
+              hint="上传一张你想模仿的风格参考图；它会作为风格来源，不是内容主体"
+            />
+          )}
           {mode === "image_ecommerce" && (
             <>
               <div className="field">
@@ -1691,9 +3101,14 @@ function ImageTab({ catalog, settings, onSubmit, onSettings }) {
         </section>
 
         <div className="create-submit-bar">
-          <button className="btn btn-block" onClick={submit} disabled={busy || (!prompt && !productName && mode !== "image_style_repaint" && mode !== "image_outpaint") || (requiresImages && !parsedImages.length)}>
+          <button
+            className="btn btn-block"
+            onClick={submit}
+            disabled={imageSubmitDisabled}
+            title={duplicateImageSubmit ? "当前图片任务内容已提交，修改提示词、素材或参数后才能再次提交" : ""}
+          >
             {busy ? <Spinner /> : <Icon name="rocket" size={14} />}
-            {busy ? "提交中…" : "提交图片任务"}
+            {busy ? "提交中…" : duplicateImageSubmit ? "内容未变，无需重复提交" : "提交图片任务"}
           </button>
         </div>
       </div>
@@ -1710,7 +3125,7 @@ function ImageTab({ catalog, settings, onSubmit, onSettings }) {
 
 // ── Tasks Tab ───────────────────────────────────────────────────────
 
-function TasksTab() {
+function TasksTab({ onOpenStoryboard }) {
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState("");
@@ -1786,14 +3201,19 @@ function TasksTab() {
       ["pose_drive", "动作驱动"],
       ["avatar_compose", "数字人合成"],
       ["long_video", "分镜长视频"],
+      ["long_video_concat", "完整长视频"],
     ];
     const labels = new Map(known);
     for (const task of tasks) {
       const mode = task.mode || "";
+      // Roll storyboard_decompose under the existing 分镜长视频 chip so it
+      // doesn't show up as a separate auto-discovered filter button.
+      if (STORYBOARD_TASK_MODES.has(mode)) continue;
       if (mode && !labels.has(mode)) labels.set(mode, mode);
     }
     return Array.from(labels.entries());
   }, [tasks]);
+  const modeLabelMap = useMemo(() => new Map(modeFilters), [modeFilters]);
   const visibleTasks = useMemo(
     () => tasks.filter((t) => {
       const status = t.status || "";
@@ -1802,7 +3222,12 @@ function TasksTab() {
         status === statusFilter ||
         (statusFilter === "running" && ["processing", "running"].includes(status)) ||
         (statusFilter === "completed" && ["succeeded", "done", "completed"].includes(status));
-      const modeOk = modeFilter === "all" || t.mode === modeFilter;
+      // The "分镜长视频" chip filters BOTH the storyboard draft task
+      // (storyboard_decompose) and the long-video chain root (long_video).
+      const modeOk =
+        modeFilter === "all" ||
+        t.mode === modeFilter ||
+        (modeFilter === "long_video" && STORYBOARD_TASK_MODES.has(t.mode));
       return statusOk && modeOk;
     }),
     [tasks, statusFilter, modeFilter]
@@ -1894,6 +3319,9 @@ function TasksTab() {
               const canCancel = ["pending", "queued", "running", "processing"].includes(status);
               const canRetry = ["failed", "timeout", "cancelled"].includes(status);
               const busyAction = actionBusy[tid];
+              const title = taskDisplayTitle(t, modeLabelMap);
+              const summary = taskPromptSummary(t, t.model_id || tid);
+              const subtitle = taskDisplaySubtitle(t);
               return (
                 <div
                   key={tid}
@@ -1909,11 +3337,11 @@ function TasksTab() {
                     </div>
                     <div className="task-info">
                       <div className="task-info-head">
-                        <strong>{t.mode || "未知模式"}</strong>
+                        <strong>{title}</strong>
                       </div>
-                      <div className="task-card-prompt">{t.prompt || t.model_id || tid}</div>
+                      <div className="task-card-prompt">{summary}</div>
                       <div className="task-meta">
-                        <span className="font-mono">{t.model_id || "—"}</span>
+                        <span className="font-mono">{subtitle}</span>
                         <span>{formatTaskTime(t.created_at)}</span>
                       </div>
                     </div>
@@ -1964,31 +3392,60 @@ function TasksTab() {
         </div>
       </div>
 
-      <TaskPreviewPane taskId={selectedVisible ? selectedId : ""} task={selectedVisible ? selectedTask : null} showCost={false} />
+      <TaskPreviewPane
+        taskId={selectedVisible ? selectedId : ""}
+        task={selectedVisible ? selectedTask : null}
+        onOpenStoryboard={onOpenStoryboard}
+        showCost={false}
+      />
     </div>
   );
 }
 
 // ── Storyboard / Long-Video Tab ─────────────────────────────────────
 
-function StoryboardTab({ catalog }) {
-  const [story, setStory] = useState("");
-  const [totalDuration, setTotalDuration] = useState(60);
-  const [segDuration, setSegDuration] = useState(10);
-  const [segments, setSegments] = useState([]);
+function StoryboardTab({ catalog, onGoTasks }) {
+  const initialStoryboardDraftRef = useRef(null);
+  if (initialStoryboardDraftRef.current === null) {
+    initialStoryboardDraftRef.current = readStoryboardDraft();
+  }
+  const initialStoryboardDraft = initialStoryboardDraftRef.current || {};
+  const validSteps = new Set(["outline", "segments", "progress", "result"]);
+  const [story, setStory] = useState(initialStoryboardDraft.story || "");
+  const [totalDuration, setTotalDuration] = useState(Number(initialStoryboardDraft.totalDuration) || 60);
+  const [segDuration, setSegDuration] = useState(Number(initialStoryboardDraft.segDuration) || 10);
+  const [segments, setSegments] = useState(Array.isArray(initialStoryboardDraft.segments) ? initialStoryboardDraft.segments : []);
   const [busy, setBusy] = useState(false);
-  const [model, setModel] = useState("happyhorse-1.0-i2v");
-  const [chainMode, setChainMode] = useState("serial");
-  const [activeStep, setActiveStep] = useState("outline");
-  const [chainGroupId, setChainGroupId] = useState("");
+  const [model, setModel] = useState(initialStoryboardDraft.model || "happyhorse-1.0-i2v");
+  const [chainMode, setChainMode] = useState(initialStoryboardDraft.chainMode || "serial");
+  const [activeStep, setActiveStep] = useState(validSteps.has(initialStoryboardDraft.activeStep) ? initialStoryboardDraft.activeStep : "outline");
+  const [chainGroupId, setChainGroupId] = useState(initialStoryboardDraft.chainGroupId || "");
   const [chainTasks, setChainTasks] = useState([]);
   const [concatResult, setConcatResult] = useState("");
   const [concatResultMeta, setConcatResultMeta] = useState(null);
   const [concatBusy, setConcatBusy] = useState(false);
+  const [lastLongVideoSignature, setLastLongVideoSignature] = useState(initialStoryboardDraft.lastLongVideoSignature || "");
+  const [lastStoryboardDecomposeSignature, setLastStoryboardDecomposeSignature] = useState(initialStoryboardDraft.lastStoryboardDecomposeSignature || "");
+  const [storyboardDecomposeTaskId, setStoryboardDecomposeTaskId] = useState(initialStoryboardDraft.storyboardDecomposeTaskId || "");
+  const [decomposeStatus, setDecomposeStatus] = useState(null);
+  const [decomposeDialogOpen, setDecomposeDialogOpen] = useState(false);
+  const [chainCancelBusy, setChainCancelBusy] = useState(false);
+  const appliedStoryboardTaskRef = useRef("");
+  const storyboardDecomposeTask = useTaskHeartbeat(storyboardDecomposeTaskId);
 
   const modelOptions = (catalog?.models || []).filter((m) => m.mode === "i2v");
-  const completedTasks = chainTasks.filter((t) => ["succeeded", "done", "completed", "downloaded"].includes(t.status));
-  const chainDone = chainTasks.length > 0 && completedTasks.length === chainTasks.length;
+  const segmentTasks = chainTasks
+    .filter((t) => t.mode !== "long_video")
+    .sort((a, b) => {
+      const ai = taskSegmentIndex(a, Number.MAX_SAFE_INTEGER) || Number.MAX_SAFE_INTEGER;
+      const bi = taskSegmentIndex(b, Number.MAX_SAFE_INTEGER) || Number.MAX_SAFE_INTEGER;
+      if (ai !== bi) return ai - bi;
+      return Number(a.created_at || 0) - Number(b.created_at || 0);
+    });
+  const completedTasks = segmentTasks.filter((t) => ["succeeded", "done", "completed", "downloaded"].includes(t.status));
+  const chainDone = segmentTasks.length > 0 && completedTasks.length === segmentTasks.length;
+  const chainHasFailure = chainTasks.some((t) => ["failed", "timeout", "cancelled", "canceled"].includes(t.status));
+  const chainHasActiveTasks = chainTasks.some((t) => ["pending", "queued", "running", "processing"].includes(t.status));
 
   const addSegment = () => {
     const nextIndex = segments.length + 1;
@@ -2012,6 +3469,36 @@ function StoryboardTab({ catalog }) {
     setSegments((prev) => prev.filter((_, i) => i !== index).map((s, i) => ({ ...s, index: i + 1 })));
   };
 
+  const resetStoryboardRun = () => {
+    const ok = window.confirm(
+      "要重置当前页面流程吗？\n\n这只会清空本页追踪的 chain_group，已生成的任务和视频不会删除，也不会中止后台任务。"
+    );
+    if (!ok) return;
+    setChainGroupId("");
+    setChainTasks([]);
+    setConcatResult("");
+    setConcatResultMeta(null);
+    setLastLongVideoSignature("");
+    setActiveStep(segments.length ? "progress" : "segments");
+  };
+
+  const cancelStoryboardRun = async () => {
+    if (!chainGroupId) return;
+    const ok = window.confirm(
+      "确认中止当前分镜视频生成吗？\n\n正在排队或运行的分段任务会被标记为已取消，已完成的视频片段会保留。"
+    );
+    if (!ok) return;
+    setChainCancelBusy(true);
+    try {
+      await api("POST", `/long-video/chains/${encodeURIComponent(chainGroupId)}/cancel`);
+      await refreshChainTasks(chainGroupId);
+    } catch (e) {
+      alert(`中止失败：${e.message || e}`);
+    } finally {
+      setChainCancelBusy(false);
+    }
+  };
+
   const refreshChainTasks = useCallback(async (groupId = chainGroupId) => {
     if (!groupId) return;
     try {
@@ -2027,30 +3514,184 @@ function StoryboardTab({ catalog }) {
     return () => clearInterval(timer);
   }, [chainGroupId, refreshChainTasks]);
 
-  const decompose = async () => {
-    if (!story.trim()) return;
-    setBusy(true);
-    try {
-      const r = await api("POST", "/storyboard/decompose", {
-        story,
-        total_duration: totalDuration,
-        segment_duration: segDuration,
-      });
-      if (r.ok) {
-        setSegments(r.segments || []);
-        setActiveStep("segments");
+  useEffect(() => {
+    writeStoryboardDraft({
+      story,
+      totalDuration,
+      segDuration,
+      segments,
+      model,
+      chainMode,
+      activeStep,
+      chainGroupId,
+      lastLongVideoSignature,
+      lastStoryboardDecomposeSignature,
+      storyboardDecomposeTaskId,
+    });
+  }, [story, totalDuration, segDuration, segments, model, chainMode, activeStep, chainGroupId, lastLongVideoSignature, lastStoryboardDecomposeSignature, storyboardDecomposeTaskId]);
+
+  useEffect(() => {
+    if (chainGroupId) return;
+    let cancelled = false;
+    const recoverChain = async () => {
+      try {
+        const active = await api("GET", "/long-video/active-chains");
+        const running = (active.chains || []).find((c) => c.chain_group_id);
+        if (!cancelled && running?.chain_group_id) {
+          setChainGroupId(running.chain_group_id);
+          setActiveStep("progress");
+          return;
+        }
+      } catch (_) {}
+      try {
+        const recent = await api("GET", "/tasks?limit=100");
+        const activeStatuses = new Set(["pending", "queued", "running", "processing"]);
+        const row = (recent.tasks || []).find((t) => t.chain_group_id && activeStatuses.has(t.status));
+        if (!cancelled && row?.chain_group_id) {
+          setChainGroupId(row.chain_group_id);
+          setActiveStep("progress");
+        }
+      } catch (_) {}
+    };
+    recoverChain();
+    return () => {
+      cancelled = true;
+    };
+  }, [chainGroupId]);
+
+  const longVideoSubmitBody = useMemo(() => ({
+    segments,
+    model_id: model,
+    mode: chainMode,
+  }), [segments, model, chainMode]);
+  const currentLongVideoSignature = useMemo(
+    () => contentFingerprint("longvideo", longVideoSubmitBody),
+    [longVideoSubmitBody]
+  );
+  const duplicateLongVideoSubmit = lastLongVideoSignature === currentLongVideoSignature && !chainHasFailure;
+  const storyboardDecomposeBody = useMemo(() => ({
+    story,
+    total_duration: totalDuration,
+    segment_duration: segDuration,
+  }), [story, totalDuration, segDuration]);
+  const currentStoryboardDecomposeSignature = useMemo(
+    () => contentFingerprint("storyboard_decompose", storyboardDecomposeBody),
+    [storyboardDecomposeBody]
+  );
+  const duplicateStoryboardDecompose =
+    lastStoryboardDecomposeSignature === currentStoryboardDecomposeSignature;
+
+  useEffect(() => {
+    const snap = storyboardManager.snapshot();
+    setBusy(snap.busy);
+    if (snap.status) setDecomposeStatus(snap.status);
+    return storyboardManager.subscribe((state) => {
+      if (!state) return;
+      if (typeof state.busy === "boolean") setBusy(state.busy);
+      setDecomposeStatus({ kind: state.kind, text: state.text });
+      if (state.taskId || state.kind === "info") setDecomposeDialogOpen(true);
+      if (state.taskId) setStoryboardDecomposeTaskId(state.taskId);
+      if (state.signature && state.kind !== "danger") {
+        setLastStoryboardDecomposeSignature(state.signature);
       }
-      else alert(r.error || "拆分镜失败");
-    } catch (e) {
-      alert(`拆分镜失败：${e.message}`);
-    } finally {
-      setBusy(false);
-    }
+      if (Array.isArray(state.segments) && state.segments.length) {
+        setSegments(state.segments);
+        setActiveStep((prev) => (prev === "outline" ? "segments" : prev));
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (storyboardDecomposeTaskId) return;
+    let cancelled = false;
+    const recoverDecomposeTask = async () => {
+      try {
+        const r = await api("GET", "/tasks?limit=100");
+        const rows = (r.tasks || []).filter((t) => t.mode === "storyboard_decompose");
+        const matched = rows.find((t) => {
+          const params = taskParams(t);
+          return (
+            String(params.story || "") === String(story || "") &&
+            Number(params.total_duration || 0) === Number(totalDuration || 0) &&
+            Number(params.segment_duration || 0) === Number(segDuration || 0)
+          );
+        });
+        const tid = taskIdOf(matched);
+        if (!cancelled && tid) setStoryboardDecomposeTaskId(tid);
+      } catch (_) {}
+    };
+    recoverDecomposeTask();
+    return () => {
+      cancelled = true;
+    };
+  }, [storyboardDecomposeTaskId, story, totalDuration, segDuration]);
+
+  const decompose = () => {
+    if (!story.trim() || busy || duplicateStoryboardDecompose) return;
+    setDecomposeDialogOpen(true);
+    storyboardManager.start({
+      story,
+      total_duration: totalDuration,
+      segment_duration: segDuration,
+      signature: currentStoryboardDecomposeSignature,
+    });
   };
+
+  useEffect(() => {
+    if (!storyboardDecomposeTask || storyboardDecomposeTask.mode !== "storyboard_decompose") return;
+    const taskStatus = storyboardDecomposeTask.status || "";
+    const params = taskParams(storyboardDecomposeTask);
+    const taskSegments = Array.isArray(params.segments) ? params.segments : [];
+    if (["succeeded", "done", "completed"].includes(taskStatus) && taskSegments.length) {
+      const tid = taskIdOf(storyboardDecomposeTask);
+      if (appliedStoryboardTaskRef.current === tid) return;
+      appliedStoryboardTaskRef.current = tid;
+      const nextSegments = taskSegments.map((seg, idx) => ({
+        ...seg,
+        index: seg.index || idx + 1,
+        transition_to_next: normalizeStoryboardTransition(seg.transition_to_next),
+      }));
+      setSegments(nextSegments);
+      setActiveStep((prev) => (prev === "outline" ? "segments" : prev));
+      setDecomposeStatus({
+        kind: "success",
+        text: `分镜草稿已完成，共 ${nextSegments.length} 段，已同步到「编辑分镜」。`,
+      });
+      const existing = readStoryboardDraft();
+      writeStoryboardDraft({
+        ...existing,
+        story: params.story || story,
+        totalDuration: params.total_duration || totalDuration,
+        segDuration: params.segment_duration || segDuration,
+        segments: nextSegments,
+        activeStep: activeStep === "outline" ? "segments" : activeStep,
+        storyboardDecomposeTaskId,
+        lastStoryboardDecomposeSignature,
+      });
+      return;
+    }
+    if (["failed", "timeout", "cancelled", "canceled"].includes(taskStatus)) {
+      setDecomposeStatus({
+        kind: "danger",
+        text: storyboardDecomposeTask.error_message || "分镜草稿任务失败，请查看任务详情后修改大纲重试。",
+      });
+      return;
+    }
+    if (["pending", "queued", "running", "processing"].includes(taskStatus)) {
+      setDecomposeStatus({
+        kind: "info",
+        text: "分镜草稿任务正在后台生成，可在「任务」Tab 查看进度。",
+      });
+    }
+  }, [storyboardDecomposeTask, storyboardDecomposeTaskId, story, totalDuration, segDuration, activeStep, lastStoryboardDecomposeSignature]);
 
   const submit = async () => {
     if (!segments.length) {
       alert("请先生成或手动添加至少一个分镜");
+      return;
+    }
+    if (duplicateLongVideoSubmit) {
+      alert("长视频分镜内容没有变化，不能重复提交。请修改分镜、模型或串接方式后再提交。");
       return;
     }
     // Parallel mode renders all segments simultaneously, which means
@@ -2067,16 +3708,13 @@ function StoryboardTab({ catalog }) {
     }
     setBusy(true);
     try {
-      const r = await api("POST", "/long-video/create", {
-        segments,
-        model_id: model,
-        mode: chainMode,
-      });
+      const r = await api("POST", "/long-video/create", longVideoSubmitBody);
       setChainGroupId(r.chain_group_id || "");
       setChainTasks([]);
       setConcatResult("");
       setConcatResultMeta(null);
       setActiveStep("progress");
+      setLastLongVideoSignature(currentLongVideoSignature);
       if (r.chain_group_id) refreshChainTasks(r.chain_group_id);
     } catch (e) {
       alert(`提交失败：${e.message}`);
@@ -2167,6 +3805,12 @@ function StoryboardTab({ catalog }) {
               className="story-outline-input"
             />
           </div>
+          <PromptAssistPanel
+            prompt={story}
+            setPrompt={setStory}
+            showNegative={false}
+            compact
+          />
           <div className="settings-grid two">
             <div className="field">
               <label>总时长 (秒)</label>
@@ -2186,13 +3830,31 @@ function StoryboardTab({ catalog }) {
             </div>
           </div>
           <div className="storyboard-outline-actions">
-            <button className="btn btn-block" onClick={decompose} disabled={busy || !story.trim()}>
-              {busy ? <Spinner /> : <Icon name="wand-sparkles" size={14} />} 生成分镜草稿
+            <button
+              className="btn btn-block"
+              onClick={decompose}
+              disabled={busy || !story.trim() || duplicateStoryboardDecompose}
+              title={duplicateStoryboardDecompose ? "当前大纲、总时长和每段时长没有变化，已提交过分镜草稿任务" : ""}
+            >
+              {busy ? <Spinner /> : <Icon name="wand-sparkles" size={14} />}
+              {busy
+                ? "正在提交分镜任务…"
+                : duplicateStoryboardDecompose
+                  ? "内容未变，无需重复生成"
+                  : "生成分镜草稿"}
             </button>
-            <button className="btn btn-ghost" onClick={() => setActiveStep("segments")}>
-              已有脚本，直接编辑分镜 →
+            <button className="btn btn-ghost" onClick={onGoTasks}>
+              去任务列表查看 →
             </button>
           </div>
+          {decomposeStatus && (
+            <div className={`storyboard-decompose-status storyboard-decompose-status--${decomposeStatus.kind}`}>
+              {decomposeStatus.kind === "info" && <Spinner />}
+              {decomposeStatus.kind === "success" && <Icon name="check" size={13} />}
+              {decomposeStatus.kind === "danger" && <Icon name="alert-triangle" size={13} />}
+              <span>{decomposeStatus.text}</span>
+            </div>
+          )}
           <div className="storyboard-tips">
             <Icon name="info" size={14} />
             <div>
@@ -2201,6 +3863,47 @@ function StoryboardTab({ catalog }) {
             </div>
           </div>
         </section>
+      )}
+
+      {decomposeDialogOpen && decomposeStatus && (
+        <div className="modal-mask storyboard-progress-mask" onClick={() => setDecomposeDialogOpen(false)}>
+          <div className="modal storyboard-progress-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="storyboard-progress-modal__head">
+              <div>
+                <h3>
+                  {decomposeStatus.kind === "danger"
+                    ? <Icon name="alert-triangle" size={16} />
+                    : decomposeStatus.kind === "success"
+                      ? <Icon name="check" size={16} />
+                      : <Spinner />}
+                  分镜草稿任务
+                </h3>
+                <p>
+                  拆分镜会调用主程序大模型（LLM，大语言模型）理解大纲并生成每段镜头，
+                  时间取决于模型响应和大纲长度，不再用固定秒数强制中断。
+                </p>
+              </div>
+              <button className="icon-btn" onClick={() => setDecomposeDialogOpen(false)} aria-label="关闭">
+                <Icon name="x" size={15} />
+              </button>
+            </div>
+            <div className={`storyboard-progress-modal__status storyboard-progress-modal__status--${decomposeStatus.kind}`}>
+              <span>{decomposeStatus.text}</span>
+            </div>
+            <div className="storyboard-progress-modal__guide">
+              <strong>下一步</strong>
+              <span>到「任务」Tab 的「分镜长视频」分类查看进度；任务完成后，点开右侧结果并使用「应用到编辑分镜」。</span>
+            </div>
+            <div className="storyboard-progress-modal__actions">
+              <button className="btn btn-ghost" onClick={() => setDecomposeDialogOpen(false)}>
+                继续编辑大纲
+              </button>
+              <button className="btn" onClick={onGoTasks}>
+                <Icon name="list" size={13} /> 去任务 Tab 查看
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {activeStep === "segments" && (
@@ -2241,39 +3944,44 @@ function StoryboardTab({ catalog }) {
               {segments.map((s, i) => (
                 <div key={i} className="story-segment-card">
                   <div className="story-segment-card__head">
-                    <strong>#{s.index || i + 1}</strong>
+                    <div>
+                      <strong>#{s.index || i + 1}</strong>
+                      <span>第 {i + 1} 段分镜</span>
+                    </div>
                     <button className="btn btn-sm btn-ghost" onClick={() => removeSegment(i)}>
                       <Icon name="trash" size={12} /> 删除
                     </button>
                   </div>
-                  <div className="settings-grid two">
-                    <div className="field">
-                      <label>时长 (秒)</label>
-                      <input
-                        type="number"
-                        value={s.duration || segDuration}
-                        onChange={(e) => updateSegment(i, { duration: parseInt(e.target.value, 10) || segDuration })}
+                  <div className="story-segment-card__body">
+                    <div className="story-segment-card__controls">
+                      <div className="field">
+                        <label>时长 (秒)</label>
+                        <input
+                          type="number"
+                          value={s.duration || segDuration}
+                          onChange={(e) => updateSegment(i, { duration: parseInt(e.target.value, 10) || segDuration })}
+                        />
+                      </div>
+                      <div className="field">
+                        <label>转场</label>
+                        <select
+                          value={normalizeStoryboardTransition(s.transition_to_next)}
+                          onChange={(e) => updateSegment(i, { transition_to_next: e.target.value })}
+                        >
+                          <option value="cut">直接切</option>
+                          <option value="crossfade">交叉淡化</option>
+                          <option value="ai_extend">动作承接</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div className="field story-segment-card__prompt">
+                      <label>本段提示词</label>
+                      <textarea
+                        value={s.prompt || ""}
+                        onChange={(e) => updateSegment(i, { prompt: e.target.value })}
+                        placeholder="描述这一段的主体、动作、镜头、环境、声音和与前后段的衔接方式"
                       />
                     </div>
-                    <div className="field">
-                      <label>转场</label>
-                      <select
-                        value={s.transition_to_next || "cut"}
-                        onChange={(e) => updateSegment(i, { transition_to_next: e.target.value })}
-                      >
-                        <option value="cut">直接切</option>
-                        <option value="fade">淡入淡出</option>
-                        <option value="match">动作承接</option>
-                      </select>
-                    </div>
-                  </div>
-                  <div className="field">
-                    <label>本段提示词</label>
-                    <textarea
-                      value={s.prompt || ""}
-                      onChange={(e) => updateSegment(i, { prompt: e.target.value })}
-                      placeholder="描述这一段的主体、动作、镜头、环境、声音和与前后段的衔接方式"
-                    />
                   </div>
                 </div>
               ))}
@@ -2292,10 +4000,19 @@ function StoryboardTab({ catalog }) {
 
       {activeStep === "progress" && (
         <div className="storyboard-workbench storyboard-workbench--generate">
-          <section className="card create-section storyboard-panel">
+          <section className="card create-section storyboard-panel storyboard-panel--generate-config">
             <div className="create-section__head">
               <h3><Icon name="settings" size={14} /> 生成配置</h3>
               <span>{segments.length} 个分镜待生成</span>
+            </div>
+            <div className="storyboard-source-summary">
+              <Icon name="list" size={15} />
+              <div>
+                <strong>将取用第二步「编辑分镜」中的内容</strong>
+                <span>
+                  提交后会按当前 {segments.length} 段分镜逐段生成视频；每段使用它自己的提示词、时长和转场设置。
+                </span>
+              </div>
             </div>
             <div className="field">
               <label>基础模型</label>
@@ -2330,13 +4047,19 @@ function StoryboardTab({ catalog }) {
               <button className="btn btn-ghost" onClick={() => setActiveStep("segments")}>
                 <Icon name="arrow-left" size={12} /> 返回分镜
               </button>
-              <button className="btn btn-block" onClick={submit} disabled={busy || !segments.length}>
-                {busy ? <Spinner /> : <Icon name="rocket" size={14} />} 提交生成
+              <button
+                className="btn btn-block"
+                onClick={submit}
+                disabled={busy || duplicateLongVideoSubmit || !segments.length}
+                title={duplicateLongVideoSubmit ? "当前分镜内容已提交，修改分镜、模型或串接方式后才能再次提交" : ""}
+              >
+                {busy ? <Spinner /> : <Icon name="rocket" size={14} />}
+                {busy ? "提交中…" : duplicateLongVideoSubmit ? "内容未变，无需重复提交" : "提交生成"}
               </button>
             </div>
           </section>
 
-          <section className="card create-section storyboard-panel">
+          <section className="card create-section storyboard-panel storyboard-panel--generate-progress">
             <div className="create-section__head">
               <h3><Icon name="list" size={14} /> 生成进度</h3>
               <span>{chainGroupId ? `chain_group: ${chainGroupId.slice(0, 8)}…` : "尚未提交"}</span>
@@ -2349,38 +4072,68 @@ function StoryboardTab({ catalog }) {
                   title="等待提交生成"
                   hint="左侧确认模型和串接方式后提交，即可在这里跟踪每段视频的生成进度。"
                 />
-              ) : chainTasks.length === 0 ? (
+              ) : segmentTasks.length === 0 ? (
                 <div className="task-list-loading"><Spinner /> 正在创建分镜任务…</div>
               ) : (
                 <div className="story-progress-list">
-                  {chainTasks.map((t, i) => (
-                    <div key={taskIdOf(t) || i} className="story-progress-item">
-                      <span>#{i + 1}</span>
-                      <div>
-                        <strong>{t.model_id || t.mode || "分镜任务"}</strong>
-                        <small>{taskIdOf(t)}</small>
+                  {segmentTasks.map((t, i) => {
+                    const index = taskSegmentIndex(t, i + 1) || i + 1;
+                    return (
+                      <div key={taskIdOf(t) || i} className="story-progress-item">
+                        <span>#{index}</span>
+                        <div className="story-progress-item__main">
+                          <div className="story-progress-item__title">
+                            <strong>{taskDisplayTitle(t, null, index)}</strong>
+                            <small>{taskDisplaySubtitle(t)}</small>
+                          </div>
+                          <div className="story-progress-item__prompt">{taskPromptSummary(t)}</div>
+                        </div>
+                        <TaskStatusBadge status={t.status} />
                       </div>
-                      <TaskStatusBadge status={t.status} />
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
             <div className="storyboard-panel__footer">
-              <button
-                className="btn btn-ghost"
-                onClick={() => refreshChainTasks()}
-                disabled={!chainGroupId}
-              >
-                <Icon name="refresh" size={12} /> 刷新进度
-              </button>
-              <button
-                className="btn"
-                onClick={() => setActiveStep("result")}
-                disabled={!chainGroupId}
-              >
-                查看拼接 →
-              </button>
+              <div className="storyboard-footer-actions">
+                <button
+                  className="btn btn-ghost"
+                  onClick={() => refreshChainTasks()}
+                  disabled={!chainGroupId}
+                >
+                  <Icon name="refresh" size={12} /> 刷新进度
+                </button>
+                <button
+                  className="btn btn-ghost"
+                  onClick={resetStoryboardRun}
+                  disabled={!chainGroupId}
+                >
+                  <Icon name="x" size={12} /> 重置流程
+                </button>
+                <button
+                  className="btn btn-ghost"
+                  onClick={cancelStoryboardRun}
+                  disabled={!chainGroupId || !chainHasActiveTasks || chainCancelBusy}
+                  title="中止后台正在生成的分段任务"
+                >
+                  {chainCancelBusy ? <Spinner /> : <Icon name="x" size={12} />} 中止生成
+                </button>
+              </div>
+              <div className="storyboard-footer-actions">
+                {onGoTasks && (
+                  <button className="btn btn-ghost" onClick={onGoTasks}>
+                    <Icon name="list" size={12} /> 去任务查看
+                  </button>
+                )}
+                <button
+                  className="btn"
+                  onClick={() => setActiveStep("result")}
+                  disabled={!chainGroupId}
+                >
+                  查看拼接 →
+                </button>
+              </div>
             </div>
           </section>
         </div>
@@ -2390,16 +4143,20 @@ function StoryboardTab({ catalog }) {
         <section className="card create-section storyboard-result-panel">
           <div className="create-section__head">
             <h3><Icon name="film" size={14} /> 结果拼接</h3>
-            <span>{completedTasks.length}/{chainTasks.length || segments.length} 段已完成</span>
+            <span>{completedTasks.length}/{segmentTasks.length || segments.length} 段已完成</span>
           </div>
           <div className="story-result-summary">
             <div>
               <strong>分段视频</strong>
-              <span>{chainTasks.length ? `已追踪 ${chainTasks.length} 个分镜任务` : "还没有提交生成任务"}</span>
+              <span>
+                {segmentTasks.length
+                  ? `${completedTasks.length}/${segmentTasks.length} 段已完成，${segmentTasks.filter((t) => t.video_url || t.video_path).length} 段可拼接`
+                  : "还没有提交生成任务"}
+              </span>
             </div>
             <div>
               <strong>完整视频</strong>
-              <span>{concatResult || "等待分段完成后拼接"}</span>
+              <span>{concatResult ? "已生成完整长视频" : chainDone ? "分段已就绪，可开始拼接" : "等待分段完成后拼接"}</span>
             </div>
           </div>
           {concatResultMeta?.preview_url && (
@@ -2408,24 +4165,60 @@ function StoryboardTab({ catalog }) {
             </div>
           )}
           {concatResultMeta?.task_id && (
-            <div className="text-xs text-muted mt-2">
-              已生成长视频任务 <span className="font-mono">{concatResultMeta.task_id}</span>
-              {concatResultMeta.asset_ids?.length ? `，发布到 Asset Bus (${concatResultMeta.asset_ids.length})` : ""}
-              ；可在「任务」页查看。
+            <div className="story-result-output-card">
+              <div>
+                <strong>完整长视频已生成</strong>
+                <span>
+                  任务 <span className="font-mono">{concatResultMeta.task_id}</span>
+                  {concatResultMeta.asset_ids?.length ? `，已发布素材 ${concatResultMeta.asset_ids.length} 个` : ""}
+                </span>
+              </div>
+              <div className="story-result-output-card__actions">
+                {onGoTasks && (
+                  <button className="btn btn-sm btn-ghost" onClick={onGoTasks}>
+                    <Icon name="list" size={12} /> 去任务查看
+                  </button>
+                )}
+                <button className="btn btn-sm btn-ghost" onClick={resetStoryboardRun}>
+                  <Icon name="x" size={12} /> 重置流程
+                </button>
+              </div>
             </div>
           )}
-          {chainTasks.length > 0 ? (
-            <div className="story-progress-list">
-              {chainTasks.map((t, i) => (
-                <div key={taskIdOf(t) || i} className="story-progress-item">
-                  <span>#{i + 1}</span>
-                  <div>
-                    <strong>{t.video_url ? "视频已生成" : "等待视频结果"}</strong>
-                    <small>{taskIdOf(t)}</small>
-                  </div>
-                  <TaskStatusBadge status={t.status} />
+          {segmentTasks.length > 0 ? (
+            <div className="story-result-segments">
+              <div className="story-result-segments__head">
+                <div>
+                  <strong>待拼接分段</strong>
+                  <span>按分镜顺序检查每段成片，全部完成后可生成完整长视频。</span>
                 </div>
-              ))}
+                <Tag kind={chainDone ? "success" : "info"}>
+                  {completedTasks.length}/{segmentTasks.length} 段完成
+                </Tag>
+              </div>
+              <div className="story-progress-list story-result-segment-list">
+                {segmentTasks.map((t, i) => {
+                  const index = taskSegmentIndex(t, i + 1) || i + 1;
+                  const ready = !!(t.video_url || t.video_path);
+                  return (
+                    <div
+                      key={taskIdOf(t) || i}
+                      className={"story-progress-item story-result-segment-item" + (ready ? " is-ready" : "")}
+                    >
+                      <span>#{index}</span>
+                      <div className="story-progress-item__main">
+                        <div className="story-progress-item__title">
+                          <strong>{segmentResultTitle(t, index)}</strong>
+                          <small>{segmentResultState(t)}</small>
+                        </div>
+                        <div className="story-progress-item__prompt">{taskPromptSummary(t)}</div>
+                        <div className="story-result-segment-item__meta">{taskDisplaySubtitle(t)}</div>
+                      </div>
+                      <TaskStatusBadge status={t.status} />
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           ) : (
             <CompactLibraryEmpty
@@ -2440,16 +4233,36 @@ function StoryboardTab({ catalog }) {
             </CompactLibraryEmpty>
           )}
           <div className="storyboard-next-bar">
-            <button className="btn btn-ghost" onClick={() => setActiveStep("progress")}>
-              <Icon name="arrow-left" size={12} /> 返回进度
-            </button>
+            <div className="storyboard-footer-actions">
+              <button className="btn btn-ghost" onClick={() => setActiveStep("progress")}>
+                <Icon name="arrow-left" size={12} /> 返回进度
+              </button>
+              <button className="btn btn-ghost" onClick={resetStoryboardRun} disabled={!chainGroupId}>
+                <Icon name="x" size={12} /> 重置流程
+              </button>
+              <button
+                className="btn btn-ghost"
+                onClick={cancelStoryboardRun}
+                disabled={!chainGroupId || !chainHasActiveTasks || chainCancelBusy}
+              >
+                {chainCancelBusy ? <Spinner /> : <Icon name="x" size={12} />} 中止生成
+              </button>
+            </div>
+            <div className="storyboard-footer-actions">
+              {onGoTasks && (
+                <button className="btn btn-ghost" onClick={onGoTasks}>
+                  <Icon name="list" size={12} /> 去任务查看
+                </button>
+              )}
             <button
               className="btn"
               onClick={concat}
-              disabled={concatBusy || !chainDone || completedTasks.length < 2}
+              disabled={concatBusy || !!concatResultMeta?.task_id || !chainDone || completedTasks.length < 2}
             >
-              {concatBusy ? <Spinner /> : <Icon name="film" size={14} />} 拼接完整视频
+              {concatBusy ? <Spinner /> : <Icon name="film" size={14} />}
+              {concatResultMeta?.task_id ? "已完成拼接" : "拼接完整视频"}
             </button>
+            </div>
           </div>
         </section>
       )}
@@ -2467,6 +4280,21 @@ function VoicesTab({ settings }) {
   const [previewing, setPreviewing] = useState("");
   const [previewResult, setPreviewResult] = useState({});
   const [loadWarning, setLoadWarning] = useState("");
+  const [cloneStatus, setCloneStatus] = useState(null);
+
+  const cloneTime = () =>
+    new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+  const openCreate = () => {
+    setCloneStatus(null);
+    setShowCreate(true);
+  };
+
+  const closeCreate = () => {
+    if (busy) return;
+    setShowCreate(false);
+    setCloneStatus(null);
+  };
 
   const load = useCallback(() => {
     api("GET", "/voices")
@@ -2519,17 +4347,33 @@ function VoicesTab({ settings }) {
 
   const cloneVoice = async () => {
     if (!draft.label || !draft.audio) {
-      alert("请填写音色名称并上传参考音频");
+      setCloneStatus({
+        kind: "warn",
+        title: "还不能开始克隆",
+        detail: "请先填写音色名称，并上传一段 5-30 秒的清晰人声样本。",
+        time: cloneTime(),
+      });
       return;
     }
     setBusy(true);
     try {
       const sample = draft.audio.oss_url || draft.audio.preview_url || draft.audio.local_path || "";
       if (!draft.audio.oss_url) {
-        alert("音色克隆需要 DashScope 可访问的 OSS 音频 URL。请先在设置里配置 OSS 后重新上传参考音频。");
+        setCloneStatus({
+          kind: "fail",
+          title: "缺少公网音频 URL",
+          detail: "音色克隆需要 DashScope 可访问的 OSS URL。请先在设置里配置 OSS，然后重新上传参考音频。",
+          time: cloneTime(),
+        });
         setBusy(false);
         return;
       }
+      setCloneStatus({
+        kind: "info",
+        title: "正在提交到百炼音色克隆",
+        detail: "已开始请求 DashScope VoiceEnrollmentService，通常需要等待几十秒；请不要关闭这个弹窗。",
+        time: cloneTime(),
+      });
       const r = await api("POST", "/voices/clone", {
         label: draft.label,
         sample_audio_url: draft.audio.oss_url || sample,
@@ -2537,14 +4381,24 @@ function VoicesTab({ settings }) {
         gender: draft.gender,
       });
       if (!r.ok) throw new Error(r.error || "clone failed");
+      setCloneStatus({
+        kind: "ok",
+        title: "音色克隆完成",
+        detail: "已生成自定义音色并刷新列表。关闭弹窗后，可在下方「自定义音色」区域查看和试听。",
+        time: cloneTime(),
+      });
       setDraft({ label: "", audio: null, language: "zh-CN", gender: "unknown" });
-      setShowCreate(false);
       load();
     } catch (e) {
       const msg = settings?.api_key_set
         ? friendlyApiMessage(e, "音色克隆服务暂不可用，请稍后重试。")
         : "请先在设置里配置 DashScope Key。";
-      alert(`克隆失败：${msg}`);
+      setCloneStatus({
+        kind: "fail",
+        title: "克隆失败",
+        detail: msg,
+        time: cloneTime(),
+      });
     } finally {
       setBusy(false);
     }
@@ -2620,7 +4474,7 @@ function VoicesTab({ settings }) {
           <h2 className="page-title"><Icon name="mic" /> 音色库</h2>
           <p className="page-subtitle">先选稳定系统音色，需要品牌声线时再上传干净人声样本克隆。</p>
         </div>
-        <button className="btn" onClick={() => setShowCreate(!showCreate)}>
+        <button className="btn" onClick={openCreate}>
           <Icon name="plus" size={13} /> 克隆新音色
         </button>
         </div>
@@ -2643,7 +4497,18 @@ function VoicesTab({ settings }) {
       )}
 
       {showCreate && (
-        <div className="card library-form">
+        <div className="modal-mask voice-clone-mask" onClick={closeCreate}>
+        <div className="modal voice-clone-modal" onClick={(e) => e.stopPropagation()}>
+          <div className="voice-clone-modal__head">
+            <div>
+              <h3>克隆新音色</h3>
+              <p>上传一段干净人声样本，系统会提交给 DashScope 创建可复用的自定义音色。</p>
+            </div>
+            <button className="btn btn-ghost btn-sm" onClick={closeCreate} disabled={busy} aria-label="关闭">
+              <Icon name="x" size={13} /> 关闭
+            </button>
+          </div>
+          <div className="card library-form voice-clone-form">
           <div className="settings-grid two">
             <div className="field">
               <label>音色名称</label>
@@ -2653,8 +4518,11 @@ function VoicesTab({ settings }) {
               <label>语言 / 性别</label>
               <div className="row">
                 <select value={draft.language} onChange={(e) => setDraft({ ...draft, language: e.target.value })}>
-                  <option value="zh-CN">中文</option>
+                  <option value="zh-CN">中文普通话</option>
                   <option value="en-US">英文</option>
+                  <option value="ja-JP">日语</option>
+                  <option value="ko-KR">韩语</option>
+                  <option value="yue">粤语</option>
                 </select>
                 <select value={draft.gender} onChange={(e) => setDraft({ ...draft, gender: e.target.value })}>
                   <option value="unknown">未知</option>
@@ -2670,16 +4538,42 @@ function VoicesTab({ settings }) {
               accept="audio/*"
               kind="audio"
               value={draft.audio}
-              onUploaded={(audio) => setDraft({ ...draft, audio })}
+              onUploaded={(audio) => {
+                setDraft({ ...draft, audio });
+                setCloneStatus({
+                  kind: audio?.oss_url ? "ok" : "warn",
+                  title: audio?.oss_url ? "参考音频已准备好" : "音频已上传，但还不能克隆",
+                  detail: audio?.oss_url
+                    ? "已生成 DashScope 可访问的 OSS URL，可以开始克隆。"
+                    : "当前只有本地预览文件。请配置 OSS 后重新上传，或提供公网可访问的音频 URL。",
+                  time: cloneTime(),
+                });
+              }}
               hint="上传 5-30 秒清晰干声，噪音越少克隆越稳定"
             />
           </div>
-          <div className="settings-actions">
-            <button className="btn btn-ghost" onClick={() => setShowCreate(false)}>取消</button>
-            <button className="btn" onClick={cloneVoice} disabled={busy}>
-              {busy ? <Spinner /> : <Icon name="save" size={13} />} 提交克隆
-            </button>
+          {cloneStatus && (
+            <TestResult status={cloneStatus} onDismiss={() => !busy && setCloneStatus(null)} />
+          )}
+          {cloneStatus?.kind === "ok" ? (
+            <div className="settings-actions voice-clone-actions">
+              <button className="btn" onClick={closeCreate}>
+                <Icon name="check" size={13} /> 关闭并查看自定义音色
+              </button>
+            </div>
+          ) : (
+            <div className="settings-actions voice-clone-actions">
+              <button className="btn btn-ghost" onClick={closeCreate} disabled={busy}>取消</button>
+              <button className="btn" onClick={cloneVoice} disabled={busy}>
+                {busy ? <Spinner /> : <Icon name="save" size={13} />} {busy ? "正在克隆，请稍候…" : "开始克隆音色"}
+              </button>
+            </div>
+          )}
+          <div className="voice-clone-footnote">
+            需要 DashScope API Key、dashscope Python 依赖和 OSS 公网 URL；失败原因会显示在这里并写入插件日志。
           </div>
+          </div>
+        </div>
         </div>
       )}
 
@@ -2756,16 +4650,29 @@ function FiguresTab() {
   const [showCreate, setShowCreate] = useState(false);
   const [draft, setDraft] = useState({ label: "", image: null });
   const [busy, setBusy] = useState(false);
+  const [deletingIds, setDeletingIds] = useState({});
 
   const load = useCallback(() => {
     api("GET", "/figures").then((r) => setList(r.figures || [])).catch(() => setList([]));
   }, []);
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const hasPending = list.some((f) => statusOf(f) === "pending");
+    if (!hasPending) return undefined;
+    const timer = setInterval(load, 4000);
+    return () => clearInterval(timer);
+  }, [list, load]);
 
   const createFigure = async () => {
     if (!draft.label || !draft.image) {
       alert("请填写形象名称并上传人像图");
       return;
+    }
+    if (!draft.image.oss_url) {
+      const ok = confirm(
+        "当前素材没有 OSS 公网 URL，DashScope 无法读取本地预览图，形象会跳过预检。\n\n仍要保存吗？"
+      );
+      if (!ok) return;
     }
     setBusy(true);
     try {
@@ -2777,6 +4684,11 @@ function FiguresTab() {
         oss_key: draft.image.oss_key || "",
       });
       if (!r.ok) throw new Error(r.error || "create failed");
+      if (r.detect_status === "pending") {
+        alert("形象已保存，正在进行素材预检。通过后会显示「可用」。");
+      } else if (r.detect_status === "skipped") {
+        alert("形象已保存，但因缺少 OSS 公网 URL 已跳过预检。DashScope 需要公网可访问 URL，请修正 OSS 后重新上传。");
+      }
       setDraft({ label: "", image: null });
       setShowCreate(false);
       load();
@@ -2789,8 +4701,18 @@ function FiguresTab() {
 
   const del = async (figId) => {
     if (!confirm("确认删除该形象？")) return;
-    await api("DELETE", `/figures/${figId}`);
-    load();
+    setDeletingIds((prev) => ({ ...prev, [figId]: true }));
+    setList((prev) => prev.filter((f) => f.id !== figId));
+    try {
+      await api("DELETE", `/figures/${figId}`);
+    } finally {
+      setDeletingIds((prev) => {
+        const next = { ...prev };
+        delete next[figId];
+        return next;
+      });
+      load();
+    }
   };
 
   const statusOf = (f) => {
@@ -2798,6 +4720,19 @@ function FiguresTab() {
     if (f.detect_pass === true || f.detect_pass === 1) return "pass";
     if (f.detect_pass === false || f.detect_pass === 0) return "pending";
     return "skipped";
+  };
+  const detectMeta = (f) => {
+    const status = statusOf(f);
+    if (status === "pass") {
+      return { status, label: "可用", kind: "success", hint: f.detect_message || "预检通过，可用于照片说话、换人和动作驱动。" };
+    }
+    if (status === "fail") {
+      return { status, label: "预检未通过", kind: "danger", hint: f.detect_message || "DashScope 拒绝了该图，常见原因：非真人、非正面、多人、遮挡或水印。" };
+    }
+    if (status === "skipped") {
+      return { status, label: "未预检", kind: "warning", hint: f.detect_message || "通常是 OSS 未配置或缺少公网 URL。配置 OSS 后请重新上传。" };
+    }
+    return { status: "pending", label: "预检中…", kind: "info", hint: "正在调用 wan2.2-s2v-detect 检查人像是否可用，通常需要 5-30 秒。" };
   };
 
   return (
@@ -2867,15 +4802,21 @@ function FiguresTab() {
       ) : (
         <div className="lib-grid figure-grid">
           {list.map((f) => {
-            const status = statusOf(f);
-            const kind = status === "pass" ? "success" : status === "fail" ? "danger" : status === "pending" ? "warning" : "info";
+            const meta = detectMeta(f);
+            const isPending = meta.status === "pending";
             return (
-              <div key={f.id} className="lib-card figure-card">
+              <div key={f.id} className={"lib-card figure-card" + (isPending ? " is-pending" : "")}>
                 <div className="fig-thumb-wrap">
                   {f.preview_url ? (
                     <img className="fig-thumb" src={f.preview_url} alt={f.label} />
                   ) : (
                     <div className="fig-thumb-placeholder"><Icon name="user-square" size={32} /></div>
+                  )}
+                  {isPending && (
+                    <div className="fig-overlay" aria-label={meta.label}>
+                      <span className="spinner-sm spinner-light" />
+                      <span className="fig-overlay__text">{meta.label}</span>
+                    </div>
                   )}
                 </div>
                 <div className="lib-card__head">
@@ -2883,11 +4824,14 @@ function FiguresTab() {
                     <div className="lib-card__title">{f.label}</div>
                     <div className="lib-card__sub">{new Date((f.created_at || 0) * 1000).toLocaleString()}</div>
                   </div>
-                  <Tag kind={kind}>{status}</Tag>
+                  <Tag kind={meta.kind}>
+                    {isPending && <span className="spinner-sm figure-status-spinner" />}
+                    {meta.label}
+                  </Tag>
                 </div>
-                {f.detect_message && <div className="lib-card__hint">{f.detect_message}</div>}
-                <button className="btn btn-sm btn-danger" onClick={() => del(f.id)}>
-                  <Icon name="trash" size={12} /> 删除
+                {meta.hint && <div className="lib-card__hint" title={meta.hint}>{meta.hint}</div>}
+                <button className="btn btn-sm btn-danger" onClick={() => del(f.id)} disabled={!!deletingIds[f.id]}>
+                  {deletingIds[f.id] ? <span className="spinner-sm spinner-light" /> : <Icon name="trash" size={12} />} 删除
                 </button>
               </div>
             );
@@ -3409,14 +5353,14 @@ function StorageSettings({ form, setFormValue }) {
       </SettingField>
 
       <div className="settings-grid two storage-options-grid">
-        <SettingField label="子目录结构" hint="可改成更大的盘 / 别的用户目录，仅支持绝对路径。">
+        <SettingField label="子目录结构" hint="控制生成结果在 outputs 下如何分组；会影响新生成的图片、视频等结果文件。">
           <select
             value={form.output_subdir_mode || "task"}
             onChange={(e) => {
               setFormValue("output_subdir_mode", e.target.value, { immediate: true });
             }}
           >
-            <option value="task">按任务（tasks/{"{task_id}"}，默认）</option>
+            <option value="task">按任务（{"{task_id}"}，默认）</option>
             <option value="date">按日期（YYYY-MM-DD）</option>
             <option value="mode">按模式（mode）</option>
             <option value="date_mode">日期 / 模式</option>
@@ -3600,6 +5544,19 @@ function SettingsTab({ catalog, settings, onSave }) {
     return undefined;
   };
 
+  const selectTtsEngine = (engine) => {
+    const nextEngine = engine === "edge" ? "edge" : "cosyvoice";
+    const options = voicesForEngine(FALLBACK_SYSTEM_VOICES, nextEngine);
+    const currentVoice = String(form.default_voice || "");
+    const nextVoice = currentVoice && voiceEngineOf(currentVoice) === nextEngine
+      ? currentVoice
+      : voiceValue(options[0]) || "";
+    clearTimeout(autosaveTimers.current.tts_engine);
+    clearTimeout(autosaveTimers.current.default_voice);
+    setForm((prev) => ({ ...prev, tts_engine: nextEngine, default_voice: nextVoice }));
+    return savePartial({ tts_engine: nextEngine, default_voice: nextVoice });
+  };
+
   const [apiKeySavedThisSession, setApiKeySavedThisSession] = useState(false);
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
   const [apiKeyPlaintext, setApiKeyPlaintext] = useState("");
@@ -3625,6 +5582,11 @@ function SettingsTab({ catalog, settings, onSave }) {
   const relayModelSet = new Set((relayModels || []).map((m) => String(m || "").toLowerCase()));
   const relaySupported = expectedRelayModels.filter((m) => relayModelSet.has(String(m).toLowerCase()));
   const relayMissing = expectedRelayModels.filter((m) => !relayModelSet.has(String(m).toLowerCase()));
+  const selectedTtsEngine = form.tts_engine === "edge" ? "edge" : "cosyvoice";
+  const defaultVoiceOptions = voicesForEngine(FALLBACK_SYSTEM_VOICES, selectedTtsEngine);
+  const defaultVoiceValue = form.default_voice && voiceEngineOf(form.default_voice) === selectedTtsEngine
+    ? form.default_voice
+    : voiceValue(defaultVoiceOptions[0]) || "";
 
   const updateApiKeyDraft = (value) => {
     clearTimeout(autosaveTimers.current.api_key);
@@ -4038,7 +6000,7 @@ function SettingsTab({ catalog, settings, onSave }) {
                 type="radio"
                 name="tts_engine"
                 checked={(form.tts_engine || "cosyvoice") === "cosyvoice"}
-                onChange={() => set("tts_engine", "cosyvoice", { immediate: true })}
+                onChange={() => selectTtsEngine("cosyvoice")}
               />
               CosyVoice（百炼付费）
             </label>
@@ -4047,7 +6009,7 @@ function SettingsTab({ catalog, settings, onSave }) {
                 type="radio"
                 name="tts_engine"
                 checked={form.tts_engine === "edge"}
-                onChange={() => set("tts_engine", "edge", { immediate: true })}
+                onChange={() => selectTtsEngine("edge")}
               />
               Edge-TTS（免费）
             </label>
@@ -4071,13 +6033,16 @@ function SettingsTab({ catalog, settings, onSave }) {
             </SettingField>
             <SettingField label="默认音色">
               <select
-                value={form.default_voice || "longxiaochun_v2"}
+                value={defaultVoiceValue}
                 onChange={(e) => set("default_voice", e.target.value, { immediate: true })}
               >
-                {FALLBACK_SYSTEM_VOICES.map((voice) => (
+                {defaultVoiceOptions.map((voice) => (
                   <option key={voice.id} value={voiceValue(voice)}>{voice.label_zh || voice.label || voice.id}</option>
                 ))}
               </select>
+              <div className="field-hint">
+                已按 {selectedTtsEngine === "edge" ? "Edge-TTS" : "CosyVoice"} 过滤，只显示当前引擎可用的音色。
+              </div>
             </SettingField>
           </div>
           <SettingField label="成本确认阈值（元）" hint="单次任务超过此金额时弹窗确认。">
@@ -4316,7 +6281,7 @@ function App() {
             onSettings={() => setTab("settings")}
             initialMode="t2v"
             title="视频生成"
-            subtitle="文生、图生、首尾帧、参考生成、视频续写和视频编辑统一在这里选择。"
+            subtitle="文生、图生、首尾帧、参考生成、续写和编辑统一在这里选择；常用比例、镜头、风格、反向提示词可点选，也支持自定义输入。"
             showModeChooser
             modeIds={["t2v", "i2v", "i2v_end", "r2v", "video_extend", "video_edit"]}
           />
@@ -4327,9 +6292,10 @@ function App() {
             settings={settings}
             onSubmit={(payload) => payload?.goTasks ? setTab("tasks") : notifyTaskSubmitted(payload)}
             onSettings={() => setTab("settings")}
+            onGoFigures={() => setTab("figures")}
             initialMode="photo_speak"
             title="数字人"
-            subtitle="围绕人像、源视频和台词创建口播、换嘴、换人或动作驱动任务。"
+            subtitle="围绕人像、源视频和台词创建口播、换嘴、换人或动作驱动任务；可用参数助手补齐背景、镜头、风格和避坑项。"
             showModeChooser
             modeIds={["photo_speak", "video_relip", "video_reface", "pose_drive", "avatar_compose"]}
           />
@@ -4342,8 +6308,8 @@ function App() {
             onSettings={() => setTab("settings")}
           />
         )}
-        {tab === "tasks" && <TasksTab />}
-        {tab === "storyboard" && <StoryboardTab catalog={catalog} />}
+        {tab === "tasks" && <TasksTab onOpenStoryboard={() => setTab("storyboard")} />}
+        {tab === "storyboard" && <StoryboardTab catalog={catalog} onGoTasks={() => setTab("tasks")} />}
         {tab === "voices" && <VoicesTab settings={settings} />}
         {tab === "figures" && <FiguresTab />}
         {tab === "prompt" && <PromptTab settings={settings} />}

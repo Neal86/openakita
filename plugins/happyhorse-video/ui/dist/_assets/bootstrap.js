@@ -80,6 +80,7 @@
       }
       case "bridge:api-response":
       case "bridge:download-ack":
+      case "bridge:open-external-ack":
       case "bridge:show-in-folder-ack":
       case "bridge:pick-folder-ack":
       case "bridge:clipboard-ack": {
@@ -123,6 +124,9 @@
     navigate: function (viewId) { send("bridge:navigate", { viewId: viewId }); },
     download: function (url, filename) {
       return request("bridge:download", { url: url, filename: filename });
+    },
+    openExternal: function (url) {
+      return request("bridge:open-external", { url: url });
     },
     showInFolder: function (path) {
       return request("bridge:show-in-folder", { path: path });
