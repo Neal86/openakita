@@ -1163,15 +1163,74 @@ def _auto_assign_agent_profiles(tpl_data: dict) -> None:
             node["agent_profile_id"] = infer_agent_profile_id_for_node(node)
 
 
+def _with_builtin_metadata(tid: str, tpl: dict) -> dict:
+    """Return a writable built-in template payload with generated metadata."""
+    tpl_data = dict(tpl)
+    tpl_data["policy_template"] = TEMPLATE_POLICY_MAP.get(tid, "default")
+    _auto_assign_avatars(tpl_data)
+    _auto_assign_agent_profiles(tpl_data)
+    return tpl_data
+
+
+def _is_legacy_aigc_video_studio(data: dict) -> bool:
+    """Detect pre-HappyHorse default AIGC templates persisted on disk.
+
+    Built-in templates are intentionally seeded once and then left alone,
+    but the v1.1 HappyHorse refactor replaced the old Tongyi + Seedance
+    four-node template. Without this narrow migration, old workspaces keep
+    showing the stale template forever.
+    """
+    node_ids = {str(n.get("id") or "") for n in data.get("nodes", []) if isinstance(n, dict)}
+    tool_names = {
+        str(tool)
+        for n in data.get("nodes", [])
+        if isinstance(n, dict)
+        for tool in (n.get("external_tools") or [])
+    }
+    return bool(
+        {"wb-tongyi-image", "wb-seedance-video"} & node_ids
+        or {"tongyi_image_create", "seedance_create"} & tool_names
+    )
+
+
+def _archive_removed_template(path: Path) -> None:
+    """Move a removed built-in template out of the ``*.json`` scan set."""
+    target = path.with_suffix(path.suffix + ".deprecated")
+    counter = 1
+    while target.exists():
+        target = path.with_suffix(path.suffix + f".deprecated.{counter}")
+        counter += 1
+    path.replace(target)
+    logger.info("[Templates] Archived removed built-in template: %s -> %s", path.name, target.name)
+
+
 def ensure_builtin_templates(templates_dir: Path) -> None:
-    """Install built-in templates if they don't exist."""
+    """Install built-in templates and migrate known stale built-ins.
+
+    User-edited templates are otherwise preserved. The only overwrite here is
+    the old built-in ``aigc-video-studio`` signature that shipped before the
+    HappyHorse-only 7-node refactor; the removed ``happyhorse-video-studio`` is
+    archived away from the ``*.json`` template scan.
+    """
     templates_dir.mkdir(parents=True, exist_ok=True)
+    removed_happyhorse = templates_dir / "happyhorse-video-studio.json"
+    if removed_happyhorse.exists():
+        _archive_removed_template(removed_happyhorse)
+
     for tid, tpl in ALL_TEMPLATES.items():
         p = templates_dir / f"{tid}.json"
         if not p.exists():
-            tpl_data = dict(tpl)
-            tpl_data["policy_template"] = TEMPLATE_POLICY_MAP.get(tid, "default")
-            _auto_assign_avatars(tpl_data)
-            _auto_assign_agent_profiles(tpl_data)
+            tpl_data = _with_builtin_metadata(tid, tpl)
             p.write_text(json.dumps(tpl_data, ensure_ascii=False, indent=2), encoding="utf-8")
             logger.info(f"[Templates] Installed built-in template: {tid}")
+            continue
+        if tid == "aigc-video-studio":
+            try:
+                current = json.loads(p.read_text(encoding="utf-8"))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[Templates] Failed to inspect template %s: %s", p, exc)
+                continue
+            if isinstance(current, dict) and _is_legacy_aigc_video_studio(current):
+                tpl_data = _with_builtin_metadata(tid, tpl)
+                p.write_text(json.dumps(tpl_data, ensure_ascii=False, indent=2), encoding="utf-8")
+                logger.info("[Templates] Migrated built-in template to HappyHorse: %s", tid)

@@ -219,3 +219,47 @@ class TestEnsureBuiltinTemplates:
         data = json.loads(custom.read_text(encoding="utf-8"))
         assert data.get("custom") is True
 
+    def test_migrates_legacy_aigc_video_studio(self, tmp_path: Path):
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        stale = tpl_dir / "aigc-video-studio.json"
+        stale.write_text(
+            json.dumps(
+                {
+                    "name": "AIGC 视频创作工作室",
+                    "nodes": [
+                        {"id": "producer", "external_tools": []},
+                        {"id": "screenwriter", "external_tools": []},
+                        {"id": "wb-tongyi-image", "external_tools": ["tongyi_image_create"]},
+                        {"id": "wb-seedance-video", "external_tools": ["seedance_create"]},
+                    ],
+                    "edges": [],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        ensure_builtin_templates(tpl_dir)
+
+        data = json.loads(stale.read_text(encoding="utf-8"))
+        node_ids = {n["id"] for n in data["nodes"]}
+        assert "wb-tongyi-image" not in node_ids
+        assert "wb-seedance-video" not in node_ids
+        assert {"wb-hh-image", "wb-hh-video", "wb-hh-human", "wb-hh-long"}.issubset(
+            node_ids
+        )
+
+    def test_archives_removed_happyhorse_video_studio(self, tmp_path: Path):
+        tpl_dir = tmp_path / "templates"
+        tpl_dir.mkdir()
+        removed = tpl_dir / "happyhorse-video-studio.json"
+        removed.write_text('{"name": "百炼 AIGC 视频创作工作室"}', encoding="utf-8")
+
+        ensure_builtin_templates(tpl_dir)
+
+        assert not removed.exists()
+        archived = list(tpl_dir.glob("happyhorse-video-studio.json.deprecated*"))
+        assert len(archived) == 1
+        assert "百炼 AIGC 视频创作工作室" in archived[0].read_text(encoding="utf-8")
+
