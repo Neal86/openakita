@@ -84,6 +84,20 @@ export interface OrgChatPanelProps {
   nodeNames?: Record<string, string>;
 }
 
+/**
+ * 一条可被指挥台用作"完成 / 取消"转发目标的 IM 频道。
+ * 与后端 ``ForwardTarget`` dataclass 一一对应（channel + chat_id 是最小可
+ * 寻址单位；thread_id 仅 Telegram topic / Lark thread 用得到）。
+ */
+interface ForwardTargetOption {
+  id: string;            // 渲染用稳定 key
+  label: string;         // UI 标签（bot 名称 / chat 名称）
+  channel: string;       // gateway 适配器 key
+  chat_id: string;
+  thread_id?: string | null;
+  bot_instance_id?: string;
+}
+
 function sessionId(orgId: string, nodeId?: string | null): string {
   return nodeId ? `org_${orgId}_node_${nodeId}` : `org_${orgId}`;
 }
@@ -152,6 +166,11 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
   const [pendingCmdId, setPendingCmdId] = useState<string | null>(null);
   const [stopDialogOpen, setStopDialogOpen] = useState(false);
   const [stopping, setStopping] = useState(false);
+  // P3：可选的 IM 转发目标。当用户选中一个或多个 bot/聊天，命令完成 / 取消时
+  // 后端会顺手把最终消息投递到这些 IM 频道——指挥台因此成为"统一入口/出口"。
+  // 列表来自 ``GET /api/agents/bots``；每项形如 ``{channel, chat_id, label}``。
+  const [availableForwards, setAvailableForwards] = useState<ForwardTargetOption[]>([]);
+  const [forwardTargets, setForwardTargets] = useState<ForwardTargetOption[]>([]);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const mountedRef = useRef(true);
@@ -167,6 +186,43 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
 
   useEffect(scrollToBottom, [messages, scrollToBottom]);
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
+
+  // 拉取可用 IM bot 列表，转成 ForwardTargetOption。
+  // 当前每个 bot 只取它的默认 chat_id（credentials 里的 ``default_chat_id``
+  // 或 ``chat_id``）；没有默认聊天的 bot 暂不展示，避免空 chat_id 报错。
+  // 后续 P3+ 可以让用户在 UI 里手工填 chat_id / thread_id。
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await safeFetch(`${apiBaseUrl}/api/agents/bots`);
+        const data = await res.json();
+        if (cancelled) return;
+        const bots = Array.isArray(data?.bots) ? data.bots : [];
+        const opts: ForwardTargetOption[] = [];
+        for (const b of bots) {
+          if (!b || b.enabled === false) continue;
+          const channel = String(b.type || b.id || "").toLowerCase();
+          const creds = (b.credentials || {}) as Record<string, unknown>;
+          const chatId = String(
+            creds.default_chat_id ?? creds.chat_id ?? creds.openid ?? creds.user_id ?? "",
+          ).trim();
+          if (!channel || !chatId) continue;
+          opts.push({
+            id: `${b.id || channel}:${chatId}`,
+            label: String(b.name || b.id || channel),
+            channel,
+            chat_id: chatId,
+            bot_instance_id: String(b.id || ""),
+          });
+        }
+        if (!cancelled) setAvailableForwards(opts);
+      } catch (err) {
+        if (!cancelled) console.warn("[OrgChat] load forward targets failed:", err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [apiBaseUrl]);
 
   // Load history: backend first, localStorage fallback
   // 整组织视图额外合并 /api/orgs/{org}/activity（含 IM/桌面/指挥台所有来源），
@@ -886,6 +942,13 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
           content: text,
           target_node_id: nodeId || undefined,
           continue_previous: !!opts?.continuePrevious,
+          forward_to: forwardTargets.map(ft => ({
+            channel: ft.channel,
+            chat_id: ft.chat_id,
+            thread_id: ft.thread_id ?? null,
+            bot_instance_id: ft.bot_instance_id ?? "",
+            label: ft.label,
+          })),
         }),
       });
       const data = await res.json();
@@ -971,7 +1034,7 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
         }
       }
     }
-  }, [input, sending, orgId, nodeId, apiBaseUrl, convId, persistToBackend]);
+  }, [input, sending, orgId, nodeId, apiBaseUrl, convId, persistToBackend, forwardTargets]);
 
   const handleContinuePrevious = useCallback(() => {
     handleSend({
@@ -1112,6 +1175,42 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
           >
             {t("org.chat.continuePrevious")}
           </button>
+        </div>
+      )}
+
+      {availableForwards.length > 0 && (
+        <div className="ocp-forward-row" aria-label="转发到 IM 渠道">
+          <span className="ocp-forward-label">转发到 IM：</span>
+          {availableForwards.map(opt => {
+            const active = forwardTargets.some(t => t.id === opt.id);
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                className={`ocp-forward-chip${active ? " ocp-forward-chip-on" : ""}`}
+                onClick={() => {
+                  setForwardTargets(prev => active
+                    ? prev.filter(t => t.id !== opt.id)
+                    : [...prev, opt]
+                  );
+                }}
+                title={`${opt.channel}/${opt.chat_id}`}
+              >
+                <span className="ocp-forward-dot" />
+                {opt.label}
+              </button>
+            );
+          })}
+          {forwardTargets.length > 0 && (
+            <button
+              type="button"
+              className="ocp-forward-clear"
+              onClick={() => setForwardTargets([])}
+              title="清空已选 IM 渠道"
+            >
+              清空
+            </button>
+          )}
         </div>
       )}
 
@@ -1334,6 +1433,42 @@ const CHAT_CSS = `
 }
 
 /* ─── Input ─── */
+/* ─── Forward-to-IM chip row (P3) ─── */
+.ocp-forward-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 6px 12px 0 12px;
+  font-size: 11px; color: var(--muted, #64748b);
+  border-top: 1px dashed var(--line, rgba(51,65,85,0.4));
+}
+.ocp-forward-label { font-weight: 600; letter-spacing: 0.04em; }
+.ocp-forward-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--line, rgba(99,102,241,0.35));
+  background: transparent; color: var(--muted, #64748b);
+  cursor: pointer; font-size: 11px;
+  transition: all 0.15s;
+}
+.ocp-forward-chip:hover { color: var(--text); border-color: var(--primary, #6366f1); }
+.ocp-forward-chip-on {
+  background: var(--primary, #6366f1); color: white;
+  border-color: var(--primary, #6366f1);
+  box-shadow: 0 0 8px rgba(99,102,241,0.4);
+}
+.ocp-forward-chip-on .ocp-forward-dot { background: white; box-shadow: 0 0 4px white; }
+.ocp-forward-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--muted, #64748b);
+}
+.ocp-forward-clear {
+  margin-left: auto;
+  padding: 2px 8px; border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent; color: var(--muted, #64748b);
+  cursor: pointer; font-size: 11px;
+}
+.ocp-forward-clear:hover { color: #ef4444; border-color: rgba(239,68,68,0.3); }
+
 .ocp-input-area {
   padding: 10px 12px;
   border-top: 1px solid var(--line, rgba(51,65,85,0.5));

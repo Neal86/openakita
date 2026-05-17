@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 from openakita.core.engine_bridge import to_engine
 from openakita.memory.json_utils import coerce_text
 from openakita.orgs.command_service import (
+    ForwardTarget,
     OrgCommandConflict,
     OrgCommandError,
     OrgCommandRequest,
@@ -680,6 +681,16 @@ async def send_command(request: Request, org_id: str):
         client_id=str(body.get("client_id") or ""),
         display_name=str(body.get("display_name") or ""),
     )
+    # 解析 ``forward_to``：指挥台可让一条命令把"完成 / 取消"通知再投递到
+    # 一个或多个 IM 频道。每一项是 ``{channel, chat_id, thread_id?,
+    # bot_instance_id?, label?}``，channel 必须命中已注册的 IM 适配器。
+    forward_targets: list[ForwardTarget] = []
+    raw_forward = body.get("forward_to") or []
+    if isinstance(raw_forward, list):
+        for item in raw_forward[:8]:
+            ft = ForwardTarget.from_dict(item)
+            if ft is not None:
+                forward_targets.append(ft)
     try:
         return svc.submit(
             OrgCommandRequest(
@@ -691,6 +702,7 @@ async def send_command(request: Request, org_id: str):
                 output_scope=OrgOutputScope.CONSOLE_FULL,
                 replace_existing=bool(body.get("replace_existing")),
                 continue_previous=bool(body.get("continue_previous")),
+                forward_to=forward_targets,
             )
         )
     except OrgCommandConflict as exc:

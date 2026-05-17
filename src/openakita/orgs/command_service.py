@@ -76,6 +76,49 @@ class OrgCommandSource:
 
 
 @dataclass(slots=True)
+class ForwardTarget:
+    """Where to mirror command status / results outside the originating surface.
+
+    Used when the org command console issues a command but also wants the
+    final result (and cancellation notices) delivered to one or more IM
+    chats. ``channel`` matches the IM adapter key registered on the
+    gateway (``feishu`` / ``telegram`` / ``dingtalk`` / ``wecom`` / ``qq``…).
+    ``chat_id`` is the conversation id within that channel.
+    """
+
+    channel: str
+    chat_id: str
+    thread_id: str | None = None
+    bot_instance_id: str = ""
+    label: str = ""
+
+    @classmethod
+    def from_dict(cls, raw: Any) -> ForwardTarget | None:
+        if not isinstance(raw, dict):
+            return None
+        channel = str(raw.get("channel") or "").strip()
+        chat_id = str(raw.get("chat_id") or "").strip()
+        if not channel or not chat_id:
+            return None
+        return cls(
+            channel=channel,
+            chat_id=chat_id,
+            thread_id=(raw.get("thread_id") or None),
+            bot_instance_id=str(raw.get("bot_instance_id") or ""),
+            label=str(raw.get("label") or ""),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "channel": self.channel,
+            "chat_id": self.chat_id,
+            "thread_id": self.thread_id,
+            "bot_instance_id": self.bot_instance_id,
+            "label": self.label,
+        }
+
+
+@dataclass(slots=True)
 class OrgCommandRequest:
     org_id: str
     content: str
@@ -85,6 +128,8 @@ class OrgCommandRequest:
     output_scope: OrgOutputScope = OrgOutputScope.CONSOLE_FULL
     replace_existing: bool = False
     continue_previous: bool = False
+    forward_to: list[ForwardTarget] = field(default_factory=list)
+    """Extra IM destinations to mirror final result / cancellation to."""
 
 
 def set_command_service(service: OrgCommandService | None) -> None:
@@ -195,6 +240,7 @@ class OrgCommandService:
                 "source": request.source.to_dict(),
                 "delivered_to": [],
                 "continue_previous": request.continue_previous,
+                "forward_to": [ft.to_dict() for ft in request.forward_to],
             }
             self._running_by_root[root_key] = command_id
 
@@ -214,6 +260,7 @@ class OrgCommandService:
             output_scope=request.output_scope,
             replace_existing=request.replace_existing,
             continue_previous=request.continue_previous,
+            forward_to=list(request.forward_to),
         )
         self._schedule_run(
             run_request,
@@ -312,6 +359,16 @@ class OrgCommandService:
             )
         except Exception:
             logger.debug("[OrgCmd] broadcast org:command_cancelled failed", exc_info=True)
+        # Notify any linked IM channels immediately so the user does not have
+        # to wait for the agent loop to wind down before the cancellation is
+        # visible on the other surfaces. ``_run`` will additionally fire a
+        # ``cancelled`` forward when the runtime actually finishes — both
+        # are fine because the IM messages carry the cancel kind and
+        # platforms typically dedupe by command_id in the body.
+        await self._dispatch_forwards(
+            org_id, command_id, "cancelled",
+            "用户在指挥台触发了强制取消，运行的子节点会优雅停止。",
+        )
         return {
             "ok": True,
             "command_id": command_id,
@@ -427,6 +484,18 @@ class OrgCommandService:
                     "command_id": command_id,
                     "result": result,
                 })
+                # Forward final result / cancellation to linked IM channels.
+                # The dispatcher inspects ``forward_to`` on the command record;
+                # absence is a no-op so existing callers see zero overhead.
+                result_text = ""
+                if isinstance(result, dict):
+                    result_text = str(result.get("result") or "")
+                forward_kind = "cancelled" if (
+                    isinstance(result, dict) and result.get("cancelled_by_user")
+                ) else "done"
+                await self._dispatch_forwards(
+                    request.org_id, command_id, forward_kind, result_text,
+                )
             except Exception as exc:
                 self._update_command_state(
                     command_id,
@@ -443,6 +512,9 @@ class OrgCommandService:
                     "command_id": command_id,
                     "error": str(exc),
                 })
+                await self._dispatch_forwards(
+                    request.org_id, command_id, "error", str(exc),
+                )
             finally:
                 with self._lock:
                     root_key = (request.org_id, root_node_id)
@@ -473,6 +545,100 @@ class OrgCommandService:
             await broadcast_event("org:command_done", payload)
         except Exception:
             logger.warning("[OrgCmd] broadcast org:command_done failed", exc_info=True)
+
+    async def _dispatch_forwards(
+        self,
+        org_id: str,
+        command_id: str,
+        kind: str,
+        text: str,
+    ) -> None:
+        """Mirror a final command outcome to extra IM destinations.
+
+        ``kind`` is one of ``done`` / ``error`` / ``cancelled`` and is used
+        only to prefix the message; ``text`` is the human-readable body
+        already trimmed by the caller. Each forward is best-effort —
+        a single channel failure must not affect siblings or the desktop
+        flow itself.
+        """
+        cmd = self._commands.get(command_id)
+        if not cmd:
+            return
+        targets_raw = cmd.get("forward_to") or []
+        if not targets_raw:
+            return
+
+        try:
+            from openakita.main import get_message_gateway
+            gateway = get_message_gateway()
+        except Exception:
+            logger.debug(
+                "[OrgCmd] channel gateway unavailable; skipping IM forwards "
+                "for command=%s", command_id,
+            )
+            return
+        if gateway is None:
+            logger.debug(
+                "[OrgCmd] no global gateway bound; skipping IM forwards "
+                "for command=%s", command_id,
+            )
+            return
+
+        prefix = {
+            "done": "✅ 组织指挥台任务已完成",
+            "error": "❌ 组织指挥台任务失败",
+            "cancelled": "🛑 组织指挥台任务已被用户取消",
+        }.get(kind, "📣 组织指挥台更新")
+        # Trim aggressively — IM platforms throttle long messages.
+        body = (text or "").strip()
+        if len(body) > 1500:
+            body = body[:1500].rstrip() + "…"
+        msg = f"{prefix}\n（command_id: {command_id}, org: {org_id}）\n\n{body}"
+
+        delivered: list[dict[str, Any]] = []
+        for raw in targets_raw:
+            if not isinstance(raw, dict):
+                continue
+            channel = str(raw.get("channel") or "")
+            chat_id = str(raw.get("chat_id") or "")
+            thread_id = raw.get("thread_id") or None
+            if not channel or not chat_id:
+                continue
+            try:
+                ok = await gateway.send_text_reliably(
+                    channel=channel,
+                    chat_id=chat_id,
+                    text=msg,
+                    record_to_session=False,
+                    user_id="system",
+                    thread_id=thread_id,
+                    metadata={
+                        "org_id": org_id,
+                        "command_id": command_id,
+                        "forward_kind": kind,
+                    },
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[OrgCmd] forward to %s/%s failed for command %s: %s",
+                    channel, chat_id, command_id, exc,
+                )
+                ok = False
+            delivered.append({
+                "channel": channel,
+                "chat_id": chat_id,
+                "kind": kind,
+                "ok": bool(ok),
+                "ts": time.time(),
+            })
+
+        if delivered:
+            with self._lock:
+                cmd_now = self._commands.get(command_id)
+                if cmd_now is not None:
+                    existing = list(cmd_now.get("forward_log") or [])
+                    existing.extend(delivered)
+                    cmd_now["forward_log"] = existing[-50:]
 
     async def _push_root_task_complete(
         self,
