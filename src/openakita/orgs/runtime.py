@@ -331,6 +331,59 @@ class OrgRuntime:
         """释放工具在途锁；幂等。"""
         self._tool_inflight_keys.pop(key, None)
 
+    def _org_setting(
+        self,
+        org_or_id: Any,
+        key: str,
+        default: Any,
+    ) -> Any:
+        """Look up a per-org tunable, falling back to a global default.
+
+        Reads from ``Organization.runtime_overrides[key]`` when the
+        organization has one defined, otherwise returns ``default``.
+        Unknown ids / missing keys / type-mismatched values silently
+        fall back so a typo in ``org.json`` cannot brick the runtime.
+
+        This is the single read-point for per-org runtime tunables —
+        callers must NOT poke ``org.runtime_overrides`` directly so we
+        can keep the contract (default fall-back, type coercion) in
+        one place.
+
+        Args:
+            org_or_id: An ``Organization`` instance or its id string.
+            key: The override key to read (e.g. ``"command_timeout_secs"``).
+            default: The fallback value when the override is missing.
+
+        Returns:
+            The override value coerced to ``type(default)`` when
+            possible; otherwise ``default``.
+        """
+        try:
+            org = self.get_org(org_or_id) if isinstance(org_or_id, str) else org_or_id
+            if org is None:
+                return default
+            ro = getattr(org, "runtime_overrides", None) or {}
+            if key not in ro:
+                return default
+            raw = ro[key]
+            if raw is None:
+                return default
+            if isinstance(default, bool):
+                return bool(raw)
+            if isinstance(default, int) and not isinstance(default, bool):
+                try:
+                    return int(raw)
+                except (TypeError, ValueError):
+                    return default
+            if isinstance(default, float):
+                try:
+                    return float(raw)
+                except (TypeError, ValueError):
+                    return default
+            return raw
+        except Exception:
+            return default
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -2001,12 +2054,92 @@ class OrgRuntime:
         self, agent: Any, prompt: str, session_id: str,
         org: Organization, node: OrgNode,
     ) -> str:
-        """Run a single agent task (no timeout wrapper)."""
+        """Run a single agent task (with per-node runtime_overrides).
+
+        Honours two optional knobs from ``OrgNode.runtime_overrides``
+        (falling back to ``Organization.runtime_overrides`` for
+        ``max_iterations`` only — wall-clock timeouts are intentionally
+        node-scoped):
+
+        * ``max_iterations`` (int): caps the ReAct loop count for THIS
+          delegated task by setting ``reasoning_engine._max_iterations_override``.
+          The override is consumed in one chat call (see
+          ``reasoning_engine.py``) so subsequent reuse of the cached
+          agent is unaffected.
+        * ``max_task_seconds`` (int): wraps ``agent.chat`` in
+          ``asyncio.wait_for`` so a stuck plugin / network hang cannot
+          burn the whole user command. On timeout we treat it as a
+          retryable cancellation rather than a hard failure.
+
+        Nodes (or organizations) without these keys keep exactly the
+        legacy ``await agent.chat(...)`` behaviour.
+        """
         from openakita.core.errors import UserCancelledError
 
+        node_ro = getattr(node, "runtime_overrides", None) or {}
+        org_ro = getattr(org, "runtime_overrides", None) or {}
+
+        max_iter = node_ro.get("max_iterations")
+        if max_iter is None:
+            max_iter = org_ro.get("max_iterations")
         try:
-            response = await agent.chat(prompt, session_id=session_id)
+            max_iter_int = int(max_iter) if max_iter is not None else None
+        except (TypeError, ValueError):
+            max_iter_int = None
+        if (
+            max_iter_int and max_iter_int > 0
+            and hasattr(agent, "reasoning_engine")
+        ):
+            try:
+                agent.reasoning_engine._max_iterations_override = max_iter_int
+            except Exception:
+                logger.debug(
+                    "[OrgRuntime] failed to apply max_iterations override "
+                    "for %s:%s", org.id, node.id, exc_info=True,
+                )
+
+        max_task_seconds = node_ro.get("max_task_seconds")
+        try:
+            max_task_seconds_f: float | None = (
+                float(max_task_seconds)
+                if max_task_seconds is not None and float(max_task_seconds) > 0
+                else None
+            )
+        except (TypeError, ValueError):
+            max_task_seconds_f = None
+
+        try:
+            if max_task_seconds_f is not None:
+                response = await asyncio.wait_for(
+                    agent.chat(prompt, session_id=session_id),
+                    timeout=max_task_seconds_f,
+                )
+            else:
+                response = await agent.chat(prompt, session_id=session_id)
             return response or ""
+        except TimeoutError:
+            logger.warning(
+                "[OrgRuntime] Task wall-clock timeout (max_task_seconds=%s) "
+                "for %s:%s — returning soft-failure marker",
+                max_task_seconds_f, org.id, node.id,
+            )
+            chain_id = self.get_current_chain_id(org.id, node.id)
+            if chain_id:
+                try:
+                    from openakita.orgs.models import TaskStatus
+                    from openakita.orgs.project_store import ProjectStore
+                    store = ProjectStore(self._manager._org_dir(org.id))
+                    task = store.find_task_by_chain(chain_id)
+                    if task and task.status == TaskStatus.IN_PROGRESS:
+                        store.update_task(task.project_id, task.id, {
+                            "status": TaskStatus.CANCELLED,
+                        })
+                except Exception as e:
+                    logger.debug(
+                        "[OrgRuntime] Failed to mark task cancelled on timeout: %s",
+                        e,
+                    )
+            return f"(节点 {node.id} 任务超时 {int(max_task_seconds_f)}s 自动终止)"
         except (asyncio.CancelledError, UserCancelledError) as cancel_err:
             logger.info(f"[OrgRuntime] Task cancelled for {node.id}: {type(cancel_err).__name__}")
             chain_id = self.get_current_chain_id(org.id, node.id)
@@ -2152,6 +2285,36 @@ class OrgRuntime:
         if getattr(node, "enable_file_tools", True) and not is_coordinator:
             allowed_external = allowed_external | {
                 "write_file", "read_file", "edit_file", "list_directory",
+            }
+
+        # P7.4: per-node ``runtime_overrides.allowed_tools / denied_tools``.
+        # Semantics chosen so AIGC-style overrides actually take effect:
+        #   - allowed_tools (list[str], non-empty): becomes the explicit
+        #     non-org / non-_KEEP allow-list. We DROP the default
+        #     ``allowed_external`` and rebuild it from allowed_tools — this
+        #     lets a coordinator node (whose default allowed_external is
+        #     empty) opt back into write_file / read_file without us also
+        #     having to alter every category mapping.
+        #   - denied_tools (list[str]): subtracted from the final
+        #     allowed_external. Useful when a node mostly wants the
+        #     category default but with a couple of tools removed.
+        # Both fields are advisory: org_* tools (delegate / accept / etc.)
+        # and the ``_KEEP`` planning helpers are unaffected so the node
+        # can still participate in the orchestration protocol.
+        _ro = getattr(node, "runtime_overrides", None) or {}
+        _ro_allow = _ro.get("allowed_tools")
+        if isinstance(_ro_allow, list) and _ro_allow:
+            allow_set = {
+                t for t in _ro_allow
+                if isinstance(t, str) and t
+                and not t.startswith("org_")
+                and t not in _KEEP
+            }
+            allowed_external = allow_set
+        _ro_deny = _ro.get("denied_tools")
+        if isinstance(_ro_deny, list) and _ro_deny:
+            allowed_external = allowed_external - {
+                t for t in _ro_deny if isinstance(t, str) and t
             }
 
         per_node_tools = build_org_node_tools(org, node)
@@ -4416,9 +4579,22 @@ class OrgRuntime:
             return v
 
         # 软看门狗只关注连续无真实进展，不限制有持续产出的长任务。
-        warn_secs = _cfg("org_command_stuck_warn_secs", 900)
-        autostop_secs = _cfg("org_command_stuck_autostop_secs", 3600)
-        hard_cap = _cfg("org_command_timeout_secs", 0)
+        # 全局默认从 settings 读；当 org 在 runtime_overrides 里给出更激进
+        # 的阈值（如 AIGC 工作室希望 120s 就告警，30 分钟硬截止），用
+        # ``_org_setting`` 覆盖回来。其他组织 runtime_overrides 为空时，
+        # 完全维持原 settings 行为。
+        warn_secs_default = _cfg("org_command_stuck_warn_secs", 900)
+        autostop_secs_default = _cfg("org_command_stuck_autostop_secs", 3600)
+        hard_cap_default = _cfg("org_command_timeout_secs", 0)
+        warn_secs = self._org_setting(
+            tracker.org_id, "command_stuck_warn_secs", warn_secs_default,
+        )
+        autostop_secs = self._org_setting(
+            tracker.org_id, "command_stuck_autostop_secs", autostop_secs_default,
+        )
+        hard_cap = self._org_setting(
+            tracker.org_id, "command_timeout_secs", hard_cap_default,
+        )
         # 死锁早停：全员 IDLE + 无消息 + 仍有 open chain 持续多久后立即收口。
         # 比 autostop 更激进——后者要等 1 小时；deadlock 路径默认 90 秒就能
         # 把"chain 漏关 / mailbox 路径异常 / root 没收到 task_complete"这类

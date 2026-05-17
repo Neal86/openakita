@@ -66,10 +66,30 @@ def unregister_on_change(callback: Callable[[str], None]) -> bool:
 def notify_skills_changed(action: str | SkillEvent = SkillEvent.RELOAD) -> int:
     """Fire all registered callbacks to signal a skill-set mutation.
 
+    Also invalidates the process-wide ``SkillParser`` cache so any
+    SKILL.md edits / installs / hot-reloads (the actions that prompt
+    this notification) are reflected on the next parse, even when the
+    on-disk mtime is unchanged (e.g. a reinstall over the same files).
+
     Returns:
         Number of callbacks that failed (0 = all succeeded).
     """
     action_str = action.value if isinstance(action, SkillEvent) else action
+    try:
+        from .parser import invalidate_global_parse_cache
+
+        dropped = invalidate_global_parse_cache()
+        if dropped:
+            logger.debug(
+                "skills change action=%s invalidated %d parse-cache entries",
+                action_str, dropped,
+            )
+    except Exception:
+        logger.debug(
+            "skills change parse-cache invalidate skipped for action=%s",
+            action_str,
+            exc_info=True,
+        )
     failures = 0
     for cb in _on_change_callbacks:
         try:

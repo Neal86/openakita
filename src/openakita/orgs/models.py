@@ -207,6 +207,15 @@ class OrgNode:
     frozen_reason: str | None = None
     frozen_at: str | None = None
     status: NodeStatus = NodeStatus.IDLE
+    # Per-node runtime overrides. Default empty dict means "no override —
+    # use the org-level / global defaults". Recognised keys:
+    #   - max_iterations: int — caps ReAct loops for this node
+    #   - max_task_seconds: int — wall-clock timeout per delegated task
+    #   - allowed_tools: list[str] — intersect with the node's tool grant
+    #   - denied_tools: list[str] — subtract from the effective tool set
+    # All keys are opt-in; unknown keys are ignored. Other organizations
+    # leaving the dict empty get exactly the legacy behaviour.
+    runtime_overrides: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -245,6 +254,9 @@ class OrgNode:
             "frozen_reason": self.frozen_reason,
             "frozen_at": self.frozen_at,
             "status": self.status.value,
+            "runtime_overrides": (
+                dict(self.runtime_overrides) if self.runtime_overrides else {}
+            ),
         }
 
     @classmethod
@@ -463,6 +475,19 @@ class Organization:
     # org_submit_deliverable 的行为。
     auto_persist_final_answer: bool = True
 
+    # Per-org runtime overrides. Default empty dict — other orgs keep
+    # the global defaults. Recognised keys (all opt-in, unknown keys
+    # ignored):
+    #   - max_iterations: int — cap on ReAct loops at the org level
+    #     (a node-level override takes priority when present)
+    #   - command_timeout_secs: int — max wall-clock for a single
+    #     user-facing command before the watchdog declares it stuck
+    #   - command_stuck_warn_secs: int — emit org:command_stuck_warning
+    #     after this many seconds of no progress
+    #   - inflight_window_secs: float — duplicate-tool-call coalescing
+    #     window for the executor
+    runtime_overrides: dict = field(default_factory=dict)
+
     def __post_init__(self):
         self.tags = normalize_tags(self.tags)
 
@@ -519,6 +544,9 @@ class Organization:
             "watchdog_stuck_threshold_s": self.watchdog_stuck_threshold_s,
             "watchdog_silence_threshold_s": self.watchdog_silence_threshold_s,
             "auto_persist_final_answer": self.auto_persist_final_answer,
+            "runtime_overrides": (
+                dict(self.runtime_overrides) if self.runtime_overrides else {}
+            ),
         }
 
     @classmethod
