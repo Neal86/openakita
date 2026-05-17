@@ -75,7 +75,7 @@ export type StreamEvent =
   | { type: "thinking_end"; duration_ms?: number; has_thinking?: boolean }
   | { type: "chain_text"; content: string; icon?: string }
   | { type: "text_delta"; content: string }
-  | { type: "text_replace"; content: string }
+  | { type: "text_replace"; content: string; attachments?: ChatAttachment[] }
   | { type: "tool_call_start"; tool: string; tool_name?: string; args: Record<string, unknown>; id?: string; call_id?: string; protocol_version?: number }
   // C23 P2-3: tool_executor 在执行任何工具前先批量发这个事件，
   // 让前端能在敏感操作真正开始前给用户一个非阻塞 toast 提示。

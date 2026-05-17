@@ -824,7 +824,7 @@ export function ChatView({
   const hydrateSeqRef = useRef(0);
 
   const mapBackendHistoryToMessages = useCallback(
-    (rows: { id: string; index?: number; role: string; content: string; timestamp: number; chain_summary?: ChainSummaryItem[]; artifacts?: ChatArtifact[]; ask_user?: { question: string; options?: { id: string; label: string }[]; questions?: ChatAskQuestion[] }; usage?: ChatMessage["usage"] }[]): ChatMessage[] => {
+    (rows: { id: string; index?: number; role: string; content: string; timestamp: number; chain_summary?: ChainSummaryItem[]; artifacts?: ChatArtifact[]; attachments?: ChatAttachment[]; ask_user?: { question: string; options?: { id: string; label: string }[]; questions?: ChatAskQuestion[] }; usage?: ChatMessage["usage"] }[]): ChatMessage[] => {
       return rows.map((m) => ({
         id: m.id,
         ...(typeof m.index === "number" ? { historyIndex: m.index } : {}),
@@ -833,6 +833,7 @@ export function ChatView({
         timestamp: m.timestamp,
         ...(m.chain_summary?.length ? { thinkingChain: buildChainFromSummary(m.chain_summary) } : {}),
         ...(m.artifacts?.length ? { artifacts: m.artifacts } : {}),
+        ...(m.attachments?.length ? { attachments: m.attachments } : {}),
         ...(m.ask_user ? { askUser: m.ask_user, content: "" } : {}),
         ...(m.usage ? { usage: m.usage } : {}),
       }));
@@ -2492,6 +2493,7 @@ export function ChatView({
       let currentAsk: ChatAskUser | null = null;
       let currentAgent: string | null = null;
       let currentArtifacts: ChatArtifact[] = [];
+      let currentAttachments: ChatAttachment[] = [];
       let currentSources: ChatSource[] = [];
       let currentMcpCalls: ChatMcpCall[] = [];
       let currentError: ChatErrorInfo | null = null;
@@ -2735,6 +2737,9 @@ export function ChatView({
               case "text_replace":
                 currentStreamStatus = null;
                 currentContent = event.content ?? "";
+                if (Array.isArray(event.attachments)) {
+                  currentAttachments = event.attachments;
+                }
                 break;
               case "tool_intent_preview": {
                 // C23 P2-3: tool_executor 在跑批之前先发这个事件，每个 tool_call
@@ -3244,6 +3249,7 @@ export function ChatView({
                     askUser: currentAsk,
                     errorInfo: currentError,
                     artifacts: currentArtifacts.length > 0 ? [...currentArtifacts] : null,
+                    attachments: currentAttachments.length > 0 ? [...currentAttachments] : null,
                     sources: currentSources.length > 0 ? [...currentSources] : null,
                     mcpCalls: currentMcpCalls.length > 0 ? [...currentMcpCalls] : null,
                     thinkingChain: chainGroups.length > 0 ? chainGroups.map(g => ({ ...g })) : null,
