@@ -652,8 +652,15 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
         if (!cur.done) return cur;
         const sinceDone = Date.now() - (cur.doneAt ?? 0);
         if (sinceDone <= SEG_REUSE_AFTER_DONE_MS) {
+          // P9.2: 复用 segment 时把上一轮的失败状态一并重置，否则
+          // 节点先失败（max_iterations / timeout）再重启成功的场景下
+          // segment 会一直顶着红色的 ⚠ 和默认展开，掩盖最终成功结果。
           cur.done = false;
           cur.doneAt = undefined;
+          cur.failed = false;
+          cur.exitReason = undefined;
+          cur.diagnosis = undefined;
+          cur.resultPreview = undefined;
           return cur;
         }
       }
@@ -790,10 +797,19 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
         }
       } else if (event === "org:task_complete") {
         const preview = ((d.result_preview || "") as string);
+        const reason = (d.exit_reason as string) || "normal";
         const idx = activeSegIdx.get(nid);
         if (idx != null && segments[idx]) {
           segments[idx].resultPreview = preview;
-          segments[idx].exitReason = (d.exit_reason as string) || "normal";
+          segments[idx].exitReason = reason;
+          // P9.2: 软退出（normal / ask_user / waiting_user / verify_incomplete）
+          // 必须把 failed 打回 false，否则节点曾经被 max_iterations / timeout
+          // 终止过、随后重启成功的轨迹会一直顶着红色 ⚠ 直到这条 command
+          // 全部结束，与"业务上其实成功了"的最终状态矛盾。
+          if (isSoftOrgExitReason(reason)) {
+            segments[idx].failed = false;
+            segments[idx].diagnosis = undefined;
+          }
         }
       } else if (event === "org:task_terminated") {
         const preview = ((d.result_preview || "") as string);
