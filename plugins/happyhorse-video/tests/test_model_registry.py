@@ -74,3 +74,39 @@ def test_native_audio_sync_only_on_happyhorse_video_modes():
             assert entry.model_id.startswith("happyhorse-1.0-"), (
                 f"unexpected native_audio_sync on {entry.model_id}"
             )
+
+
+def test_happyhorse_i2v_uses_media_array_protocol():
+    """Per the official Bailian HappyHorse image-to-video API reference,
+    ``happyhorse-1.0-i2v`` ships its first_frame inside ``input.media``
+    — NOT ``input.first_frame_url``. Both the ``i2v`` mode entry and the
+    ``long_video`` mode entry (which reuses the same model) must carry
+    ``input_protocol == "media_array_i2v"`` so the dashscope client packs
+    the request body correctly.
+    """
+    for entry in REGISTRY:
+        if entry.model_id == "happyhorse-1.0-i2v":
+            assert entry.input_protocol == "media_array_i2v", (
+                f"happyhorse-1.0-i2v (mode={entry.mode}) must use "
+                f"media_array_i2v; got {entry.input_protocol}"
+            )
+
+
+def test_happyhorse_r2v_uses_media_array_r2v_protocol():
+    """``happyhorse-1.0-r2v`` packs 1-9 reference images into
+    ``input.media[{type:"reference_image"}]`` per the official Bailian
+    reference-to-video API."""
+    entry = by_model_id("happyhorse-1.0-r2v")
+    assert entry is not None
+    assert entry.input_protocol == "media_array_r2v", (
+        f"happyhorse-1.0-r2v must use media_array_r2v; "
+        f"got {entry.input_protocol}"
+    )
+
+
+def test_wan2_7_i2v_remains_media_array_i2v():
+    """Regression guard — wan2.7-i2v shares the i2v protocol with
+    HappyHorse i2v after the 2026 protocol-correction fix."""
+    for entry in REGISTRY:
+        if entry.model_id == "wan2.7-i2v":
+            assert entry.input_protocol == "media_array_i2v"

@@ -395,3 +395,155 @@ async def test_happyhorse_t2v_rejects_driving_audio(monkeypatch):
             driving_audio_url="https://example.test/bg.mp3",
         )
     assert "audio" in str(ei.value).lower()
+
+
+# ─── HappyHorse i2v / r2v 协议回归（2026-04 后修正） ────────────────
+
+
+@pytest.mark.asyncio
+async def test_happyhorse_i2v_packs_first_frame_into_media_array(monkeypatch):
+    """HappyHorse 1.0 i2v ships first_frame via input.media[] per the
+    official Bailian "HappyHorse 图生视频-基于首帧" API reference. The
+    pre-fix code packed it as ``input.first_frame_url`` and DashScope
+    returned ``Field required: input.media`` — pin the corrected shape
+    so the regression cannot reappear."""
+    c = HappyhorseDashScopeClient(_read_settings_factory(api_key="sk-x"))
+    captured: dict[str, object] = {}
+
+    async def fake_submit_async(path, body):
+        captured["path"] = path
+        captured["body"] = body
+        return "task-hh-i2v"
+
+    monkeypatch.setattr(c, "_submit_async", fake_submit_async)
+    task_id = await c.submit_video_synth(
+        mode="i2v",
+        model_id="happyhorse-1.0-i2v",
+        prompt="一只猫在草地上奔跑",
+        first_frame_url="https://example.test/cat.png",
+        resolution="720P",
+        duration=5,
+    )
+    assert task_id == "task-hh-i2v"
+    body = captured["body"]
+    inp = body["input"]
+    assert "first_frame_url" not in inp, (
+        "happyhorse-1.0-i2v must NOT use legacy first_frame_url — that "
+        "is the bug we just fixed"
+    )
+    assert inp["media"] == [
+        {"type": "first_frame", "url": "https://example.test/cat.png"}
+    ]
+    # HappyHorse 1.0 forbids parameters.task_type as well — registry
+    # marks it via input_protocol=media_array_i2v which skips task_type.
+    assert "task_type" not in body["parameters"]
+    assert body["parameters"]["resolution"] == "720P"
+    assert body["parameters"]["duration"] == 5
+
+
+@pytest.mark.asyncio
+async def test_happyhorse_long_video_i2v_segment_also_uses_media_array(monkeypatch):
+    """The long-video pipeline reuses ``happyhorse-1.0-i2v`` under
+    mode="long_video"; that ModelEntry must carry the same media_array
+    protocol so per-segment submissions don't 422."""
+    c = HappyhorseDashScopeClient(_read_settings_factory(api_key="sk-x"))
+    captured: dict[str, object] = {}
+
+    async def fake_submit_async(path, body):
+        captured["body"] = body
+        return "task-long"
+
+    monkeypatch.setattr(c, "_submit_async", fake_submit_async)
+    await c.submit_video_synth(
+        mode="long_video",
+        model_id="happyhorse-1.0-i2v",
+        prompt="镜头 1",
+        first_frame_url="https://example.test/frame1.png",
+        resolution="720P",
+        duration=5,
+    )
+    inp = captured["body"]["input"]
+    assert "first_frame_url" not in inp
+    assert inp["media"] == [
+        {"type": "first_frame", "url": "https://example.test/frame1.png"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_happyhorse_r2v_packs_reference_images_into_media_array(monkeypatch):
+    """HappyHorse 1.0 r2v puts 1-9 reference images into
+    ``input.media[{type:'reference_image'}]`` per the official Bailian
+    reference-to-video API. Lock the shape so the pre-fix url_fields
+    body (which 422'd) cannot resurface."""
+    c = HappyhorseDashScopeClient(_read_settings_factory(api_key="sk-x"))
+    captured: dict[str, object] = {}
+
+    async def fake_submit_async(path, body):
+        captured["body"] = body
+        return "task-hh-r2v"
+
+    monkeypatch.setattr(c, "_submit_async", fake_submit_async)
+    await c.submit_video_synth(
+        mode="r2v",
+        model_id="happyhorse-1.0-r2v",
+        prompt="[Image 1] 与 [Image 2] 在同一画面",
+        reference_urls=[
+            "https://example.test/char1.png",
+            "https://example.test/char2.png",
+        ],
+        resolution="720P",
+        duration=5,
+    )
+    inp = captured["body"]["input"]
+    assert "reference_urls" not in inp
+    assert inp["media"] == [
+        {"type": "reference_image", "url": "https://example.test/char1.png"},
+        {"type": "reference_image", "url": "https://example.test/char2.png"},
+    ]
+    assert "task_type" not in captured["body"]["parameters"]
+
+
+@pytest.mark.asyncio
+async def test_happyhorse_r2v_requires_at_least_one_reference(monkeypatch):
+    c = HappyhorseDashScopeClient(_read_settings_factory(api_key="sk-x"))
+    monkeypatch.setattr(c, "_submit_async", lambda *a, **kw: None)
+    with pytest.raises(VendorError) as ei:
+        await c.submit_video_synth(
+            mode="r2v",
+            model_id="happyhorse-1.0-r2v",
+            prompt="x",
+            reference_urls=[],
+        )
+    assert "reference" in str(ei.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_happyhorse_r2v_rejects_more_than_9_references(monkeypatch):
+    c = HappyhorseDashScopeClient(_read_settings_factory(api_key="sk-x"))
+    monkeypatch.setattr(c, "_submit_async", lambda *a, **kw: None)
+    with pytest.raises(VendorError) as ei:
+        await c.submit_video_synth(
+            mode="r2v",
+            model_id="happyhorse-1.0-r2v",
+            prompt="x",
+            reference_urls=[f"https://example.test/r{i}.png" for i in range(10)],
+        )
+    assert "9" in str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_happyhorse_r2v_rejects_first_frame_url(monkeypatch):
+    """r2v's protocol is purely reference_image-based; first_frame_url is
+    not part of its spec and must be refused so the user catches the
+    miswire (i2v vs r2v) early."""
+    c = HappyhorseDashScopeClient(_read_settings_factory(api_key="sk-x"))
+    monkeypatch.setattr(c, "_submit_async", lambda *a, **kw: None)
+    with pytest.raises(VendorError) as ei:
+        await c.submit_video_synth(
+            mode="r2v",
+            model_id="happyhorse-1.0-r2v",
+            prompt="x",
+            reference_urls=["https://example.test/r0.png"],
+            first_frame_url="https://example.test/ff.png",
+        )
+    assert "first_frame_url" in str(ei.value)

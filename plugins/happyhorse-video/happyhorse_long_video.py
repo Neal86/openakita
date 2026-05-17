@@ -48,6 +48,12 @@ _T2V_COMPANION_BY_I2V_MODEL: dict[str, str] = {
     "happyhorse-1.0-i2v": "happyhorse-1.0-t2v",
     "wan2.6-i2v": "wan2.6-t2v",
     "wan2.6-i2v-flash": "wan2.6-t2v",
+    # wan2.7-i2v has no in-family t2v sibling on Bailian; stay inside
+    # the wan family by reusing wan2.6-t2v for storyboard "opener"
+    # segments that lack a leading frame. Without this entry we would
+    # fall back to the registry default (happyhorse-1.0-t2v), which
+    # silently switches the user's chosen model family mid-pipeline.
+    "wan2.7-i2v": "wan2.6-t2v",
 }
 
 

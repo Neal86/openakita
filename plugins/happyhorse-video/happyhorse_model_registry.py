@@ -72,17 +72,29 @@ ProtocolVersion = Literal["new_async", "legacy_async", "sdk"]
 SizeFormat = Literal["resolution_p", "size_star", "size_x"]
 # ``input_protocol`` decides how the client packs first/last/clip URLs
 # into the request:
-# - ``url_fields`` (default, legacy & HappyHorse 1.0 t2v/i2v/r2v): plain
+# - ``url_fields`` (legacy Wan 2.6 family and HappyHorse 1.0 t2v): plain
 #   ``input.first_frame_url`` / ``last_frame_url`` / ``video_url`` /
-#   ``audio_url`` + ``parameters.task_type`` selector.
-# - ``media_array_i2v`` (wan2.7-i2v family per official 2026-04 docs): a
-#   single ``input.media: [{"type": "first_frame|last_frame|first_clip|
-#   driving_audio", "url": "..."}]`` array. The task type is implicit in
-#   which entries the array contains; no ``task_type`` parameter exists.
+#   ``audio_url`` + ``parameters.task_type`` selector. NOTE: HappyHorse
+#   1.0 i2v / r2v / video-edit are NOT in this group — see the
+#   media_array_* protocols below.
+# - ``media_array_i2v`` (wan2.7-i2v family AND HappyHorse 1.0 i2v per
+#   official Bailian docs): a single ``input.media: [{"type":
+#   "first_frame|last_frame|first_clip|driving_audio", "url": "..."}]``
+#   array. The task type is implicit in which entries the array
+#   contains; no ``task_type`` parameter exists. HappyHorse 1.0 i2v
+#   only accepts ``first_frame`` (single entry); wan2.7-i2v accepts
+#   first+last / first_clip / driving_audio combinations.
 # - ``media_array_v2v`` (happyhorse-1.0-video-edit): ``input.media``
 #   contains exactly one ``{"type": "video", "url": "..."}`` entry plus
 #   0-5 optional ``{"type": "image", "url": "..."}`` reference images.
-InputProtocol = Literal["url_fields", "media_array_i2v", "media_array_v2v"]
+# - ``media_array_r2v`` (happyhorse-1.0-r2v and wan2.6-r2v reference-
+#   to-video per official 2026-04 docs): ``input.media`` is a 1-9
+#   element array of ``{"type": "reference_image", "url": "..."}``
+#   entries. Prompt uses ``[Image N]`` placeholders to refer to the
+#   N-th entry in array order.
+InputProtocol = Literal[
+    "url_fields", "media_array_i2v", "media_array_v2v", "media_array_r2v"
+]
 
 
 @dataclass(frozen=True)
@@ -250,6 +262,10 @@ REGISTRY: tuple[ModelEntry, ...] = (
         cost_note="720P 0.90 元/秒；1080P 1.60 元/秒",
         resolutions=_HAPPYHORSE_RES,
         duration_range=_HAPPYHORSE_DUR,
+        # HappyHorse i2v ships its first_frame inside input.media[] —
+        # NOT input.first_frame_url. Confirmed against the official
+        # Bailian "HappyHorse 图生视频-基于首帧" API reference (2026).
+        input_protocol="media_array_i2v",
         forbidden_params=_HAPPYHORSE_FORBIDDEN,
         native_audio_sync=True,
         is_default=True,
@@ -355,6 +371,10 @@ REGISTRY: tuple[ModelEntry, ...] = (
         cost_note="720P 0.90 元/秒；1080P 1.60 元/秒",
         resolutions=_HAPPYHORSE_RES,
         duration_range=_HAPPYHORSE_DUR,
+        # HappyHorse r2v ships 1-9 reference images inside input.media[]
+        # with type="reference_image". Confirmed against the official
+        # Bailian "HappyHorse 参考生视频" API reference (2026).
+        input_protocol="media_array_r2v",
         forbidden_params=_HAPPYHORSE_FORBIDDEN,
         native_audio_sync=True,
         is_default=True,
@@ -522,6 +542,9 @@ REGISTRY: tuple[ModelEntry, ...] = (
         cost_note="按每段 i2v 计费",
         resolutions=_HAPPYHORSE_RES,
         duration_range=_HAPPYHORSE_DUR,
+        # Same protocol as the mode="i2v" entry — HappyHorse i2v always
+        # ships first_frame via input.media[].
+        input_protocol="media_array_i2v",
         forbidden_params=_HAPPYHORSE_FORBIDDEN,
         native_audio_sync=True,
         is_default=True,

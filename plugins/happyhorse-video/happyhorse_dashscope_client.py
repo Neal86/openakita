@@ -800,9 +800,9 @@ class HappyhorseDashScopeClient(BaseVendorClient):
                     kind=ERROR_KIND_CLIENT,
                 )
             if reference_urls:
-                # wan2.7-i2v does not accept reference_urls — those go to
-                # wan2.6-r2v / happyhorse-r2v. Fail loudly so the UI
-                # doesn't silently drop the user's reference images.
+                # i2v family does not accept reference_urls — those go to
+                # an r2v model. Fail loudly so the UI doesn't silently
+                # drop the user's reference images.
                 raise VendorError(
                     f"model {model_id!r} does not accept reference_urls; "
                     "use a wan2.6-r2v / happyhorse-1.0-r2v model for "
@@ -811,6 +811,50 @@ class HappyhorseDashScopeClient(BaseVendorClient):
                     retryable=False,
                     kind=ERROR_KIND_CLIENT,
                 )
+            input_obj["media"] = media
+        elif entry.input_protocol == "media_array_r2v":
+            # happyhorse-1.0-r2v reference-to-video: input.media is a
+            # 1-9 element array of {"type":"reference_image","url":...}.
+            # Per the official Bailian r2v API reference (2026), the
+            # prompt uses [Image N] placeholders to refer to the N-th
+            # entry in array order; the caller is responsible for that
+            # mapping. We only validate cardinality and shape here.
+            refs = [r for r in (reference_urls or []) if isinstance(r, str) and r]
+            if not refs:
+                raise VendorError(
+                    f"model {model_id!r} requires at least one reference "
+                    "image via reference_urls (got none)",
+                    status=422,
+                    retryable=False,
+                    kind=ERROR_KIND_CLIENT,
+                )
+            if len(refs) > 9:
+                raise VendorError(
+                    f"model {model_id!r} accepts at most 9 reference "
+                    f"images (got {len(refs)})",
+                    status=422,
+                    retryable=False,
+                    kind=ERROR_KIND_CLIENT,
+                )
+            for label, val in (
+                ("first_frame_url", first_frame_url),
+                ("last_frame_url", last_frame_url),
+                ("source_video_url", source_video_url),
+            ):
+                if val:
+                    raise VendorError(
+                        f"model {model_id!r} does not accept {label}; "
+                        "use a wan2.7-i2v / video-edit variant for that.",
+                        status=422,
+                        retryable=False,
+                        kind=ERROR_KIND_CLIENT,
+                    )
+            media = [{"type": "reference_image", "url": r} for r in refs]
+            if driving_audio_url:
+                # HappyHorse r2v natively synthesises audio; still allow
+                # an explicit driving audio if the caller insists — pack
+                # under the same media array using the wan-style type.
+                media.append({"type": "driving_audio", "url": driving_audio_url})
             input_obj["media"] = media
         elif entry.input_protocol == "media_array_v2v":
             # happyhorse-1.0-video-edit: exactly one {type:"video"}
