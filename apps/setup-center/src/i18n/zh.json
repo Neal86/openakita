@@ -2304,6 +2304,30 @@
     "timeout": "连接超时，请确认手机与电脑在同一 WiFi 下",
     "hint": "密码在服务首次启动时自动生成，可在桌面端设置中查看或重置"
   },
+  "setup": {
+    "title": "首次访问 — 请设置访问密码",
+    "intro": "为保护你的数据，请为 Web 端访问设置一个密码。设置完成后，本机和已登录设备可直接使用；其他设备访问需要先输入此密码。",
+    "password": "新密码",
+    "passwordPlaceholder": "至少 8 个字符，不能全是数字或全是字母",
+    "confirm": "确认密码",
+    "confirmPlaceholder": "再次输入新密码",
+    "mismatch": "两次输入的密码不一致",
+    "submitting": "正在设置...",
+    "submit": "设置密码并进入",
+    "verifyFailed": "密码已设置但即时验证失败，请刷新页面后用刚才输入的密码登录",
+    "errorTooShort": "密码至少需要 8 个字符",
+    "errorAllDigits": "密码不能全部是数字，请加入字母或符号",
+    "errorAllLetters": "密码不能全部是字母，请加入数字或符号",
+    "errorAlreadySet": "密码已被其他客户端设置，请刷新页面后登录",
+    "errorGeneric": "设置失败，请重试或检查后端日志",
+    "faqTitle": "常见问题",
+    "faqWhy": "为什么要设置密码？",
+    "faqWhyAns": "Headless Linux / Docker 安装默认会监听局域网；没有密码任何同网段设备都能调用你的 AI 后端。设置密码可阻止未授权访问。",
+    "faqForgot": "如果忘记密码怎么办？",
+    "faqForgotAns": "在服务端执行 `openakita reset-password`（需 backend 停止或重启），下次打开会重新进入此页。",
+    "faqLocal": "我只想本机使用，不想要密码可以吗？",
+    "faqLocalAns": "可以。在 .env 里设置 API_HOST=127.0.0.1 并重启，本机访问会自动豁免密码要求。"
+  },
   "web": {
     "passwordBanner": "当前 Web 访问密码为系统自动生成，建议前往设置页面配置自定义密码以保障远程访问安全。",
     "passwordBannerAction": "去设置"

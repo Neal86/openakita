@@ -117,6 +117,26 @@ def _safe_int(val: str, default: int) -> int:
         return default
 
 
+def _resolve_api_host_display(request: Request) -> str:
+    """Return the host the server is actually bound to (best effort).
+
+    Prefers ``app.state.actual_bind_host`` (set by ``start_api_server``) so
+    that headless-detect / api_lan_mode users see the truth instead of the
+    env-var default.
+    """
+    actual = getattr(request.app.state, "actual_bind_host", None)
+    if isinstance(actual, str) and actual:
+        return actual
+    return os.environ.get("API_HOST", "").strip() or "127.0.0.1"
+
+
+def _resolve_api_port_display(request: Request) -> int:
+    actual = getattr(request.app.state, "actual_bind_port", None)
+    if isinstance(actual, int):
+        return actual
+    return _safe_int(os.environ.get("API_PORT", "18900"), 18900)
+
+
 _VIRTUAL_PREFIXES = (
     "26.",       # Radmin VPN
     "25.",       # Hamachi
@@ -223,8 +243,8 @@ async def health(request: Request):
         and request.app.state.agent is not None,
         "local_ip": _get_lan_ip(),
         "all_ips": _get_all_lan_ips(),
-        "api_host": os.environ.get("API_HOST", "127.0.0.1"),
-        "api_port": _safe_int(os.environ.get("API_PORT", "18900"), 18900),
+        "api_host": _resolve_api_host_display(request),
+        "api_port": _resolve_api_port_display(request),
         "last_link_diagnostic": getattr(request.app.state, "last_link_diagnostic", None),
         "startup_phase": readiness.get("phase", "http_ready"),
         "readiness": readiness,

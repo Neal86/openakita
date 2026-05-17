@@ -2304,6 +2304,30 @@
     "timeout": "Connection timed out. Please check that your phone and computer are on the same WiFi",
     "hint": "Password is auto-generated on first start. View or reset it in the Desktop Setup Center."
   },
+  "setup": {
+    "title": "First Run — Set an Access Password",
+    "intro": "Set a password to protect your OpenAkita instance. Once set, this device stays logged in; other devices on your network will need this password to access the API.",
+    "password": "New password",
+    "passwordPlaceholder": "At least 8 characters, not entirely digits or letters",
+    "confirm": "Confirm password",
+    "confirmPlaceholder": "Re-enter the new password",
+    "mismatch": "Passwords do not match",
+    "submitting": "Saving...",
+    "submit": "Save and continue",
+    "verifyFailed": "Password was saved but the immediate verification failed. Reload and log in with the password you just chose.",
+    "errorTooShort": "Password must be at least 8 characters",
+    "errorAllDigits": "Password cannot be all digits — add letters or symbols",
+    "errorAllLetters": "Password cannot be all letters — add digits or symbols",
+    "errorAlreadySet": "Another client just finished the setup. Reload the page and log in.",
+    "errorGeneric": "Could not save the password. Please retry or check the backend logs.",
+    "faqTitle": "FAQ",
+    "faqWhy": "Why do I need to set a password?",
+    "faqWhyAns": "Headless Linux / Docker installs listen on the LAN by default. Without a password, anyone on the same network could call your AI backend. Setting a password keeps unauthorised devices out.",
+    "faqForgot": "What if I forget the password?",
+    "faqForgotAns": "Run `openakita reset-password` on the server (with the backend stopped or restarted afterwards). The next visit will route back to this page.",
+    "faqLocal": "I only use it from this machine — can I skip the password?",
+    "faqLocalAns": "Yes. Set `API_HOST=127.0.0.1` in .env and restart. Local connections are automatically exempt from the password requirement."
+  },
   "web": {
     "passwordBanner": "The current web access password was auto-generated. It is recommended to set a custom password in settings for remote access security.",
     "passwordBannerAction": "Go to Settings"

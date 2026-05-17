@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse
 import openakita._ensure_utf8  # noqa: F401  # Windows UTF-8 编码保护
 
 from .auth import WebAccessConfig, create_auth_middleware
+from .middleware_setup_gate import create_setup_gate_middleware
 from .routes import (
     agents,
     bug_report,
@@ -54,11 +55,13 @@ from .routes import (
     skills,
     token_stats,
     upload,
-    web_search as web_search_routes,
     wechat_onboard,
     wecom_onboard,
     workspace_io,
     workspaces,
+)
+from .routes import (
+    web_search as web_search_routes,
 )
 
 try:
@@ -75,8 +78,27 @@ from .routes import (
 
 logger = logging.getLogger(__name__)
 
-API_HOST = os.environ.get("API_HOST", "127.0.0.1")
+# Default port. The actual host is decided by
+# :func:`openakita.api.host_resolution.resolve_api_host` at startup and passed
+# into :func:`start_api_server` explicitly. Do not import a module-level
+# ``API_HOST`` constant — it was removed because it captured ``os.environ``
+# at import time, which is too early (``.env`` may not be loaded yet) and
+# made the resolution logic invisible to tests.
 API_PORT = int(os.environ.get("API_PORT", "18900"))
+
+
+def get_api_host_for_health_display(app_state: Any | None = None) -> str:
+    """Best-effort answer to "which host did we bind to?" for /api/health.
+
+    Prefers the value stored on FastAPI ``app.state.actual_bind_host`` (the
+    truth, set by :func:`start_api_server` after uvicorn binds), then falls
+    back to the ``API_HOST`` env var, finally to ``127.0.0.1``.
+    """
+    if app_state is not None:
+        actual = getattr(app_state, "actual_bind_host", None)
+        if isinstance(actual, str) and actual:
+            return actual
+    return os.environ.get("API_HOST", "").strip() or "127.0.0.1"
 
 
 def is_port_free(host: str, port: int) -> bool:
@@ -287,6 +309,14 @@ def create_app(
 
     auth_mw = create_auth_middleware(web_access_config)
     app.middleware("http")(auth_mw)
+
+    # Setup gate runs **before** the auth middleware on the inbound side
+    # (FastAPI middleware is LIFO: added later = executed earlier). It
+    # short-circuits non-loopback requests with HTTP 428 when the web-access
+    # password has not been configured yet, so the frontend can route the
+    # user to the SetupView before any 401 noise.
+    setup_gate_mw = create_setup_gate_middleware(web_access_config)
+    app.middleware("http")(setup_gate_mw)
 
     # CORS configuration (outermost middleware — added last)
     # NOTE: allow_origins=["*"] is incompatible with allow_credentials=True per
@@ -747,7 +777,7 @@ async def start_api_server(
     gateway: Any = None,
     orchestrator: Any = None,
     agent_pool: Any = None,
-    host: str = API_HOST,
+    host: str = "127.0.0.1",
     port: int = API_PORT,
     max_retries: int = 5,
 ) -> asyncio.Task:
@@ -791,6 +821,8 @@ async def start_api_server(
         agent_pool=agent_pool,
     )
     app.state.engine_loop = engine_loop
+    app.state.actual_bind_host = host
+    app.state.actual_bind_port = port
 
     config = uvicorn.Config(
         app=app,

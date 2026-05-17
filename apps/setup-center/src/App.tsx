@@ -4,6 +4,7 @@ import { invoke, listen, IS_TAURI, IS_WEB, IS_CAPACITOR, IS_LOCAL_WEB, getAppVer
 import { getActiveServer, getActiveServerId } from "./platform/servers";
 import { checkAuth, installFetchInterceptor, AUTH_EXPIRED_EVENT, isPasswordUserSet, clearAccessToken, setTauriRemoteMode, isTauriRemoteMode } from "./platform/auth";
 import { LoginView } from "./views/LoginView";
+import { SetupView } from "./views/SetupView";
 import { ServerManagerView } from "./views/ServerManagerView";
 import { ChatView } from "./views/ChatView";
 import type { LinkDiagnostic } from "./components/LinkDiagnosticsPanel";
@@ -252,8 +253,24 @@ function MainApp() {
   const [needServerConfig, setNeedServerConfig] = useState(
     () => IS_CAPACITOR && !getActiveServer(),
   );
+  // Setup gate: backend's middleware_setup_gate sends 428 when no web-access
+  // password is configured AND the caller is not a trusted local connection.
+  // We mirror the same condition here so the SPA can route the user to the
+  // SetupView before any "logged out" toast or login screen confuses them.
+  const [setupRequired, setSetupRequired] = useState(false);
   // Tauri remote auth: when Tauri desktop connects to a remote backend that requires login
   const [tauriRemoteLoginUrl, setTauriRemoteLoginUrl] = useState<string | null>(null);
+
+  // ── Top-level: react to 428 setup_required signals from any in-flight fetch
+  // (see providers.ts safeFetch). Mounted unconditionally so even local-web
+  // sessions can be redirected if the user explicitly invokes reset-password.
+  useEffect(() => {
+    const onSetupRequired = () => setSetupRequired(true);
+    window.addEventListener("openakita:setup-required", onSetupRequired);
+    return () => {
+      window.removeEventListener("openakita:setup-required", onSetupRequired);
+    };
+  }, []);
 
   useEffect(() => {
     if (!needsRemoteAuth) {
@@ -264,16 +281,40 @@ function MainApp() {
       setAuthChecking(false);
       return;
     }
-    checkAuth(IS_CAPACITOR ? (getActiveServer()?.url || "") : "").then((ok) => {
-      if (ok) {
-        installFetchInterceptor();
-      }
-      setWebAuthed(ok);
-      setAuthChecking(false);
-    });
+    const apiBase = IS_CAPACITOR ? (getActiveServer()?.url || "") : "";
+    let cancelled = false;
+    // Probe setup-status first: if the backend says setup is required we go
+    // straight to SetupView and skip the (pointless) checkAuth round-trip.
+    // The endpoint is in AUTH_EXEMPT_PATHS so it works without a token.
+    fetch(`${apiBase}/api/auth/setup-status`, {
+      method: "GET",
+      credentials: "include",
+      signal: AbortSignal.timeout(IS_CAPACITOR ? 5_000 : 8_000),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null)
+      .then((status) => {
+        if (cancelled) return;
+        if (status && status.setup_required === true) {
+          setSetupRequired(true);
+          setAuthChecking(false);
+          return;
+        }
+        // Setup already done (or skipped because we're trusted-local on the
+        // server side): proceed to normal auth check.
+        checkAuth(apiBase).then((ok) => {
+          if (cancelled) return;
+          if (ok) installFetchInterceptor();
+          setWebAuthed(ok);
+          setAuthChecking(false);
+        });
+      });
     const onExpired = () => setWebAuthed(false);
     window.addEventListener(AUTH_EXPIRED_EVENT, onExpired);
-    return () => window.removeEventListener(AUTH_EXPIRED_EVENT, onExpired);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(AUTH_EXPIRED_EVENT, onExpired);
+    };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -5632,6 +5673,25 @@ function MainApp() {
       }}
       onDone={needServerConfig ? undefined : () => setShowServerManager(false)}
     />;
+  }
+
+  // ── First-run setup gate: show SetupView before LoginView ──
+  // Triggered either by the startup setup-status probe or by a 428 from any
+  // subsequent fetch. Loopback callers never reach this branch because the
+  // backend's setup_state.should_require_setup returns False for them; the
+  // gate is for non-trusted-local sessions (Capacitor / LAN browser).
+  if (setupRequired) {
+    return (
+      <SetupView
+        apiBaseUrl={IS_CAPACITOR ? apiBaseUrl : ""}
+        onSetupSuccess={() => {
+          installFetchInterceptor();
+          webInitDone.current = false;
+          setSetupRequired(false);
+          setWebAuthed(true);
+        }}
+      />
+    );
   }
 
   // ── Web / Capacitor auth gate: show login page if not authenticated ──

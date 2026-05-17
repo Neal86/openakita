@@ -330,6 +330,35 @@ export async function safeFetch(url: string, init?: RequestInit): Promise<Respon
   const res = useAuth
     ? await authFetch(url, effectiveInit, apiBase)
     : await fetch(url, effectiveInit);
+  // HTTP 428 Precondition Required is the signal from middleware_setup_gate
+  // saying "no web-access password set; complete the setup flow first".
+  // We surface this as a custom event so the App-level effect can switch the
+  // view to SetupView, and re-throw a sentinel error so the caller knows the
+  // current request was *not* fulfilled. The sentinel error message is a
+  // well-known string the caller can detect; the human-visible body is
+  // attached on the error so existing toast handlers won't render gibberish.
+  if (res.status === 428) {
+    let body: { error?: string; detail?: string; setup_url?: string } = {};
+    try {
+      const text = await res.clone().text();
+      if (text) body = JSON.parse(text);
+    } catch { /* ignore parse error */ }
+    if (body?.error === "setup_required") {
+      try {
+        window.dispatchEvent(
+          new CustomEvent("openakita:setup-required", { detail: body }),
+        );
+      } catch { /* ignore in non-browser env */ }
+      // The thrown error message may briefly surface in toast handlers
+      // before the App-level listener swaps to SetupView. Use the human
+      // detail from the backend so the user sees an actionable message
+      // ("Setup required…") instead of an internal sentinel.
+      const message = body.detail || "Setup required";
+      const err = new Error(message);
+      (err as Error & { setupRequired?: boolean }).setupRequired = true;
+      throw err;
+    }
+  }
   if (!res.ok) {
     let userMessage = res.statusText;
     try {

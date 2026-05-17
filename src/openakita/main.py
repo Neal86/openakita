@@ -1956,37 +1956,36 @@ def serve(
         api_task = None
         _api_fatal = False
         try:
-            from openakita.api.server import API_HOST, API_PORT, start_api_server
+            import sys as _sys
 
-            # PR-L1: 解析 API host / port，按 settings.api_lan_mode 决定绑定范围。
-            # 优先级：环境变量 API_HOST > settings.api_lan_mode 推导 > settings.api_host。
-            # 安全闸：开启 lan_mode 必须有 web_access 密码或 api_token，
-            # 否则 0.0.0.0 暴露后任何同网段设备无认证即可调 API。
-            _api_host = API_HOST  # 已经是 env(API_HOST) > "127.0.0.1"
+            from openakita.api.host_resolution import resolve_api_host
+            from openakita.api.server import API_PORT, start_api_server
+
+            # v1.28: 监听地址完全由 resolve_api_host 决定。优先级链：
+            #   1) 环境变量 API_HOST 显式覆盖
+            #   2) settings.api_lan_mode=True 或 headless 检测 → 0.0.0.0
+            #   3) 否则 → 127.0.0.1
+            # 旧的"api_lan_mode=True 无密码就 raise"安全闸已删除：
+            # 同等保护改由 middleware_setup_gate 在请求层强制 setup，
+            # 这样新装的 headless Linux 用户能直接打开网页完成设置。
+            _api_host = resolve_api_host(
+                env=os.environ,
+                api_lan_mode=bool(getattr(settings, "api_lan_mode", False)),
+                platform=_sys.platform,
+            )
             _api_port = API_PORT
-            try:
-                if getattr(settings, "api_lan_mode", False):
-                    _has_password = bool(os.environ.get("OPENAKITA_WEB_PASSWORD") or _web_password_already_set())
-                    _has_token = bool(getattr(settings, "api_token", "") or "").strip()
-                    if not (_has_password or _has_token):
-                        raise RuntimeError(
-                            "api_lan_mode=True 但既没有 web_access 密码也没有 api_token，"
-                            "拒绝启动以避免裸奔暴露。请先在 Setup Center 设置访问密码，"
-                            "或在 .env 设置 OPENAKITA_API_TOKEN=<32 字符随机串>。"
-                        )
-                    if not os.environ.get("API_HOST"):
-                        _api_host = "0.0.0.0"
-                        console.print(
-                            "[yellow]⚠ 已开启 api_lan_mode，HTTP API 将绑定到 0.0.0.0 ——"
-                            " 同网段所有设备都能看到这个端口。[/yellow]"
-                        )
-                else:
-                    if not os.environ.get("API_HOST"):
-                        _api_host = getattr(settings, "api_host", "127.0.0.1") or "127.0.0.1"
-            except RuntimeError:
-                raise
-            except Exception as _exc:
-                logger.warning(f"[main] api host resolution fallback: {_exc}")
+            if _api_host in ("0.0.0.0", "::"):
+                if not _web_password_already_set() and not (
+                    os.environ.get("OPENAKITA_WEB_PASSWORD") or ""
+                ).strip():
+                    console.print(
+                        "[yellow]⚠ HTTP API 将绑定到 "
+                        f"{_api_host}（外部可访问），但当前未设置访问密码。[/yellow]"
+                    )
+                    console.print(
+                        "[yellow]  首次从局域网/外网打开 Web UI 时会强制要求设置密码 "
+                        "(setup 流程)。[/yellow]"
+                    )
 
             api_task = await start_api_server(
                 agent=agent_or_master,
@@ -2206,11 +2205,19 @@ def serve(
 
             # 等待端口释放（旧 uvicorn 关闭后 TCP socket 可能处于 TIME_WAIT）
             try:
-                from openakita.api.server import API_HOST, API_PORT, wait_for_port_free
+                import sys as _sys
 
+                from openakita.api.host_resolution import resolve_api_host
+                from openakita.api.server import API_PORT, wait_for_port_free
+
+                _api_host = resolve_api_host(
+                    env=os.environ,
+                    api_lan_mode=bool(getattr(settings, "api_lan_mode", False)),
+                    platform=_sys.platform,
+                )
                 _api_port = int(os.environ.get("API_PORT", API_PORT))
                 console.print(f"[dim]等待端口 {_api_port} 释放...[/dim]")
-                if not wait_for_port_free(API_HOST, _api_port, timeout=15.0):
+                if not wait_for_port_free(_api_host, _api_port, timeout=15.0):
                     console.print(f"[yellow]⚠[/yellow] 端口 {_api_port} 仍被占用，继续尝试启动...")
                 else:
                     console.print(f"[dim]端口 {_api_port} 已就绪[/dim]")
@@ -2526,6 +2533,74 @@ def run_mcp_module(
             _root.removeHandler(h)
 
     mcp_instance.run()
+
+
+@app.command(name="reset-password")
+def reset_password(
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="跳过交互确认（脚本/CI 场景）"
+    ),
+):
+    """清除 Web 访问密码，下次访问会进入 setup 流程。
+
+    用途：用户忘记密码、密码档损坏、误操作后想重置。会清空
+    ``data/web_access.json`` 中的 password_hash / password_salt /
+    password_plain_hint，但保留 jwt_secret / data_epoch / token_version
+    避免外部工具持有的 token 立即变成"未知签名"造成的混淆。
+
+    如果检测到 backend 还在运行（基于 60 秒内的心跳），会提示用户重启
+    backend，因为 ``WebAccessConfig`` 是进程级单例，加载时间在 import
+    之后，仅文件改动不会让运行中的进程立即生效。
+    """
+    import json as _json
+    import time as _time
+
+    from openakita.api.auth import WebAccessConfig
+
+    ws = settings.user_workspace_path
+    data_dir = Path(ws) / "data"
+    web_file = data_dir / "web_access.json"
+
+    if not web_file.exists():
+        console.print("[yellow]未找到 web_access.json，无需清除。[/yellow]")
+        raise typer.Exit(0)
+
+    if not yes:
+        confirmed = typer.confirm(
+            f"将清除 {web_file} 中的密码哈希，下次访问 Web UI 需重新设置。继续？",
+            default=False,
+        )
+        if not confirmed:
+            console.print("[dim]已取消。[/dim]")
+            raise typer.Exit(0)
+
+    # 复用 WebAccessConfig.clear_password() 走原子写 + fsync 持久化路径，
+    # 避免出现"清密码时因断电留下半截 JSON 让 backend 启动崩"的尴尬。同时
+    # bump token_version 让旧 token 在 backend 重启前就失效。
+    cfg = WebAccessConfig(data_dir)
+    cfg.clear_password()
+
+    console.print(f"[green]✓[/green] 已清除密码：{web_file}")
+
+    # 心跳还活着 → backend 进程在运行，需要重启才能让 setup gate 重新感知"无密码"状态。
+    heartbeat = data_dir / "heartbeat.json"
+    backend_running = False
+    if heartbeat.exists():
+        try:
+            payload = _json.loads(heartbeat.read_text(encoding="utf-8"))
+            ts = payload.get("ts") or payload.get("timestamp")
+            if isinstance(ts, (int, float)) and _time.time() - ts < 60:
+                backend_running = True
+        except Exception:
+            backend_running = False
+
+    if backend_running:
+        console.print(
+            "[yellow]⚠ 检测到 openakita backend 仍在运行。请手动重启 backend "
+            "（关闭 Setup Center / kill 进程后重新启动），新的 setup 流程才会生效。[/yellow]"
+        )
+    else:
+        console.print("[dim]下次启动 openakita 时会进入 setup 流程。[/dim]")
 
 
 if __name__ == "__main__":
