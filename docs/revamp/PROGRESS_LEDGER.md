@@ -2,7 +2,7 @@
 
 <!-- machine-readable phase marker; do NOT remove.
      Parsed by tests/revamp/_ledger.py + tests/parity/test_no_facade.py. -->
-current_phase: P-RC-3
+current_phase: P-RC-4
 
 > Source of truth for every commit landed on `revamp/v2` during
 > the post-RC continuation phases (P-RC-0 → P-RC-8). One row per
@@ -101,7 +101,22 @@ runs identical cases against both backends.
 
 ## P-RC-4 — Phase 2 real slim-down: brain / tools / context
 
-_Not started._
+G-RC-3 was signed; this phase opens the first real Phase-2 rewrite:
+the three medium giants (`core/brain.py` 2015, `core/tool_executor.py`
+1818, `core/context_manager.py` 1799) are split into focused
+`runtime/llm/*`, `runtime/stream/llm.py`, `runtime/io/*`,
+`runtime/context/*` submodules; `agent/{brain,tools,context}.py`
+are rewritten on top of those submodules; the three `core/*.py`
+giants collapse into `≤30` LOC re-export shims; `LOC_BASELINE.json`
+shrinks the giants and bumps the agent files in the same commit so
+`scripts/revamp_loc_audit.py` stays exit 0. Real-parity suites land
+5 cases per giant (15 total) against recorded LLM fixtures and assert
+v1/v2 `__file__` differ -- the facade-detector `test_no_facade.py`
+loses its sentinel allowance for these three files.
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-4 P4.0 | chore(revamp): bump ledger to P-RC-4 + raise commit-guard baseline | +1 line (header bump) + this block | 0 | — |
 
 ## P-RC-5 — Phase 2 real slim-down: reasoning_engine
 
@@ -148,3 +163,16 @@ may be retired from this list.
   LOC, and exits 1 at >= 400. No git hook is installed; this is
   a manual operator discipline so a legitimate one-off giant
   commit can still be force-recorded with eyes open.
+
+* **P4-D1** (continuation plan §5, P-RC-4 entry): P-RC-4 is the first
+  *real* rewrite phase. Every commit MUST grow `agent/*.py` net SLOC
+  (the rewrite target) and (eventually) shrink `core/*.py` net SLOC.
+  `LOC_BASELINE.json` is updated *in the same commit* that lands the
+  shrink so `scripts/revamp_loc_audit.py` stays exit 0; the agent
+  growth budget (`+50`) stays as-is, but per-file baselines for the
+  three rewrite targets are rebased downward in the shrink commit.
+* **P4-D2** (continuation plan §5.3, gate criteria): the three
+  facade sentinels in `agent/brain.py` / `agent/tools.py` /
+  `agent/context.py` must be REMOVED (not re-targeted) by the end of
+  P-RC-4; `test_facade_files_either_declare_sentinel_or_have_real_body`
+  then falls back to the 200 SLOC floor for those three files.
