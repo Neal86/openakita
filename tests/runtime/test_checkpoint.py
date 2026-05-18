@@ -139,7 +139,9 @@ async def test_memory_put_get() -> None:
     assert meta == ck.metadata
     fetched = await store.aget(meta.checkpoint_id)
     assert fetched is not None
-    assert fetched.state == ck.state
+    # Memory backend normalises the envelope through encode/decode so
+    # reads carry the $schema_version (matches SQLite/JsonFile).
+    assert fetched.state == {"$schema_version": 1, **ck.state}
 
 
 async def test_memory_get_returns_none_for_unknown_id() -> None:

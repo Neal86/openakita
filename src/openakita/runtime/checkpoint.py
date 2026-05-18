@@ -243,9 +243,16 @@ class MemoryCheckpointer(BaseCheckpointer):
 
     async def aput(self, checkpoint: Checkpoint) -> CheckpointMetadata:
         # Round-trip the state through encode/decode so we exercise the
-        # same schema validation path as the SQLite backend.
-        decode_state(encode_state(checkpoint.state))
-        self._by_id[checkpoint.metadata.checkpoint_id] = checkpoint
+        # same schema validation path as the SQLite backend, and store
+        # the *normalised* envelope (with $schema_version) so reads
+        # match the persistent backends byte for byte.
+        normalised_state = decode_state(encode_state(checkpoint.state))
+        normalised = Checkpoint(
+            metadata=checkpoint.metadata,
+            state=normalised_state,
+            pending_writes=list(checkpoint.pending_writes),
+        )
+        self._by_id[checkpoint.metadata.checkpoint_id] = normalised
         self._by_command.setdefault(
             checkpoint.metadata.command_id, []
         ).append(checkpoint.metadata.checkpoint_id)
