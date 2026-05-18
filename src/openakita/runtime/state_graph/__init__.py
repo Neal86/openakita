@@ -70,8 +70,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from .models import EdgeKind, EdgeV2, NodeV2, OrgV2
-from .supervisor import DelegationResult
+from ..models import EdgeKind, EdgeV2, NodeV2, OrgV2
+from ..supervisor import DelegationResult
 
 __all__ = [
     "END",

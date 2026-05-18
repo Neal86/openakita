@@ -154,7 +154,8 @@ long-tail Decision cascade; ``core/reasoning_engine.py`` collapses to a thin laz
 |---|---|---|---|---|---|
 | `7f094936` | P-RC-5 P5.0a | chore(revamp): bump ledger to P-RC-5 + clean P-RC-4 ledger residue (N8) | +12 / -3 (ledger header + dup row + orphan fragment + section preface) | 0 | — |
 | `26cee0e7` | P-RC-5 P5.0b | chore(core/brain): add legacy-private fallback to shim (N7) | +5 / -1 (shim docstring + 4-line fallback block; net stays 25 LOC <= baseline 26) | 0 | ADR-0001, ADR-0003 |
-| _this commit_ | P-RC-5 P5.0c | test(parity): exercise runtime/llm/failover.py through real Brain (N6) | +85 / -1 (test_brain_parity.py +N6 fixture + stub LLMClient + endpoint-info parity) | +1 (test_failover_endpoint_info_parity) | ADR-0001, ADR-0003 |
+| `5906b606` | P-RC-5 P5.0c | test(parity): exercise runtime/llm/failover.py through real Brain (N6) | +85 / -1 (test_brain_parity.py +N6 fixture + stub LLMClient + endpoint-info parity) | +1 (test_failover_endpoint_info_parity) | ADR-0001, ADR-0003 |
+| _this commit_ | P-RC-5 P5.1 | refactor(runtime): convert state_graph.py to package + scaffold guards/ + reasoning_nodes/ | +43 / -2 (state_graph -> package; new guards/__init__ + agent/reasoning_nodes/__init__ docstrings) | 0 | ADR-0002, ADR-0007 |
 
 ## P-RC-6 — Phase 2 real slim-down: agent.py
 
