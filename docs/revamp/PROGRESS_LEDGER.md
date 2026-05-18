@@ -188,7 +188,8 @@ commit_guard WARN/REJECT documentation).
 
 | commit hash | phase | title | LOC delta | tests delta | ADR refs |
 |---|---|---|---|---|---|
-| _this commit_ | P-RC-6 P6.0a | chore(revamp): bump ledger to P-RC-6 + N11 (legacy LOC visibility) + N12 (commit_guard docs) | +60 (TRACKED_FILES + docstrings + ledger section + discipline reminder) | 0 | --- |
+| `be9c1b13` | P-RC-6 P6.0a | chore(revamp): bump ledger to P-RC-6 + close N11 (legacy LOC visibility) and N12 (commit_guard docs) | +60 / -7 (TRACKED_FILES + INFO_ONLY_FILES + commit_guard docstring + baseline cleanup + ledger header + section + Discipline N12) | 0 | --- |
+| _this commit_ | P-RC-6 P6.0b | test(parity): 5 non-trivial reasoning fixtures + non-triviality structural assertion (N9) | +136 (5 JSON fixtures + test_fixtures_include_non_trivial_divergence) | +11 (10 parity + 1 structural) | --- |
 
 ## P-RC-7 — Caller migration + legacy bulk delete
 

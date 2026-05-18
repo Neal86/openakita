@@ -126,3 +126,34 @@ def test_guard_evaluation_parity(fixture: dict) -> None:
         f"guard verdict drift on fixture {fixture['name']!r}: "
         f"v2={actual!r} expected={expected!r}"
     )
+
+
+def test_fixtures_include_non_trivial_divergence() -> None:
+    """N9 (G-RC-5 P-RC-5 audit) -- at least five fixtures MUST flip a guard.
+
+    The original P-RC-5 fixture set was dominated by happy-path Decision
+    routing cases where every guard returned ``passed=True``. That made
+    ``test_guard_evaluation_parity`` a structural identity test on the v2
+    routing table without ever exercising the actual guard divergence
+    branches. The four guards we expect to flip in practice are
+    ``source_tag``, ``tool_failure_ack``, ``unbacked_action``, and
+    ``waiting_for_user`` -- this test pins that at least five fixtures
+    flip *some* guard, with at least one fixture per guard kind.
+    """
+    fixtures = _load_fixtures()
+    assert len(fixtures) >= 10, f"only {len(fixtures)} fixtures present"
+    flipping = [f for f in fixtures if not all(f["expected_guard_passed"].values())]
+    assert len(flipping) >= 5, (
+        f"only {len(flipping)} non-trivial fixtures; need >= 5 with a "
+        f"failing guard to make the parity sweep meaningful"
+    )
+    # Per-guard coverage: every interesting guard must flip in at least one fixture.
+    flipping_guards: set[str] = set()
+    for f in flipping:
+        for k, v in f["expected_guard_passed"].items():
+            if not v:
+                flipping_guards.add(k)
+    for required in ("source_tag", "tool_failure_ack", "unbacked_action", "waiting_for_user"):
+        assert required in flipping_guards, (
+            f"no fixture exercises guard {required!r}; please add one"
+        )
