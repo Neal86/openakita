@@ -52,7 +52,7 @@ default unless a parity test surfaces a better placement.
 |---|---:|---|---|---|
 | `permission.py` | 455 | **MOVE** | `agent/permission.py` | Tight, well-tested module. Used by tools and runtime; no v2 contract change needed today. Plan §2 explicitly anticipates this is a move. |
 | `identity.py` | 495 | **MOVE — done** | `agent/identity.py` | Shipped 2026-05-18 in commit `feat(agent): port identity (MOVE)`. Byte-equivalent copy + docstring refresh; legacy path is now a re-export shim. The existing `tests/unit/test_identity.py` (17 tests) still passes through the shim, transitively anchoring the move. |
-| `persona.py` | 467 | **MOVE** | `agent/persona.py` | Persona compilation; touched by prompt builder. Stable. |
+| `persona.py` | 467 | **MOVE — done** | `agent/persona.py` | Shipped today. Three-layer persona manager (preset + user-trait overlay + context adaptation). Importers migrated transparently via shim: `core.agent` (lazy), `core.trait_miner`, `tools.handlers.persona`, plus 12 dedicated test files under `tests/unit/test_persona*.py`. Move-compatibility tests in `tests/agent/test_persona_move.py` pin `PersonaManager`, `PersonaTrait`, `MergedPersona`, `PERSONA_DIMENSIONS`, and `persist_trait_to_memory` to the same object across both paths. |
 | `validators.py` | 416 | **MOVE** | `agent/validators.py` | Pure functions. |
 | `agent_state.py` | 431 | **MOVE** | `agent/state.py` (already exists; merge) | Fold into the existing v2 `agent/state.py` so there's a single state container. |
 | `pending_approvals.py` | 449 | **MOVE** | `agent/pending_approvals.py` | Tightly coupled to permission flow but stable. |
@@ -143,24 +143,27 @@ below maps to one commit in the Phase 2 series.
    `persona.py` 467) are larger and merit their own commits; they
    become commits 4 and 5 below.
 4. **Done** — `feat(agent): port identity (MOVE)` landed 2026-05-18.
-5. `feat(agent): port persona (MOVE)`.
-4. `feat(agent): port permission, audit, validators (MOVE)` — covers
+5. **Done** — `feat(agent): port persona (MOVE)` landed 2026-05-18.
+   Three-layer persona manager moved with shim; 12 legacy persona test
+   files keep passing through the shim (227 tests in `-k persona`
+   slice).
+6. `feat(agent): port permission, audit, validators (MOVE)` — covers
    plan §8 keep-as-is candidates.
-5. `feat(agent): port pending_approvals, confirmation, ui_confirm_bus, hooks (MOVE)`.
-6. `feat(agent): port token / resource / loop budget modules (MOVE)`.
-7. `feat(agent): port skill_manager, capabilities, security_actions (MOVE)`.
-8. `feat(agent): port file_history, trusted_paths, domain_allowlist, lsp_feedback (MOVE)`.
-9. `feat(agent): port sandbox, docker_backend, desktop_notify, sse_replay (MOVE)`.
-10. `feat(agent): port ralph driver and trait_miner / user_profile (MOVE)`.
-11. `test(parity): bootstrap parity harness with 5 baseline cases`.
-12. `feat(agent): rewrite tool_executor.py into agent/tools.py (REWRITE)`.
-13. `feat(agent): rewrite context_manager.py into agent/context.py (REWRITE)`.
-14. `feat(agent): rewrite brain.py into agent/brain.py (REWRITE)`.
-15. `feat(agent): rewrite reasoning_engine.py into agent/reasoning.py (REWRITE)` — **the big one**, depends on `runtime/state_graph.py` (already shipped).
-16. `feat(agent): rewrite agent.py into agent/core.py (REWRITE)` — assembles the pieces.
-17. `test(parity): expand parity harness to 30 cases for G2 sign-off`.
+7. `feat(agent): port pending_approvals, confirmation, ui_confirm_bus, hooks (MOVE)`.
+8. `feat(agent): port token / resource / loop budget modules (MOVE)`.
+9. `feat(agent): port skill_manager, capabilities, security_actions (MOVE)`.
+10. `feat(agent): port file_history, trusted_paths, domain_allowlist, lsp_feedback (MOVE)`.
+11. `feat(agent): port sandbox, docker_backend, desktop_notify, sse_replay (MOVE)`.
+12. `feat(agent): port ralph driver and trait_miner / user_profile (MOVE)`.
+13. `test(parity): bootstrap parity harness with 5 baseline cases`.
+14. `feat(agent): rewrite tool_executor.py into agent/tools.py (REWRITE)`.
+15. `feat(agent): rewrite context_manager.py into agent/context.py (REWRITE)`.
+16. `feat(agent): rewrite brain.py into agent/brain.py (REWRITE)`.
+17. `feat(agent): rewrite reasoning_engine.py into agent/reasoning.py (REWRITE)` — **the big one**, depends on `runtime/state_graph.py` (already shipped).
+18. `feat(agent): rewrite agent.py into agent/core.py (REWRITE)` — assembles the pieces.
+19. `test(parity): expand parity harness to 30 cases for G2 sign-off`.
 
-After commit 17 the G2 review note can be authored
+After commit 19 the G2 review note can be authored
 (`docs/revamp/gates/G2.md`).
 
 ## Open questions to resolve at port time

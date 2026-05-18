@@ -16,20 +16,20 @@ A user-led ADR review is the gate to flip them all to `Accepted`.
 |---|---|---|---|
 | 0 — ADRs (10 docs) | **Complete** | 10 | n/a |
 | 1 — Foundation (runtime/ leaf modules) | **Complete** | 8 | 99 runtime tests |
-| 2 — Agent rewrite | **In progress (audit + 4 MOVE commits)** | 4 (`agent/state.py`; `agent/errors.py`+`agent/working_facts.py`; `agent/output_guard.py`+`agent/output_formatter.py`; `agent/identity.py`) + 1 audit doc | 62 agent tests + 17 legacy identity tests still green via shim |
+| 2 — Agent rewrite | **In progress (audit + 5 MOVE commits)** | 5 (`agent/state.py`; `agent/errors.py`+`agent/working_facts.py`; `agent/output_guard.py`+`agent/output_formatter.py`; `agent/identity.py`; `agent/persona.py`) + 1 audit doc | 70 agent tests + 17 legacy identity tests + 12 legacy persona test files still green via shims |
 | 3 — Runtime engine (supervisor + messenger + guardrail + state graph) | **Complete (G3 review pending)** | 6 (`ledger`, `stall_detector`, `supervisor`, `messenger`, `guardrail/`, `state_graph`) | 110 new runtime tests |
 | 4 — Nodes | **Complete incl. plugin loader (G4 review pending)** | 7 (`base`+sig fix, `tool_node`, `llm_node`, `condition_node`+`human_review_node`, `workbench_node`+`manifest`, `happyhorse-video` adoption, `plugins/manager.py` WORKBENCH discovery) | 89 new tests (`test_nodes_*`) + 5 plugin smoke tests + 5 manifest discovery tests |
-| 5 — Templates | **Schema + registry + 4 builtins shipped (G5 review pending)** | 6 (`schema`, `registry`, `aigc_video_studio`, `software_team`, `startup_company`, `content_ops`+discovery test) | 75 template tests |
+| 5 — Templates | **Schema + registry + 4 builtins shipped (G5 review pending)** | 7 (`schema`, `registry`, `aigc_video_studio`, `software_team`, `startup_company`, `content_ops`+discovery test, parent_id-from-HIERARCHY fix) | 88 template tests (incl. 5 new parent-id regression tests) |
 | 6 — API / channels swap | **In progress (templates facade live)** | 2 (`orgs_v2` route + survivable factory marker, server mount) | 15 api tests |
 | 7 — Cutover + data migration | Pending | 0 | — |
 | 8 — Legacy removal | Pending | 0 | — |
 
-Total to date: **43 code commits + 10 ADR commits + 4 docs commits =
-57 commits on `revamp/v2`**, all lint-clean (ruff over the v2 surface),
-test-green (595 / 595 across `tests/runtime/`, `tests/agent/`,
-`tests/api/`, `tests/unit/test_plugins/`, `tests/orgs/`, and
-`plugins/happyhorse-video/tests/test_workbench_manifest.py`; the
-larger total reflects v1 unit tests that the move shims keep green).
+Total to date: **45 code commits + 10 ADR commits + 4 docs commits =
+59 commits on `revamp/v2`**, all lint-clean (ruff over the v2 surface),
+test-green (642 / 642 across `tests/runtime/`, `tests/agent/`,
+`tests/api/`, `tests/unit/test_plugins/`, plus 227-strong legacy
+slice on `-k "persona or identity or output or working_fact or error"`
+to anchor the move shims).
 
 ### 2026-05-18 mid-cycle plan-vs-reality review
 
@@ -235,7 +235,7 @@ sign-off is the written gate review note under
 | Module | ADR | Status |
 |---|---|---|
 | `runtime/templates/schema.py` | ADR-0008 | **Done.** TemplateSpec / NodeSpec / EdgeSpec / DefaultsSpec / GuardrailSpec / WorkbenchBindingSpec / NodeRuntimeOverridesSpec dataclasses with construction-time `validate()` and JSON round-trip. 25 tests. |
-| `runtime/templates/registry.py` | ADR-0008 | **Done.** @template decorator (lazy queue), TemplateRegistry (register / get / list / clear / bootstrap), `instantiate(template_id, name=, overrides=)` mints fresh `OrgV2` with prefixed ULIDs and applies a closed override whitelist (`defaults`, `node_persona_prompts`, `node_runtime_overrides`); unknown override keys raise loudly. `discover_builtins()` auto-imports `runtime.templates.builtin.*`. 16 tests. |
+| `runtime/templates/registry.py` | ADR-0008 | **Done.** @template decorator (lazy queue), TemplateRegistry (register / get / list / clear / bootstrap), `instantiate(template_id, name=, overrides=)` mints fresh `OrgV2` with prefixed ULIDs and applies a closed override whitelist (`defaults`, `node_persona_prompts`, `node_runtime_overrides`); unknown override keys raise loudly. **2026-05-18 fix:** `instantiate` now also derives `NodeV2.parent_id` from `EdgeKind.HIERARCHY` edges so `OrgV2.root_nodes()` and `children_of()` return real trees (previously every node looked like a root); multi-parent HIERARCHY raises `TemplateValidationError`, repeat-edges are idempotent. `discover_builtins()` auto-imports `runtime.templates.builtin.*`. 21 tests (16 + 5 parent-id regression). |
 | `runtime/templates/builtin/aigc_video_studio.py` | ADR-0008 + ADR-0009 | **Done.** 7-node AIGC studio: producer → screenwriter / art_director → wb_image / wb_video / wb_human / wb_long; four workbench leaves bound to the `happyhorse-video` manifest, with the stitching node narrowed to `(storyboard, long_video, video_concat)` capabilities. Personas Chinese, ~190 lines vs the legacy ~420-line dict. 12 tests. |
 | `runtime/templates/builtin/software_team.py` | ADR-0008 | **Done.** 10-node engineering org with HIERARCHY / COLLABORATE / CONSULT edges (qa→leads as CONSULT). 7 tests. |
 | `runtime/templates/builtin/startup_company.py` | ADR-0008 | **Done.** 16-node generic startup with four C-level departments and four cross-department COLLABORATE edges. 6 tests. |
@@ -282,11 +282,13 @@ log` reader can diff the world before / after.
 1. Read this `STATUS.md` first, then `docs/revamp/PLAN_AUDIT.md`
    and `docs/revamp/core_audit.md` for the rationale behind the
    Phase 2 commit plan.
-2. **Recommended next slice — Phase 2 commit 5**:
-   port `core/persona.py` (467 LOC) as a MOVE commit with a
-   re-export shim. This is the last "large MOVE" before Phase 2
-   moves into the medium-impact ports (permission, audit, prompt,
-   pending_approvals, hooks).
+2. **Recommended next slice — Phase 2 commit 6**:
+   `feat(agent): port permission, audit, validators (MOVE)`. These
+   three legacy modules are tight, well-tested, and sit on the
+   permission-flow critical path that the channels gateway will
+   need next. `permission.py` (455 LOC) is the largest. Group them
+   in one commit because their importers overlap. Phase 2 commit 5
+   (`persona.py`) shipped 2026-05-18.
 3. After (2): walk the MOVE list in `core_audit.md` in the order
    given. Each commit:
    * moves one tightly-scoped legacy file to `agent/`,

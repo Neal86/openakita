@@ -27,6 +27,13 @@ from .output_guard import (
     detect_numeric_task,
     validate_no_fabricated_numbers,
 )
+from .persona import (
+    PERSONA_DIMENSIONS,
+    MergedPersona,
+    PersonaManager,
+    PersonaTrait,
+    persist_trait_to_memory,
+)
 from .working_facts import (
     extract_working_facts,
     format_working_facts,
@@ -38,7 +45,11 @@ __all__ = [
     "DISCLAIMER_TEXT",
     "Identity",
     "JSONFormatter",
+    "MergedPersona",
     "OutputFormatter",
+    "PERSONA_DIMENSIONS",
+    "PersonaManager",
+    "PersonaTrait",
     "StreamJSONFormatter",
     "TextFormatter",
     "UserCancelledError",
@@ -48,5 +59,6 @@ __all__ = [
     "extract_working_facts",
     "format_working_facts",
     "merge_working_facts",
+    "persist_trait_to_memory",
     "validate_no_fabricated_numbers",
 ]
