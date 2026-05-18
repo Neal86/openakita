@@ -58,9 +58,9 @@ default unless a parity test surfaces a better placement.
 | `pending_approvals.py` | 449 | **MOVE** | `agent/pending_approvals.py` | Tightly coupled to permission flow but stable. |
 | `proactive.py` | 405 | **MOVE** | `agent/proactive.py` | Self-prompting suggestions; OK to keep. |
 | `audit_logger.py` | 177 | **MOVE** | `agent/audit.py` | Plan §8 lists this as a MOVE candidate. |
-| `agent_output_guard.py` | 86 | **MOVE** | `agent/output_guard.py` | Already small. |
+| `agent_output_guard.py` | 86 | **MOVE — done** | `agent/output_guard.py` | Shipped 2026-05-18 in commit `feat(agent): port output_guard and output_formatter (MOVE)`. Legacy path is now a re-export shim. |
 | `prompt_assembler.py` | 157 | **MOVE** | `agent/prompt.py` | The legacy single-pass assembler; the new `prompt/builder.py` (already in repo) is the multi-layer builder. We keep the assembler as the agent's view-into-builder until the parity harness is happy. |
-| `output_formatter.py` | 101 | **MOVE** | `agent/output_formatter.py` | Pure functions; stable. |
+| `output_formatter.py` | 101 | **MOVE — done** | `agent/output_formatter.py` | Shipped 2026-05-18 in commit `feat(agent): port output_guard and output_formatter (MOVE)`. Legacy path is now a re-export shim. |
 | `errors.py` | 15 | **MOVE — done** | `agent/errors.py` | Shipped 2026-05-18 in commit `feat(agent): port errors and working_facts (MOVE)`. Legacy path is now a re-export shim until Phase 8. |
 | `state.py` | 75 | **DELETE — Phase 8** (re-classified) | n/a | Re-classified during the actual port: a workspace-wide search for `core.state` returns zero importers in production code, so the audit's original "MOVE → merge into agent/state.py" is wrong on two counts. (1) The merge target (`agent/state.py`) is the port of the unrelated 431-line `core/agent_state.py` and shares no symbols with this 75-line `StateStore` / `AppState` module. (2) Nothing imports it, so the cleanest action is mechanical removal at Phase 8. We leave the file untouched so a stray future caller would still find it during the burn-in window. |
 | `working_facts.py` | 53 | **MOVE — done** | `agent/working_facts.py` | Shipped 2026-05-18 in commit `feat(agent): port errors and working_facts (MOVE)`. Legacy path is now a re-export shim until Phase 8. |
@@ -137,7 +137,13 @@ below maps to one commit in the Phase 2 series.
 2. **Done** — `feat(agent): port errors and working_facts (MOVE)`
    landed 2026-05-18. `core/state.py` was re-classified to DELETE
    when the port revealed it has zero importers.
-3. `feat(agent): port identity, persona, output_guard, output_formatter (MOVE)`.
+3. **Partially done** — `feat(agent): port output_guard and output_formatter (MOVE)`
+   landed 2026-05-18 (`agent_output_guard.py` + `output_formatter.py`).
+   The remaining halves of the audit's grouping (`identity.py` 495,
+   `persona.py` 467) are larger and merit their own commits; they
+   become commits 4 and 5 below.
+4. `feat(agent): port identity (MOVE)` (was: half of original step 3).
+5. `feat(agent): port persona (MOVE)` (was: half of original step 3).
 4. `feat(agent): port permission, audit, validators (MOVE)` — covers
    plan §8 keep-as-is candidates.
 5. `feat(agent): port pending_approvals, confirmation, ui_confirm_bus, hooks (MOVE)`.

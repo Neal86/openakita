@@ -16,7 +16,7 @@ A user-led ADR review is the gate to flip them all to `Accepted`.
 |---|---|---|---|
 | 0 — ADRs (10 docs) | **Complete** | 10 | n/a |
 | 1 — Foundation (runtime/ leaf modules) | **Complete** | 8 | 99 runtime tests |
-| 2 — Agent rewrite | **In progress (audit + 2 MOVE commits)** | 2 (`agent/state.py`, `agent/errors.py`+`agent/working_facts.py`) + 1 audit doc | 32 agent tests |
+| 2 — Agent rewrite | **In progress (audit + 3 MOVE commits)** | 3 (`agent/state.py`; `agent/errors.py`+`agent/working_facts.py`; `agent/output_guard.py`+`agent/output_formatter.py`) + 1 audit doc | 60 agent tests |
 | 3 — Runtime engine (supervisor + messenger + guardrail + state graph) | **Complete (G3 review pending)** | 6 (`ledger`, `stall_detector`, `supervisor`, `messenger`, `guardrail/`, `state_graph`) | 110 new runtime tests |
 | 4 — Nodes | **Complete incl. plugin loader (G4 review pending)** | 7 (`base`+sig fix, `tool_node`, `llm_node`, `condition_node`+`human_review_node`, `workbench_node`+`manifest`, `happyhorse-video` adoption, `plugins/manager.py` WORKBENCH discovery) | 89 new tests (`test_nodes_*`) + 5 plugin smoke tests + 5 manifest discovery tests |
 | 5 — Templates | **Schema + registry + 4 builtins shipped (G5 review pending)** | 6 (`schema`, `registry`, `aigc_video_studio`, `software_team`, `startup_company`, `content_ops`+discovery test) | 75 template tests |
@@ -178,6 +178,8 @@ focused commit with tests. Already done:
 | `agent/state.py` | ADR-0003 | `core/agent_state.py` | **Done.** Phase-1 era port; 17 tests. |
 | `agent/errors.py` | ADR-0003 | `core/errors.py` | **Done.** Move with re-export shim; 4 tests. |
 | `agent/working_facts.py` | ADR-0003 | `core/working_facts.py` | **Done.** Move with re-export shim; 11 tests. |
+| `agent/output_guard.py` | ADR-0003 | `core/agent_output_guard.py` | **Done.** Move with re-export shim; 14 tests. |
+| `agent/output_formatter.py` | ADR-0003 | `core/output_formatter.py` | **Done.** Move with re-export shim; 14 tests. |
 
 Remaining:
 
@@ -186,7 +188,6 @@ Remaining:
 | `agent/identity.py` | ADR-0003 | `core/identity.py` | 495 | 250 |
 | `agent/permission.py` | ADR-0003 | `core/permission.py` | 455 | 250 |
 | `agent/audit.py` | ADR-0003 | `core/audit_logger.py` | 177 | 150 |
-| `agent/output_guard.py` | ADR-0003 | `core/agent_output_guard.py` | 86 | 200 |
 | `agent/prompt.py` | ADR-0003 | `core/prompt_assembler.py` | 157 | 200 |
 | `agent/context.py` | ADR-0003 | `core/context_manager.py` | 1 569 | 400 |
 | `agent/tools.py` | ADR-0003 | `core/tool_executor.py` | 1 609 | 300 |
@@ -281,11 +282,11 @@ log` reader can diff the world before / after.
 1. Read this `STATUS.md` first, then `docs/revamp/PLAN_AUDIT.md`
    and `docs/revamp/core_audit.md` for the rationale behind the
    Phase 2 commit plan.
-2. **Recommended next slice — Phase 2 commit 3 in the audit plan**:
-   port `core/identity.py` + `core/persona.py` + `core/output_guard.py`
-   + `core/output_formatter.py` as MOVE-only commits with re-export
-   shims. These are well-scoped, well-tested, and unblock the
-   prompt-builder pipeline.
+2. **Recommended next slice — Phase 2 commits 4 and 5**:
+   port `core/identity.py` (495 LOC) and `core/persona.py` (467 LOC)
+   as separate MOVE commits with re-export shims. These two are the
+   largest MOVE candidates that ship without behaviour change, and
+   landing them unblocks the prompt-builder pipeline.
 3. After (2): walk the MOVE list in `core_audit.md` in the order
    given. Each commit:
    * moves one tightly-scoped legacy file to `agent/`,

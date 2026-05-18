@@ -12,6 +12,20 @@ from :mod:`openakita.agent.facade` once the rewrite slices land.
 from __future__ import annotations
 
 from .errors import UserCancelledError
+from .output_formatter import (
+    JSONFormatter,
+    OutputFormatter,
+    StreamJSONFormatter,
+    TextFormatter,
+    create_formatter,
+)
+from .output_guard import (
+    CODE_EXEC_TOOLS,
+    DISCLAIMER_TEXT,
+    detect_numeric_output,
+    detect_numeric_task,
+    validate_no_fabricated_numbers,
+)
 from .working_facts import (
     extract_working_facts,
     format_working_facts,
@@ -19,8 +33,18 @@ from .working_facts import (
 )
 
 __all__ = [
+    "CODE_EXEC_TOOLS",
+    "DISCLAIMER_TEXT",
+    "JSONFormatter",
+    "OutputFormatter",
+    "StreamJSONFormatter",
+    "TextFormatter",
     "UserCancelledError",
+    "create_formatter",
+    "detect_numeric_output",
+    "detect_numeric_task",
     "extract_working_facts",
     "format_working_facts",
     "merge_working_facts",
+    "validate_no_fabricated_numbers",
 ]
