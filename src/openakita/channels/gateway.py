@@ -1028,6 +1028,42 @@ class MessageGateway:
         self._GROUP_CONTEXT_MAX_ITEMS = 20
         self._GROUP_CONTEXT_TTL = 600  # 10 分钟
 
+        # ==================== Runtime v2 canary dispatch ====================
+        # 每个 session 当前正在跑的 v2 dispatch 的 CancellationToken；用户
+        # 通过 IM 发送"中止/结束任务"等 fast-path 时（commit 5 接入），
+        # 我们查表把它 cancel 掉，由 Supervisor 自动落最终 checkpoint。
+        from openakita.runtime.cancel_token import CancellationToken as _CT
+        self._v2_cancel_tokens: dict[str, _CT] = {}
+
+        # 把 session->org_id 的查询能力注入到 runtime.session_bridge，让
+        # runtime.channel_routing.dispatch_inbound_message_to_v2 不必导入
+        # openakita.sessions（避免 fork-style 重写后的循环依赖，ADR-0001）。
+        try:
+            from openakita.runtime.session_bridge import register_session_org_lookup
+            register_session_org_lookup(self._lookup_org_id_for_session)
+        except Exception as _exc:
+            logger.debug("[v2 dispatch] failed to register session lookup: %s", _exc)
+
+    def _lookup_org_id_for_session(self, session_key: str) -> str | None:
+        """Reverse-lookup helper used by ``runtime.session_bridge``.
+
+        Reads ``bound_org_id`` off the session metadata produced by the
+        ``/org bind`` handler (see ``_handle_org_command``). Returns
+        ``None`` for unbound sessions or any internal failure (never
+        raises -- the runtime contract forbids it).
+        """
+        try:
+            sessions = getattr(self.session_manager, "_sessions", None)
+            if not isinstance(sessions, dict):
+                return None
+            session = sessions.get(session_key)
+            if session is None:
+                return None
+            bound = session.get_metadata("bound_org_id") or ""
+            return str(bound) if bound else None
+        except Exception:
+            return None
+
     def enable_dm_pairing(self, data_dir: "Path") -> None:
         """Enable DM Pairing authorization."""
         from .dm_pairing import DMPairingManager
@@ -2968,39 +3004,96 @@ class MessageGateway:
                     return str(org_id), task
         return None
 
-    def _maybe_log_v2_routing_plan(self, session_key: str) -> None:
-        """Phase-6 canary observability hook.
+    async def _try_dispatch_v2(
+        self,
+        message: "UnifiedMessage",
+        attachments: list | None = None,
+    ) -> bool:
+        """P-RC-1: dispatch a canary org's IM message through v2 Supervisor.
 
-        On every inbound message, ask :mod:`runtime.channel_routing`
-        whether v2 would have routed it and emit a one-line structured
-        log. This is **observation only** — the legacy path always
-        continues to run during the canary window. The routing helper
-        itself is production-shaped (returns a :class:`RoutingPlan`
-        dataclass, never raises). Phase 7 flips
-        ``settings.runtime_v2_enabled`` to True by default; Phase 8
-        replaces the legacy delegate call below with a real
-        ``runtime.supervisor`` run.
+        Returns ``True`` iff v2 took the message (the caller MUST NOT
+        run the legacy path). Returns ``False`` for every reason that
+        should keep the legacy path live: flag off, org not canary,
+        session not bound, runtime not ready, or any unexpected error.
 
-        We deliberately do NOT try to resolve the bound org from
-        ``session_key`` here. Today the IM gateway does not carry an
-        org-aware session reverse lookup, and adding one in this
-        commit would couple the canary hook to that future API. The
-        routing helper handles ``org_id=None`` cleanly by returning a
-        ``skipped: not bound`` plan, which is the right answer for
-        every non-org IM session anyway.
+        Gating order (cheapest first):
+        1. ``settings.runtime_v2_enabled`` master switch;
+        2. ``settings.runtime_v2_canary_orgs`` allow-list (added in
+           commit 6; absent / empty -> nobody is canary);
+        3. session reverse lookup -> bound org id;
+        4. org id in canary allow-list;
+        5. construct ``StreamBus`` / ``ImStreamBridge`` /
+           ``CancellationToken``, stash the token for the cancel verb
+           (commit 5), call ``dispatch_inbound_message_to_v2``.
+
+        The supervisor's stream events are translated into Chinese IM
+        messages by ``ImStreamBridge.relay_to`` running as a sibling
+        background task; both the bridge and the dispatch share the
+        same ``StreamBus`` instance.
         """
         try:
-            from openakita.runtime.channel_routing import route_inbound_message_to_v2
+            from openakita.config import settings
 
-            plan = route_inbound_message_to_v2(org_id=None)
-            logger.debug(
-                "[IM v2-canary] session=%s status=%s reason=%s",
-                session_key,
-                plan.status,
-                plan.reason,
+            if not getattr(settings, "runtime_v2_enabled", False):
+                return False
+            canary_orgs = getattr(settings, "runtime_v2_canary_orgs", set()) or set()
+            if not canary_orgs:
+                return False
+
+            session_key = self._get_session_key(message)
+            from openakita.runtime.session_bridge import get_org_id_for_session
+
+            org_id = get_org_id_for_session(session_key)
+            if not org_id or org_id not in canary_orgs:
+                return False
+
+            from openakita.runtime.cancel_token import CancellationToken
+            from openakita.runtime.channel_routing import dispatch_inbound_message_to_v2
+            from openakita.runtime.im_stream_bridge import ImStreamBridge
+            from openakita.runtime.stream import StreamBus
+
+            stream_bus = StreamBus()
+            bridge = ImStreamBridge(stream_bus=stream_bus)
+            cancel_token = CancellationToken()
+            self._v2_cancel_tokens[session_key] = cancel_token
+
+            async def _bridge_send(_key: str, body: str) -> None:
+                await self._send_response(message, body)
+
+            relay_task = asyncio.create_task(
+                bridge.relay_to(_bridge_send, session_key=session_key),
             )
-        except Exception as exc:  # noqa: BLE001 — must never break the legacy path
-            logger.debug("[IM v2-canary] hook failed (non-fatal): %s", exc)
+            text = (message.plain_text or "").strip()
+            try:
+                plan = await dispatch_inbound_message_to_v2(
+                    session_key=session_key,
+                    org_id=org_id,
+                    message=text,
+                    attachments=attachments,
+                    cancel_token=cancel_token,
+                    stream_bus=stream_bus,
+                )
+            finally:
+                self._v2_cancel_tokens.pop(session_key, None)
+                with contextlib.suppress(Exception):
+                    await stream_bus.close()
+                relay_task.cancel()
+                with contextlib.suppress(Exception):
+                    await relay_task
+
+            logger.info(
+                "[v2 dispatch] session=%s org=%s status=%s reason=%s",
+                session_key, org_id, plan.status, plan.reason,
+            )
+            if plan.routed or plan.cancelled:
+                return True
+            return False
+        except Exception as exc:  # noqa: BLE001 -- never break the legacy path
+            logger.warning(
+                "[v2 dispatch] _try_dispatch_v2 failed (non-fatal): %s", exc,
+                exc_info=True,
+            )
+            return False
 
     def _get_org_manager(self):
         """从 OrgCommandService 链路上取出 OrgManager 单例。
@@ -3711,7 +3804,9 @@ class MessageGateway:
             f'text="{user_text[:100]}"'
         )
 
-        self._maybe_log_v2_routing_plan(session_key)
+        # P-RC-1: canary-org v2 dispatch. Returns True if v2 took over.
+        if await self._try_dispatch_v2(message):
+            return
 
         typing_task: asyncio.Task | None = None
         session = None
