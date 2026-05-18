@@ -759,10 +759,12 @@ class Settings(BaseSettings):
     #   - 后续 Phase 6 的 channels gateway 会按 org 选择 v2 supervisor 路径
     # 设置：在 .env 里写 RUNTIME_V2_ENABLED=true 或在 settings 上动态切换。
     runtime_v2_enabled: bool = Field(
-        default=False,
+        default=True,
         description=(
             "灰度开关：是否启用 src/openakita/runtime/ 下的 v2 运行时及其 API "
-            "facade（v2 模板、v2 supervisor）。默认关闭；Phase 7 cutover 时翻转为 True。"
+            "facade（v2 模板、v2 supervisor）。Phase 7 cutover 已翻转为 True。"
+            "如需回退到 legacy 路径仅暴露 v1 endpoints，在 .env 里写 "
+            "RUNTIME_V2_ENABLED=false 即可。"
         ),
     )
 
