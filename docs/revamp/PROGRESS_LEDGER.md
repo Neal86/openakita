@@ -2,7 +2,7 @@
 
 <!-- machine-readable phase marker; do NOT remove.
      Parsed by tests/revamp/_ledger.py + tests/parity/test_no_facade.py. -->
-current_phase: P-RC-4
+current_phase: P-RC-5
 
 > Source of truth for every commit landed on `revamp/v2` during
 > the post-RC continuation phases (P-RC-0 → P-RC-8). One row per
@@ -140,13 +140,19 @@ loses its sentinel allowance for these three files.
 | `11eaec49` | P-RC-4 P4.15a | refactor(core): rename core/context_manager.py to _context_manager_legacy.py (pure git mv) | rename only | 0 | ADR-0001 |
 | `0af43180` | P-RC-4 P4.15b | refactor(core): replace core/context_manager.py body with thin import shim | core/context_manager.py 1799->36 (lazy __getattr__ re-export); agent/context.py imports updated to use _context_manager_legacy | 0 | ADR-0001 |
 | `7b46216e` | P-RC-4 P4.16 | test(parity): real parity for ContextManager (5 fixtures + __file__ divergence) | +112 (test_context_parity.py) + 5 JSON fixtures | +7 (5 fixtures + __file__ + class-identity) | ADR-0001 |
-| _this commit_ | P-RC-4 P4.17 | docs(revamp): G-RC-4 gate review + STATUS scoreboard update | +174 (gates/G-RC-4.md) + STATUS scoreboard row | 0 | ADR-0001 |
-| _this commit_ | P-RC-4 P4.10 | feat(agent): implement real agent/tools.py on extracted helpers (~280 LOC) | +330 (agent/tools.py 56->401) | -0 (no new tests; parity tests cover behaviour) | ADR-0001 |
- refactor(core): replace core/brain.py body with thin import shim | core/brain 2015 -> 19 (shim), _brain_legacy preserves legacy body | 0 | ADR-0001, ADR-0003 |
+| `456bcb45` | P-RC-4 P4.17 | docs(revamp): G-RC-4 gate review + STATUS scoreboard update | +174 (gates/G-RC-4.md) + STATUS scoreboard row | 0 | ADR-0001 |
 
 ## P-RC-5 — Phase 2 real slim-down: reasoning_engine
 
-_Not started._
+G-RC-4 was signed; this phase rewrites the 8725 LOC ``core/reasoning_engine.py`` god-class.
+Per continuation plan section 6 the rewrite extracts ~6-8 module-level guards/helpers into
+``runtime/state_graph/guards/*`` and ``agent/reasoning_nodes/*``, then implements a real
+``agent/reasoning.py`` (~580 LOC) composing those helpers plus the legacy class for the
+long-tail Decision cascade; ``core/reasoning_engine.py`` collapses to a thin lazy shim.
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-5 P5.0a | chore(revamp): bump ledger to P-RC-5 + clean P-RC-4 ledger residue (N8) | +12 / -3 (ledger header + dup row + orphan fragment + section preface) | 0 | — |
 
 ## P-RC-6 — Phase 2 real slim-down: agent.py
 
