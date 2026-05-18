@@ -11,6 +11,8 @@ import { safeFetch } from "../providers";
 import { copyToClipboard } from "../utils/clipboard";
 import { onWsEvent } from "../platform";
 import { useMdModules } from "../views/chat/hooks/useMdModules";
+import { createV2Stream, type V2StreamEvent } from "../api/v2Stream";
+import { ProgressLedgerTimeline, type ProgressLedgerEvent } from "./ProgressLedgerTimeline";
 import { FileAttachmentCard } from "./FileAttachmentCard";
 import type { FileAttachment } from "./FileAttachmentCard";
 import {
@@ -98,6 +100,16 @@ export interface OrgChatPanelProps {
   onClose?: () => void;
   /** Map node IDs to display names so progress lines show readable names. */
   nodeNames?: Record<string, string>;
+  /**
+   * Which supervisor runtime drives this org. ``"v1"`` keeps the
+   * legacy WS + ``onWsEvent`` + ``/api/orgs/.../activity`` path
+   * (every existing call site). ``"v2"`` ALSO subscribes to the
+   * SSE feed at ``/api/v2/orgs/{id}/stream`` and renders a
+   * :class:`ProgressLedgerTimeline` above the chat list. The v1
+   * path is left untouched in either mode so a v2-bound org keeps
+   * working with the IM-side aggregation while it migrates.
+   */
+  runtime?: "v1" | "v2";
 }
 
 /**
@@ -357,7 +369,7 @@ function loadFromLocalStorage(cid: string): ChatMsg[] {
   } catch { return []; }
 }
 
-export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, title, onClose, nodeNames }: OrgChatPanelProps) {
+export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, title, onClose, nodeNames, runtime }: OrgChatPanelProps) {
   const { t } = useTranslation();
   const md = useMdModules();
   const [messages, setMessages] = useState<ChatMsg[]>([]);
@@ -392,6 +404,39 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
 
   useEffect(scrollToBottom, [messages, scrollToBottom]);
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
+
+  // P-RC-2 commit P2.6: v2-bound orgs additionally subscribe to the
+  // SSE progress feed at ``/api/v2/orgs/{id}/stream`` and surface
+  // ``progress_ledger`` events through :class:`ProgressLedgerTimeline`.
+  // The legacy ``onWsEvent`` path below stays intact -- this useEffect
+  // is purely additive and is short-circuited when ``runtime !== "v2"``.
+  const [v2LedgerEvents, setV2LedgerEvents] = useState<ProgressLedgerEvent[]>([]);
+  useEffect(() => {
+    if (runtime !== "v2" || !orgId) return;
+    const stream = createV2Stream(orgId, { apiBase: apiBaseUrl });
+    const off = stream.onEvent("progress_ledger", (ev: V2StreamEvent) => {
+      const p = ev.payload as Record<string, unknown>;
+      setV2LedgerEvents((prev) => [
+        ...prev,
+        {
+          id: ev.event_id ?? `${ev.command_id}:${ev.superstep}:${ev.ts}`,
+          ts: ev.ts ?? ev.emitted_at ?? new Date().toISOString(),
+          is_request_satisfied: Boolean(p?.is_request_satisfied),
+          is_in_loop: Boolean(p?.is_in_loop),
+          is_progress_being_made: Boolean(p?.is_progress_being_made),
+          next_speaker: typeof p?.next_speaker === "string" ? (p.next_speaker as string) : "",
+          instruction_or_question:
+            typeof p?.instruction_or_question === "string"
+              ? (p.instruction_or_question as string)
+              : "",
+        },
+      ]);
+    });
+    return () => {
+      off();
+      stream.close();
+    };
+  }, [runtime, orgId, apiBaseUrl]);
 
   // 拉取可用 IM bot 列表，转成 ForwardTargetOption。
   // 当前每个 bot 只取它的默认 chat_id（credentials 里的 ``default_chat_id``
@@ -1314,6 +1359,12 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
               </button>
             )}
           </div>
+        </div>
+      )}
+
+      {runtime === "v2" && (
+        <div className="ocp-v2-timeline" data-testid="ocp-v2-timeline">
+          <ProgressLedgerTimeline events={v2LedgerEvents} />
         </div>
       )}
 

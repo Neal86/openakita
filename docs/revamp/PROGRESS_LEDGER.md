@@ -71,7 +71,8 @@ cold-session `org_id` rehydration in `MessageGateway` (#3).
 | `2d35c0f9` | P-RC-2 P2.2 | feat(channels): rehydrate cold-session org_id from disk in lookup | +153 / -13 | +6 | ADR-0002 |
 | `00c783f3` | P-RC-2 P2.3 | feat(api): add GET /api/v2/orgs/{id}/stream (SSE) backed by StreamBus | +400 / -1 | +5 | ADR-0006 |
 | `74d565b7` | P-RC-2 P2.4 | feat(setup-center): add v2 stream client (EventSource wrapper) + vitest infra | +316 (src) +1119 (lock, generated) | +5 (vitest) | ADR-0006 |
-| _this commit_ | P-RC-2 P2.5 | feat(setup-center): render ProgressLedgerTimeline component | +198 | +4 (vitest) | ADR-0006 |
+| `415226a7` | P-RC-2 P2.5 | feat(setup-center): render ProgressLedgerTimeline component | +219 / -2 | +4 (vitest) | ADR-0006 |
+| _this commit_ | P-RC-2 P2.6 | feat(setup-center): OrgChatPanel switches to v2 stream when org is v2-bound | +160 | +2 (vitest) | ADR-0006 |
 
 ## P-RC-3 — Multi-process-safe v2 persistence
 
