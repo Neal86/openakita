@@ -725,139 +725,16 @@ from openakita.runtime.state_graph.guards.recap_context import (  # noqa: E402
 )
 
 
-_USER_BLOCKED_MARKERS = (
-    "无法继续",
-    "不能继续",
-    "没法继续",
-    "需要用户",
-    "需要你",
-    "请手动",
-    "等待用户",
-    "卡住",
-    "卡在",
-    "遇到技术障碍",
-    "需要人工",
-    "需要协助",
-    "需要帮助",
-    "需要登录",
-    "验证码",
-    "权限不足",
-    "浏览器已关闭",
-    "浏览器被关闭",
-    "被用户关闭",
+# Extracted to runtime/state_graph/guards/conversation_state.py (P-RC-5 P5.7);
+# re-exported here under the legacy private names for backward compat.
+from openakita.runtime.state_graph.guards.conversation_state import (  # noqa: E402
+    HARD_USER_BLOCKER_TOOL_MARKERS as _HARD_USER_BLOCKER_TOOL_MARKERS,
+    RECOVERABLE_TOOL_ERROR_MARKERS as _RECOVERABLE_TOOL_ERROR_MARKERS,
+    USER_BLOCKED_ACTIONS as _USER_BLOCKED_ACTIONS,
+    USER_BLOCKED_MARKERS as _USER_BLOCKED_MARKERS,
+    has_recoverable_tool_issue as _has_recoverable_tool_issue,
+    looks_like_waiting_for_user_response as _looks_like_waiting_for_user_response,
 )
-
-_USER_BLOCKED_ACTIONS = (
-    "无法",
-    "不能",
-    "没法",
-    "失败",
-    "超时",
-    "卡住",
-    "卡在",
-    "阻塞",
-    "需要",
-    "等待",
-)
-
-_RECOVERABLE_TOOL_ERROR_MARKERS = (
-    "未知工具",
-    "unknown_tool",
-    "No handler mapped for tool",
-    "is deferred",
-    "must first call tool_search",
-    "selector and text is required",
-    "selector or text is required",
-)
-
-_HARD_USER_BLOCKER_TOOL_MARKERS = (
-    "浏览器连接已断开",
-    "浏览器已被用户关闭",
-    "浏览器被用户关闭",
-    "验证码",
-    "需要用户确认",
-    "权限不足",
-)
-
-
-def _looks_like_waiting_for_user_response(text: str) -> bool:
-    """Whether a post-tool final answer is a real user handoff, not a task promise.
-
-    This protects long ReAct tasks from being pushed back into tool execution by
-    completion verification after the model has already reported a blocker such
-    as "需要你截图/请手动确认/浏览器被关闭". Those replies are valid stopping
-    points: the next step must come from the user, not another forced tool call.
-    """
-    normalized = (text or "").strip()
-    if not normalized:
-        return False
-
-    lowered = normalized.lower()
-    if any(
-        marker in lowered
-        for marker in (
-            "waiting for user",
-            "need your help",
-            "need you to",
-            "please provide",
-            "please confirm",
-            "manual confirmation",
-            "cannot continue",
-            "can't continue",
-            "blocked",
-        )
-    ):
-        return True
-
-    if any(marker in normalized for marker in _USER_BLOCKED_MARKERS):
-        return True
-
-    if "请" in normalized and any(
-        marker in normalized
-        for marker in (
-            "手动",
-            "确认",
-            "提供",
-            "截图",
-            "验证码",
-            "登录",
-            "权限",
-        )
-    ):
-        return True
-
-    # More conservative composite check for phrases that split the blocker and
-    # the requested user action across a sentence.
-    has_blocker = any(marker in normalized for marker in _USER_BLOCKED_ACTIONS)
-    asks_user = any(
-        marker in normalized
-        for marker in (
-            "你",
-            "用户",
-            "手动",
-            "确认",
-            "提供",
-            "截图",
-            "验证码",
-            "登录",
-            "权限",
-        )
-    )
-    return has_blocker and asks_user
-
-
-def _has_recoverable_tool_issue(tool_results: list[dict] | None) -> bool:
-    """Whether the latest blocker is a tool-call shape issue the model can repair."""
-    for result in tool_results or []:
-        content = str(result.get("content") or "")
-        if not content:
-            continue
-        if any(marker in content for marker in _HARD_USER_BLOCKER_TOOL_MARKERS):
-            return False
-        is_error = result.get("is_error")
-        if is_error and any(marker in content for marker in _RECOVERABLE_TOOL_ERROR_MARKERS):
-            return True
-    return False
 
 
 class ReasoningEngine:
