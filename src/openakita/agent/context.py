@@ -41,19 +41,19 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
-from openakita.core.context_manager import (
+from openakita.core._context_manager_legacy import (
     CHARS_PER_TOKEN as _LEGACY_CHARS_PER_TOKEN,
 )
-from openakita.core.context_manager import (
+from openakita.core._context_manager_legacy import (
     CHUNK_MAX_TOKENS as _LEGACY_CHUNK_MAX_TOKENS,
 )
-from openakita.core.context_manager import (
+from openakita.core._context_manager_legacy import (
     CONTEXT_BOUNDARY_MARKER as _LEGACY_CONTEXT_BOUNDARY_MARKER,
 )
-from openakita.core.context_manager import (
+from openakita.core._context_manager_legacy import (
     ContextManager as _LegacyContextManagerImpl,
 )
-from openakita.core.context_manager import (
+from openakita.core._context_manager_legacy import (
     ContextPressure as _LegacyContextPressure,
 )
 from openakita.core.context_utils import (
