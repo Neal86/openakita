@@ -20,16 +20,30 @@ from .base import (
     NodeProtocol,
     NodeRegistration,
 )
+from .llm_node import (
+    BrainPrompt,
+    BrainResponse,
+    LLMNode,
+    NodeBrain,
+    ToolCallRequest,
+    TranscriptTurn,
+)
 from .tool_node import ToolInvocation, ToolNode, ToolResult, ToolRunner
 
 __all__ = [
     "BaseNode",
+    "BrainPrompt",
+    "BrainResponse",
+    "LLMNode",
+    "NodeBrain",
     "NodeContext",
     "NodeLifecycleEvent",
     "NodeProtocol",
     "NodeRegistration",
+    "ToolCallRequest",
     "ToolInvocation",
     "ToolNode",
     "ToolResult",
     "ToolRunner",
+    "TranscriptTurn",
 ]
