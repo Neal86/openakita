@@ -69,6 +69,8 @@ import { WorkbenchNodePicker, type WorkbenchTemplate } from "../components/Workb
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { OrgAvatar, AVATAR_PRESETS, AVATAR_MAP } from "../components/OrgAvatars";
 import { OrgChatPanel } from "../components/OrgChatPanel";
+import { TemplatePickerDrawer } from "../components/TemplatePickerDrawer";
+import { createOrg as createOrgV2, type OrgWire } from "../api/orgs";
 import { OrgBlackboardPanel, type OrgBlackboardPanelHandle } from "../components/OrgBlackboardPanel";
 import { OrgMonitorPanel } from "../components/OrgMonitorPanel";
 import { OrgDashboard } from "../components/OrgDashboard";
@@ -1342,6 +1344,43 @@ export function OrgEditorView({
     }
   }, [apiBaseUrl, fetchOrgList, showToast, t]);
 
+  // P-RC-2 P2.7: persist a v2 OrgWire returned by TemplatePickerDrawer
+  // (from POST /api/v2/orgs/templates/{id}/instantiate) via POST
+  // /api/v2/orgs, then refresh and select the new org.
+  const handleCreateOrgV2FromTemplate = useCallback(
+    async (org: OrgWire) => {
+      if (orgCreateBusyRef.current) return;
+      orgCreateBusyRef.current = true;
+      setCreatingOrg(true);
+      try {
+        const created = await createOrgV2(apiBaseUrl, org);
+        const list = await fetchOrgList();
+        let newId = typeof created?.id === "string" ? created.id : "";
+        if (!newId && list.length > 0) {
+          const sorted = [...list].sort((a, b) =>
+            (b.created_at || "").localeCompare(a.created_at || ""),
+          );
+          newId = sorted[0]?.id ?? "";
+        }
+        if (newId) setSelectedOrgId(newId);
+        showToast(
+          newId
+            ? t("org.editor.createdFromTemplate")
+            : t("org.editor.createdButNotFound"),
+          newId ? "ok" : "error",
+        );
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error("Failed to persist v2 org from template:", e);
+        showToast(t("org.editor.createFromTemplateFailed", { error: msg }), "error");
+      } finally {
+        orgCreateBusyRef.current = false;
+        setCreatingOrg(false);
+      }
+    },
+    [apiBaseUrl, fetchOrgList, showToast, t],
+  );
+
   const [confirmDeleteOrgId, setConfirmDeleteOrgId] = useState<string | null>(null);
 
   const handleDeleteOrg = useCallback(async (orgId: string) => {
@@ -1960,6 +1999,19 @@ export function OrgEditorView({
                   </Tooltip>
                   <Tooltip>
                     <TooltipTrigger asChild>
+                      <span data-testid="org-editor-v2-template-trigger">
+                        <TemplatePickerDrawer
+                          apiBase={apiBaseUrl}
+                          onCreated={(org) => void handleCreateOrgV2FromTemplate(org)}
+                        >
+                          <Button variant="link" size="sm" disabled={creatingOrg} className="h-7 px-2 text-xs text-primary cursor-pointer">新建 v2 组织（从模板）</Button>
+                        </TemplatePickerDrawer>
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom">{t("org.editor.createFromTemplate")}</TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
                       <Button variant="link" size="sm" onClick={() => orgImportRef.current?.click()} disabled={creatingOrg} className="h-7 px-2 text-xs text-primary cursor-pointer">{t("org.editor.import")}</Button>
                     </TooltipTrigger>
                     <TooltipContent side="bottom">{t("org.editor.importFromFile")}</TooltipContent>
@@ -2108,6 +2160,21 @@ export function OrgEditorView({
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent side="bottom">{t("org.editor.createBlank")}</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span data-testid="org-editor-v2-template-trigger-compact">
+                    <TemplatePickerDrawer
+                      apiBase={apiBaseUrl}
+                      onCreated={(org) => void handleCreateOrgV2FromTemplate(org)}
+                    >
+                      <Button variant="link" size="sm" disabled={creatingOrg} className="h-7 px-2 text-xs text-primary cursor-pointer">
+                        新建 v2 组织（从模板）
+                      </Button>
+                    </TemplatePickerDrawer>
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">{t("org.editor.createFromTemplate")}</TooltipContent>
               </Tooltip>
               <Tooltip>
                 <TooltipTrigger asChild>
