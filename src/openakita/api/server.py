@@ -753,6 +753,43 @@ def create_app(
         except Exception as e:
             logger.warning("[Shutdown] AsyncBatchAuditWriter stop error: %s", e)
 
+    # ------------------------------------------------------------
+    # P-RC-3 T4: idle StreamBus cleanup (per-org SSE registry).
+    # ------------------------------------------------------------
+    app.state.stream_cleanup_task = None
+
+    @app.on_event("startup")
+    async def _start_stream_cleanup() -> None:
+        try:
+            from openakita.runtime.stream_registry import (
+                cleanup_idle_buses_periodically,
+            )
+
+            app.state.stream_cleanup_task = asyncio.create_task(
+                cleanup_idle_buses_periodically(),
+                name="openakita-stream-registry-cleanup",
+            )
+            logger.info("[Startup] StreamRegistry cleanup task started")
+        except Exception as e:  # noqa: BLE001 -- never block startup
+            logger.warning(
+                "[Startup] StreamRegistry cleanup not started: %s", e
+            )
+
+    @app.on_event("shutdown")
+    async def _stop_stream_cleanup() -> None:
+        task = getattr(app.state, "stream_cleanup_task", None)
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=2.0)
+        except (asyncio.CancelledError, TimeoutError):
+            pass
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[Shutdown] StreamRegistry cleanup stop error: %s", e
+            )
+
     return app
 
 

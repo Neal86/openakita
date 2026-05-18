@@ -26,7 +26,11 @@ from fastapi.responses import StreamingResponse
 from openakita.config import settings
 from openakita.runtime.orgs import OrgNotFound, get_default_store
 from openakita.runtime.stream import StreamEvent
-from openakita.runtime.stream_registry import get_or_create_org_stream_bus
+from openakita.runtime.stream_registry import (
+    get_or_create_org_stream_bus,
+    mark_subscriber_attached,
+    mark_subscriber_lost,
+)
 
 __all__ = ["router"]
 
@@ -73,6 +77,7 @@ async def _event_stream(request: Request, org_id: str) -> AsyncIterator[str]:
         drain_on_close=False,
     )
     await bus.register_subscription(sub)
+    mark_subscriber_attached(org_id)
 
     # The try/finally must wrap every yield so ``aclose`` reliably
     # detaches the subscription regardless of which yield point
@@ -104,6 +109,7 @@ async def _event_stream(request: Request, org_id: str) -> AsyncIterator[str]:
         pass
     finally:
         await bus.detach_subscription(sub)
+        mark_subscriber_lost(org_id)
 
 
 @router.get("/{org_id}/stream", summary="SSE stream of v2 supervisor progress for one org")
