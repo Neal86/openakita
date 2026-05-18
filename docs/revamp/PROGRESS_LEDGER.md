@@ -52,7 +52,8 @@ two nits the P-RC-0 audit raised before the main work begins.
 | fc2558dd | P-RC-1 #4 | feat(channels): replace canary log hook with real v2 dispatch (canary-org gated) | +125 / -30 | 0 | ADR-0002, ADR-0004 |
 | a97fa73b | P-RC-1 #5 | feat(channels): plumb IM cancel verb to runtime CancellationToken (per org) | +47 (gw) +147 (test) | +4 | ADR-0002, ADR-0004 |
 | fc701385 | P-RC-1 #6 | feat(config): add runtime_v2_canary_orgs allow-list (default empty) | +37 / -2 (cfg) +45 (test) | +5 | ADR-0002 |
-| _this commit_ | P-RC-1 #7 | test(integration): e2e canary org runs via Supervisor + cancel + resume | +273 (test) +11 (gw drain fix) | +1 | ADR-0002, ADR-0004, ADR-0006 |
+| 4d396303 | P-RC-1 #7 | test(integration): e2e canary org runs via Supervisor + cancel + resume | +273 (test) +11 (gw drain fix) | +1 | ADR-0002, ADR-0004, ADR-0006 |
+| _this commit_ | P-RC-1 G | docs(revamp): G-RC-1 gate review + STATUS scoreboard update | +224 (gate) + STATUS row + ledger fill-in | 0 | — |
 
 ## P-RC-2 — Frontend v2 wiring
 
