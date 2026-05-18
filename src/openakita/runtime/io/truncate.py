@@ -12,7 +12,7 @@ can ``read_file`` it later if needed.
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from openakita.config import settings
 
@@ -73,9 +73,9 @@ def smart_truncate(
             from .overflow import save_overflow as _default_save_overflow
             save_overflow_fn = _default_save_overflow
         path = save_overflow_fn(label, content)
-        overflow_ref = f", saved full output to {path}, use read_file to inspect"
+        overflow_ref = f", 完整内容: {path}, 可用 read_file 查看"
 
-    marker = f"\n[truncated, original {len(content)} chars{overflow_ref}]\n"
+    marker = f"\n[已截断, 原文{len(content)}字{overflow_ref}]\n"
 
     if tail > 0:
         return content[:head] + marker + content[-tail:], True

@@ -29,7 +29,7 @@ def test_smart_truncate_over_limit_returns_head_marker_tail() -> None:
     assert was is True
     # Head should be `a`s, tail should be `c`s (some of them).
     assert out.startswith("a")
-    assert "truncated" in out
+    assert "已截断" in out
     assert out.endswith("c")
 
 

@@ -161,7 +161,7 @@ def is_retriable_tool_error(exc: BaseException) -> bool:
     return is_retriable_exception(exc)
 
 
-def default_tool_retry_policy() -> "RetryPolicy":
+def default_tool_retry_policy() -> RetryPolicy:
     """Return the v2 default ``RetryPolicy`` for tool calls.
 
     Conservative defaults: 3 attempts, 100ms initial interval, 5s
