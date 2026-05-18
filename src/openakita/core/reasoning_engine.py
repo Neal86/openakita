@@ -1,14 +1,13 @@
-"""Backward-compat shim for the legacy ReAct reasoning engine.
+﻿"""Backward-compat shim for the legacy ReAct reasoning engine.
 
-Real code now lives in :mod:`openakita.core._reasoning_engine_legacy`
-(the renamed 8000+ LOC body). This shim re-exports the public surface
-so existing ``from openakita.core.reasoning_engine import X`` imports
-keep working unchanged.
-
-P-RC-5 / P5.9 (continuation plan section 6): this commit performs
-the rename + thin shim. The next commit (P5.10) lands the real v2
-implementation in :mod:`openakita.agent.reasoning` and repoints
-this shim's public surface to ``agent.reasoning``.
+Real v2 code now lives in :mod:`openakita.agent.reasoning` (the
+StateGraph-driven slim implementation that landed in P5.10); the
+historical 8000+ LOC body lives at
+:mod:`openakita.core._reasoning_engine_legacy`. This shim re-exports
+the public surface so existing
+``from openakita.core.reasoning_engine import X`` imports keep
+working unchanged, with the same legacy-fallback pattern as the
+sister shims for ``brain`` / ``tool_executor`` / ``context_manager``.
 """
 
 from __future__ import annotations
@@ -17,6 +16,9 @@ __all__ = ["Checkpoint", "Decision", "DecisionType", "ReasoningEngine"]
 
 
 def __getattr__(name):
+    if name in __all__:
+        from openakita.agent import reasoning as _v2
+        return getattr(_v2, name)
     from openakita.core import _reasoning_engine_legacy as _legacy
     if hasattr(_legacy, name):
         return getattr(_legacy, name)

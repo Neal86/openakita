@@ -168,7 +168,8 @@ long-tail Decision cascade; ``core/reasoning_engine.py`` collapses to a thin laz
 | `ef74fb34` | P-RC-5 P5.8a | refactor(runtime/state_graph/guards): extract tool-filter guards | +234 (tool_filters.py) / -195 (7 helpers/constants replaced by 1 re-import block); core/reasoning_engine 8237 -> 8057; baseline rebased | 0 (tests follow in P5.8b) | ADR-0001, ADR-0002 |
 | `e414a452` | P-RC-5 P5.8b | test(runtime/state_graph/guards): 22 cases for tool-filter guards | +144 (test_tool_filters.py) | +22 (anchor + 11 behaviour + 8 shell-write parametrize + 2 legacy-identity parity) | ADR-0001 |
 | `8e187b8d` | P-RC-5 P5.9a | refactor(core): rename reasoning_engine.py to _reasoning_engine_legacy.py (pre-shim move) | 0 net (pure git mv, --diff-filter=R100) | 0 (tests transiently fail until P5.9b shim) | ADR-0001 |
-| _this commit_ | P-RC-5 P5.9b | refactor(core): replace core/reasoning_engine.py body with thin shim | +25 (new shim) / 0 deletions; baseline core/reasoning_engine 8057 -> 25, adds _reasoning_engine_legacy 8057 | 0 (legacy tests resume passing) | ADR-0001, ADR-0002 |
+| `a8c8509d` | P-RC-5 P5.9b | refactor(core): replace core/reasoning_engine.py body with thin shim | +25 (new shim) / 0 deletions; baseline core/reasoning_engine 8057 -> 25, adds _reasoning_engine_legacy 8057 | 0 (legacy tests resume passing) | ADR-0001, ADR-0002 |
+| _this commit_ | P-RC-5 P5.10 | feat(agent): implement real agent/reasoning.py on StateGraph + guard composition | +315 / -55 (real ReasoningEngine subclassing _LegacyReasoningEngine; sentinel removed; core/reasoning_engine shim repointed); agent/reasoning 51 -> 333 baseline rebased | 0 net new tests (parity lands in P5.11); existing 1078 still pass; sentinel SLOC 222 (>200 floor) | ADR-0001, ADR-0002, ADR-0003 |
 
 ## P-RC-6 — Phase 2 real slim-down: agent.py
 
