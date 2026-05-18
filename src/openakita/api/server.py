@@ -48,6 +48,7 @@ from .routes import (
     orgs,
     orgs_v2,
     orgs_v2_stream,
+    build_info as build_info_routes,
     pending_approvals,
     qqbot_onboard,
     scheduler,
@@ -411,6 +412,9 @@ def create_app(
     # ``orgs_v2.router`` -- always-mount, refuse-to-serve when
     # ``runtime_v2_enabled`` is False.
     app.include_router(orgs_v2_stream.router)
+    # P-RC-2 commit P2.8: GET /api/build-info for the frontend
+    # stale-bundle banner. Always-mounted, unauthenticated.
+    app.include_router(build_info_routes.router)
     if plugins_routes is not None:
         app.include_router(plugins_routes.router)
 
