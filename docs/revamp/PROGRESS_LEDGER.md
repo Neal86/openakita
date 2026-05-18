@@ -2,7 +2,7 @@
 
 <!-- machine-readable phase marker; do NOT remove.
      Parsed by tests/revamp/_ledger.py + tests/parity/test_no_facade.py. -->
-current_phase: P-RC-1
+current_phase: P-RC-2
 
 > Source of truth for every commit landed on `revamp/v2` during
 > the post-RC continuation phases (P-RC-0 → P-RC-8). One row per
@@ -57,7 +57,16 @@ two nits the P-RC-0 audit raised before the main work begins.
 
 ## P-RC-2 — Frontend v2 wiring
 
-_Not started._
+G-RC-1 was signed; this phase wires the v2 supervisor stack into
+the setup-center frontend (SSE backend, EventSource client,
+ProgressLedgerTimeline, OrgChatPanel switch, TemplatePickerDrawer
+mount, stale-bundle banner) and closes the two residual risks the
+P-RC-1 gate review flagged: drain-on-close in `StreamBus` (#1) and
+cold-session `org_id` rehydration in `MessageGateway` (#3).
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-2 P2.0 | chore(revamp): bump ledger current_phase to P-RC-2 + apply N3/N4/N5 discipline doc | +60 | 0 | — |
 
 ## P-RC-3 — Multi-process-safe v2 persistence
 
@@ -82,3 +91,25 @@ _Not started._
 ## P-RC-8 — Endgame (renames, docs, acceptance, release)
 
 _Not started._
+
+## Discipline reminders (auto-collected by audits)
+
+These are nits / gotchas the per-phase audits surfaced; they are
+documented here so future executors do not re-discover them the hard
+way. Each entry is one line; the audit that raised it is named in
+parentheses. Once resolved across two consecutive phases, an entry
+may be retired from this list.
+
+* **N3** (G-RC-1 P-RC-1 audit): when a commit's ``Files:`` footer says
+  ``PROGRESS_LEDGER.md (append ...)``, the ledger row MUST be in the
+  same commit -- ``git add docs/revamp/PROGRESS_LEDGER.md`` before
+  ``git commit``. No more "next commit fills the prior hash".
+* **N4** (G-RC-1 P-RC-1 audit): keep per-commit diff strictly under
+  400 LOC. If insertions reach 380+, STOP and split the commit
+  before recording it.
+* **N5** (G-RC-1 P-RC-1 audit, cosmetic): write commit messages via
+  Python (``pathlib.Path("commit_msg.tmp").write_text(msg,
+  encoding='utf-8')`` then ``git commit -F commit_msg.tmp``); never
+  via PowerShell ``Out-File -Encoding utf8`` -- the latter prepends a
+  UTF-8 BOM and the resulting commit subject reads as
+  ``\ufefffeat(...): ...``.
