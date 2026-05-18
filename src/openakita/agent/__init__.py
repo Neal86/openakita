@@ -128,6 +128,8 @@ from .persona import (
     persist_trait_to_memory,
 )
 from .ralph import RalphLoop, StopHook, Task, TaskResult, TaskStatus
+from .reasoning import Checkpoint, DecisionType, ReasoningEngine
+from .reasoning import Decision as ReasoningDecision
 from .resource_budget import (
     BudgetAction,
     BudgetConfig,
@@ -253,6 +255,7 @@ __all__ = [
     "CapabilityKind",
     "CapabilityOrigin",
     "CapabilityVisibility",
+    "Checkpoint",
     "CommandSandbox",
     "ConfirmationDecision",
     "ContextManager",
@@ -265,6 +268,7 @@ __all__ = [
     "DEFAULT_TTL_SECONDS",
     "DISCLAIMER_TEXT",
     "Decision",
+    "DecisionType",
     "DeniedError",
     "Diagnostic",
     "DiagnosticBackend",
@@ -304,6 +308,8 @@ __all__ = [
     "PersonaTrait",
     "READONLY_EXPLORATION_TOOLS",
     "RalphLoop",
+    "ReasoningDecision",
+    "ReasoningEngine",
     "ResourceBudget",
     "RuffBackend",
     "Ruleset",

@@ -126,6 +126,28 @@ BASELINE_CASES: list[ParityCase] = [
         label="Brain Response default ctor parity",
         inputs={"content": ""},
     ),
+    ParityCase(
+        id="reasoning-decision-final-answer",
+        kind="reasoning_decision",
+        label="Decision FINAL_ANSWER parity",
+        inputs={
+            "decision_type": "FINAL_ANSWER",
+            "text_content": "已完成",
+            "stop_reason": "end_turn",
+        },
+    ),
+    ParityCase(
+        id="reasoning-decision-tool-calls",
+        kind="reasoning_decision",
+        label="Decision TOOL_CALLS parity",
+        inputs={
+            "decision_type": "TOOL_CALLS",
+            "tool_calls": [
+                {"name": "grep", "input": {"pattern": "Brain"}, "id": "t9"},
+            ],
+            "stop_reason": "tool_use",
+        },
+    ),
 ]
 
 

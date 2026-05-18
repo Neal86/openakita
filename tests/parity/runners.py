@@ -216,6 +216,45 @@ RunnerFn = Callable[[ParityCase], ParityResult]
 
 
 # ---------------------------------------------------------------------------
+# Kind 9 — reasoning engine DecisionType enum parity
+# ---------------------------------------------------------------------------
+
+
+def _reasoning_decision_v1(case: ParityCase) -> ParityResult:
+    from openakita.core.reasoning_engine import Decision, DecisionType
+
+    return _reasoning_decision_eval(Decision, DecisionType, case)
+
+
+def _reasoning_decision_v2(case: ParityCase) -> ParityResult:
+    from openakita.agent.reasoning import Decision, DecisionType
+
+    return _reasoning_decision_eval(Decision, DecisionType, case)
+
+
+def _reasoning_decision_eval(decision_cls, decision_type_cls, case: ParityCase) -> ParityResult:
+    name = case.inputs["decision_type"]
+    dtype = getattr(decision_type_cls, name)
+    dec = decision_cls(
+        type=dtype,
+        text_content=case.inputs.get("text_content", ""),
+        tool_calls=list(case.inputs.get("tool_calls", [])),
+        stop_reason=case.inputs.get("stop_reason", ""),
+    )
+    return ParityResult(
+        final_message=dec.text_content,
+        success=True,
+        tool_sequence=[(tc.get("name", ""), tc.get("input", {})) for tc in dec.tool_calls],
+        extras={
+            "type_value": dtype.value,
+            "type_name": dtype.name,
+            "stop_reason": dec.stop_reason,
+            "members": sorted([m.name for m in decision_type_cls]),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Kind 8 — brain Response dataclass identity / shape parity
 # ---------------------------------------------------------------------------
 
@@ -324,6 +363,7 @@ V1_RUNNERS: dict[str, RunnerFn] = {
     "smart_truncate": _smart_truncate_v1,
     "context_estimate_tokens": _context_estimate_v1,
     "brain_response": _brain_response_v1,
+    "reasoning_decision": _reasoning_decision_v1,
 }
 
 V2_RUNNERS: dict[str, RunnerFn] = {
@@ -335,6 +375,7 @@ V2_RUNNERS: dict[str, RunnerFn] = {
     "smart_truncate": _smart_truncate_v2,
     "context_estimate_tokens": _context_estimate_v2,
     "brain_response": _brain_response_v2,
+    "reasoning_decision": _reasoning_decision_v2,
 }
 
 
