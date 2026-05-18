@@ -1,13 +1,13 @@
 """V2 context helpers extracted from ``core.context_manager`` (P-RC-4 P4.13).
 
-Initial submodules (P4.13a):
+Three focused submodules host the leaf-level concerns lifted from
+the legacy 1799-LOC ContextManager:
 
 * :mod:`runtime.context.grouping` -- :func:`group_messages`
 * :mod:`runtime.context.budget_trace` -- :func:`calc_context_budget`,
   :func:`estimate_tokens`, :func:`payload_size_bytes`
-
-Compression helpers (:mod:`runtime.context.compress`) land in
-P4.13b.
+* :mod:`runtime.context.compress` -- :func:`pre_request_cleanup`,
+  :func:`sanitize_tool_pairs`
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from .budget_trace import (
     estimate_tokens,
     payload_size_bytes,
 )
+from .compress import pre_request_cleanup, sanitize_tool_pairs
 from .grouping import group_messages
 
 __all__ = [
@@ -26,4 +27,6 @@ __all__ = [
     "estimate_tokens",
     "group_messages",
     "payload_size_bytes",
+    "pre_request_cleanup",
+    "sanitize_tool_pairs",
 ]

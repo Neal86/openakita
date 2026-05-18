@@ -10,6 +10,8 @@ from openakita.runtime.context import (
     estimate_tokens,
     group_messages,
     payload_size_bytes,
+    pre_request_cleanup,
+    sanitize_tool_pairs,
 )
 
 # ---- group_messages ----
@@ -94,3 +96,64 @@ def test_payload_size_bytes_unicode_aware() -> None:
     msgs = [{"role": "user", "content": "你好"}]
     # UTF-8 encoding of Chinese chars is 3 bytes each; total > 2.
     assert payload_size_bytes(msgs) > len(str(msgs[0]))
+
+
+# ---- sanitize_tool_pairs ----
+
+def test_sanitize_tool_pairs_drops_orphan_tool_use() -> None:
+    msgs = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "let me try"},
+                {"type": "tool_use", "id": "t_orphan", "name": "x", "input": {}},
+            ],
+        }
+    ]
+    out = sanitize_tool_pairs(msgs)
+    assert out[0]["content"] == [{"type": "text", "text": "let me try"}]
+
+
+def test_sanitize_tool_pairs_keeps_paired_use_and_result() -> None:
+    msgs = [
+        {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "t1", "name": "x", "input": {}}],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "ok"},
+            ],
+        },
+    ]
+    out = sanitize_tool_pairs(msgs)
+    assert out == msgs
+
+
+def test_sanitize_tool_pairs_drops_orphan_tool_result() -> None:
+    msgs = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "missing", "content": "ok"},
+            ],
+        }
+    ]
+    out = sanitize_tool_pairs(msgs)
+    # Orphan tool_result removed; user message had only that block -> dropped.
+    assert out == []
+
+
+def test_sanitize_tool_pairs_preserves_plain_text_messages() -> None:
+    msgs = [{"role": "user", "content": "hi"}]
+    assert sanitize_tool_pairs(msgs) == msgs
+
+
+# ---- pre_request_cleanup ----
+
+def test_pre_request_cleanup_returns_list_for_empty_input() -> None:
+    # ``microcompact`` is well-tested by its own suite; we just assert
+    # the v2 wrapper preserves the empty-input contract.
+    out = pre_request_cleanup([])
+    assert isinstance(out, list)
