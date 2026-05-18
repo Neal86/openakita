@@ -77,8 +77,13 @@ NODE_FINALIZE = "finalize"
 
 # Routing label map keyed off ``DecisionType.value`` strings.
 _DECISION_TO_LABEL: dict[str, str] = {
-    "tool_use": "act",
+    # Real DecisionType.value strings from the legacy enum.
+    "tool_calls": "act",
     "final_answer": "verify",
+    # Extended exit-reason tokens the legacy ``_last_exit_reason`` uses.
+    # Not DecisionType values, but the routing map accepts them so a
+    # caller can pass either form.
+    "tool_use": "act",
     "ask_user": "finalize",
     "continue": "reason",
     "error": "finalize",
@@ -250,23 +255,37 @@ class ReasoningEngine(_LegacyReasoningEngine):
         """
         verdicts: list[GuardVerdict] = []
 
-        tag_msg = check_source_tag_consistency(text)
+        tools_executed_count = len(tool_results or [])
+        tag_msg = check_source_tag_consistency(text, tools_executed_count)
         verdicts.append(GuardVerdict("source_tag", tag_msg is None, tag_msg))
 
-        names = successful_tool_names(tool_results or [])
-        ack_msg = check_tool_failure_acknowledgement(text, names)
+        executed_names = [
+            (tr.get("name") or tr.get("tool_name") or "")
+            for tr in (tool_results or [])
+        ]
+        names = list(successful_tool_names(executed_names, tool_results))
+        ack_msg = check_tool_failure_acknowledgement(text, tool_results)
         verdicts.append(GuardVerdict("tool_failure_ack", ack_msg is None, ack_msg))
 
-        unbacked_msg = guard_unbacked_action_claim(
+        unbacked_out = guard_unbacked_action_claim(
             text,
-            successful_tool_names=names,
-            recent_messages=recent_messages or [],
+            executed_tool_names=names,
+            tool_results=tool_results,
         )
+        # The legacy guard returns the input text unchanged when clean
+        # and the text+warning suffix when it flagged an unbacked claim.
+        # The guard "passes" iff the returned text is identical to the
+        # input; otherwise the appended suffix is the warning message.
+        unbacked_passed = unbacked_out == text
         verdicts.append(
-            GuardVerdict("unbacked_action", unbacked_msg is None, unbacked_msg)
+            GuardVerdict(
+                "unbacked_action",
+                unbacked_passed,
+                None if unbacked_passed else unbacked_out[len(text):].strip(),
+            )
         )
 
-        recap = is_recap_context(last_user_text)
+        recap = is_recap_context(last_user_text, "")
         verdicts.append(GuardVerdict("recap_context", True, f"recap={recap}"))
 
         waiting = looks_like_waiting_for_user_response(text)
