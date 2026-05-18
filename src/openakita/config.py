@@ -8,8 +8,10 @@ from pathlib import Path
 
 os.environ.setdefault("OPENAKITA", "1")
 
-from pydantic import Field, model_validator
-from pydantic_settings import BaseSettings
+from typing import Annotated
+
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode
 
 logger = logging.getLogger(__name__)
 
@@ -789,6 +791,39 @@ class Settings(BaseSettings):
             "docs/revamp/rollback.md."
         ),
     )
+    runtime_v2_canary_orgs: Annotated[set[str], NoDecode] = Field(
+        default_factory=set,
+        description=(
+            "Comma-separated list of org ids whose inbound IM messages "
+            "are dispatched through runtime.supervisor instead of the "
+            "legacy OrgRuntime. Default empty preserves Phase-7 behaviour. "
+            "Set RUNTIME_V2_CANARY_ORGS=org_abc,org_xyz in .env to opt in. "
+            "The list is consumed by channels.gateway.MessageGateway."
+            "_try_dispatch_v2 (P-RC-1)."
+        ),
+    )
+
+    @field_validator("runtime_v2_canary_orgs", mode="before")
+    @classmethod
+    def _split_canary_orgs_csv(cls, value: object) -> object:
+        """Accept ``"org_a,org_b"`` from env and produce ``{"org_a", "org_b"}``.
+
+        Pydantic-settings reads env vars as strings; this validator
+        splits a CSV-formatted ``RUNTIME_V2_CANARY_ORGS`` value into a
+        :class:`set` of org ids. Whitespace and empty fragments are
+        dropped. Sequence and set inputs pass through untouched so
+        programmatic construction (tests, ``Settings(...)`` overrides)
+        keeps working.
+        """
+        if value is None or value == "":
+            return set()
+        if isinstance(value, str):
+            return {part.strip() for part in value.split(",") if part.strip()}
+        if isinstance(value, (set, frozenset)):
+            return {str(item).strip() for item in value if str(item).strip()}
+        if isinstance(value, (list, tuple)):
+            return {str(item).strip() for item in value if str(item).strip()}
+        return value
 
     # === Harness 配置 ===
     # 默认全部关闭/不限，对齐 Claude Code 风格（CLI 真人场景不强加业务护栏）。
