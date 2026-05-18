@@ -216,6 +216,41 @@ RunnerFn = Callable[[ParityCase], ParityResult]
 
 
 # ---------------------------------------------------------------------------
+# Kind 8 — brain Response dataclass identity / shape parity
+# ---------------------------------------------------------------------------
+
+
+def _brain_response_v1(case: ParityCase) -> ParityResult:
+    from openakita.core.brain import Response
+
+    return _brain_response_eval(Response, case)
+
+
+def _brain_response_v2(case: ParityCase) -> ParityResult:
+    from openakita.agent.brain import Response
+
+    return _brain_response_eval(Response, case)
+
+
+def _brain_response_eval(response_cls, case: ParityCase) -> ParityResult:
+    resp = response_cls(
+        content=case.inputs["content"],
+        tool_calls=list(case.inputs.get("tool_calls", [])),
+        stop_reason=case.inputs.get("stop_reason", ""),
+        usage=dict(case.inputs.get("usage", {})),
+    )
+    return ParityResult(
+        final_message=resp.content,
+        success=True,
+        tool_sequence=[(tc.get("name", ""), tc.get("input", {})) for tc in resp.tool_calls],
+        extras={
+            "stop_reason": resp.stop_reason,
+            "usage_keys": sorted(resp.usage.keys()),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Kind 7 — context estimate_tokens parity
 # ---------------------------------------------------------------------------
 
@@ -288,6 +323,7 @@ V1_RUNNERS: dict[str, RunnerFn] = {
     "trusted_paths": _trusted_paths_v1,
     "smart_truncate": _smart_truncate_v1,
     "context_estimate_tokens": _context_estimate_v1,
+    "brain_response": _brain_response_v1,
 }
 
 V2_RUNNERS: dict[str, RunnerFn] = {
@@ -298,6 +334,7 @@ V2_RUNNERS: dict[str, RunnerFn] = {
     "trusted_paths": _trusted_paths_v2,
     "smart_truncate": _smart_truncate_v2,
     "context_estimate_tokens": _context_estimate_v2,
+    "brain_response": _brain_response_v2,
 }
 
 

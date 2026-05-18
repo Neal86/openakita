@@ -12,6 +12,9 @@ from :mod:`openakita.agent.facade` once the rewrite slices land.
 from __future__ import annotations
 
 from .audit import AuditLogger, get_audit_logger, reset_audit_logger
+from .brain import Brain, SupervisorBrain
+from .brain import Context as BrainContext
+from .brain import Response as BrainResponse
 from .capabilities import (
     CapabilityDescriptor,
     CapabilityKind,
@@ -233,6 +236,9 @@ __all__ = [
     "AuditLogger",
     "BackupInfo",
     "BaseValidator",
+    "Brain",
+    "BrainContext",
+    "BrainResponse",
     "BudgetAction",
     "BudgetConfig",
     "BudgetExceeded",
@@ -316,6 +322,7 @@ __all__ = [
     "SkillManager",
     "StopHook",
     "StreamJSONFormatter",
+    "SupervisorBrain",
     "TRAIT_MINING_PROMPT",
     "TRAIT_MINING_SYSTEM",
     "Task",

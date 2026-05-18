@@ -107,6 +107,25 @@ BASELINE_CASES: list[ParityCase] = [
         label="estimate_tokens on empty string is zero",
         inputs={"text": ""},
     ),
+    ParityCase(
+        id="brain-response-with-tool-call",
+        kind="brain_response",
+        label="Brain Response round-trips content + tool_calls",
+        inputs={
+            "content": "Plan: read README then summarise.",
+            "tool_calls": [
+                {"name": "read_file", "input": {"file_path": "README.md"}, "id": "t1"},
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 120, "output_tokens": 80},
+        },
+    ),
+    ParityCase(
+        id="brain-response-empty",
+        kind="brain_response",
+        label="Brain Response default ctor parity",
+        inputs={"content": ""},
+    ),
 ]
 
 
