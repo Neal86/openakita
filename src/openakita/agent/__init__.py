@@ -114,6 +114,7 @@ from .persona import (
     PersonaTrait,
     persist_trait_to_memory,
 )
+from .ralph import RalphLoop, StopHook, Task, TaskResult, TaskStatus
 from .resource_budget import (
     BudgetAction,
     BudgetConfig,
@@ -165,6 +166,13 @@ from .tool_result_budget import (
     OVERFLOW_DIR,
     truncate_tool_result,
 )
+from .trait_miner import (
+    ANSWER_ANALYSIS_PROMPT,
+    ANSWER_ANALYSIS_SYSTEM,
+    TRAIT_MINING_PROMPT,
+    TRAIT_MINING_SYSTEM,
+    TraitMiner,
+)
 from .trusted_paths import (
     SESSION_KEY,
     clear_session_trust,
@@ -174,6 +182,15 @@ from .trusted_paths import (
     is_trusted_workspace_path,
 )
 from .ui_confirm_bus import UIConfirmBus, get_ui_confirm_bus, reset_ui_confirm_bus
+from .user_profile import (
+    USER_PROFILE_ITEMS,
+    USER_PROFILE_KEY_ALIASES,
+    UserProfileItem,
+    UserProfileManager,
+    UserProfileState,
+    get_profile_manager,
+    resolve_profile_key,
+)
 from .validators import (
     BaseValidator,
     ValidationContext,
@@ -190,6 +207,8 @@ from .working_facts import (
 )
 
 __all__ = [
+    "ANSWER_ANALYSIS_PROMPT",
+    "ANSWER_ANALYSIS_SYSTEM",
     "ASK_MODE_RULESET",
     "AuditLogger",
     "BackupInfo",
@@ -249,6 +268,7 @@ __all__ = [
     "PersonaManager",
     "PersonaTrait",
     "READONLY_EXPLORATION_TOOLS",
+    "RalphLoop",
     "ResourceBudget",
     "RuffBackend",
     "Ruleset",
@@ -265,12 +285,24 @@ __all__ = [
     "SandboxVerdict",
     "ShellHook",
     "SkillManager",
+    "StopHook",
     "StreamJSONFormatter",
+    "TRAIT_MINING_PROMPT",
+    "TRAIT_MINING_SYSTEM",
+    "Task",
+    "TaskResult",
+    "TaskStatus",
     "TextFormatter",
     "TokenBudget",
+    "TraitMiner",
     "TypeScriptBackend",
     "UIConfirmBus",
+    "USER_PROFILE_ITEMS",
+    "USER_PROFILE_KEY_ALIASES",
     "UserCancelledError",
+    "UserProfileItem",
+    "UserProfileManager",
+    "UserProfileState",
     "ValidationContext",
     "ValidationReport",
     "ValidationResult",
@@ -300,6 +332,7 @@ __all__ = [
     "get_domain_allowlist",
     "get_hook_executor",
     "get_pending_approvals_store",
+    "get_profile_manager",
     "get_registry",
     "get_sandbox_executor",
     "get_session_overrides",
@@ -324,6 +357,7 @@ __all__ = [
     "reset_pending_approvals_store",
     "reset_registry_for_testing",
     "reset_ui_confirm_bus",
+    "resolve_profile_key",
     "send_desktop_notification",
     "send_desktop_notification_async",
     "set_hook_executor",
