@@ -2,7 +2,7 @@
 
 <!-- machine-readable phase marker; do NOT remove.
      Parsed by tests/revamp/_ledger.py + tests/parity/test_no_facade.py. -->
-current_phase: P-RC-5
+current_phase: P-RC-6
 
 > Source of truth for every commit landed on `revamp/v2` during
 > the post-RC continuation phases (P-RC-0 → P-RC-8). One row per
@@ -175,7 +175,20 @@ long-tail Decision cascade; ``core/reasoning_engine.py`` collapses to a thin laz
 
 ## P-RC-6 — Phase 2 real slim-down: agent.py
 
-_Not started._
+G-RC-5 was signed; this phase rewrites the 9602 LOC ``core/agent.py``
+god-class. Per continuation plan section 7 the rewrite extracts module-
+level helpers (desktop attachment routing, destructive-intent classifier,
+risk authorization replay, intent text classifiers) into ``runtime/desktop/*``
+and ``agent/safety/*``, then implements a real ``agent/core.py`` (<=500 LOC)
+composing those helpers plus the legacy class for the long-tail Agent surface;
+``core/agent.py`` collapses to a thin lazy shim. This phase also lands four
+P-RC-5 audit-nit fixes (N9 non-trivial reasoning fixtures, N10 parity
+diff-test sanity wrapper, N11 legacy-file LOC audit visibility, N12
+commit_guard WARN/REJECT documentation).
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-6 P6.0a | chore(revamp): bump ledger to P-RC-6 + N11 (legacy LOC visibility) + N12 (commit_guard docs) | +60 (TRACKED_FILES + docstrings + ledger section + discipline reminder) | 0 | --- |
 
 ## P-RC-7 — Caller migration + legacy bulk delete
 
@@ -227,3 +240,12 @@ may be retired from this list.
   `agent/context.py` must be REMOVED (not re-targeted) by the end of
   P-RC-4; `test_facade_files_either_declare_sentinel_or_have_real_body`
   then falls back to the 200 SLOC floor for those three files.
+
+* **N12** (G-RC-5 P-RC-5 audit, clarification): `scripts/revamp_commit_guard.py`
+  enforces two thresholds tightened from continuation plan section 0.4:
+  **380 LOC = WARN** (script prints `WARN: ...` and exits 0, you may
+  proceed but should stop and consider splitting); **400 LOC = REJECT**
+  (script prints `REJECT: ...` and exits 1, block the commit and split
+  before recording). Earlier mentions of `380 LOC` as a single cap in
+  the gate notes were imprecise; the two-threshold behaviour is the
+  source of truth and is encoded in both the script docstring and here.

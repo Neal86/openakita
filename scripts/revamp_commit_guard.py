@@ -1,11 +1,25 @@
 """Per-commit hand-written LOC guard for the OpenAkita revamp.
 
 The P-RC-2 audit (T1) tightened continuation plan section 0.4
-from "<= 400 LOC per commit" to "WARN >= 380, REJECT >= 400" so
-the operator notices the cap approaching before sliding into it.
-There is intentionally no git pre-commit hook; this script is run
-manually before every commit per the discipline reminder in
+from "<= 400 LOC per commit" to a two-threshold gate so the
+operator notices the cap approaching before sliding into it.
+There is intentionally no git pre-commit hook; this script is
+run manually before every commit per the discipline reminder in
 ``docs/revamp/PROGRESS_LEDGER.md``.
+
+Threshold semantics (N12, G-RC-5 P-RC-5 audit clarification)::
+
+    total < 380   -> prints "ok: ...",     exits 0 (proceed)
+    380 <= t < 400 -> prints "WARN: ...",   exits 0 (proceed -- stop
+                                            and consider splitting)
+    400 <= total   -> prints "REJECT: ...", exits 1 (block; split
+                                            this commit before
+                                            recording it)
+
+Earlier wording in the gate notes referred to ``380 LOC`` as a
+single cap; that was imprecise. The two-threshold behaviour above
+(WARN at 380, REJECT at 400) is the source of truth and matches
+the ``WARN_THRESHOLD`` / ``REJECT_THRESHOLD`` constants below.
 
 Hand-written LOC = ``added + removed`` across files NOT in the
 auto-generated set: ``package-lock.json`` (any tree), any

@@ -60,6 +60,14 @@ TRACKED_FILES: list[str] = [
     "src/openakita/core/brain.py",
     "src/openakita/core/tool_executor.py",
     "src/openakita/core/context_manager.py",
+    # Legacy renames preserved during the phased rewrite -- listed here
+    # for visibility only (N11 P-RC-6 audit fix). The audit prints their
+    # current LOC in the table but never enforces a cap on them; they
+    # are deleted wholesale in P-RC-7 / P-RC-8.
+    "src/openakita/core/_brain_legacy.py",
+    "src/openakita/core/_tool_executor_legacy.py",
+    "src/openakita/core/_context_manager_legacy.py",
+    "src/openakita/core/_reasoning_engine_legacy.py",
     "src/openakita/orgs/runtime.py",
     "src/openakita/orgs/tool_handler.py",
     "src/openakita/orgs/templates.py",
@@ -77,6 +85,24 @@ TRACKED_FILES: list[str] = [
 # phases will rebase the baseline downward in the same commit
 # that lands the corresponding real rewrite.
 AGENT_GROWTH_BUDGET = 50
+
+# Files that are tracked for visibility only -- the audit prints their
+# current LOC in the rendered table but never compares against the
+# baseline (an informational "infinite cap" so they never fail the gate).
+# Per N11 (G-RC-5 P-RC-5 audit fix) the four legacy renames preserved
+# during P-RC-4 and P-RC-5 are surfaced here so an external reader can
+# see how much of the legacy giants is still in-tree at a glance.
+INFO_ONLY_FILES: set[str] = {
+    "src/openakita/core/_brain_legacy.py",
+    "src/openakita/core/_tool_executor_legacy.py",
+    "src/openakita/core/_context_manager_legacy.py",
+    "src/openakita/core/_reasoning_engine_legacy.py",
+}
+
+# Sentinel for the informational-only budget: large enough that any
+# realistic LOC count stays well below it, but kept finite so the
+# rendered table stays human-readable.
+_INFO_ONLY_BUDGET = 10_000_000
 
 
 @dataclass(frozen=True)
@@ -104,6 +130,8 @@ def _is_agent(path: str) -> bool:
 
 
 def _budget_for(path: str) -> int:
+    if path in INFO_ONLY_FILES:
+        return _INFO_ONLY_BUDGET
     return AGENT_GROWTH_BUDGET if _is_agent(path) else 0
 
 
