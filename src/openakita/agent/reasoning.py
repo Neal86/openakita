@@ -34,6 +34,16 @@ Migration guidance
 * Legacy callers in ``core.agent`` continue to work unchanged.
 """
 
+# REVAMP-FACADE-ALLOWED-UNTIL: P-RC-5
+# This module is intentionally a thin re-export of its legacy
+# `openakita.core.*` counterpart during P-RC-0..3. The real
+# Phase-2 slim-down rewrite lands in P-RC-5 (continuation plan
+# section 5/6/7); the sentinel above is the marker
+# `tests/parity/test_no_facade.py` looks for to allow a small
+# facade body during the early continuation phases. Removing this
+# sentinel block in P-RC-5 is part of the gate review and forces
+# the test to fall back to the SLOC heuristic.
+
 from __future__ import annotations
 
 from openakita.core.reasoning_engine import (

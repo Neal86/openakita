@@ -20,6 +20,16 @@ Migration guidance
 * Old code remains valid through the cutover.
 """
 
+# REVAMP-FACADE-ALLOWED-UNTIL: P-RC-4
+# This module is intentionally a thin re-export of its legacy
+# `openakita.core.*` counterpart during P-RC-0..3. The real
+# Phase-2 slim-down rewrite lands in P-RC-4 (continuation plan
+# section 5/6/7); the sentinel above is the marker
+# `tests/parity/test_no_facade.py` looks for to allow a small
+# facade body during the early continuation phases. Removing this
+# sentinel block in P-RC-4 is part of the gate review and forces
+# the test to fall back to the SLOC heuristic.
+
 from __future__ import annotations
 
 from openakita.core.context_manager import (

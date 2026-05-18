@@ -16,6 +16,7 @@ G2.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 
 from .harness import ParityCase, ParityResult
@@ -553,6 +554,34 @@ V2_RUNNERS: dict[str, RunnerFn] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Kind -> (v1_module, v2_module) — used by `_dispatch` to record the
+# resolved on-disk source files in every `ParityResult.extras`. Once the
+# Phase-2 rewrites land (P-RC-4..6), v1 and v2 modules will live in
+# physically different files; until then a v2 module that is a thin
+# re-export of its v1 counterpart still resolves to a different `__file__`
+# (because `agent/brain.py` etc. are real source files), but the
+# *structural* facade check is enforced separately by `test_no_facade.py`.
+# ---------------------------------------------------------------------------
+
+KIND_MODULES: dict[str, tuple[str, str]] = {
+    "permission_mode": ("openakita.core.permission", "openakita.agent.permission"),
+    "token_budget": ("openakita.core.token_budget", "openakita.agent.token_budget"),
+    "working_facts": ("openakita.core.working_facts", "openakita.agent.working_facts"),
+    "loop_budget": ("openakita.core.loop_budget_guard", "openakita.agent.loop_budget"),
+    "trusted_paths": ("openakita.core.trusted_paths", "openakita.agent.trusted_paths"),
+    "smart_truncate": ("openakita.core.tool_executor", "openakita.agent.tools"),
+    "context_estimate_tokens": ("openakita.core.context_utils", "openakita.agent.context"),
+    "brain_response": ("openakita.core.brain", "openakita.agent.brain"),
+    "reasoning_decision": ("openakita.core.reasoning_engine", "openakita.agent.reasoning"),
+    "primary_agent": ("openakita.core.agent", "openakita.agent.core"),
+    "confirm_normalize": ("openakita.core.confirmation_state", "openakita.agent.confirmation"),
+    "domain_allowlist": ("openakita.core.domain_allowlist", "openakita.agent.domain_allowlist"),
+    "user_profile_resolve": ("openakita.core.user_profile", "openakita.agent.user_profile"),
+    "capability_id": ("openakita.core.capabilities", "openakita.agent.capabilities"),
+}
+
+
 def run_v1(case: ParityCase) -> ParityResult:
     return _dispatch(V1_RUNNERS, case)
 
@@ -565,10 +594,23 @@ def _dispatch(table: dict[str, RunnerFn], case: ParityCase) -> ParityResult:
     runner = table.get(case.kind)
     if runner is None:
         raise KeyError(f"No runner registered for kind {case.kind!r}")
-    return runner(case)
+    result = runner(case)
+    pair = KIND_MODULES.get(case.kind)
+    if pair is not None:
+        v1_name, v2_name = pair
+        v1_mod = sys.modules.get(v1_name)
+        v2_mod = sys.modules.get(v2_name)
+        # `__file__` is None for namespace packages but populated for
+        # every ordinary module we care about here.
+        if v1_mod is not None and getattr(v1_mod, "__file__", None):
+            result.extras["v1_file"] = v1_mod.__file__
+        if v2_mod is not None and getattr(v2_mod, "__file__", None):
+            result.extras["v2_file"] = v2_mod.__file__
+    return result
 
 
 __all__ = [
+    "KIND_MODULES",
     "ParityCase",
     "ParityResult",
     "RunnerFn",
