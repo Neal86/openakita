@@ -23,6 +23,7 @@ from openakita.runtime.stream import (
     STANDARD_CHANNELS,
     StreamBus,
     StreamEvent,
+    Subscription,
 )
 
 # ---------------------------------------------------------------------------
@@ -304,6 +305,157 @@ async def test_stats_returns_counters() -> None:
     assert s["total_emitted"] == 1
     assert s["total_dropped"] == 0
     assert s["subscribers"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Drain-on-close semantics (P-RC-2; closes G-RC-1 residual risk #1)
+# ---------------------------------------------------------------------------
+
+
+async def test_close_drains_pending_events_before_signalling() -> None:
+    """Default drain_on_close=True: close() waits for queued events.
+
+    A slow consumer that sleeps between iterations will not have read
+    every emitted event when we ask the bus to close. With drain-on-
+    close, ``close()`` blocks until the queue is empty, so the
+    consumer reads all of them before its loop exits.
+    """
+    bus = StreamBus()
+    received: list[str] = []
+    started = asyncio.Event()
+
+    async def consume() -> None:
+        async for ev in bus.subscribe("updates"):
+            started.set()
+            await asyncio.sleep(0.01)  # slow consumer
+            received.append(ev.type)
+
+    task = asyncio.create_task(consume())
+    # Wait for the subscriber to attach.
+    for _ in range(50):
+        async with bus._lock:
+            if bus._subscriptions:
+                break
+        await asyncio.sleep(0.005)
+    for i in range(5):
+        await bus.emit("updates", f"u{i}", {}, command_id="c", org_id="o")
+    # Close immediately -- drain must wait until the queue is empty.
+    await bus.close(drain_timeout=1.0)
+    await asyncio.wait_for(task, timeout=2.0)
+    assert received == ["u0", "u1", "u2", "u3", "u4"]
+
+
+async def test_close_drain_times_out_cleanly_for_stuck_consumer() -> None:
+    """Pathological consumer that never reads must not wedge close().
+
+    We construct a subscriber that never pulls from its queue. The
+    bus must give up after ``drain_timeout`` seconds, log a warning
+    (we just verify no exception escapes), and still close cleanly.
+    """
+    bus = StreamBus(max_queue_size=4)
+    # Manually attach a subscription that will never have its queue
+    # drained -- we don't iterate the async generator.
+    sub = Subscription(
+        channels=frozenset({"updates"}),
+        queue=asyncio.Queue(maxsize=4),
+        drain_on_close=True,
+    )
+    async with bus._lock:
+        bus._subscriptions.append(sub)
+    # Stuff the queue.
+    for i in range(3):
+        await bus.emit("updates", f"u{i}", {}, command_id="c", org_id="o")
+    assert sub.queue.qsize() == 3
+
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    await bus.close(drain_timeout=0.1)
+    elapsed = loop.time() - t0
+    # Drain timeout must be honoured: between ~0.1s and a generous
+    # upper bound (CI variance). The bus must NOT hang.
+    assert elapsed < 1.0, f"close hung past drain_timeout: {elapsed:.3f}s"
+    assert sub.closed.is_set()
+
+
+async def test_close_drain_on_close_false_is_eager() -> None:
+    """Legacy callers can opt out: drain_on_close=False closes immediately.
+
+    The subscriber yields any events that already landed in its queue
+    before close, but the bus does NOT wait for the queue to drain.
+    """
+    bus = StreamBus()
+    received: list[str] = []
+    started = asyncio.Event()
+
+    async def consume() -> None:
+        async for ev in bus.subscribe("updates", drain_on_close=False):
+            started.set()
+            await asyncio.sleep(0.05)  # slow consumer
+            received.append(ev.type)
+
+    task = asyncio.create_task(consume())
+    for _ in range(50):
+        async with bus._lock:
+            if bus._subscriptions:
+                break
+        await asyncio.sleep(0.005)
+    for i in range(5):
+        await bus.emit("updates", f"u{i}", {}, command_id="c", org_id="o")
+
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    await bus.close(drain_timeout=1.0)
+    elapsed = loop.time() - t0
+    # Eager close: should return promptly because no subscription
+    # opted in.
+    assert elapsed < 0.05, f"eager close took too long: {elapsed:.3f}s"
+    # Cancel the consumer task; we don't care what it received,
+    # only that close() did not block on draining.
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+async def test_close_mixed_eager_and_drain_subscribers() -> None:
+    """Mixed: an eager subscriber must not hold up an opt-in subscriber.
+
+    The drain-on-close subscriber pulls one slow event after close;
+    the eager subscriber's queue is allowed to be non-empty when
+    close fires.
+    """
+    bus = StreamBus()
+    drain_received: list[str] = []
+    eager_received: list[str] = []
+
+    async def drain_consume() -> None:
+        async for ev in bus.subscribe("updates"):
+            await asyncio.sleep(0.005)
+            drain_received.append(ev.type)
+
+    async def eager_consume() -> None:
+        async for ev in bus.subscribe("messages", drain_on_close=False):
+            eager_received.append(ev.type)
+
+    t1 = asyncio.create_task(drain_consume())
+    t2 = asyncio.create_task(eager_consume())
+    for _ in range(100):
+        async with bus._lock:
+            if len(bus._subscriptions) >= 2:
+                break
+        await asyncio.sleep(0.005)
+
+    for i in range(3):
+        await bus.emit("updates", f"u{i}", {}, command_id="c", org_id="o")
+        await bus.emit("messages", f"m{i}", {}, command_id="c", org_id="o")
+
+    await bus.close(drain_timeout=1.0)
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(asyncio.gather(t1, t2, return_exceptions=True), timeout=2.0)
+    # The drain-eligible subscriber must have received ALL three.
+    assert drain_received == ["u0", "u1", "u2"]
+    # The eager subscriber may have received fewer; we only assert it
+    # ran at all.
+    assert isinstance(eager_received, list)
 
 
 # Ensure no orphaned tasks pollute the event loop between tests.

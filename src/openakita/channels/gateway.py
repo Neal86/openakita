@@ -3126,12 +3126,12 @@ class MessageGateway:
                 )
             finally:
                 self._v2_cancel_tokens.pop(session_key, None)
-                # Drain: give the relay a few ticks to consume queued events
-                # before we close the bus. ``StreamBus.close()`` races with
-                # queued events; without this, emits made right at the end
-                # of ``supervisor.run()`` are dropped.
-                for _ in range(10):
-                    await asyncio.sleep(0)
+                # P-RC-2: ``StreamBus.close()`` now waits for every
+                # subscription that opted into drain-on-close to drain
+                # to zero pending items before signalling close (default
+                # timeout 2s; warning logged on timeout). The 10x
+                # ``asyncio.sleep(0)`` workaround that lived here in
+                # P-RC-1 is no longer needed.
                 with contextlib.suppress(Exception):
                     await stream_bus.close()
                 relay_task.cancel()

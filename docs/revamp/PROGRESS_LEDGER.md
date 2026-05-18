@@ -66,7 +66,8 @@ cold-session `org_id` rehydration in `MessageGateway` (#3).
 
 | commit hash | phase | title | LOC delta | tests delta | ADR refs |
 |---|---|---|---|---|---|
-| _this commit_ | P-RC-2 P2.0 | chore(revamp): bump ledger current_phase to P-RC-2 + apply N3/N4/N5 discipline doc | +60 | 0 | — |
+| `b6a77a94` | P-RC-2 P2.0 | chore(revamp): bump ledger current_phase to P-RC-2 + apply N3/N4/N5 discipline doc | +33 / -2 | 0 | — |
+| _this commit_ | P-RC-2 P2.1 | feat(runtime): add drain-on-close semantics to StreamBus | +160 / -10 | +4 | ADR-0006 |
 
 ## P-RC-3 — Multi-process-safe v2 persistence
 

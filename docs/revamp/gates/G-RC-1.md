@@ -169,12 +169,11 @@ IM "中止" / "/cancel" / abort verb
 ## Residual risks
 
 1. **Bridge drain race**: ``StreamBus.close()`` competes with the
-   relay task's ``queue.get`` task. ``_try_dispatch_v2`` mitigates
-   by yielding control 10× before close (commit 7 added this
-   after the e2e test exposed the race). Long-term we may want
-   to teach ``StreamBus.subscribe`` to prefer queue events over
-   close events (drain-on-close semantics) -- consider this for
-   P-RC-2 or P-RC-3.
+   relay task's ``queue.get`` task. ``_try_dispatch_v2`` mitigated
+   by yielding control 10× before close (P-RC-1 commit 7).
+   *Status: addressed in P-RC-2 commit P2.1 (drain-on-close semantics
+   on ``StreamBus`` + the 10× ``asyncio.sleep(0)`` workaround in
+   ``_try_dispatch_v2`` removed).*
 2. **DegenerateSupervisorBrain**: the default brain in
    ``agent/supervisor_brain.py`` terminates after one inner turn
    with a canned acknowledgement and never delegates. Operators

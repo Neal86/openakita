@@ -114,12 +114,25 @@ class Subscription:
     Owned by ``StreamBus``. Held by callers via the async iterator
     returned from :meth:`StreamBus.subscribe`; closing the iterator
     detaches the subscription from the bus.
+
+    Attributes:
+        drain_on_close:
+            When ``True`` (the default in P-RC-2 and beyond), the
+            owning :class:`StreamBus` waits for this subscription's
+            queue to drain to zero pending items before signalling
+            its ``closed`` event in :meth:`StreamBus.close`. Legacy
+            callers that prefer the original eager-close behaviour
+            (close fires immediately, in-flight events are lost)
+            pass ``drain_on_close=False`` to
+            :meth:`StreamBus.subscribe`. Closes G-RC-1 residual
+            risk #1.
     """
 
     channels: frozenset[str]
     queue: asyncio.Queue[StreamEvent]
     dropped: int = 0
     closed: asyncio.Event = field(default_factory=asyncio.Event)
+    drain_on_close: bool = True
 
     def matches(self, channel: str) -> bool:
         return channel in self.channels
@@ -162,7 +175,11 @@ class StreamBus:
     # Subscription management
     # ------------------------------------------------------------------
 
-    async def subscribe(self, *channels: str) -> AsyncIterator[StreamEvent]:
+    async def subscribe(
+        self,
+        *channels: str,
+        drain_on_close: bool = True,
+    ) -> AsyncIterator[StreamEvent]:
         """Subscribe to one or more channels and yield events.
 
         Usage:
@@ -171,6 +188,14 @@ class StreamBus:
 
         The async iterator stops cleanly when the subscriber's task is
         cancelled or when :meth:`close` is called on the bus.
+
+        Args:
+            channels: one or more channel names to listen on.
+            drain_on_close: when ``True`` (default), :meth:`close` waits
+                up to the close-time timeout for this subscription's
+                queue to drain to zero before unblocking the consumer.
+                Pass ``False`` to opt into legacy eager-close
+                semantics (in-flight events are lost on close).
         """
         if not channels:
             raise ValueError("subscribe() requires at least one channel name")
@@ -184,6 +209,7 @@ class StreamBus:
         sub = Subscription(
             channels=frozenset(channels),
             queue=asyncio.Queue(maxsize=self._max_queue),
+            drain_on_close=drain_on_close,
         )
         async with self._lock:
             self._subscriptions.append(sub)
@@ -208,13 +234,67 @@ class StreamBus:
                     self._subscriptions.remove(sub)
             sub.closed.set()
 
-    async def close(self) -> None:
-        """Close every subscription so consumers exit their loops."""
+    async def close(self, *, drain_timeout: float = 2.0) -> None:
+        """Close every subscription so consumers exit their loops.
+
+        For subscriptions that opted in (``drain_on_close=True``,
+        the default in P-RC-2 and beyond), this method first waits
+        up to ``drain_timeout`` seconds for their queues to reach
+        zero pending items before signalling the close event. This
+        eliminates the post-supervisor drain race that P-RC-1
+        commit 7 had to mitigate with a 10x ``asyncio.sleep(0)``
+        workaround in ``channels/gateway.py``.
+
+        Subscriptions that pass ``drain_on_close=False`` retain the
+        original eager-close semantics: their close event fires
+        immediately and any events still queued are discarded when
+        the consumer exits.
+
+        On timeout, a warning is logged and the close still
+        proceeds -- pathological consumers must never be able to
+        wedge a bus shutdown.
+        """
         async with self._lock:
             subs = list(self._subscriptions)
             self._subscriptions.clear()
+        await self._wait_until_drained(subs, timeout=drain_timeout)
         for sub in subs:
             sub.closed.set()
+
+    async def _wait_until_drained(
+        self,
+        subs: list[Subscription],
+        *,
+        timeout: float,
+    ) -> None:
+        """Block until every drain-eligible subscription's queue is empty.
+
+        Eager subscriptions (``drain_on_close=False``) are skipped so
+        the legacy fast-close path is unaffected. Returns early on
+        timeout; callers that care log a warning when this happens.
+        """
+        eligible = [s for s in subs if s.drain_on_close]
+        if not eligible:
+            return
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, timeout)
+        while True:
+            if all(s.queue.empty() for s in eligible):
+                return
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                pending = sum(s.queue.qsize() for s in eligible)
+                logger.warning(
+                    "StreamBus.close: drain timed out with %d event(s) still "
+                    "queued across %d subscriber(s); proceeding to close",
+                    pending, len(eligible),
+                )
+                return
+            # Yield once per micro-tick. ``asyncio.sleep(0)`` re-enters
+            # the scheduler so consumer ``queue.get()`` tasks get a turn
+            # before we re-check ``empty()``. The deadline guarantees we
+            # never spin.
+            await asyncio.sleep(0)
 
     # ------------------------------------------------------------------
     # Emission
