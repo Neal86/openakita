@@ -20,13 +20,14 @@ A user-led ADR review is the gate to flip them all to `Accepted`.
 | 3 — Runtime engine (supervisor + messenger + guardrail) | **In progress (critical path complete)** | 5 (`ledger`, `stall_detector`, `supervisor`, `messenger`, `guardrail/`) | 82 new runtime tests |
 | 4 — Nodes | **Implementation complete (G4 review pending)** | 6 (`base`+sig fix, `tool_node`, `llm_node`, `condition_node`+`human_review_node`, `workbench_node`+`manifest`, `happyhorse-video` adoption) | 89 new tests (`test_nodes_*`) + 5 plugin smoke tests |
 | 5 — Templates | **Schema + registry + 4 builtins shipped (G5 review pending)** | 6 (`schema`, `registry`, `aigc_video_studio`, `software_team`, `startup_company`, `content_ops`+discovery test) | 75 template tests |
-| 6 — API / channels swap | Pending | 0 | — |
+| 6 — API / channels swap | **In progress (templates facade live)** | 2 (`orgs_v2` route + survivable factory marker, server mount) | 15 api tests |
 | 7 — Cutover + data migration | Pending | 0 | — |
 | 8 — Legacy removal | Pending | 0 | — |
 
-Total to date: **36 code commits + 10 ADR commits = 46 commits on
-`revamp/v2`**, all lint-clean (ruff), test-green (344 / 344 across
-`tests/runtime/`, `tests/agent/`, and `plugins/happyhorse-video/tests/test_workbench_manifest.py`).
+Total to date: **38 code commits + 10 ADR commits = 48 commits on
+`revamp/v2`**, all lint-clean (ruff over the v2 surface), test-green
+(362 / 362 across `tests/runtime/`, `tests/agent/`, `tests/api/`, and
+`plugins/happyhorse-video/tests/test_workbench_manifest.py`).
 
 ## What v2 already delivers
 
@@ -234,13 +235,14 @@ once at startup and serve `GLOBAL_REGISTRY.list()` from
 
 ### Phase 6 — API / channels swap
 
-* `src/openakita/api/routes/orgs_v2.py` mounts the v2 facade behind
-  `runtime_v2_enabled`;
-* `src/openakita/channels/gateway.py` learns to route per-org based
-  on the same flag;
-* `apps/setup-center/src/components/OrgChatPanel.tsx` subscribes to
-  the multi-channel StreamBus and renders the progress-ledger
-  timeline.
+| Slice | Status |
+|---|---|
+| `src/openakita/api/routes/orgs_v2.py` (template facade) | **Done.** ``GET /api/v2/orgs/templates`` (list), ``GET /api/v2/orgs/templates/{id}`` (one), ``POST /api/v2/orgs/templates/{id}/instantiate`` (mint a fresh OrgV2). Gated by ``settings.runtime_v2_enabled``. 15 tests. |
+| `runtime/templates/registry.py` survivable factory marker | **Done.** ``@template`` now also sets ``__openakita_template_factory__`` on the function so :func:`collect_builtin_factories` can repopulate the registry without depending on the lazy ``_PENDING`` queue (which test fixtures sometimes drain). 3 new tests. |
+| `api/server.py` mount | **Done.** Router included after the v1 ``orgs`` routers. Always mounted; per-request flag check decides whether to serve. |
+| `runtime/api/v2/orgs/{id}` resource (CRUD) | Pending (Phase 7 also persists). |
+| `src/openakita/channels/gateway.py` per-org v2 route | Pending. |
+| `apps/setup-center/src/components/OrgChatPanel.tsx` v2 stream | Pending. |
 
 ### Phase 7 — Cutover
 
@@ -257,14 +259,19 @@ log` reader can diff the world before / after.
 ## How to resume in the next session
 
 1. Read this `STATUS.md` first.
-2. Recommended next slice: **Phase 6 — API facade for templates**.
-   Mount `runtime.templates.GLOBAL_REGISTRY` behind
-   `/api/orgs/templates` (list) + `/api/orgs/templates/{id}/instantiate`
-   (POST → returns the fresh `OrgV2`). The frontend
-   `OrgEditor` template-picker can then drop the legacy
-   `orgs/templates.py` import. Estimate: one focused commit
-   (route + DI wiring + tests), feature-flagged on
-   `runtime_v2_enabled`.
+2. Recommended next slice: **Phase 6 — frontend `OrgEditor` swap to
+   ``/api/v2/orgs/templates``**. Add a thin client wrapper in
+   `apps/setup-center/src/api/orgs.ts` that calls the v2 list /
+   instantiate endpoints when the runtime flag is on, and update the
+   template-picker drawer to render the v2 wire format (no
+   ``position`` / ``avatar`` / ``department`` fields). Estimate: one
+   focused commit; backend already serves.
+3. After UI: **Phase 6 — channels gateway flag**. Teach
+   `channels/gateway.py` to consult ``settings.runtime_v2_enabled``
+   per inbound message (later, per-org once the v2 OrgV2 persistence
+   lands). Until persistence lands, the flag is "everyone or no
+   one" and the channel keeps using the v1 supervisor — but the
+   plumbing should be in place.
 3. Alternatively: **Phase 3 `runtime/state_graph.py`**. Not
    strictly on the critical path because the existing supervisor +
    messenger handles single-flight hierarchical delegation, but
