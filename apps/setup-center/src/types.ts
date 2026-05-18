@@ -53,6 +53,13 @@ export type EndpointDraft = {
   note?: string | null;
   pricing_tiers?: { max_input: number; input_price: number; output_price: number }[];
   enabled?: boolean;
+  // Relay capability discovery (filled by POST /api/config/sync-endpoint-models).
+  // When set, the UI can grey out unavailable models and the LLMClient
+  // skips this endpoint when its `model` is not in the catalog. Absence
+  // means "never probed" — the endpoint is still considered usable.
+  supported_models?: string[];
+  models_synced_at?: number | null;
+  models_sync_error?: string | null;
 };
 
 export type PythonCandidate = {
@@ -191,6 +198,21 @@ export type ChatErrorInfo = {
   raw?: string;
 };
 
+/** Single row in the organization-command live timeline. */
+export type OrgTimelineEntry = {
+  /** "started" – command accepted; "progress" – sub-agent emitted a summary;
+   *  "done" – command finished (success or error). */
+  status: "started" | "progress" | "done";
+  /** Plain-text summary (already user-facing, no internal payload). */
+  summary: string;
+  /** Optional category – e.g. node id, role label, mailbox type. */
+  category?: string | null;
+  /** Optional originating node id from org runtime. */
+  nodeId?: string | null;
+  /** Epoch millis when the event arrived in the browser. */
+  timestamp: number;
+};
+
 export type ChatMessage = {
   id: string;
   /** Stable backend history index used for paged history loading. */
@@ -207,6 +229,14 @@ export type ChatMessage = {
   sources?: ChatSource[] | null;
   mcpCalls?: ChatMcpCall[] | null;
   thinkingChain?: ChainGroup[] | null;
+  /** Live timeline of organization command progress (org-mode only).
+   *
+   * Populated by `org_command_started` / `org_progress` / `org_command_done`
+   * SSE events. Rendered as a collapsible card above the final answer so
+   * users can see which sub-agents fired without the progress text leaking
+   * into the assistant's textual reply.
+   */
+  orgTimeline?: OrgTimelineEntry[] | null;
   errorInfo?: ChatErrorInfo | null;
   usage?: {
     input_tokens: number;
@@ -223,12 +253,49 @@ export type ChatMessage = {
 
 // ─── 思维链 (Thinking Chain) 类型 ───
 
+/**
+ * Backend ``config_hint`` SSE event payload (see
+ * src/openakita/core/reasoning_engine.py:_build_tool_end_events).
+ *
+ * Single source of truth for both ChainEntry's ``config_hint`` kind and
+ * ChatToolCall.configHints[]; keeping it in one place prevents the two
+ * sites from drifting (the previous inline duplication was a known smell).
+ */
+export type ConfigHintPayload = {
+  scope: string;
+  error_code:
+    | "missing_credential"
+    | "auth_failed"
+    | "rate_limited"
+    | "network_unreachable"
+    | "content_filter"
+    | "unknown";
+  title: string;
+  message?: string;
+  actions?: Array<{
+    id?: string;
+    label?: string;
+    view?: string;
+    section?: string;
+    anchor?: string;
+    url?: string;
+    [k: string]: unknown;
+  }>;
+};
+
 /** 叙事流条目类型 */
 export type ChainEntry =
   | { kind: "thinking"; content: string }       // LLM extended thinking 内容
   | { kind: "text"; content: string; icon?: string }  // LLM 推理意图 / chain_text / 状态通知
   | { kind: "tool_start"; toolId: string; tool: string; args: Record<string, unknown>; description: string; status?: "running" | "done" | "error" }
   | { kind: "tool_end"; toolId: string; tool: string; result: string; status: "done" | "error" }
+  // Structured config hint inlined into the ReAct chain timeline so the user
+  // sees the actionable card *in the iteration that produced it*, instead of
+  // relying on the legacy ToolCallsGroup which is hidden whenever a
+  // thinkingChain exists (see MessageBubble.tsx / FlatMessageItem.tsx
+  // guards). ``toolId`` is forwarded so we can later cross-link the card
+  // back to the offending tool_start row if needed.
+  | { kind: "config_hint"; toolId: string; hint: ConfigHintPayload }
   | { kind: "compressed"; beforeTokens: number; afterTokens: number };
 
 /** 一个 ReAct 迭代组 = 按时间顺序的叙事流 */
@@ -269,6 +336,12 @@ export type ChatToolCall = {
   args: Record<string, unknown>;
   result?: string | null;
   status: "pending" | "running" | "done" | "error";
+  // Optional structured config hints attached when the backend emitted a
+  // ``config_hint`` SSE event for this tool call. Used by the legacy
+  // ToolCallsGroup path (no thinkingChain). The thinkingChain path renders
+  // hints via ChainEntry "config_hint" kind instead — both reference the
+  // same ConfigHintPayload type to keep the two render sites in sync.
+  configHints?: ConfigHintPayload[];
 };
 
 export type ChatTodo = {

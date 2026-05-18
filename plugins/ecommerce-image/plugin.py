@@ -14,26 +14,20 @@ import base64
 import json
 import logging
 import mimetypes
-import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Query
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-
-from openakita.plugins.api import PluginAPI, PluginBase
-
+from ecom_execution import (
+    ExecutionContext,
+    strategy_factory,
+)
 from ecom_feature_registry import (
     FeatureDefinition,
     FeatureExample,
     FeatureParam,
     FeatureRegistry,
-)
-from ecom_execution import (
-    ExecutionContext, strategy_factory, safe_format,
 )
 from ecom_mock import (
     MOCK_VIDEO_URL,
@@ -42,6 +36,11 @@ from ecom_mock import (
     mock_image_urls,
     should_use_mock,
 )
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+from openakita.plugins.api import PluginAPI, PluginBase
 
 logger = logging.getLogger(__name__)
 
@@ -168,17 +167,97 @@ class Plugin(PluginBase):
         self._tm = TaskManager(self._data_dir / "ecommerce.db")
         await self._tm.init()
 
-        dashscope_key = await self._tm.get_config("dashscope_api_key")
+        dashscope_key, dashscope_base_url = self._resolve_relay_endpoint(
+            "dashscope_api_key", "dashscope_relay_endpoint",
+            "dashscope_relay_fallback_policy",
+            required_capability="image",
+            await_config=await self._tm.get_all_config(),
+        )
         if dashscope_key:
             from ecom_client import EcomClient
-            self._dashscope = EcomClient(dashscope_key)
+            self._dashscope = EcomClient(dashscope_key, base_url=dashscope_base_url or None)
 
-        ark_key = await self._tm.get_config("ark_api_key")
+        ark_key, ark_base_url = self._resolve_relay_endpoint(
+            "ark_api_key", "ark_relay_endpoint",
+            "ark_relay_fallback_policy",
+            required_capability="video",
+            await_config=await self._tm.get_all_config(),
+        )
         if ark_key:
             from ecom_video_client import EcomVideoClient
-            self._ark = EcomVideoClient(ark_key)
+            self._ark = EcomVideoClient(ark_key, base_url=ark_base_url or None)
 
         self._start_polling()
+
+    def _resolve_relay_endpoint(
+        self,
+        key_field: str,
+        relay_field: str,
+        policy_field: str,
+        *,
+        required_capability: str,
+        await_config: dict,
+        target_model: str = "",
+    ) -> tuple[str, str]:
+        """Resolve (api_key, base_url) honouring an optional relay reference.
+
+        ``await_config`` is the result of ``self._tm.get_all_config()``
+        — passed in so this method stays sync and easy to unit-test
+        without an event loop. ``key_field`` is the per-plugin api_key
+        config key (e.g. ``dashscope_api_key``); ``relay_field`` is the
+        optional relay-name override; ``policy_field`` controls strict
+        / official fallback.
+
+        On strict-policy + missing relay raises HTTPException(400)
+        with a Chinese user_message so the Settings UI banner can
+        surface it verbatim.
+        """
+        api_key = str(await_config.get(key_field) or "")
+        relay_name = str(await_config.get(relay_field) or "").strip()
+        if not relay_name:
+            return api_key, ""
+        try:
+            from openakita.relay import (
+                SettingsRelayResolutionError,
+                apply_relay_override,
+            )
+
+            merged = apply_relay_override(
+                {
+                    "api_key": api_key,
+                    "base_url": "",
+                    "relay_endpoint": relay_name,
+                    "relay_fallback_policy": str(
+                        await_config.get(policy_field) or "official"
+                    ),
+                },
+                required_capability=required_capability,
+                plugin_name="ecommerce-image",
+            )
+        except (ImportError, ModuleNotFoundError) as exc:
+            logger.info(
+                "ecommerce-image: openakita.relay not importable (%s); "
+                "keeping per-plugin endpoint for %s",
+                exc,
+                key_field,
+            )
+            return api_key, ""
+        except SettingsRelayResolutionError as exc:
+            raise HTTPException(status_code=400, detail=exc.user_message) from exc
+        ref = merged.get("_relay_reference")
+        if (
+            target_model
+            and ref is not None
+            and hasattr(ref, "supports_model")
+            and not ref.supports_model(target_model)
+        ):
+            policy = str(await_config.get(policy_field) or "official")
+            msg = f"中转站 {relay_name!r} 不支持 ecommerce-image 当前模型: {target_model}"
+            if policy == "strict":
+                raise HTTPException(status_code=400, detail=msg)
+            logger.warning("%s; falling back to per-plugin endpoint for %s", msg, key_field)
+            return api_key, ""
+        return str(merged.get("api_key") or ""), str(merged.get("base_url") or "")
 
     def _load_features(self) -> None:
         """Load all 19 feature definitions from config module.
@@ -482,8 +561,10 @@ class Plugin(PluginBase):
             return ""
         out_dir = await self._get_output_dir("video")
         try:
-            async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as client:
-                async with client.stream("GET", url) as resp:
+            async with (
+                httpx.AsyncClient(timeout=300.0, follow_redirects=True) as client,
+                client.stream("GET", url) as resp,
+            ):
                     resp.raise_for_status()
                     ext = self._ext_from_response(resp, ".mp4")
                     out_path = out_dir / f"ecom_{task_id}{ext}"
@@ -726,6 +807,39 @@ class Plugin(PluginBase):
             from ecom_execution import resolve_model, resolve_size
             chosen_model = resolve_model(params, _make_mini_ctx(feature))
             size = resolve_size(params, _make_mini_ctx(feature))
+            saved_full = await self._tm.get_all_config()
+            if feature.api_provider == "dashscope":
+                ds_key, ds_base = self._resolve_relay_endpoint(
+                    "dashscope_api_key",
+                    "dashscope_relay_endpoint",
+                    "dashscope_relay_fallback_policy",
+                    required_capability="image",
+                    await_config=saved_full,
+                    target_model=chosen_model,
+                )
+                if ds_key:
+                    from ecom_client import EcomClient
+                    if self._dashscope:
+                        self._dashscope.update_api_key(ds_key)
+                        self._dashscope.update_base_url(ds_base or None)
+                    else:
+                        self._dashscope = EcomClient(ds_key, base_url=ds_base or None)
+            else:
+                ark_key, ark_base = self._resolve_relay_endpoint(
+                    "ark_api_key",
+                    "ark_relay_endpoint",
+                    "ark_relay_fallback_policy",
+                    required_capability="video",
+                    await_config=saved_full,
+                    target_model=chosen_model,
+                )
+                if ark_key:
+                    from ecom_video_client import EcomVideoClient
+                    if self._ark:
+                        self._ark.update_api_key(ark_key)
+                        self._ark.update_base_url(ark_base or None)
+                    else:
+                        self._ark = EcomVideoClient(ark_key, base_url=ark_base or None)
 
             await self._tm.update_task_status(task_id, "running")
             self._broadcast_update(task_id, "running")
@@ -844,7 +958,6 @@ class Plugin(PluginBase):
             filepath = assets_dir / filename
 
             total = 0
-            sha = None  # placeholder; could hash if dedup needed later
             try:
                 with filepath.open("wb") as fp:
                     while True:
@@ -1004,18 +1117,48 @@ class Plugin(PluginBase):
                             "请检查是否误粘了路径/命令/带空格的字符串。",
                         )
             await self._tm.set_configs(body.updates)
-            if "dashscope_api_key" in body.updates and body.updates["dashscope_api_key"]:
-                from ecom_client import EcomClient
-                if self._dashscope:
-                    self._dashscope.update_api_key(body.updates["dashscope_api_key"])
-                else:
-                    self._dashscope = EcomClient(body.updates["dashscope_api_key"])
-            if "ark_api_key" in body.updates and body.updates["ark_api_key"]:
-                from ecom_video_client import EcomVideoClient
-                if self._ark:
-                    self._ark.update_api_key(body.updates["ark_api_key"])
-                else:
-                    self._ark = EcomVideoClient(body.updates["ark_api_key"])
+            saved_full = await self._tm.get_all_config()
+            ds_endpoint_keys = {
+                "dashscope_api_key",
+                "dashscope_relay_endpoint",
+                "dashscope_relay_fallback_policy",
+            }
+            ark_endpoint_keys = {
+                "ark_api_key",
+                "ark_relay_endpoint",
+                "ark_relay_fallback_policy",
+            }
+            if ds_endpoint_keys & body.updates.keys():
+                ds_key, ds_base = self._resolve_relay_endpoint(
+                    "dashscope_api_key",
+                    "dashscope_relay_endpoint",
+                    "dashscope_relay_fallback_policy",
+                    required_capability="image",
+                    await_config=saved_full,
+                )
+                if ds_key:
+                    from ecom_client import EcomClient
+                    if self._dashscope:
+                        self._dashscope.update_api_key(ds_key)
+                        if hasattr(self._dashscope, "update_base_url"):
+                            self._dashscope.update_base_url(ds_base or None)
+                    else:
+                        self._dashscope = EcomClient(ds_key, base_url=ds_base or None)
+            if ark_endpoint_keys & body.updates.keys():
+                ark_key, ark_base = self._resolve_relay_endpoint(
+                    "ark_api_key",
+                    "ark_relay_endpoint",
+                    "ark_relay_fallback_policy",
+                    required_capability="video",
+                    await_config=saved_full,
+                )
+                if ark_key:
+                    from ecom_video_client import EcomVideoClient
+                    if self._ark:
+                        self._ark.update_api_key(ark_key)
+                        self._ark.update_base_url(ark_base or None)
+                    else:
+                        self._ark = EcomVideoClient(ark_key, base_url=ark_base or None)
             return {"ok": True}
 
         # --- Storage management (mirrors seedance-video for UI parity) ---
@@ -1076,7 +1219,8 @@ class Plugin(PluginBase):
                 target.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
                 raise HTTPException(status_code=500, detail=f"Cannot create folder: {exc}") from exc
-            import subprocess, sys
+            import subprocess
+            import sys
             try:
                 if sys.platform == "win32":
                     subprocess.Popen(["explorer", str(target)])

@@ -7,6 +7,7 @@ Provides HTTP API for the frontend Memory Management Panel.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import time
@@ -58,7 +59,20 @@ def _get_manager(request: Request):
 
 
 def _sync_json(request: Request):
-    """After store mutations, reload manager's in-memory cache and flush to JSON."""
+    """Force a full cache reload from SQLite.
+
+    Historically every mutation route called this so the in-memory cache
+    on ``MemoryManager`` did not lag behind the DB. As of v4.1, the cache
+    is kept coherent automatically through a store-observer registered in
+    ``MemoryManager.__init__`` — single-row creates / updates / deletes
+    NO LONGER need this O(N) full-reload, and the cheap routes have
+    stopped calling it.
+
+    The function is retained for the few legitimate callers that perform
+    bulk multi-step writes through the LLM review pipeline (which still
+    benefit from a single reload at the end as a defensive resync) and
+    for any out-of-tree callers that still depend on it.
+    """
     mm = _get_manager(request)
     if mm and hasattr(mm, "_reload_from_sqlite"):
         mm._reload_from_sqlite()
@@ -100,6 +114,15 @@ class MemoryCreateRequest(BaseModel):
 class ClaimLegacyRequest(BaseModel):
     include_inactive: bool = True
     include_default_graph_nodes: bool = True
+
+
+class MigrateWorkspaceRequest(BaseModel):
+    """Phase 2a：把当前 user 在 ``from_workspace_id`` 里的记忆迁到
+    ``to_workspace_id``。空 ``to_workspace_id`` 时取当前 session 的
+    workspace_id（一般是用户切到 project 模式后的项目哈希值）。"""
+    from_workspace_id: str = "default"
+    to_workspace_id: str = ""
+    scope: str = "user"
 
 
 IDENTITY_SLOT_ALIASES: dict[str, str] = {
@@ -285,7 +308,18 @@ def _is_reviewed_legacy(mem: Any) -> bool:
     return "legacy_pending_review" in tags or any(t.startswith("legacy_reason:") for t in tags)
 
 
+_LEGACY_BANNER_DISMISSED_KEY = "legacy_banner_dismissed"
+"""_schema_meta 里的 sentinel 键：用户点过"不再提醒"。"""
+
+
 def _legacy_review_counts(store: Any) -> dict[str, int]:
+    """统计真实的 legacy_quarantine（v1/v2 历史旧数据），用于决定 UI 是否再次提示用户。
+
+    v4 改动：
+    - 只统计 ``scope='legacy_quarantine'`` 且 ``user_id='legacy'`` 的桶；
+    - lifecycle 后台合成产物现在落到 ``pending_consolidation`` 桶，
+      单独计数（pending_consolidation 字段），UI 不再用它去推 banner。
+    """
     legacy = store.load_all_memories(
         scope="legacy_quarantine",
         scope_owner="",
@@ -295,7 +329,24 @@ def _legacy_review_counts(store: Any) -> dict[str, int]:
     )
     pending = sum(1 for mem in legacy if not _is_reviewed_legacy(mem))
     reviewed = len(legacy) - pending
-    return {"total": len(legacy), "pending": pending, "reviewed": reviewed}
+    try:
+        pending_consolidation = len(
+            store.load_all_memories(
+                scope="pending_consolidation",
+                scope_owner="",
+                user_id=None,
+                workspace_id=None,
+                include_inactive=True,
+            )
+        )
+    except Exception:
+        pending_consolidation = 0
+    return {
+        "total": len(legacy),
+        "pending": pending,
+        "reviewed": reviewed,
+        "pending_consolidation": pending_consolidation,
+    }
 
 
 def _identity_slot_for(subject: str, predicate: str) -> str:
@@ -382,7 +433,11 @@ def _mark_legacy_reviewed(store: Any, mem: Any, reason: str, superseded_by: str 
     }
     if superseded_by:
         updates["superseded_by"] = superseded_by
-    store.db.update_memory(mem.id, updates)
+    # Route through ``update_semantic`` so the store observer fires and the
+    # FTS index gets reindexed on tag changes. The pre-Path-A bypass via
+    # ``store.db.update_memory`` left both stale and was only saved by the
+    # ``_sync_json`` reload at the end of the claim-legacy route.
+    store.update_semantic(mem.id, updates)
 
 
 def _safe_import_legacy_memories(
@@ -447,7 +502,9 @@ def _safe_import_legacy_memories(
             "confidence": min(float(getattr(mem, "confidence", 0.5) or 0.5), 0.7),
             "tags": _normalize_legacy_tags(mem, "legacy_imported"),
         }
-        if store.db.update_memory(mem.id, updates):
+        # See ``_mark_legacy_reviewed`` rationale — go through update_semantic
+        # so the observer + search-index reindex run uniformly.
+        if store.update_semantic(mem.id, updates):
             promoted_ids.add(mem.id)
 
     return {
@@ -503,7 +560,7 @@ async def create_memory(request: Request, body: MemoryCreateRequest):
                 user_id=user_id,
                 workspace_id=workspace_id,
             )
-        _sync_json(request)
+        # Cache coherence is handled by the store observer; no manual reload.
         return {"status": "ok", "id": mem_id}
     except HTTPException:
         raise
@@ -615,16 +672,52 @@ async def memory_migration_status(request: Request):
     legacy_counts = _legacy_review_counts(store)
     all_counts = _owner_counts(store)
     graph_counts = _graph_owner_counts(_get_manager(request))
+
+    # Phase 4：show_banner 是前端**唯一**应该信的字段，把 banner 决策完整收敛到后端。
+    # - 只有真历史 legacy_quarantine 还有待 review 条目 (`pending > 0`)；
+    # - 且用户没显式按过"不再提醒"（_schema_meta 里 legacy_banner_dismissed != '1'）。
+    # pending_consolidation 是 v4 新桶（lifecycle 后台合成产物），用户不可见，
+    # **不**触发 banner。这就是为什么修了 Phase 0 之后 banner 不会再反复弹。
+    has_pending_legacy = legacy_counts["pending"] > 0
+    try:
+        dismissed = store.get_meta(_LEGACY_BANNER_DISMISSED_KEY) == "1"
+    except Exception:
+        dismissed = False
+    show_banner = has_pending_legacy and not dismissed
+
     return {
+        "api_version": "v4",
         "current_owner": {"user_id": user_id, "workspace_id": workspace_id},
         "current_visible": current_visible,
         "legacy_quarantine": legacy_counts["total"],
         "legacy_pending": legacy_counts["pending"],
         "legacy_reviewed": legacy_counts["reviewed"],
+        # v4 字段：lifecycle 后台合成产物的独立桶计数，仅供 DevOps 排查用。
+        "pending_consolidation": legacy_counts.get("pending_consolidation", 0),
         "semantic": all_counts,
         "graph": graph_counts,
-        "has_recoverable_legacy": legacy_counts["pending"] > 0,
+        # 旧字段保留，老前端继续可读。
+        "has_recoverable_legacy": has_pending_legacy,
+        # Phase 4：banner 显示与否的唯一权威字段。
+        "show_banner": show_banner,
+        "banner_dismissed": dismissed,
     }
+
+
+@router.post("/legacy/dismiss")
+async def dismiss_legacy_banner(request: Request):
+    """Phase 4：用户点"不再提醒 legacy 记忆"按钮的端点。
+
+    幂等：重复调用只会重设 timestamp，不会产生副作用。
+    通过 _schema_meta 持久化，跨进程 / 跨重启都生效。
+    取消"不再提醒"目前没有专用按钮 —— 用户重新触发"导入旧记忆"成功后，
+    后端会顺手清除该 sentinel。
+    """
+    store = _get_store(request)
+    if not store:
+        raise HTTPException(503, "Memory store not available")
+    store.set_meta(_LEGACY_BANNER_DISMISSED_KEY, "1")
+    return {"ok": True, "dismissed": True}
 
 
 @router.post("/claim-legacy")
@@ -657,6 +750,12 @@ async def claim_legacy_memories(request: Request, body: ClaimLegacyRequest | Non
         include_default_graph_nodes=body.include_default_graph_nodes,
     )
     _sync_json(request)
+    # Phase 4：用户主动整理过 legacy 后，重置 dismissed sentinel。
+    # 这样如果未来又出现新的 legacy_quarantine（比如导入了别人的旧 db），banner 还会再提醒一次。
+    try:
+        store.set_meta(_LEGACY_BANNER_DISMISSED_KEY, "0")
+    except Exception:
+        pass
     return {
         "ok": True,
         "claimed": report["promoted"],
@@ -666,6 +765,62 @@ async def claim_legacy_memories(request: Request, body: ClaimLegacyRequest | Non
         "conflict_skipped": report["conflict_skipped"],
         "graph_nodes_updated": graph_updated,
         "current_owner": {"user_id": user_id, "workspace_id": workspace_id},
+    }
+
+
+@router.post("/migrate-workspace")
+async def migrate_workspace(request: Request, body: MigrateWorkspaceRequest):
+    """Phase 2a：把当前 user 在某个 workspace_id 下的记忆迁到另一个 workspace_id。
+
+    典型场景：用户启用了项目专属工作区（``OPENAKITA_DESKTOP_PROJECT_WORKSPACE=1``
+    或 session metadata ``memory_workspace_mode='project'``）之后，想把原来
+    在共享 ``"default"`` 工作区里的记忆"携过来"。
+
+    安全约束：
+    - 只动当前请求会话身份所属 ``user_id`` 的记忆，不会跨用户搬运；
+    - 默认 scope='user'，不动 legacy_quarantine / pending_consolidation / session 桶；
+    - 操作有事务保护，失败 ROLLBACK；
+    - 每条迁徙记录写入 ``_memory_scope_audit`` 表，可审计。
+    """
+    store = _get_store(request)
+    if not store:
+        raise HTTPException(503, "Memory store not available")
+    user_id, current_workspace_id = _current_owner(request)
+
+    from_workspace_id = (body.from_workspace_id or "").strip() or "default"
+    to_workspace_id = (body.to_workspace_id or "").strip() or current_workspace_id
+    if not to_workspace_id:
+        raise HTTPException(400, "to_workspace_id is required (and current session has none)")
+    if from_workspace_id == to_workspace_id:
+        return {
+            "ok": True,
+            "moved": 0,
+            "reason": "from and to workspace are identical",
+            "from_workspace_id": from_workspace_id,
+            "to_workspace_id": to_workspace_id,
+            "user_id": user_id,
+        }
+
+    moved = store.migrate_workspace_id(
+        from_workspace_id=from_workspace_id,
+        to_workspace_id=to_workspace_id,
+        user_id=user_id,
+        scope=body.scope or "user",
+    )
+
+    # 刷新内存缓存，让 UI 立即看到迁过来的记忆。
+    mm = _get_manager(request)
+    if mm and hasattr(mm, "_reload_from_sqlite"):
+        with contextlib.suppress(Exception):
+            mm._reload_from_sqlite()
+
+    return {
+        "ok": True,
+        "moved": moved,
+        "from_workspace_id": from_workspace_id,
+        "to_workspace_id": to_workspace_id,
+        "user_id": user_id,
+        "scope": body.scope or "user",
     }
 
 
@@ -762,7 +917,7 @@ async def batch_delete(request: Request):
         if store.delete_semantic(mid):
             deleted += 1
 
-    _sync_json(request)
+    # Observer fires per-id during the loop above; no full reload needed.
     return {"deleted": deleted, "total": len(ids)}
 
 
@@ -930,20 +1085,27 @@ async def update_memory(request: Request, memory_id: str, body: MemoryUpdateRequ
     ok = store.update_semantic(memory_id, updates)
     if not ok:
         raise HTTPException(404, "Memory not found")
-    _sync_json(request)
+    # Observer keeps MemoryManager._memories in sync.
     return {"ok": True}
 
 
 @router.delete("/{memory_id}")
 async def delete_memory(request: Request, memory_id: str):
+    # Route through MemoryManager.delete_memory so the cache mirror, vector
+    # index, and any plugin-attached vector store are all touched through a
+    # single chokepoint. Falls back to direct store.delete_semantic only when
+    # the manager is unavailable (degraded mode).
+    mm = _get_manager(request)
+    if mm is not None and hasattr(mm, "delete_memory"):
+        if not mm.delete_memory(memory_id):
+            raise HTTPException(404, "Memory not found")
+        return {"ok": True}
+
     store = _get_store(request)
     if not store:
         raise HTTPException(503, "Memory store not available")
-
-    ok = store.delete_semantic(memory_id)
-    if not ok:
+    if not store.delete_semantic(memory_id):
         raise HTTPException(404, "Memory not found")
-    _sync_json(request)
     return {"ok": True}
 
 

@@ -82,6 +82,14 @@ class MangaArkClient(BaseVendorClient):
         return explicit or fallback
 
     def auth_headers(self) -> dict[str, str]:
+        # Re-evaluate the relay-resolved base URL on every request.
+        # ``_read_settings`` (plugin layer) injects ``ark_base_url`` only
+        # when a relay endpoint actively overrides ARK_BASE_URL — falling
+        # back to the bare ARK_BASE_URL otherwise. We mutate ``self.base_url``
+        # because BaseVendorClient.request reads ``self.base_url`` to
+        # build the URL right after calling auth_headers().
+        override = str(self._current_settings().get("ark_base_url") or "").strip()
+        self.base_url = override or ARK_BASE_URL
         key = self._current_api_key()
         if not key:
             raise VendorError(
@@ -119,6 +127,16 @@ class MangaArkClient(BaseVendorClient):
         callback_url: str | None = None,
         execution_expires_after: int | None = None,
     ) -> dict:
+        supported = self._current_settings().get("ark_supported_models") or []
+        if supported and model.strip().lower() not in {
+            str(m or "").strip().lower() for m in supported
+        }:
+            raise VendorError(
+                f"中转站模型目录不包含 Ark 视频模型 {model!r}",
+                status=422,
+                retryable=False,
+                kind="client",
+            )
         body: dict[str, Any] = {"model": model, "content": content}
         if ratio:
             body["ratio"] = ratio

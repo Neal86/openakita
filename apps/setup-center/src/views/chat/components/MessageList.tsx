@@ -1,7 +1,69 @@
-import { useRef, useCallback, useEffect, useLayoutEffect, forwardRef, useImperativeHandle } from "react";
+import { useRef, useCallback, useEffect, useLayoutEffect, useMemo, useState, forwardRef, useImperativeHandle } from "react";
 import type { ChatMessage, MdModules, ChatDisplayMode } from "../utils/chatTypes";
 import { MessageBubble } from "./MessageBubble";
 import { FlatMessageItem } from "./FlatMessageItem";
+
+const CHAT_RENDER_MESSAGE_LIMIT = 100;
+const CHAT_RENDER_CHAR_BUDGET = 240_000;
+
+function cappedAdd(total: number, amount: number, limit: number) {
+  return Math.min(limit, total + Math.max(0, amount));
+}
+
+function estimateUnknownChars(value: unknown, limit: number, depth = 0): number {
+  if (limit <= 0) return 0;
+  if (typeof value === "string") return Math.min(value.length, limit);
+  if (typeof value === "number" || typeof value === "boolean") return String(value).length;
+  if (!value || typeof value !== "object" || depth >= 6) return 0;
+
+  let chars = 0;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      chars = cappedAdd(chars, estimateUnknownChars(item, limit - chars, depth + 1), limit);
+      if (chars >= limit) break;
+    }
+    return chars;
+  }
+
+  const record = value as Record<string, unknown>;
+  for (const key of ["content", "thinking", "thinkingChain", "toolCalls", "todo", "artifacts", "sources", "mcpCalls", "result", "args", "entries"] as const) {
+    chars = cappedAdd(chars, estimateUnknownChars(record[key], limit - chars, depth + 1), limit);
+    if (chars >= limit) break;
+  }
+  return chars;
+}
+
+// Identity-keyed cache. ChatMessage is replaced (not mutated) on every patch,
+// so once cached, the value stays correct for the lifetime of that object.
+// New objects (e.g. the currently streaming assistant message after each
+// delta) compute fresh; the rest of the conversation hits the cache.
+const messageCharCache = new WeakMap<ChatMessage, number>();
+
+function estimateMessageRenderCharsCached(msg: ChatMessage): number {
+  const cached = messageCharCache.get(msg);
+  if (cached !== undefined) return cached;
+  // Cap the walk at the global char budget — we don't need exact char counts
+  // beyond it (any single message that exceeds the budget already dominates
+  // the window decision on its own).
+  const value = Math.max(1, estimateUnknownChars(msg, CHAT_RENDER_CHAR_BUDGET));
+  messageCharCache.set(msg, value);
+  return value;
+}
+
+function resolveRenderStartIndex(messages: ChatMessage[]): number {
+  let visibleCount = 0;
+  let renderChars = 0;
+  let startIndex = messages.length;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (visibleCount >= CHAT_RENDER_MESSAGE_LIMIT) break;
+    const messageChars = estimateMessageRenderCharsCached(messages[index]);
+    if (visibleCount > 0 && renderChars + messageChars > CHAT_RENDER_CHAR_BUDGET) break;
+    renderChars += messageChars;
+    visibleCount += 1;
+    startIndex = index;
+  }
+  return startIndex;
+}
 
 export interface MessageListHandle {
   scrollToIndex: (index: number, align?: "start" | "center" | "end") => void;
@@ -102,6 +164,44 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
   const forceFollowRef = useRef(false);
   const atBottomRef = useRef(true);
   const savedScrollPositionRef = useRef<{ top: number; height: number } | null>(null);
+  const pendingScrollRef = useRef<{ id: string; align: "start" | "center" | "end" } | null>(null);
+  const [renderAllMessages, setRenderAllMessages] = useState(false);
+  const searchActive = Boolean(searchHighlight?.trim());
+
+  const renderWindow = useMemo(() => {
+    if (renderAllMessages || searchActive) {
+      return { startIndex: 0, hiddenCount: 0, visibleMessages: messages };
+    }
+    const startIndex = resolveRenderStartIndex(messages);
+    return {
+      startIndex,
+      hiddenCount: startIndex,
+      visibleMessages: messages.slice(startIndex),
+    };
+  }, [messages, renderAllMessages, searchActive]);
+
+  useEffect(() => {
+    setRenderAllMessages(false);
+    // Drop any pending scroll target from the previous conversation so a later
+    // re-visit doesn't trigger an unrequested scroll if the same msg id is
+    // still reachable. itemRefs are torn down by the unmount cycle anyway.
+    pendingScrollRef.current = null;
+  }, [conversationId]);
+
+  // Consume any pending scroll target queued by scrollToIndex while the
+  // target was hidden by the render budget. We run on every renderWindow
+  // change so we catch the moment the message becomes mounted.
+  useLayoutEffect(() => {
+    const pending = pendingScrollRef.current;
+    if (!pending) return;
+    const el = itemRefs.current.get(pending.id);
+    if (!el) return;
+    el.scrollIntoView({
+      block: pending.align === "end" ? "end" : pending.align === "center" ? "center" : "start",
+      behavior: "smooth",
+    });
+    pendingScrollRef.current = null;
+  }, [renderWindow]);
 
   const emitAtBottomChange = useCallback((atBottom: boolean) => {
     atBottomRef.current = atBottom;
@@ -149,11 +249,24 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
       const msg = messages[index];
       if (!msg) return;
       const target = itemRefs.current.get(msg.id);
-      if (!target) return;
-      target.scrollIntoView({
-        block: align === "end" ? "end" : align === "center" ? "center" : "start",
-        behavior: "smooth",
-      });
+      if (target) {
+        target.scrollIntoView({
+          block: align === "end" ? "end" : align === "center" ? "center" : "start",
+          behavior: "smooth",
+        });
+        return;
+      }
+      // Target is not mounted. Two reasons:
+      //   1. It exists in `messages` but the render budget hid it → expand
+      //      the window and finish the scroll in a layout effect once it mounts.
+      //   2. It is older than what we hold locally → ask host to page in
+      //      history from the backend.
+      if (index < renderWindow.startIndex) {
+        pendingScrollRef.current = { id: msg.id, align };
+        setRenderAllMessages(true);
+        return;
+      }
+      onLoadOlder?.();
     },
     scrollToBottom: scrollToAbsoluteBottom,
     forceFollow: () => {
@@ -175,7 +288,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
         syncAtBottomState();
       }
     },
-  }), [messages, scrollToAbsoluteBottom, syncAtBottomState]);
+  }), [messages, renderWindow.startIndex, onLoadOlder, scrollToAbsoluteBottom, syncAtBottomState]);
 
   useEffect(() => {
     if (!isStreaming) {
@@ -286,17 +399,51 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
               </button>
             </div>
           )}
-          {messages.map((msg, index) => (
+          {renderWindow.hiddenCount > 0 && (
+            <div style={{ display: "flex", justifyContent: "center", padding: "8px 0" }}>
+              <div style={{
+                border: "1px solid var(--border)",
+                background: "var(--surface)",
+                color: "var(--text-muted)",
+                borderRadius: 999,
+                padding: "5px 12px",
+                fontSize: 12,
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+              }}>
+                <span>已隐藏更早的 {renderWindow.hiddenCount} 条消息以保持流式显示流畅</span>
+                <button
+                  type="button"
+                  onClick={() => setRenderAllMessages(true)}
+                  style={{
+                    border: "none",
+                    background: "transparent",
+                    color: "var(--brand)",
+                    cursor: "pointer",
+                    padding: 0,
+                    fontSize: 12,
+                  }}
+                >
+                  显示已隐藏消息
+                </button>
+              </div>
+            </div>
+          )}
+          {renderWindow.visibleMessages.map((msg, visibleIndex) => {
+            const originalIndex = renderWindow.startIndex + visibleIndex;
+            return (
             <div
-              key={computeItemKey(index, msg)}
+              key={computeItemKey(originalIndex, msg)}
               ref={(el) => {
                 if (el) itemRefs.current.set(msg.id, el);
                 else itemRefs.current.delete(msg.id);
               }}
             >
-              {itemContent(index, msg)}
+              {itemContent(originalIndex, msg)}
             </div>
-          ))}
+            );
+          })}
           <Footer />
         </div>
       </div>

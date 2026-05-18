@@ -10,6 +10,7 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import i18n from "../i18n";
 import { useMdModules } from "./chat/hooks/useMdModules";
+import { useSourceTagFormatter } from "./chat/components/SourceBadge";
 import {
   ReactFlow,
   Background,
@@ -72,7 +73,8 @@ import { OrgBlackboardPanel, type OrgBlackboardPanelHandle } from "../components
 import { OrgMonitorPanel } from "../components/OrgMonitorPanel";
 import { OrgDashboard } from "../components/OrgDashboard";
 import { OrgProjectBoard } from "../components/OrgProjectBoard";
-import { ZoomIn, ZoomOut, Maximize, X as XIcon } from "lucide-react";
+import { ZoomIn, ZoomOut, Maximize, X as XIcon, Copy as IconCopy } from "lucide-react";
+import { copyToClipboard } from "../utils/clipboard";
 import { Button } from "../components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import { Checkbox } from "../components/ui/checkbox";
@@ -636,6 +638,7 @@ export function OrgEditorView({
 }) {
   const { t } = useTranslation();
   const mdModules = useMdModules();
+  const formatSourceTags = useSourceTagFormatter();
 
   // State
   const [orgList, setOrgList] = useState<OrgSummary[]>([]);
@@ -703,6 +706,21 @@ export function OrgEditorView({
     setToast({ message, type });
     toastTimer.current = setTimeout(() => setToast(null), 3000);
   }, []);
+
+  // 一键复制组织 ID（顶栏 / 列表卡片 / 指挥台都复用）。
+  const copyOrgId = useCallback(async (orgId: string | null | undefined, event?: React.MouseEvent) => {
+    if (event) {
+      event.stopPropagation();
+      event.preventDefault();
+    }
+    const id = (orgId || "").trim();
+    if (!id) {
+      showToast(t("org.editor.orgIdMissing"), "error");
+      return;
+    }
+    const ok = await copyToClipboard(id);
+    showToast(ok ? t("org.editor.orgIdCopied") : t("org.editor.orgIdCopyFailed"), ok ? "ok" : "error");
+  }, [showToast, t]);
 
   // MCP/Skill lists for selection
   const [availableMcpServers, setAvailableMcpServers] = useState<{ name: string; status: string }[]>([]);
@@ -995,6 +1013,8 @@ export function OrgEditorView({
         ev === "org:command_stopped_no_progress"
       ) {
         void fetchOrg(orgId);
+        bbPanelRef.current?.refresh();
+      } else if (ev === "org:command_started") {
         bbPanelRef.current?.refresh();
       } else if (ev === "org:command_phase") {
         // command_phase is emitted by polling/diagnostics and can arrive every few seconds.
@@ -1789,6 +1809,31 @@ export function OrgEditorView({
                 </span>
               )
             )}
+            {/* Org ID + 一键复制（让 IM 用户 / 调试时不用再翻 F12） */}
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className="org-topbar-id"
+                    onClick={(e) => copyOrgId(currentOrg.id, e)}
+                    aria-label={t("org.editor.copyOrgId")}
+                  >
+                    <span className="org-topbar-id-label">ID</span>
+                    <code className="org-topbar-id-value">
+                      {isMobile ? `${currentOrg.id.slice(0, 6)}…` : currentOrg.id}
+                    </code>
+                    <IconCopy size={11} />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                    <code style={{ fontSize: 11 }}>{currentOrg.id}</code>
+                    <span style={{ fontSize: 10, opacity: 0.7 }}>{t("org.editor.copyOrgIdHint")}</span>
+                  </div>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
             <TooltipProvider>
               <div
                 className="org-topbar-status"
@@ -1960,7 +2005,17 @@ export function OrgEditorView({
                     <IconBuilding size={16} />
                     <div style={{ overflow: "hidden" }}>
                       <div style={{ fontWeight: 500, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{org.name}</div>
-                      <div style={{ fontSize: 10, color: "var(--muted)" }}>{t("org.editor.nodeCount", { count: org.node_count })} · {ORG_STATUS_LABELS[org.status] ? t(ORG_STATUS_LABELS[org.status]) : org.status}</div>
+                      <div style={{ fontSize: 10, color: "var(--muted)", display: "flex", alignItems: "center", gap: 6 }}>
+                        <span>{t("org.editor.nodeCount", { count: org.node_count })} · {ORG_STATUS_LABELS[org.status] ? t(ORG_STATUS_LABELS[org.status]) : org.status}</span>
+                        <span
+                          className="org-card-id"
+                          title={`${t("org.editor.copyOrgId")} · ${org.id}`}
+                          onClick={(e) => copyOrgId(org.id, e)}
+                        >
+                          {org.id.slice(0, 8)}…
+                          <IconCopy size={9} />
+                        </span>
+                      </div>
                     </div>
                   </div>
                   <button className="btnSmall" onClick={(e) => { e.stopPropagation(); setConfirmDeleteOrgId(org.id); }} style={{ opacity: 0.5, fontSize: 10 }} title={t("org.editor.deleteOrg")}>
@@ -2139,8 +2194,16 @@ export function OrgEditorView({
                   <div style={{ fontWeight: 500, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {org.name}
                   </div>
-                  <div style={{ fontSize: 10, color: "var(--muted)" }}>
-                    {t("org.editor.nodeCount", { count: org.node_count })} · {ORG_STATUS_LABELS[org.status] ? t(ORG_STATUS_LABELS[org.status]) : org.status}
+                  <div style={{ fontSize: 10, color: "var(--muted)", display: "flex", alignItems: "center", gap: 6 }}>
+                    <span>{t("org.editor.nodeCount", { count: org.node_count })} · {ORG_STATUS_LABELS[org.status] ? t(ORG_STATUS_LABELS[org.status]) : org.status}</span>
+                    <span
+                      className="org-card-id"
+                      title={`${t("org.editor.copyOrgId")} · ${org.id}`}
+                      onClick={(e) => copyOrgId(org.id, e)}
+                    >
+                      {org.id.slice(0, 8)}…
+                      <IconCopy size={9} />
+                    </span>
                   </div>
                 </div>
               </div>
@@ -2495,7 +2558,7 @@ export function OrgEditorView({
                 <div className="org-feed-tip-content">
                   {mdModules ? (
                     <mdModules.ReactMarkdown remarkPlugins={mdModules.remarkPlugins} rehypePlugins={mdModules.rehypePlugins}>
-                      {text ?? ""}
+                      {formatSourceTags(text ?? "")}
                     </mdModules.ReactMarkdown>
                   ) : (
                     <div style={{ whiteSpace: "pre-wrap" }}>{text ?? ""}</div>
@@ -2748,9 +2811,10 @@ export function OrgEditorView({
             .org-topbar {
               min-height: 36px;
               padding: 2px 0;
-              display: flex;
+              display: grid;
+              grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
               align-items: center;
-              justify-content: space-between;
+              justify-content: initial;
               gap: 8px;
 
               background: var(--card-bg, #fff);
@@ -2769,10 +2833,12 @@ export function OrgEditorView({
             }
             .org-topbar-left {
               display: flex; align-items: center; gap: 6px;
+              justify-self: start;
               flex-shrink: 1; min-width: 0; overflow: hidden;
             }
             .org-topbar-center {
               display: flex; align-items: center; justify-content: center;
+              justify-self: center;
               align-self: stretch; flex: 0 0 auto;
             }
             .org-topbar-tabs {
@@ -2800,6 +2866,51 @@ export function OrgEditorView({
               cursor: text;
             }
             .org-topbar-name--editing:hover { background: var(--card-bg, #fff); }
+            .org-topbar-id {
+              display: inline-flex; align-items: center; gap: 4px;
+              font-size: 10px;
+              padding: 2px 7px;
+              border-radius: 12px;
+              border: 1px dashed var(--border, rgba(99,102,241,0.35));
+              background: transparent;
+              color: var(--muted);
+              cursor: pointer;
+              user-select: none;
+              transition: background 0.15s, color 0.15s, border-color 0.15s;
+              max-width: 220px;
+            }
+            .org-topbar-id:hover {
+              background: var(--hover-bg, rgba(99,102,241,0.08));
+              color: var(--primary, #6366f1);
+              border-color: var(--primary, #6366f1);
+            }
+            .org-topbar-id-label {
+              font-weight: 600; letter-spacing: 0.05em;
+              opacity: 0.75;
+            }
+            .org-topbar-id-value {
+              font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+              font-size: 10px;
+              max-width: 160px;
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            }
+            .org-card-id {
+              display: inline-flex; align-items: center; gap: 3px;
+              font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+              font-size: 9px;
+              color: var(--muted);
+              opacity: 0.78;
+              padding: 1px 4px;
+              border-radius: 4px;
+              cursor: pointer;
+              transition: background 0.15s, color 0.15s, opacity 0.15s;
+              user-select: none;
+            }
+            .org-card-id:hover {
+              background: var(--hover-bg, rgba(99,102,241,0.10));
+              color: var(--primary, #6366f1);
+              opacity: 1;
+            }
             .org-topbar-status {
               display: inline-flex; align-items: center; gap: 5px;
               font-size: 11px; padding: 3px 10px; border-radius: 20px;
@@ -2835,7 +2946,7 @@ export function OrgEditorView({
 
             /* ── Right actions ── */
             .org-topbar-right {
-              display: flex; align-items: center; gap: 3px; flex-shrink: 0;
+              display: flex; align-items: center; gap: 3px; justify-self: end; flex-shrink: 0;
             }
             .org-tb-btn {
               display: inline-flex; align-items: center; gap: 4px;
@@ -3532,7 +3643,7 @@ export function OrgEditorView({
                             <div className="bb-entry-content" style={{ marginTop: 3 }}>
                               {mdModules ? (
                                 <mdModules.ReactMarkdown remarkPlugins={mdModules.remarkPlugins} rehypePlugins={mdModules.rehypePlugins}>
-                                  {bb.content ?? ""}
+                                  {formatSourceTags(bb.content ?? "")}
                                 </mdModules.ReactMarkdown>
                               ) : (
                                 <div style={{ whiteSpace: "pre-wrap" }}>{bb.content ?? ""}</div>

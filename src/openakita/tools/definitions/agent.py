@@ -307,7 +307,7 @@ AGENT_TOOLS = [
             "- 设置 persistent=true 可永久保存（仅在用户明确要求时使用）\n\n"
             "**记忆与身份**：\n"
             "- 默认共享身份与记忆，适合一次性或通用任务\n"
-            "- 当用户要长期保存某个专业 Agent，或该 Agent 需要形成独立偏好/经验时，可设置 memory_mode=\"isolated\"\n"
+            "- 当用户要长期保存某个专业 Agent，或该 Agent 需要形成独立偏好/经验时，可设置 memory_isolation=\"isolated\"（旧名 memory_mode 同义，已废弃）\n"
             "- memory_inherit_global=true 表示独立记忆也能参考全局记忆，通常保持默认即可\n\n"
             "**限制**：\n"
             "- 每个会话最多创建 5 个动态 Agent\n"
@@ -343,10 +343,15 @@ AGENT_TOOLS = [
                     "enum": ["shared", "custom"],
                     "description": "身份模式：shared 共享全局身份；custom 使用独立身份（默认 shared）",
                 },
+                "memory_isolation": {
+                    "type": "string",
+                    "enum": ["shared", "isolated"],
+                    "description": "记忆隔离：shared 共享全局记忆；isolated 使用独立记忆（默认 shared）。Phase 2b.2 新名，推荐使用。",
+                },
                 "memory_mode": {
                     "type": "string",
                     "enum": ["shared", "isolated"],
-                    "description": "记忆模式：shared 共享全局记忆；isolated 使用独立记忆（默认 shared）",
+                    "description": "memory_isolation 的旧名，已废弃但仍兼容；优先使用 memory_isolation。",
                 },
                 "memory_inherit_global": {
                     "type": "boolean",

@@ -5,14 +5,103 @@ SKILL.md 解析器
 解析 SKILL.md 文件的 YAML frontmatter 和 Markdown body
 """
 
+import copy
 import logging
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Process-wide parse cache (shared across SkillLoader instances)
+# ---------------------------------------------------------------------------
+#
+# Every Agent owns its own ``SkillLoader`` which in turn owns a fresh
+# ``SkillParser``. The historical ``self._parse_cache`` on the parser
+# instance correctly avoids re-reading + re-yamling the same SKILL.md
+# within a single agent's lifetime, but did nothing across agents — and
+# the org runtime creates a new agent per node, so each delegated task
+# would re-parse all 200+ SKILL.md files from disk.
+#
+# This module-level cache makes the parse step process-wide. Entries
+# are keyed by ``(resolved_path, mtime)`` so any on-disk edit
+# invalidates them automatically; ``invalidate_global_parse_cache`` is
+# also exposed for explicit eviction (hooked from
+# ``skills.events.notify_skills_changed`` so install / uninstall
+# events drop stale entries even if mtime is unchanged).
+#
+# Cache hits return a deep copy so downstream mutation of
+# ``ParsedSkill.metadata.category`` (see ``SkillLoader.load_skill``)
+# cannot pollute the shared object.
+_GLOBAL_PARSE_CACHE_LOCK = threading.Lock()
+_GLOBAL_PARSE_CACHE: dict[tuple[str, float], "ParsedSkill"] = {}
+_GLOBAL_PARSE_CACHE_MAX = 2000
+
+
+def _global_cache_get(key: tuple[str, float]) -> "ParsedSkill | None":
+    with _GLOBAL_PARSE_CACHE_LOCK:
+        return _GLOBAL_PARSE_CACHE.get(key)
+
+
+def _global_cache_put(key: tuple[str, float], value: "ParsedSkill") -> None:
+    with _GLOBAL_PARSE_CACHE_LOCK:
+        if len(_GLOBAL_PARSE_CACHE) >= _GLOBAL_PARSE_CACHE_MAX:
+            _GLOBAL_PARSE_CACHE.clear()
+        _GLOBAL_PARSE_CACHE[key] = value
+
+
+def invalidate_global_parse_cache(path: Path | str | None = None) -> int:
+    """Drop ``ParsedSkill`` entries from the process-wide cache.
+
+    Args:
+        path: When provided, only entries whose resolved path equals
+            ``path`` or lives under ``path``/<...> are dropped. When
+            omitted, the entire cache is cleared. This is the entry
+            point ``skills.events.notify_skills_changed`` hooks into so
+            install / uninstall / hot-reload events make the cache
+            forget previously parsed entries even when SKILL.md mtime
+            has not changed (e.g. a reinstall over the same files).
+
+    Returns:
+        The number of cache entries that were dropped.
+    """
+    import os as _os
+
+    with _GLOBAL_PARSE_CACHE_LOCK:
+        if path is None:
+            n = len(_GLOBAL_PARSE_CACHE)
+            _GLOBAL_PARSE_CACHE.clear()
+            return n
+        try:
+            target = str(Path(path).resolve())
+        except Exception:
+            return 0
+        prefix = target + _os.sep
+        keys_to_drop = [
+            k for k in list(_GLOBAL_PARSE_CACHE.keys())
+            if k[0] == target or k[0].startswith(prefix)
+        ]
+        for k in keys_to_drop:
+            _GLOBAL_PARSE_CACHE.pop(k, None)
+        return len(keys_to_drop)
+
+
+def _clone_parsed_skill_for_caller(skill: "ParsedSkill") -> "ParsedSkill":
+    """Return a deep copy of ``skill`` safe to mutate.
+
+    Downstream callers (notably ``SkillLoader.load_skill``) write to
+    ``parsed.metadata.category`` after the parser returns. If we hand
+    back the same object that lives inside ``_GLOBAL_PARSE_CACHE``
+    those edits would leak across agents. ``copy.deepcopy`` is fine
+    here — a ``ParsedSkill`` only carries the metadata dataclass,
+    short ``Path`` objects, and the markdown body string, so the copy
+    cost is ≪ a fresh YAML parse + disk read.
+    """
+    return copy.deepcopy(skill)
 
 
 @dataclass
@@ -207,25 +296,41 @@ class SkillParser:
         if not path.exists():
             raise FileNotFoundError(f"SKILL.md not found: {path}")
 
-        # F13: check mtime-based cache
+        # F13 + P7.6a: mtime-keyed cache check, instance-local first
+        # (cheap, no lock contention), then process-global so SKILL.md
+        # already parsed by a sibling Agent's SkillParser is reused
+        # without touching the disk or YAML loader.
         resolved = str(path.resolve())
         try:
             mtime = path.stat().st_mtime
         except OSError:
             mtime = 0.0
         cache_key = (resolved, mtime)
+
         cached = self._parse_cache.get(cache_key)
+        if cached is None:
+            cached = _global_cache_get(cache_key)
+            if cached is not None:
+                # Promote into the local cache so subsequent calls in
+                # this parser skip the global lock entirely.
+                self._parse_cache[cache_key] = cached
         if cached is not None:
-            return cached
+            # Hand callers a private copy — see the docstring on
+            # ``_clone_parsed_skill_for_caller`` for why this matters.
+            return _clone_parsed_skill_for_caller(cached)
 
         content = path.read_text(encoding="utf-8")
         result = self.parse_content(content, path)
 
-        # Store in cache (limit size to prevent unbounded growth)
+        # Store the FRESH-parsed object in both caches, but hand the
+        # caller a deep copy so any post-parse mutation (e.g.
+        # ``SkillLoader.load_skill`` rebinding ``metadata.category``)
+        # cannot reach the cached object and pollute future hits.
         if len(self._parse_cache) > 500:
             self._parse_cache.clear()
         self._parse_cache[cache_key] = result
-        return result
+        _global_cache_put(cache_key, result)
+        return _clone_parsed_skill_for_caller(result)
 
     def parse_content(self, content: str, path: Path) -> ParsedSkill:
         """

@@ -32,7 +32,7 @@ from .types import normalize_tags
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 # Process-level singleton registry: same db_path → same MemoryStorage instance
 _instance_registry: dict[str, MemoryStorage] = {}
@@ -194,6 +194,43 @@ class MemoryStorage:
             logger.warning(f"[MemoryStorage] Could not read schema version, assuming v0: {e}")
             return 0
 
+    # ----------------------------------------------------------------
+    # 通用 meta 键值（复用 _schema_meta 表，避免再开一张 _meta 表）
+    # 用于持久化"一次性 sentinel"，如 legacy_json_backfill_done 等。
+    # ----------------------------------------------------------------
+
+    def get_meta(self, key: str) -> str | None:
+        """读取 _schema_meta 里的一个键。不存在返回 None。"""
+        if self._conn is None or not key:
+            return None
+        try:
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT)"
+            )
+            cur = self._conn.execute("SELECT value FROM _schema_meta WHERE key = ?", (key,))
+            row = cur.fetchone()
+            return row[0] if row else None
+        except Exception as e:
+            logger.debug(f"[MemoryStorage] get_meta({key!r}) failed: {e}")
+            return None
+
+    def set_meta(self, key: str, value: str) -> None:
+        """写 _schema_meta 里的一个键。"""
+        if self._conn is None or not key:
+            return
+        with self._lock:
+            try:
+                self._conn.execute(
+                    "CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT)"
+                )
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES (?, ?)",
+                    (key, str(value)),
+                )
+                self._conn.commit()
+            except Exception as e:
+                logger.warning(f"[MemoryStorage] set_meta({key!r}) failed: {e}")
+
     def _set_schema_version(
         self,
         version: int,
@@ -232,6 +269,8 @@ class MemoryStorage:
                 self._migrate_v1_to_v2(mig_conn, commit=False)
             if from_version < 3:
                 self._migrate_v2_to_v3(mig_conn, commit=False)
+            if from_version < 4:
+                self._migrate_v3_to_v4(mig_conn, commit=False)
 
             self._set_schema_version(_SCHEMA_VERSION, conn=mig_conn, commit=False)
             mig_conn.execute("COMMIT")
@@ -349,6 +388,165 @@ class MemoryStorage:
             END""")
         except sqlite3.OperationalError:
             pass
+        if commit:
+            c.commit()
+
+    def _migrate_v3_to_v4(
+        self,
+        conn: sqlite3.Connection | None = None,
+        *,
+        commit: bool = True,
+    ) -> None:
+        """Phase 0: 把 legacy_quarantine 里的 lifecycle 后台合成产物迁出到
+        pending_consolidation，让真历史旧数据和后台合成数据物理分桶。
+
+        分流规则（保守优先）：
+        - source IN ('daily_consolidation', 'experience_synthesis')
+          → pending_consolidation（lifecycle 自己写的）
+        - 其余 → 留在 legacy_quarantine（视为真历史 v1/v2 数据）
+
+        所有被迁移的记录写入 _memory_scope_audit 表，便于排查和回滚。
+        """
+        c = conn or self._conn
+
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS _memory_scope_audit (
+                memory_id TEXT NOT NULL,
+                old_scope TEXT NOT NULL,
+                new_scope TEXT NOT NULL,
+                old_user_id TEXT DEFAULT '',
+                new_user_id TEXT DEFAULT '',
+                reason TEXT NOT NULL,
+                migrated_at TEXT NOT NULL,
+                migration_version TEXT NOT NULL DEFAULT 'v3_to_v4'
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scope_audit_memory ON _memory_scope_audit(memory_id)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scope_audit_version ON _memory_scope_audit(migration_version)"
+        )
+
+        # session 租户索引表（lifecycle 反查租户用），即使本次 migration
+        # 不写入数据，也要保证表结构存在，避免 LifecycleManager / MemoryManager
+        # 启动期就抛 no such table。
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_tenants (
+                session_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL DEFAULT 'default',
+                workspace_id TEXT NOT NULL DEFAULT 'default',
+                last_updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+        # 关闭 FTS update 触发器，避免 owner-only 字段更新触发 FTS 重建
+        c.execute("DROP TRIGGER IF EXISTS memories_fts_au")
+        now = datetime.now().isoformat()
+
+        # 先记审计：哪些行将被改 scope
+        c.execute(
+            """
+            INSERT INTO _memory_scope_audit
+                (memory_id, old_scope, new_scope, old_user_id, new_user_id, reason, migrated_at, migration_version)
+            SELECT
+                id, scope, 'pending_consolidation',
+                user_id, user_id,
+                'v3_to_v4_source_lifecycle', ?, 'v3_to_v4'
+            FROM memories
+            WHERE scope = 'legacy_quarantine'
+              AND source IN ('daily_consolidation', 'experience_synthesis')
+            """,
+            (now,),
+        )
+
+        cur_update = c.execute(
+            """
+            UPDATE memories
+            SET scope = 'pending_consolidation',
+                updated_at = ?
+            WHERE scope = 'legacy_quarantine'
+              AND source IN ('daily_consolidation', 'experience_synthesis')
+            """,
+            (now,),
+        )
+        moved = cur_update.rowcount if cur_update.rowcount is not None else 0
+        if moved:
+            logger.info(
+                "[MemoryStorage] v3→v4 split: moved %d rows from legacy_quarantine to "
+                "pending_consolidation (audit recorded)",
+                moved,
+            )
+
+        # v4 backfill：从 conversation_turns 里出现过的所有 session_id 反推登记
+        # session_tenants，避免 v4 升级后旧 unextracted turn 被 lifecycle 误落
+        # 到 pending_consolidation（再被 SHORT_TERM 自清规则 3 天后删掉）。
+        #
+        # 推断策略：
+        # - session_id 形如 ``ns__chat_id__user_id[__thread]``（IM 通道的
+        #   conversation_safe_id 标准形式）→ 取第 3 段当 user_id，workspace 仍
+        #   默认 default（workspace_id 的真值要等 Phase 2a 才会出现）。
+        # - 不符合此格式（如 desktop CLI 的 ``YYYYMMDD_HHMMSS_xxx`` 单段）→
+        #   登记成 (default, default)。Phase 0 的语义已经接受 default 作为
+        #   合法的单用户身份，lifecycle 会正确归属到该用户。
+        # - user_id 段落是 ``default / anonymous / system / legacy / ''`` 时
+        #   也降级为 (default, default)，避免把占位身份当真用户。
+        #
+        # 这一步只补 session_tenants，**不动** memories 表本身，零数据丢失风险。
+        existing_sessions = {
+            row[0]
+            for row in c.execute("SELECT session_id FROM session_tenants").fetchall()
+        }
+        backfill_rows: list[tuple[str, str, str, str]] = []
+        for (session_id,) in c.execute(
+            "SELECT DISTINCT session_id FROM conversation_turns WHERE session_id IS NOT NULL "
+            "AND session_id != ''"
+        ).fetchall():
+            if not session_id or session_id in existing_sessions:
+                continue
+            parts = session_id.split("__")
+            if len(parts) >= 3 and parts[2] and parts[2] not in {
+                "default", "anonymous", "system", "legacy", ""
+            }:
+                user_id = parts[2]
+            else:
+                user_id = "default"
+            backfill_rows.append((session_id, user_id, "default", now))
+
+        if backfill_rows:
+            c.executemany(
+                """
+                INSERT OR IGNORE INTO session_tenants
+                    (session_id, user_id, workspace_id, last_updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                backfill_rows,
+            )
+            logger.info(
+                "[MemoryStorage] v3→v4 backfill: registered %d sessions in session_tenants "
+                "(IM-style parsed: %d, default fallback: %d)",
+                len(backfill_rows),
+                sum(1 for r in backfill_rows if r[1] != "default"),
+                sum(1 for r in backfill_rows if r[1] == "default"),
+            )
+
+        # 恢复 FTS update 触发器
+        try:
+            c.execute(
+                """CREATE TRIGGER IF NOT EXISTS memories_fts_au AFTER UPDATE ON memories BEGIN
+                INSERT INTO memories_fts(memories_fts, rowid, content, subject, predicate, tags)
+                VALUES ('delete', old.rowid, old.content, old.subject, old.predicate, old.tags);
+                INSERT INTO memories_fts(rowid, content, subject, predicate, tags)
+                VALUES (new.rowid, new.content, new.subject, new.predicate, new.tags);
+            END"""
+            )
+        except sqlite3.OperationalError:
+            pass
+
         if commit:
             c.commit()
 
@@ -537,6 +735,33 @@ class MemoryStorage:
             )
         """)
 
+        # v4: session_id → 租户映射，lifecycle 后台批处理用这张表反查
+        # 一条 conversation_turns 的 session_id 属于哪个 (user_id, workspace_id)，
+        # 避免裸用 ContextVar 默认值导致后台合成全部落到 default 共享桶。
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS session_tenants (
+                session_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL DEFAULT 'default',
+                workspace_id TEXT NOT NULL DEFAULT 'default',
+                last_updated_at TEXT NOT NULL
+            )
+        """)
+
+        # v4: 记忆 scope 迁移审计表，记录每条记忆历史上被哪次 migration
+        # 从哪个 scope 移到哪个 scope，含理由和时间戳，便于排查 / 回滚。
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS _memory_scope_audit (
+                memory_id TEXT NOT NULL,
+                old_scope TEXT NOT NULL,
+                new_scope TEXT NOT NULL,
+                old_user_id TEXT DEFAULT '',
+                new_user_id TEXT DEFAULT '',
+                reason TEXT NOT NULL,
+                migrated_at TEXT NOT NULL,
+                migration_version TEXT NOT NULL DEFAULT 'v3_to_v4'
+            )
+        """)
+
         # ==============================================================
         # Phase 2: CREATE INDEX — all tables already exist at this point
         # ==============================================================
@@ -591,6 +816,14 @@ class MemoryStorage:
         c.execute("CREATE INDEX IF NOT EXISTS idx_attach_mime ON attachments(mime_type)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_attach_direction ON attachments(direction)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_attach_created ON attachments(created_at)")
+
+        # session_tenants + _memory_scope_audit (v4)
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scope_audit_memory ON _memory_scope_audit(memory_id)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scope_audit_version ON _memory_scope_audit(migration_version)"
+        )
 
         if include_fts:
             self._create_fts_objects(c)
@@ -1252,14 +1485,42 @@ class MemoryStorage:
         outcome: str | None = None,
         days: int | None = None,
         limit: int = 20,
+        user_id: str | None = None,
+        workspace_id: str | None = None,
     ) -> list[dict]:
+        """搜索 episodes。
+
+        Phase 2b.5 新增 ``user_id`` / ``workspace_id`` 过滤：通过 INNER JOIN
+        ``session_tenants`` 表把 episode 收敛到给定租户。
+
+        兼容性：
+        - 不传 ``user_id`` 和 ``workspace_id`` 时回退到旧行为（全库扫描），
+          老调用方完全不感知；
+        - 显式传任一参数后，未在 ``session_tenants`` 登记的 session 对应的
+          episode（v3 之前的老数据）会被自然过滤掉 —— 这是有意的安全默认。
+          调用方如果想包含历史孤儿数据，可以在迁徙工具里单独走 raw SQL。
+        """
         if not self._conn:
             return []
         conditions: list[str] = []
         params: list[Any] = []
 
+        use_tenant_filter = user_id is not None or workspace_id is not None
+        table_expr = "episodes"
+        if use_tenant_filter:
+            table_expr = (
+                "episodes INNER JOIN session_tenants st "
+                "ON episodes.session_id = st.session_id"
+            )
+            if user_id is not None:
+                conditions.append("st.user_id = ?")
+                params.append(user_id)
+            if workspace_id is not None:
+                conditions.append("st.workspace_id = ?")
+                params.append(workspace_id)
+
         if session_id:
-            conditions.append("session_id = ?")
+            conditions.append("episodes.session_id = ?" if use_tenant_filter else "session_id = ?")
             params.append(session_id)
         if entity:
             conditions.append("entities LIKE ?")
@@ -1278,9 +1539,12 @@ class MemoryStorage:
         where = " AND ".join(conditions) if conditions else "1=1"
         params.append(limit)
 
+        select_cols = "episodes.*" if use_tenant_filter else "*"
+
         try:
             cur = self._conn.execute(
-                f"SELECT * FROM episodes WHERE {where} ORDER BY started_at DESC LIMIT ?",
+                f"SELECT {select_cols} FROM {table_expr} WHERE {where} "
+                "ORDER BY started_at DESC LIMIT ?",
                 params,
             )
             return self._rows_to_dicts(
@@ -1391,6 +1655,224 @@ class MemoryStorage:
                 if _is_db_locked(e):
                     raise
                 logger.error(f"Failed to save scratchpad: {e}")
+
+    # ======================================================================
+    # Session Tenants (v4)
+    # ======================================================================
+
+    def upsert_session_tenant(
+        self,
+        session_id: str,
+        user_id: str,
+        workspace_id: str,
+    ) -> None:
+        """记录 session_id → (user_id, workspace_id) 映射，供 lifecycle 反查租户。
+
+        每次 MemoryManager.start_session 都会被调用一次。重复写入只刷新时间戳，
+        避免后台批处理时拿不到当前会话归属的 user / workspace 而误落 default。
+        """
+        if not self._conn or not session_id:
+            return
+        u = (user_id or "").strip() or "default"
+        w = (workspace_id or "").strip() or "default"
+        ts = datetime.now().isoformat()
+        with self._lock:
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO session_tenants (session_id, user_id, workspace_id, last_updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(session_id) DO UPDATE SET
+                        user_id = excluded.user_id,
+                        workspace_id = excluded.workspace_id,
+                        last_updated_at = excluded.last_updated_at
+                    """,
+                    (session_id, u, w, ts),
+                )
+                self._conn.commit()
+            except Exception as e:
+                if _is_db_locked(e):
+                    raise
+                logger.warning(f"[MemoryStorage] upsert_session_tenant failed: {e}")
+
+    def get_session_tenant(self, session_id: str) -> tuple[str, str] | None:
+        """根据 session_id 查 (user_id, workspace_id)。
+
+        未找到返回 None；调用方应将 None 视为 “租户未知”，把记忆落到
+        pending_consolidation 桶里，避免污染共享 default。
+        """
+        if not self._conn or not session_id:
+            return None
+        try:
+            cur = self._conn.execute(
+                "SELECT user_id, workspace_id FROM session_tenants WHERE session_id = ?",
+                (session_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return (row[0] or "default", row[1] or "default")
+        except Exception as e:
+            logger.debug(f"[MemoryStorage] get_session_tenant failed: {e}")
+            return None
+
+    def iter_owned_session_ids(
+        self,
+        *,
+        user_id: str,
+        workspace_id: str | None = None,
+    ) -> list[str]:
+        """返回 session_tenants 里所有属于 (user_id[, workspace_id]) 的 session_id。
+
+        用于多用户 IM 部署下 JSONL / react_traces 文件级回退路径的 owner
+        过滤 —— 没登记过的 session 自然被排除，即便文件还在磁盘上。
+        """
+        if not self._conn:
+            return []
+        try:
+            if workspace_id is None:
+                cur = self._conn.execute(
+                    "SELECT session_id FROM session_tenants WHERE user_id = ?",
+                    (user_id,),
+                )
+            else:
+                cur = self._conn.execute(
+                    "SELECT session_id FROM session_tenants "
+                    "WHERE user_id = ? AND workspace_id = ?",
+                    (user_id, workspace_id),
+                )
+            return [row[0] for row in cur.fetchall() if row[0]]
+        except Exception as e:
+            logger.debug(f"[MemoryStorage] iter_owned_session_ids failed: {e}")
+            return []
+
+    def list_known_tenants(self) -> list[tuple[str, str]]:
+        """返回所有已知 (user_id, workspace_id) 组合，供 synthesize 等批处理分组。
+
+        排除 ``legacy / system / anonymous / ''`` 这种 **明确表示"不知道是谁"** 的
+        占位身份。``default`` **保留**：在桌面 / CLI 单用户场景，``default`` 就是
+        合法用户身份，不能被当成共享桶过滤掉。
+        """
+        if not self._conn:
+            return []
+        try:
+            cur = self._conn.execute(
+                """
+                SELECT DISTINCT user_id, workspace_id
+                FROM session_tenants
+                WHERE user_id NOT IN ('legacy', 'system', 'anonymous', '')
+                """
+            )
+            return [(r[0] or "default", r[1] or "default") for r in cur.fetchall()]
+        except Exception as e:
+            logger.debug(f"[MemoryStorage] list_known_tenants failed: {e}")
+            return []
+
+    def migrate_workspace_id(
+        self,
+        *,
+        from_workspace_id: str,
+        to_workspace_id: str,
+        user_id: str,
+        scope: str = "user",
+    ) -> int:
+        """Phase 2a：把同一 (scope, user_id) 下、workspace_id=from 的 memories
+        全部改成 workspace_id=to。返回更新行数。
+
+        典型场景：用户从默认 ``workspace_id="default"`` 切换到项目专属工作区，
+        想把原来共享桶里的记忆"携过来"。
+        - 仅修改 ``memories.workspace_id`` 字段，不动 content / scope / user_id；
+        - 全程在事务内，单语句 UPDATE，失败回滚；
+        - 写入 _memory_scope_audit 表记录每条变更，便于审计与可能的回滚。
+        """
+        if not self._conn:
+            return 0
+        if (
+            not from_workspace_id or not to_workspace_id
+            or from_workspace_id == to_workspace_id
+            or not user_id
+        ):
+            return 0
+        now = datetime.now().isoformat()
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                # 先写审计
+                self._conn.execute(
+                    """
+                    INSERT INTO _memory_scope_audit
+                        (memory_id, old_scope, new_scope, old_user_id, new_user_id,
+                         reason, migrated_at, migration_version)
+                    SELECT id, scope, scope, user_id, user_id,
+                           'workspace_migrate:' || ? || '->' || ?,
+                           ?, 'workspace_migrate'
+                    FROM memories
+                    WHERE scope = ? AND user_id = ? AND workspace_id = ?
+                    """,
+                    (from_workspace_id, to_workspace_id, now, scope, user_id, from_workspace_id),
+                )
+                cur = self._conn.execute(
+                    """
+                    UPDATE memories
+                    SET workspace_id = ?, updated_at = ?
+                    WHERE scope = ? AND user_id = ? AND workspace_id = ?
+                    """,
+                    (to_workspace_id, now, scope, user_id, from_workspace_id),
+                )
+                moved = cur.rowcount if cur.rowcount is not None else 0
+                self._conn.execute("COMMIT")
+                if moved:
+                    logger.info(
+                        "[MemoryStorage] workspace migrate: %d rows scope=%s user_id=%s "
+                        "from %s → %s",
+                        moved, scope, user_id, from_workspace_id, to_workspace_id,
+                    )
+                return moved
+            except Exception as e:
+                try:
+                    self._conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                logger.warning(f"[MemoryStorage] migrate_workspace_id failed: {e}")
+                return 0
+
+    def record_scope_audit(
+        self,
+        memory_id: str,
+        *,
+        old_scope: str,
+        new_scope: str,
+        reason: str,
+        old_user_id: str = "",
+        new_user_id: str = "",
+        migration_version: str = "runtime",
+    ) -> None:
+        """记一条 scope 变更审计。runtime 路径下用 migration_version='runtime'。"""
+        if not self._conn or not memory_id:
+            return
+        with self._lock:
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO _memory_scope_audit
+                        (memory_id, old_scope, new_scope, old_user_id, new_user_id,
+                         reason, migrated_at, migration_version)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        memory_id,
+                        old_scope or "",
+                        new_scope or "",
+                        old_user_id or "",
+                        new_user_id or "",
+                        reason or "",
+                        datetime.now().isoformat(),
+                        migration_version or "runtime",
+                    ),
+                )
+                self._conn.commit()
+            except Exception as e:
+                logger.debug(f"[MemoryStorage] record_scope_audit failed: {e}")
 
     # ======================================================================
     # Conversation Turns
@@ -1624,33 +2106,70 @@ class MemoryStorage:
         session_id: str | None = None,
         days_back: int = 7,
         limit: int = 20,
+        *,
+        user_id: str | None = None,
+        workspace_id: str | None = None,
     ) -> list[dict]:
-        """按关键词搜索 conversation_turns（content + tool_calls + tool_results）"""
+        """按关键词搜索 conversation_turns（content + tool_calls + tool_results）。
+
+        Phase 2b.5：新增 ``user_id`` / ``workspace_id`` 过滤，通过 JOIN
+        ``session_tenants`` 限定结果到给定租户。和 ``search_episodes`` 一样，
+        不传则保持旧的全库扫描行为（向后兼容）。
+        """
         if not self._conn or not keyword:
             return []
         cutoff = (datetime.now() - timedelta(days=days_back)).isoformat()
         pattern = f"%{keyword}%"
+
+        use_tenant_filter = user_id is not None or workspace_id is not None
+        if use_tenant_filter:
+            table_expr = (
+                "conversation_turns AS ct "
+                "INNER JOIN session_tenants AS st ON ct.session_id = st.session_id"
+            )
+            select_cols = (
+                "ct.session_id, ct.turn_index, ct.role, ct.content, "
+                "ct.tool_calls, ct.tool_results, ct.timestamp, ct.episode_id"
+            )
+        else:
+            table_expr = "conversation_turns"
+            select_cols = (
+                "session_id, turn_index, role, content, "
+                "tool_calls, tool_results, timestamp, episode_id"
+            )
+
+        conditions: list[str] = []
+        params: list[Any] = []
+        if use_tenant_filter and user_id is not None:
+            conditions.append("st.user_id = ?")
+            params.append(user_id)
+        if use_tenant_filter and workspace_id is not None:
+            conditions.append("st.workspace_id = ?")
+            params.append(workspace_id)
+        if session_id:
+            conditions.append(
+                "ct.session_id = ?" if use_tenant_filter else "session_id = ?"
+            )
+            params.append(session_id)
+        conditions.append(("ct." if use_tenant_filter else "") + "timestamp >= ?")
+        params.append(cutoff)
+        # LIKE 三选一
+        cols_prefix = "ct." if use_tenant_filter else ""
+        conditions.append(
+            f"({cols_prefix}content LIKE ? OR {cols_prefix}tool_calls LIKE ? "
+            f"OR {cols_prefix}tool_results LIKE ?)"
+        )
+        params.extend([pattern, pattern, pattern])
+        params.append(limit)
+
+        where = " AND ".join(conditions)
+        ordering = "ct.timestamp DESC" if use_tenant_filter else "timestamp DESC"
         try:
-            if session_id:
-                cur = self._conn.execute(
-                    "SELECT session_id, turn_index, role, content, "
-                    "tool_calls, tool_results, timestamp, episode_id "
-                    "FROM conversation_turns "
-                    "WHERE session_id = ? AND timestamp >= ? "
-                    "AND (content LIKE ? OR tool_calls LIKE ? OR tool_results LIKE ?) "
-                    "ORDER BY timestamp DESC LIMIT ?",
-                    (session_id, cutoff, pattern, pattern, pattern, limit),
-                )
-            else:
-                cur = self._conn.execute(
-                    "SELECT session_id, turn_index, role, content, "
-                    "tool_calls, tool_results, timestamp, episode_id "
-                    "FROM conversation_turns "
-                    "WHERE timestamp >= ? "
-                    "AND (content LIKE ? OR tool_calls LIKE ? OR tool_results LIKE ?) "
-                    "ORDER BY timestamp DESC LIMIT ?",
-                    (cutoff, pattern, pattern, pattern, limit),
-                )
+            cur = self._conn.execute(
+                f"SELECT {select_cols} FROM {table_expr} WHERE {where} "
+                f"ORDER BY {ordering} LIMIT ?",
+                params,
+            )
             return self._rows_to_dicts(cur, json_fields=["tool_calls", "tool_results"])
         except Exception as e:
             logger.warning(f"Failed to search turns for '{keyword}': {e}")

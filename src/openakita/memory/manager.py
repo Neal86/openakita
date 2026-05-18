@@ -31,6 +31,7 @@ import re
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from ..core.log_health import record_health_event
 from .consolidator import MemoryConsolidator
@@ -277,6 +278,15 @@ class MemoryManager:
             )
             # v2: Retrieval Engine (with brain for LLM query decomposition)
             self.retrieval_engine = RetrievalEngine(self.store, brain=brain)
+            # Subscribe to DB write events: every successful save/update/delete
+            # going through ``self.store`` now keeps ``self._memories`` coherent
+            # automatically — including writes from LifecycleManager, API
+            # routes, plugins, or any other caller that holds a UnifiedStore
+            # reference. This eliminates the previous ad-hoc cache-update
+            # pattern scattered across MemoryManager and the
+            # ``_sync_json``/``_reload_from_sqlite`` ceremony in HTTP routes.
+            with contextlib.suppress(Exception):
+                self.store.register_observer(self._on_store_event)
             # Load existing memories
             self._load_memories()
             self._maybe_schedule_snapshot()
@@ -297,6 +307,29 @@ class MemoryManager:
             with contextlib.suppress(Exception):
                 record_health_event("memory_degraded", {"reason": e.reason})
             emit_memory_health_event("degraded", {"reason": e.reason})
+
+    def _on_store_event(self, kind: str, payload: Any) -> None:
+        """Observer mirror for ``UnifiedStore`` semantic writes.
+
+        Keeps the in-memory ``_memories`` cache in lock-step with SQLite for
+        every write path — including ones that bypass MemoryManager entirely.
+
+        Idempotent and safe to call when the id is already absent (delete) or
+        already present (upsert overwrites with fresher state).
+        """
+        if not isinstance(kind, str):
+            return
+        try:
+            with self._memories_lock:
+                if kind == "upsert":
+                    if payload is not None and getattr(payload, "id", None):
+                        self._memories[payload.id] = payload
+                elif kind == "delete":
+                    mem_id = payload if isinstance(payload, str) else getattr(payload, "id", None)
+                    if mem_id:
+                        self._memories.pop(mem_id, None)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[Manager] _on_store_event %s failed: %s", kind, exc)
 
     def _maybe_schedule_snapshot(self) -> None:
         try:
@@ -358,11 +391,17 @@ class MemoryManager:
         self.memory_md_path.write_text(default_content, encoding="utf-8")
         logger.info(f"Created default MEMORY.md at {self.memory_md_path}")
 
+    # v4 sentinel：标记 memories.json → SQLite 一次性 backfill 已经做完，
+    # 之后不再读取、也不再写出 memories.json，让 SQLite 成为唯一真相源。
+    _LEGACY_JSON_BACKFILL_SENTINEL = "legacy_json_backfill_done"
+
     def _load_memories(self) -> None:
         """Load memories from SQLite (authoritative source) into in-memory cache.
 
-        memories.json is kept as a secondary copy for backward compat,
-        and legacy JSON will be backfilled into SQLite when needed.
+        v4：SQLite 是唯一真相源。``memories.json`` 仅作为从旧版本升级时
+        一次性导入兼容入口；backfill 完成后通过 _schema_meta 里的
+        ``legacy_json_backfill_done`` sentinel 标记，并把 ``memories.json``
+        改名归档，``_save_memories`` 退化为 no-op，不再 dual-write。
         """
         try:
             all_mems = self.store.load_all_memories()
@@ -376,18 +415,33 @@ class MemoryManager:
                 logger.info(f"Loaded {len(all_mems)} memories from SQLite")
         except Exception as e:
             logger.warning(f"[Manager] Failed to load from SQLite: {e}")
-
-        # Sync in-memory cache → JSON (keep JSON in sync, not the other way around)
-        if self._memories:
-            self._save_memories()
+        # v4：_save_memories 已退化为 no-op；不再启动期写 memories.json。
 
     def _backfill_legacy_json_memories(self, existing_mems: list[Memory]) -> int:
-        """Backfill old memories.json into SQLite when SQLite is incomplete.
+        """One-shot import of legacy ``memories.json`` into SQLite.
 
-        This protects users upgrading from old versions where memories were
-        primarily persisted in JSON.
+        v4 改造点：
+        - 用 _schema_meta 里的 ``legacy_json_backfill_done`` sentinel 做幂等。
+          一旦标记设置完成，后续启动会跳过整个 backfill 流程，**不再读取
+          memories.json 内容**。
+        - 成功 backfill 后把 ``memories.json`` 改名为
+          ``memories.json.archived.<timestamp>``，让用户能在文件层看到这是
+          已归档的历史副本，同时彻底切断 dual-write 路径。
+        - 移除原来 ``len(existing_ids) >= len(raw)`` 的脆弱启发式：有了
+          sentinel 后我们不再需要它来"猜"是否已经导过。
         """
+        # Sentinel 设置过 → 一次性 backfill 已完成，直接跳过。
+        try:
+            if self.store.get_meta(self._LEGACY_JSON_BACKFILL_SENTINEL):
+                return 0
+        except Exception:
+            pass
+
         if not self.memories_file.exists():
+            # 没有 memories.json 也算 backfill 完成，标记 sentinel 避免每次
+            # 启动都走 file.exists 判断。
+            with contextlib.suppress(Exception):
+                self.store.set_meta(self._LEGACY_JSON_BACKFILL_SENTINEL, "no_legacy_file")
             return 0
 
         try:
@@ -396,12 +450,19 @@ class MemoryManager:
             logger.warning(f"[Manager] Failed to read legacy memories.json: {e}")
             return 0
 
-        if not isinstance(raw, list) or not raw:
+        if not isinstance(raw, list):
+            # JSON 不合法或不是 list，直接归档不再尝试，避免每次重试。
+            self._archive_legacy_memories_json("invalid_format")
+            with contextlib.suppress(Exception):
+                self.store.set_meta(self._LEGACY_JSON_BACKFILL_SENTINEL, "invalid_format")
+            return 0
+        if not raw:
+            self._archive_legacy_memories_json("empty_file")
+            with contextlib.suppress(Exception):
+                self.store.set_meta(self._LEGACY_JSON_BACKFILL_SENTINEL, "empty_file")
             return 0
 
         existing_ids = {m.id for m in existing_mems if getattr(m, "id", "")}
-        if len(existing_ids) >= len(raw):
-            return 0
 
         existing_fingerprints = {
             (
@@ -466,34 +527,46 @@ class MemoryManager:
                 f"[Manager] Backfilled {migrated} memories from legacy JSON "
                 f"(skipped={skipped}, sqlite_before={len(existing_mems)}, json_total={len(raw)})"
             )
+
+        # backfill 流程完成（无论是否真的导入了行）→ 归档 memories.json 文件 +
+        # 写入 sentinel，永久切断 dual-write 路径。
+        self._archive_legacy_memories_json(
+            f"backfilled_{migrated}_skipped_{skipped}"
+        )
+        with contextlib.suppress(Exception):
+            self.store.set_meta(
+                self._LEGACY_JSON_BACKFILL_SENTINEL,
+                f"backfilled={migrated},skipped={skipped},total={len(raw)}",
+            )
         return migrated
 
-    def _save_memories(self) -> None:
-        """Save to memories.json (backward compat, dual-write)"""
-        import tempfile
-
+    def _archive_legacy_memories_json(self, reason: str) -> None:
+        """把旧 ``memories.json`` 改名到 ``memories.json.archived.<ts>`` 防止被
+        重新读取或被新版 dual-write 覆盖。
+        """
         try:
-            with self._memories_lock:
-                data = [m.to_dict() for m in self._memories.values()]
-            target_dir = self.memories_file.parent
-            fd, tmp_path = tempfile.mkstemp(
-                suffix=".tmp", prefix="memories_", dir=target_dir
+            if not self.memories_file.exists():
+                return
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            archived = self.memories_file.with_name(
+                f"{self.memories_file.name}.archived.{ts}"
             )
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                os.replace(tmp_path, self.memories_file)
-            except BaseException:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-                raise
+            os.replace(self.memories_file, archived)
+            logger.info(
+                "[Manager] Archived legacy memories.json → %s (reason=%s)",
+                archived.name, reason,
+            )
         except Exception as e:
-            logger.error(f"Failed to save memories.json: {e}")
+            logger.warning(f"[Manager] Failed to archive legacy memories.json: {e}")
+
+    def _save_memories(self) -> None:
+        """v4：dual-write 已禁用。SQLite 是唯一真相源；此函数保留兼容旧调用站点，
+        改为 no-op。需要持久化记忆时直接调用 ``self.store.*`` 写 SQLite。
+        """
+        return
 
     async def _save_memories_async(self) -> None:
-        await asyncio.to_thread(self._save_memories)
+        return
 
     # ==================== Session Management ====================
 
@@ -510,6 +583,16 @@ class MemoryManager:
             self._current_user_id = str(user_id).strip() if user_id else "anonymous"
         if workspace_id is not _UNSET_OWNER:
             self._current_workspace_id = str(workspace_id).strip() if workspace_id else "default"
+        # v4：把 session_id → (user_id, workspace_id) 的映射写进 session_tenants 表，
+        # 让凌晨 LifecycleManager 批处理时可以反查每条 conversation_turn 到底
+        # 属于哪个租户，而不是无脑落到 ContextVar 默认值 default/default。
+        if session_id:
+            with contextlib.suppress(Exception):
+                self.store.upsert_session_tenant(
+                    session_id,
+                    self._current_user_id or "default",
+                    self._current_workspace_id or "default",
+                )
         # P1-5：每次切换会话时显式记录当前 (user_id, workspace_id) 范围，
         # 让运维能从日志直接看出"本会话能看见的长期记忆来自哪个租户"，
         # 排查跨用户串扰时不必再去翻代码或 DB。
@@ -660,14 +743,13 @@ class MemoryManager:
                 continue
             if self._identity_slot_for(old) != slot:
                 continue
+            # ``update_semantic`` re-fetches the row and fires an ``upsert``
+            # event with the fresh state, so the cached copy of ``old`` is
+            # replaced in-place by the observer. No manual mutation needed.
             self.store.update_semantic(old.id, {"superseded_by": memory.id})
-            with self._memories_lock:
-                cached = self._memories.get(old.id)
-                if cached:
-                    cached.superseded_by = memory.id
-        with self._memories_lock:
-            self._memories[memory.id] = memory
-            self._save_memories()
+        # Cache write happens via the observer; _save_memories stays for any
+        # future JSON-mirror code (currently a no-op in v4).
+        self._save_memories()
         return memory.id
 
     def _normalize_scope_for_owner(self, scope: str, source: str = "") -> tuple[str, str, str, str]:
@@ -731,10 +813,12 @@ class MemoryManager:
             workspace_id=write_workspace,
             skip_dedup=skip_dedup,
         )
+        # Cache mirror is handled by the store observer (_on_store_event);
+        # _save_memories is a no-op in v4 but kept callable in case JSON sync
+        # is restored later. We only invoke it when an actual upsert happened
+        # (i.e. dedup did not short-circuit by returning a different id).
         if saved_id == memory.id:
-            with self._memories_lock:
-                self._memories[memory.id] = memory
-                self._save_memories()
+            self._save_memories()
         return saved_id
 
     # 任务流水账识别：包含这些动词或客观操作描述的提取项几乎一定是
@@ -1684,6 +1768,13 @@ class MemoryManager:
                 except Exception:
                     pass
 
+            # Pre-commit cache write: kept (despite the store observer also
+            # populating ``_memories`` after the SQLite save below) because the
+            # dedup check above looks at ``_memories``, and two concurrent
+            # ``add_memory`` calls for near-duplicate content would otherwise
+            # race past the dedup gate before the observer fires. The
+            # subsequent observer upsert is idempotent — it overwrites with
+            # the fresh state.
             self._memories[memory.id] = memory
             self._save_memories()
 
@@ -1788,8 +1879,16 @@ class MemoryManager:
         scope_owner: str = "",
         user_id: str | None = None,
         workspace_id: str | None = None,
+        fallback_workspace_id: str | None = None,
     ) -> list[Memory]:
-        results = []
+        """搜索可见记忆。
+
+        Phase 2a：``fallback_workspace_id`` 可选参数。当主 workspace 命中数
+        < limit 时，再从 fallback_workspace_id 补充结果（按 id 去重）。
+        用于桌面用户从 ``"default"`` 平滑切换到项目专属工作区时仍能看到
+        历史共享记忆 —— 调用方可以传 ``fallback_workspace_id="default"``
+        激活。**默认 None 时与历史行为完全一致**。
+        """
         now = datetime.now()
         if scope == "global":
             scope = "user"
@@ -1797,42 +1896,84 @@ class MemoryManager:
             "system" if scope == "system" else "legacy" if scope == "legacy_quarantine" else self._current_user_id
         ) or "default"
         workspace_id = workspace_id or self._current_workspace_id or "default"
-        with self._memories_lock:
-            for memory in self._memories.values():
-                if memory.superseded_by:
+
+        def _collect(target_workspace_id: str) -> list[Memory]:
+            collected: list[Memory] = []
+            with self._memories_lock:
+                for memory in self._memories.values():
+                    if memory.superseded_by:
+                        continue
+                    if memory.expires_at and memory.expires_at < now:
+                        continue
+                    mem_scope = getattr(memory, "scope", "global") or "global"
+                    if mem_scope == "global":
+                        mem_scope = "user"
+                    mem_owner = getattr(memory, "scope_owner", "") or ""
+                    if mem_scope != scope or mem_owner != scope_owner:
+                        continue
+                    if (getattr(memory, "user_id", "default") or "default") != user_id:
+                        continue
+                    if (
+                        getattr(memory, "workspace_id", "default") or "default"
+                    ) != target_workspace_id:
+                        continue
+                    if memory_type and memory.type != memory_type:
+                        continue
+                    if tags and not any(tag in memory.tags for tag in tags):
+                        continue
+                    if query and query.lower() not in memory.content.lower():
+                        continue
+                    collected.append(memory)
+            return collected
+
+        results = _collect(workspace_id)
+
+        # Phase 2a：可选 workspace fallback。仅在主 workspace 命中不足 limit
+        # 且 fallback_workspace_id 与主不同时触发，按 id 去重再合并。
+        if (
+            fallback_workspace_id
+            and fallback_workspace_id != workspace_id
+            and len(results) < limit
+        ):
+            seen_ids = {m.id for m in results}
+            for mem in _collect(fallback_workspace_id):
+                if mem.id in seen_ids:
                     continue
-                if memory.expires_at and memory.expires_at < now:
-                    continue
-                mem_scope = getattr(memory, "scope", "global") or "global"
-                if mem_scope == "global":
-                    mem_scope = "user"
-                mem_owner = getattr(memory, "scope_owner", "") or ""
-                if mem_scope != scope or mem_owner != scope_owner:
-                    continue
-                if (getattr(memory, "user_id", "default") or "default") != user_id:
-                    continue
-                if (getattr(memory, "workspace_id", "default") or "default") != workspace_id:
-                    continue
-                if memory_type and memory.type != memory_type:
-                    continue
-                if tags and not any(tag in memory.tags for tag in tags):
-                    continue
-                if query and query.lower() not in memory.content.lower():
-                    continue
-                results.append(memory)
+                results.append(mem)
+                seen_ids.add(mem.id)
+                if len(results) >= limit:
+                    break
+
         results.sort(key=lambda m: (m.importance_score, m.access_count), reverse=True)
         return results[:limit]
 
     def delete_memory(self, memory_id: str) -> bool:
-        with self._memories_lock:
-            if memory_id in self._memories:
-                del self._memories[memory_id]
-                self._save_memories()
-                if self.vector_store is not None:
-                    self.vector_store.delete_memory(memory_id)
-                self.store.delete_semantic(memory_id)
-                return True
-            return False
+        """Delete a semantic memory by id.
+
+        SQLite is the source of truth. ``_memories`` is mirrored via the
+        observer registered on ``self.store``; we do not gate the DB delete
+        on cache presence (the pre-v4.1 implementation did and silently
+        leaked rows for memories that lifecycle had written between the
+        latest reload and now — see the regression test
+        ``test_delete_memory_works_for_uncached_rows``).
+        """
+        ok = bool(self.store.delete_semantic(memory_id))
+        if self.vector_store is not None:
+            # store.delete_semantic already routes through SearchBackend,
+            # which for vector-backed installs maps to the same
+            # vector_store.delete_memory call. This second call is a safety
+            # net for installs that bind vector_store as a separate plugin
+            # backend and is idempotent.
+            with contextlib.suppress(Exception):
+                self.vector_store.delete_memory(memory_id)
+        if not ok:
+            # Self-heal: if the row is no longer in DB but is still cached
+            # (rare; would only happen if the observer was bypassed earlier),
+            # drop it so iter_cached() stops returning a ghost.
+            with self._memories_lock:
+                if self._memories.pop(memory_id, None) is not None:
+                    return True
+        return ok
 
     # ==================== Plugin Memory Backends ====================
 
@@ -1948,13 +2089,65 @@ class MemoryManager:
             700,
         )
 
+    # Phase 1B：明确"绝不可从缓存直接返回给上层"的隔离桶。
+    # 走 `iter_cached`/`_keyword_search`/`get_stats` 这些会被注入提示词或
+    # 展示给用户的路径都必须排除它们；只有显式 scope 查询（点名要这些桶）
+    # 才能看到内容。
+    _ISOLATED_CACHE_SCOPES: frozenset[str] = frozenset(
+        {"legacy_quarantine", "pending_consolidation"}
+    )
+
+    def iter_cached(
+        self,
+        *,
+        scope: str | None = None,
+        scope_owner: str | None = None,
+        user_id: str | None = None,
+        workspace_id: str | None = None,
+        include_isolated: bool = False,
+    ):
+        """带 scope 过滤的 _memories 缓存迭代器（Phase 1B）。
+
+        这是新版**唯一推荐的**直接读缓存入口。和 ``self._memories.values()``
+        相比的关键差异：
+
+        - 默认会过滤掉 ``legacy_quarantine`` 和 ``pending_consolidation`` 两个
+          隔离桶，避免它们被注入提示词或返回到检索 / 统计接口；
+        - 可选按 (scope, scope_owner, user_id, workspace_id) 精确过滤；
+        - ``include_isolated=True`` 时才会放出隔离桶内容（只给特定迁徙工具用）。
+        """
+        with self._memories_lock:
+            for memory in self._memories.values():
+                mem_scope = getattr(memory, "scope", "user") or "user"
+                if not include_isolated and mem_scope in self._ISOLATED_CACHE_SCOPES:
+                    continue
+                if scope is not None and mem_scope != scope:
+                    continue
+                if scope_owner is not None and (
+                    getattr(memory, "scope_owner", "") or ""
+                ) != scope_owner:
+                    continue
+                if user_id is not None and (
+                    getattr(memory, "user_id", "default") or "default"
+                ) != user_id:
+                    continue
+                if workspace_id is not None and (
+                    getattr(memory, "workspace_id", "default") or "default"
+                ) != workspace_id:
+                    continue
+                yield memory
+
     def _keyword_search(self, query: str, limit: int = 5) -> list[Memory]:
+        """Phase 1B：本地关键词回退检索，强制排除隔离桶（legacy_quarantine
+        和 pending_consolidation），避免被搜索后端失败时把这些桶的内容
+        泄漏到提示词。
+        """
         keywords = [kw for kw in query.lower().split() if len(kw) > 2]
         if not keywords:
             return []
         results = []
-        for memory in self._memories.values():
-            content_lower = memory.content.lower()
+        for memory in self.iter_cached():
+            content_lower = (memory.content or "").lower()
             if any(kw in content_lower for kw in keywords):
                 results.append(memory)
         results.sort(key=lambda m: m.importance_score, reverse=True)
@@ -2119,10 +2312,35 @@ class MemoryManager:
 
     # ==================== Stats ====================
 
-    def get_stats(self, scope: str = "global", scope_owner: str = "") -> dict:
+    def get_stats(
+        self,
+        scope: str = "global",
+        scope_owner: str = "",
+        *,
+        user_id: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict:
+        """Phase 1B：统计入口默认排除隔离桶（legacy_quarantine、
+        pending_consolidation），避免前端"记忆总数"被未审查内容污染。
+
+        如果调用方显式指定 ``scope='legacy_quarantine'`` /
+        ``'pending_consolidation'`` 来查这些桶时，仍可拿到对应统计。
+
+        三次审计新增 ``user_id`` / ``workspace_id``（Phase 2b.5 二次扩展）：
+        多用户 IM 部署下 LLM 工具 ``get_memory_stats`` 之前会暴露**总条数**
+        ——即便不暴露内容，counts 也是信息泄漏（"系统里一共有 1000 条记忆"
+        让 alice 推断出有其他用户）。这里收敛到 owner 视角。
+
+        不传时保持旧行为（desktop / 老 API 调用零感知）。
+        """
         type_counts: dict[str, int] = {}
         priority_counts: dict[str, int] = {}
-        for memory in self._memories.values():
+        wants_isolated = scope in self._ISOLATED_CACHE_SCOPES
+        for memory in self.iter_cached(
+            include_isolated=wants_isolated,
+            user_id=user_id,
+            workspace_id=workspace_id,
+        ):
             if scope != "global" or scope_owner:
                 mem_scope = getattr(memory, "scope", "global") or "global"
                 mem_owner = getattr(memory, "scope_owner", "") or ""

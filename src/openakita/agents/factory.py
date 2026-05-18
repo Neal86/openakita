@@ -88,6 +88,11 @@ class _GlobalStoreSource:
     Used by isolated-memory agents with memory_inherit_global=True to also
     retrieve from the shared global memory during search.
 
+    Phase 2b.1 安全洞修复：必须按当前 (user_id, workspace_id) 透传过滤，
+    否则 isolated agent 在 "继承全局" 模式下会拉到别的用户的记忆。
+    检索仅返回 ``scope="user"`` 范围、且 `user_id/workspace_id` 与
+    isolated MemoryManager 当前租户匹配的记忆，禁止跨用户、跨工作区。
+
     RetrievalEngine._call_external_sources_sync expects:
       - ``source.source_name: str``
       - ``async source.retrieve(query, limit) -> list[dict]``
@@ -96,11 +101,45 @@ class _GlobalStoreSource:
 
     source_name = "global_memory"
 
-    def __init__(self, global_store):
+    def __init__(self, global_store, owner_provider):
+        """
+        Args:
+            global_store: 共享的全局 UnifiedStore
+            owner_provider: 无参可调用对象，返回当前 (user_id, workspace_id) 元组。
+                通常绑定到 isolated MemoryManager._current_owner，以便每次
+                检索时拿到该 Agent 当前会话的真实租户身份。
+        """
         self._store = global_store
+        self._owner_provider = owner_provider
 
     async def retrieve(self, query: str, limit: int = 8) -> list[dict]:
-        memories = self._store.search_semantic(query, limit=limit)
+        try:
+            user_id, workspace_id = self._owner_provider()
+        except Exception as e:
+            logger.warning(
+                "[_GlobalStoreSource] owner_provider failed (%s); refusing cross-user fallback",
+                e,
+            )
+            return []
+        if not user_id or user_id in {"default", "anonymous", "legacy", "system", ""}:
+            logger.debug(
+                "[_GlobalStoreSource] user_id=%r is non-personal; "
+                "skipping global memory inheritance to avoid leaking shared bucket.",
+                user_id,
+            )
+            return []
+        try:
+            memories = self._store.search_semantic(
+                query,
+                limit=limit,
+                scope="user",
+                scope_owner="",
+                user_id=user_id,
+                workspace_id=workspace_id or "default",
+            )
+        except Exception as e:
+            logger.warning("[_GlobalStoreSource] tenant-scoped search failed: %s", e)
+            return []
         results = []
         for mem in memories:
             results.append(
@@ -377,6 +416,26 @@ class AgentFactory:
         logger.info(f"Identity override applied: profile={profile.id}, dir={profile_identity_dir}")
 
     @staticmethod
+    def _isolated_memory_md_seed(profile: AgentProfile) -> str:
+        """Phase 2b.3：生成 isolated agent 的 MEMORY.md 初始内容。
+
+        刻意不引用全局记忆，让 daily_consolidator 在该 Agent 运行一段时间后
+        用它**自己**的对话和经验填充。
+        """
+        from datetime import datetime
+
+        name = (profile.name or profile.id).strip()
+        return (
+            f"# {name} — 独立记忆\n\n"
+            f"<!-- Phase 2b.3 seeded {datetime.now().isoformat(timespec='seconds')} -->\n\n"
+            f"_这是 Agent `{profile.id}` 的独立记忆文件。_\n\n"
+            f"这个 Agent 配置了 `memory_isolation=isolated`，所以它有自己的偏好、"
+            f"经验和事实记忆，不会和其它 Agent / 全局记忆混在一起。\n\n"
+            f"当 Agent 在对话里习得新的偏好、规则或事实，后台 lifecycle 任务会"
+            f"把它们写到这里。_无需手动编辑。_\n"
+        )
+
+    @staticmethod
     def _apply_memory_isolation(agent: Agent, profile: AgentProfile) -> None:
         """替换 agent.memory_manager 为独立的 MemoryManager 实例。"""
         from ..config import settings
@@ -388,9 +447,34 @@ class AgentFactory:
         memory_dir = profile_dir / "memory"
         memory_dir.mkdir(parents=True, exist_ok=True)
 
+        # Phase 2b.3：isolated agent 首次启动 seed 一份属于自己的 MEMORY.md。
+        #
+        # 旧实现（v4 之前）：找不到 profile 自己的 MEMORY.md 时回退到全局
+        # ``settings.memory_path``。这有两个问题：
+        # 1) 启动时读到的是**别人**（全局）的偏好和经验，破坏 isolated 语义；
+        # 2) daily_consolidator.refresh_memory_md() 会用 isolated MemoryManager
+        #    的数据**覆写**全局 MEMORY.md —— 这是真正的数据污染 bug。
+        #
+        # 新实现：永远使用 profile 私有的路径；不存在就写入一份带注释头的
+        # 空模板，让用户知道这是该 Agent 的独立记忆区域。
         memory_md_path = profile_dir / "identity" / "MEMORY.md"
         if not memory_md_path.exists():
-            memory_md_path = settings.memory_path
+            try:
+                memory_md_path.parent.mkdir(parents=True, exist_ok=True)
+                seed = AgentFactory._isolated_memory_md_seed(profile)
+                memory_md_path.write_text(seed, encoding="utf-8")
+                logger.info(
+                    "[Memory] Seeded isolated MEMORY.md for %s at %s",
+                    profile.id, memory_md_path,
+                )
+            except Exception as e:
+                logger.warning(
+                    "[Memory] Failed to seed MEMORY.md for %s (%s); falling "
+                    "back to global path. This may temporarily cross-pollinate "
+                    "global memory.",
+                    profile.id, e,
+                )
+                memory_md_path = settings.memory_path
 
         isolated_mm = MemoryManager(
             data_dir=memory_dir,
@@ -409,7 +493,12 @@ class AgentFactory:
         if profile.memory_inherit_global:
             global_store = agent.memory_manager.store
             isolated_mm._global_store_ref = global_store
-            isolated_mm.retrieval_engine._external_sources.append(_GlobalStoreSource(global_store))
+            # P2b.1：把 owner_provider 绑定到 isolated_mm 的 _current_owner，
+            # 让全局检索严格按当前 (user_id, workspace_id) 过滤，
+            # 防止 isolated agent 从全局拉到别的用户/工作区的记忆。
+            isolated_mm.retrieval_engine._external_sources.append(
+                _GlobalStoreSource(global_store, isolated_mm._current_owner)
+            )
 
         agent.memory_manager = isolated_mm
 

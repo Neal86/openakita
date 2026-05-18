@@ -761,7 +761,13 @@ class MemoryHandler:
 
     def _get_memory_stats(self, params: dict) -> str:
         """获取记忆统计"""
-        stats = self.agent.memory_manager.get_stats()
+        # 三次审计：counts 也是信息泄漏 —— alice 看到"系统总记忆 1000"会推断
+        # 出存在其它用户。把 stats 收敛到当前 owner 视角。desktop 单用户场景
+        # owner 是 default/default，行为不变。
+        owner_uid, owner_wsid = self._current_owner_pair()
+        stats = self.agent.memory_manager.get_stats(
+            user_id=owner_uid, workspace_id=owner_wsid
+        )
 
         output = f"""记忆系统统计:
 
@@ -790,7 +796,17 @@ class MemoryHandler:
         if not store:
             return "记忆系统未初始化"
 
-        episodes = store.get_recent_episodes(days=days, limit=limit)
+        # Phase 2b.5：把 episode 列表限制到当前 (user_id, workspace_id)。
+        # 多用户 IM 部署下，原实现会把别人的任务也列给当前用户的 LLM —— 隐私泄漏。
+        # mm._current_owner() 在 v4 之后由 start_session 设好；session_tenants
+        # 表里登记的 episode 才会被返回（v3 之前的孤儿数据被自然过滤）。
+        owner_user_id, owner_workspace_id = self._current_owner_pair()
+        episodes = store.get_recent_episodes(
+            days=days,
+            limit=limit,
+            user_id=owner_user_id,
+            workspace_id=owner_workspace_id,
+        )
         if not episodes:
             return f"最近 {days} 天没有已完成的任务记录。"
 
@@ -845,6 +861,9 @@ class MemoryHandler:
 
         # === 数据源 1: SQLite conversation_turns（主数据源） ===
         store = getattr(self.agent.memory_manager, "store", None)
+        # Phase 2b.5：把 turn 搜索限制到当前 (user_id, workspace_id)。多用户
+        # IM 部署下，原实现会让 alice 的 search_conversation_traces 搜到 bob 的对话。
+        owner_user_id, owner_workspace_id = self._current_owner_pair()
         if store:
             try:
                 rows = []
@@ -855,6 +874,8 @@ class MemoryHandler:
                         session_id=session_id_filter or None,
                         days_back=days_back,
                         limit=max_results,
+                        user_id=owner_user_id,
+                        workspace_id=owner_workspace_id,
                     ):
                         key = (
                             str(row.get("session_id", "")),
@@ -885,6 +906,32 @@ class MemoryHandler:
             except Exception as e:
                 logger.warning(f"[SearchTraces] SQLite search failed, will try JSONL: {e}")
 
+        # 二次审计：JSONL / react_traces 文件级回退路径**不走** SQL，
+        # 之前的 Phase 2b.5 没覆盖到。多用户 IM 共享目录时，alice 会从这些
+        # fallback 路径读到 bob 的对话原文。先准备一个 allow-set，列出当前
+        # owner 在 session_tenants 表里登记过的 session_id 子集，回退路径
+        # 用 allow-set 做硬过滤。
+        allowed_session_ids: set[str] | None = None
+        if owner_user_id is not None and store is not None:
+            try:
+                allowed_session_ids = self._list_owned_session_ids(
+                    store,
+                    user_id=owner_user_id,
+                    workspace_id=owner_workspace_id,
+                )
+                # session_id_filter 是 LLM 显式指定的 session：如果它也属于本 owner，
+                # 一并放进 allow-set；否则 SQL 阶段就已经返回空，不会更糟。
+                if session_id_filter:
+                    if session_id_filter in allowed_session_ids or self._session_belongs_to_owner(
+                        store, session_id_filter, owner_user_id, owner_workspace_id
+                    ):
+                        allowed_session_ids.add(session_id_filter)
+            except Exception as e:
+                logger.debug(
+                    "[SearchTraces] failed to build allowed_session_ids: %s", e
+                )
+                allowed_session_ids = None
+
         # === 数据源 2: react_traces（补充工具调用细节） ===
         if len(results) < max_results:
             cutoff = datetime.now() - timedelta(days=days_back)
@@ -904,6 +951,7 @@ class MemoryHandler:
                     remaining,
                     results,
                     seen_timestamps,
+                    allowed_session_ids=allowed_session_ids,
                 )
 
         # === 数据源 3: JSONL fallback（SQLite 无结果或更早历史） ===
@@ -925,6 +973,7 @@ class MemoryHandler:
                     remaining,
                     results,
                     seen_timestamps,
+                    allowed_session_ids=allowed_session_ids,
                 )
 
         if not results:
@@ -1009,6 +1058,12 @@ class MemoryHandler:
         if not mem:
             return f"未找到记忆 {memory_id}"
 
+        # Phase 2b.5 二次审计：trace_memory 是按显式 ID 直读的接口，没有 SQL
+        # JOIN 过滤兜底。如果 LLM 通过其它泄漏面拿到了别人的 memory_id，这里
+        # 必须做最后一道 owner 校验，否则就是单点穿透。
+        if not self._memory_belongs_to_current_owner(mem):
+            return f"未找到记忆 {memory_id}"
+
         lines = ["## 记忆详情\n"]
         lines.append(f"- [{mem.type.value}] {mem.content}")
         lines.append(
@@ -1023,6 +1078,12 @@ class MemoryHandler:
         ep = store.get_episode(ep_id)
         if not ep:
             lines.append(f"\n关联情节 {ep_id} 已不存在。")
+            return "\n".join(lines)
+
+        # 防御：source episode 必须和当前 owner 同租户。否则即便 mem 本身
+        # 通过校验，关联的 episode 可能是历史误关联（极少见但理论可能）。
+        if not self._episode_belongs_to_current_owner(store, ep):
+            lines.append(f"\n关联情节 {ep_id} 不在当前用户的可见范围内。")
             return "\n".join(lines)
 
         lines.append("\n## 来源情节\n")
@@ -1057,6 +1118,10 @@ class MemoryHandler:
         """episode_id → linked memories + conversation turns"""
         ep = store.get_episode(episode_id)
         if not ep:
+            return f"未找到情节 {episode_id}"
+
+        # Phase 2b.5 二次审计：见 _trace_from_memory 同款理由。
+        if not self._episode_belongs_to_current_owner(store, ep):
             return f"未找到情节 {episode_id}"
 
         lines = ["## 情节详情\n"]
@@ -1103,6 +1168,132 @@ class MemoryHandler:
 
         return "\n".join(lines)
 
+    def _current_owner_pair(self) -> tuple[str | None, str | None]:
+        """统一拿当前 (user_id, workspace_id)，拿不到时返回 (None, None)。"""
+        try:
+            mm = self.agent.memory_manager
+            if hasattr(mm, "_current_owner"):
+                uid, wsid = mm._current_owner()
+                return uid, wsid
+        except Exception as e:
+            logger.debug("[Tool] _current_owner fetch failed: %s", e)
+        return None, None
+
+    def _memory_belongs_to_current_owner(self, mem) -> bool:
+        """memory 的 (user_id, workspace_id) 必须严格等于当前 owner。
+
+        owner 取不到（None）时退回到"放行"（默认不破坏老桌面单用户行为）。
+        owner 是 default/default 时仍走严格比较 —— v4 之后 default 是合法身份。
+        """
+        owner_uid, owner_wsid = self._current_owner_pair()
+        if owner_uid is None and owner_wsid is None:
+            return True
+        mem_uid = getattr(mem, "user_id", "default") or "default"
+        mem_wsid = getattr(mem, "workspace_id", "default") or "default"
+        if owner_uid is not None and mem_uid != owner_uid:
+            return False
+        if owner_wsid is not None and mem_wsid != owner_wsid:
+            return False
+        return True
+
+    def _episode_belongs_to_current_owner(self, store, ep) -> bool:
+        """episode 通过 session_tenants 反查 owner 比较。
+
+        没登记过（孤儿）episode 在 owner 拿到时拒绝；owner 拿不到时放行。
+        """
+        owner_uid, owner_wsid = self._current_owner_pair()
+        if owner_uid is None and owner_wsid is None:
+            return True
+        sid = getattr(ep, "session_id", "") or ""
+        if not sid:
+            return False
+        return self._session_belongs_to_owner(store, sid, owner_uid, owner_wsid)
+
+    @staticmethod
+    def _list_owned_session_ids(
+        store,
+        *,
+        user_id: str,
+        workspace_id: str | None,
+    ) -> set[str]:
+        """从 session_tenants 取当前 owner 的所有 session_id allow-set。"""
+        owned: set[str] = set()
+        try:
+            iter_owned = getattr(store, "iter_owned_session_ids", None)
+            if iter_owned is not None:
+                owned.update(iter_owned(user_id=user_id, workspace_id=workspace_id))
+        except Exception:
+            pass
+        return owned
+
+    @staticmethod
+    def _session_belongs_to_owner(
+        store,
+        session_id: str,
+        user_id: str,
+        workspace_id: str | None,
+    ) -> bool:
+        try:
+            getter = getattr(store, "get_session_tenant", None)
+            if getter is None:
+                return False
+            tenant = getter(session_id)
+            if not tenant:
+                return False
+            uid, wsid = tenant
+            if uid != user_id:
+                return False
+            if workspace_id is not None and wsid != workspace_id:
+                return False
+            return True
+        except Exception:
+            return False
+
+    # session_id 在 stem 里出现时，前后必须是这些边界字符之一（或字符串两端）。
+    # 字母/数字/Unicode 文字都视为 token 内部字符，绝对不能让 "user_alice" 误
+    # 命中 "user_alice2"（substring 攻击面）。
+    # 注：`_` 必须算"边界"——session_id 自己会含 `_`，但 stem 把多个字段用 `_`
+    # 拼起来（如 ``trace_<sid>_<ts>``），所以紧贴 `_` 的位置是合法分隔点。
+    # 同理 `.`（扩展名分隔）和 `-`。
+    _ALLOW_SET_BOUNDARY_CHARS = frozenset("_-.")
+
+    @classmethod
+    def _stem_matches_session_allow_set(
+        cls,
+        stem: str,
+        allowed_session_ids: set[str] | None,
+    ) -> bool:
+        """文件名 stem 是否对应 allow-set 里某个 session_id —— **边界感知**匹配。
+
+        三次审计修正：纯子串匹配会被前缀 / 后缀绕过（alice 的 ``user_alice``
+        会命中 bob 的 ``user_alice2``）。这里要求 session_id 在 stem 里出现时
+        其前后字符必须是 ``_`` / ``-`` / ``.`` 中的一个（或 stem 边界）。
+
+        - allow-set 为空 / None → False（owner 已知但没 owned session，安全侧）；
+        - 任一 session_id 以边界方式出现在 stem 里 → True；
+        - 否则 → False（拒绝读取该文件，宁可错杀）。
+        """
+        if not allowed_session_ids:
+            return False
+        boundary = cls._ALLOW_SET_BOUNDARY_CHARS
+        for sid in allowed_session_ids:
+            if not sid:
+                continue
+            start = 0
+            slen = len(sid)
+            stem_len = len(stem)
+            while True:
+                pos = stem.find(sid, start)
+                if pos < 0:
+                    break
+                left_ok = pos == 0 or stem[pos - 1] in boundary
+                end = pos + slen
+                right_ok = end == stem_len or stem[end] in boundary
+                if left_ok and right_ok:
+                    return True
+                start = pos + 1
+        return False
+
     def _search_react_traces(
         self,
         traces_dir: Path,
@@ -1112,8 +1303,15 @@ class MemoryHandler:
         limit: int,
         results: list[dict],
         seen_timestamps: set[str],
+        *,
+        allowed_session_ids: set[str] | None = None,
     ) -> None:
-        """搜索 react_traces/{date}/*.json"""
+        """搜索 react_traces/{date}/*.json。
+
+        Phase 2b.5 二次审计：增加 allowed_session_ids 参数 —— 多用户 IM
+        共享目录场景，回退路径必须按当前 owner 的 session allow-set 过滤，
+        否则 SQL 阶段的 tenant 收敛会被这里的全目录扫描绕过。
+        """
         count = 0
         for date_dir in sorted(traces_dir.iterdir(), reverse=True):
             if not date_dir.is_dir():
@@ -1126,6 +1324,10 @@ class MemoryHandler:
                 continue
             for trace_file in sorted(date_dir.glob("*.json"), reverse=True):
                 if session_id_filter and session_id_filter not in trace_file.stem:
+                    continue
+                if allowed_session_ids is not None and not self._stem_matches_session_allow_set(
+                    trace_file.stem, allowed_session_ids
+                ):
                     continue
                 try:
                     raw = trace_file.read_text(encoding="utf-8")
@@ -1166,11 +1368,21 @@ class MemoryHandler:
         limit: int,
         results: list[dict],
         seen_timestamps: set[str],
+        *,
+        allowed_session_ids: set[str] | None = None,
     ) -> None:
-        """搜索 conversation_history/*.jsonl，跳过 SQLite 已返回的条目"""
+        """搜索 conversation_history/*.jsonl，跳过 SQLite 已返回的条目。
+
+        Phase 2b.5 二次审计：增加 allowed_session_ids 参数 —— 多用户 IM
+        部署里这个目录可能存放多个 user 的 jsonl，必须按 owner 收敛。
+        """
         count = 0
         for jsonl_file in sorted(history_dir.glob("*.jsonl"), reverse=True):
             if session_id_filter and session_id_filter not in jsonl_file.stem:
+                continue
+            if allowed_session_ids is not None and not self._stem_matches_session_allow_set(
+                jsonl_file.stem, allowed_session_ids
+            ):
                 continue
             try:
                 file_mtime = datetime.fromtimestamp(jsonl_file.stat().st_mtime)

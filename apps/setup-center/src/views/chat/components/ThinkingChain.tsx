@@ -5,6 +5,15 @@ import {
   IconChevronRight, IconCheck, IconX, IconLoader, IconCircle,
   IconAlertCircle, IconRefresh,
 } from "../../../icons";
+import { TextWithSourceBadges } from "./SourceBadge";
+import ConfigHintCard, { type ConfigHintPayload } from "../../../components/ConfigHintCard";
+
+const TOOL_RESULT_PREVIEW_CHAR_LIMIT = 120_000;
+
+function previewLongText(text: string, limit = TOOL_RESULT_PREVIEW_CHAR_LIMIT): string {
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit)}\n\n... 已截断 ${text.length - limit} 字符（总计 ${text.length} 字符）。`;
+}
 
 // ── ThinkingBlock: legacy bubble mode ──
 
@@ -23,7 +32,7 @@ export function ThinkingBlock({ content, defaultOpen }: { content: string; defau
       </div>
       {open && (
         <div style={{ padding: "8px 12px", background: "rgba(124,58,237,0.04)", borderRadius: 10, fontSize: 13, lineHeight: 1.6, opacity: 0.75, whiteSpace: "pre-wrap" }}>
-          {content}
+          <TextWithSourceBadges text={content} />
         </div>
       )}
     </div>
@@ -61,7 +70,7 @@ export function ToolCallDetail({ tc }: { tc: ChatToolCall }) {
             <>
               <div style={{ fontWeight: 700, marginTop: 8, marginBottom: 4 }}>{t("chat.result")}</div>
               <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: 11, maxHeight: 200, overflow: "auto" }}>
-                {typeof tc.result === "string" ? tc.result : JSON.stringify(tc.result, null, 2)}
+                {previewLongText(typeof tc.result === "string" ? tc.result : JSON.stringify(tc.result, null, 2))}
               </pre>
             </>
           )}
@@ -74,6 +83,27 @@ export function ToolCallDetail({ tc }: { tc: ChatToolCall }) {
 // ── ToolCallsGroup ──
 
 export function ToolCallsGroup({ toolCalls }: { toolCalls: ChatToolCall[] }) {
+  // Aggregate config hints from every child tool call so the card stays
+  // visible even when the group is collapsed. Hints are de-duplicated by
+  // (error_code, scope, title) — duplicates happen when the same tool is
+  // retried multiple times in one turn.
+  const aggregatedHints: ConfigHintPayload[] = [];
+  const seenHints = new Set<string>();
+  for (const tc of toolCalls) {
+    for (const h of tc.configHints || []) {
+      const key = `${h.error_code}|${h.scope}|${h.title}`;
+      if (seenHints.has(key)) continue;
+      seenHints.add(key);
+      aggregatedHints.push(h);
+    }
+  }
+  return <ToolCallsGroupInner toolCalls={toolCalls} hints={aggregatedHints} />;
+}
+
+function ToolCallsGroupInner({
+  toolCalls,
+  hints,
+}: { toolCalls: ChatToolCall[]; hints: ConfigHintPayload[] }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
 
@@ -108,6 +138,13 @@ export function ToolCallsGroup({ toolCalls }: { toolCalls: ChatToolCall[] }) {
         )}
         <span style={{ fontSize: 11, opacity: 0.5, marginLeft: "auto", flexShrink: 0 }}>{expanded ? t("chat.collapse") : t("chat.expand")}</span>
       </div>
+      {hints.length > 0 && (
+        <div style={{ padding: "8px 8px 0 8px", display: "flex", flexDirection: "column", gap: 6 }}>
+          {hints.map((h, i) => (
+            <ConfigHintCard key={`hint-${i}`} hint={h} />
+          ))}
+        </div>
+      )}
       {expanded && (
         <div style={{ padding: "6px 8px", display: "flex", flexDirection: "column", gap: 4, background: "var(--panel)" }}>
           {toolCalls.map((tc, i) => (
@@ -125,7 +162,7 @@ function ToolResultBlock({ result }: { result: string }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   if (!result) return null;
-  const safeResult = typeof result === "string" ? result : JSON.stringify(result, null, 2);
+  const safeResult = previewLongText(typeof result === "string" ? result : JSON.stringify(result, null, 2));
   const isShort = safeResult.length < 120;
   if (isShort) return <span className="chainToolResultInline">{safeResult}</span>;
   return (
@@ -147,7 +184,9 @@ function ChainEntryLine({ entry, onSkipStep }: { entry: ChainEntry; onSkipStep?:
       return (
         <div className="chainNarrThinking">
           <span className="chainNarrThinkingLabel">thinking</span>
-          <span className="chainNarrThinkingText">{entry.content}</span>
+          <span className="chainNarrThinkingText">
+            <TextWithSourceBadges text={entry.content} />
+          </span>
         </div>
       );
     case "text": {
@@ -158,7 +197,7 @@ function ChainEntryLine({ entry, onSkipStep }: { entry: ChainEntry; onSkipStep?:
           : null;
       return (
         <div className={`chainNarrText${svgIcon ? " chainNarrStatus" : ""}`}>
-          {svgIcon}{entry.content}
+          {svgIcon}<TextWithSourceBadges text={entry.content} />
         </div>
       );
     }
@@ -197,6 +236,18 @@ function ChainEntryLine({ entry, onSkipStep }: { entry: ChainEntry; onSkipStep?:
         <div className={cls}>
           {icon}
           <ToolResultBlock result={entry.result} />
+        </div>
+      );
+    }
+    case "config_hint": {
+      // Render the actionable card directly inline in the ReAct timeline.
+      // This is what makes the "missing API key → click to configure" UX
+      // actually visible — without this branch the ConfigHintCard only
+      // shows in legacy ToolCallsGroup, which the default chat UI hides
+      // whenever a thinkingChain exists (i.e. essentially always).
+      return (
+        <div className="chainNarrConfigHint" data-tool-id={entry.toolId || undefined}>
+          <ConfigHintCard hint={entry.hint} />
         </div>
       );
     }

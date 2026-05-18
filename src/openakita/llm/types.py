@@ -564,6 +564,30 @@ class EndpointConfig:
     price_currency: str = "CNY"  # 价格货币单位
     enabled: bool = True  # 是否启用 (false=停用，不参与调用但保留配置)
     stream_only: bool = False  # 仅流式模式 (某些中转站/relay 要求 stream=true)
+    # ── Relay/Aggregator capability discovery ──────────────────────────
+    # When the user points an endpoint at a relay station (oneapi /
+    # new-api / yunwu / private gateway), the upstream model catalog
+    # often differs from the official provider's. ``supported_models``
+    # caches the result of GET /v1/models (or the equivalent for
+    # Anthropic / DashScope) so the UI can grey out models the relay
+    # does not actually carry, and ``LLMClient`` can skip endpoints
+    # whose configured ``model`` is not in their own catalog instead of
+    # surfacing an opaque 404 to the user.
+    # An empty list means "never probed" — treat as "allow any" so we
+    # do not break upgrades from older configs.
+    supported_models: list[str] | None = None
+    models_synced_at: float | None = None  # epoch seconds of last sync
+    models_sync_error: str | None = None  # last sync error (kept for UI)
+    # ── Directed fallback chain ────────────────────────────────────────
+    # When ``fallback_enabled`` is True and ``fallback_endpoint`` names
+    # another endpoint in the same llm_endpoints.json, that endpoint is
+    # promoted to be tried immediately after this one (instead of the
+    # next priority-sorted entry). Lets the user express "if my yunwu
+    # relay fails, prefer official Anthropic" without juggling priorities
+    # against the other ten endpoints. Disabled by default so legacy
+    # configs are unaffected.
+    fallback_endpoint: str | None = None
+    fallback_enabled: bool = False
 
     def __post_init__(self):
         if self.capabilities is None:
@@ -611,6 +635,26 @@ class EndpointConfig:
                 return True
 
         return False
+
+    def supports_model(self, model: str) -> bool:
+        """Return True when this endpoint's relay/upstream catalog
+        contains ``model`` (or when no catalog has ever been probed —
+        we then assume the user knows what they typed and let the
+        upstream answer).
+
+        Comparison is case-insensitive and tolerant of leading/trailing
+        whitespace. We do NOT split on ``/`` because some relays use
+        prefixed names like ``anthropic/claude-3.5-sonnet`` verbatim.
+        """
+        if not model:
+            return True
+        if not self.supported_models:
+            # Never probed — be permissive so existing configs don't
+            # silently lose endpoints after an upgrade. ``sync_models``
+            # populates the list when the user clicks "Sync".
+            return True
+        target = model.strip().lower()
+        return any((m or "").strip().lower() == target for m in self.supported_models)
 
     def get_api_key(self) -> str | None:
         """获取 API Key (优先使用直接存储的 key，然后从环境变量获取)"""
@@ -727,6 +771,19 @@ class EndpointConfig:
             price_currency=data.get("price_currency", "CNY"),
             enabled=data.get("enabled", True),
             stream_only=data.get("stream_only", False),
+            supported_models=(
+                list(data["supported_models"])
+                if isinstance(data.get("supported_models"), list)
+                else None
+            ),
+            models_synced_at=data.get("models_synced_at"),
+            models_sync_error=data.get("models_sync_error"),
+            fallback_endpoint=(
+                str(data["fallback_endpoint"]).strip()
+                if data.get("fallback_endpoint")
+                else None
+            ),
+            fallback_enabled=bool(data.get("fallback_enabled", False)),
         )
 
     def to_dict(self) -> dict:
@@ -762,6 +819,16 @@ class EndpointConfig:
             result["enabled"] = False
         if self.stream_only:
             result["stream_only"] = True
+        if self.supported_models:
+            result["supported_models"] = list(self.supported_models)
+        if self.models_synced_at is not None:
+            result["models_synced_at"] = self.models_synced_at
+        if self.models_sync_error:
+            result["models_sync_error"] = self.models_sync_error
+        if self.fallback_endpoint:
+            result["fallback_endpoint"] = self.fallback_endpoint
+        if self.fallback_enabled:
+            result["fallback_enabled"] = True
         return result
 
 

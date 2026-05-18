@@ -8,6 +8,7 @@ Windows Toast / macOS Notification Center / Linux notify-send
 
 import asyncio
 import logging
+import os
 import platform
 import subprocess
 import sys
@@ -15,6 +16,28 @@ import sys
 logger = logging.getLogger(__name__)
 
 _system = platform.system()
+
+
+def _is_pytest_runtime() -> bool:
+    """检测当前是否运行在 pytest 进程中。
+
+    pytest 会自动设置以下两个环境/模块标志，命中任一即视为测试环境：
+    - ``PYTEST_CURRENT_TEST``: 每个测试函数运行期间由 pytest 设置
+    - ``sys.modules["pytest"]``: pytest 一旦导入即存在
+
+    存在以下场景会触发桌面通知误弹：
+    - ``tests/unit/test_scheduler_executor_status.py`` 等测试用 ``trigger_now``
+      实际执行 ``TaskExecutor.execute``，链路最终调到本模块的 toast 弹窗。
+    - 之前长期表现为：跑测试时凭空出现 "daily research / OpenAkita 任务完成"
+      的 Windows Toast，每秒一条连续好几条，让人误以为有定时任务在跑。
+
+    Pytest 环境内一律 no-op，避免污染开发者桌面。
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+    if "pytest" in sys.modules:
+        return True
+    return False
 
 
 def _notify_windows(title: str, body: str, sound: bool = True) -> bool:
@@ -193,6 +216,13 @@ def send_desktop_notification(
     Returns:
         是否成功发送通知
     """
+    if _is_pytest_runtime():
+        # 测试环境直接跳过，避免误弹真实的系统通知打扰开发者
+        logger.debug(
+            f"Skipping desktop notification under pytest: [{title}] {body[:60]}"
+        )
+        return False
+
     logger.info(f"Sending desktop notification: [{title}] {body[:60]}")
     ok = False
     try:

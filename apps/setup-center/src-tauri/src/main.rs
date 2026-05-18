@@ -3,6 +3,7 @@
     windows_subsystem = "windows"
 )]
 
+mod crash_handler;
 mod migrations;
 
 use base64::Engine as _;
@@ -478,11 +479,45 @@ fn setup_logs_dir() -> PathBuf {
     openakita_root_dir().join("logs")
 }
 
+/// 进程内 minidump 落地目录：~/.openakita/crashdumps/
+/// 由 crash_handler 在启动时 ensure dir 并安装 SEH filter；
+/// build_feedback_zip 会把这个目录里的 *.dmp 自动打包进反馈包。
+fn crashdumps_dir() -> PathBuf {
+    openakita_root_dir().join("crashdumps")
+}
+
+/// Soft size cap for `autostart.log`. Once exceeded, the current file is
+/// rotated to `autostart.log.1` (overwriting any previous rotation) and a
+/// fresh empty file is started. We keep exactly one rotated generation —
+/// this log is diagnostic chatter, not an audit trail, so unbounded
+/// retention isn't useful and a single hot+cold pair caps disk use at
+/// roughly `2 * AUTOSTART_LOG_MAX_BYTES`.
+const AUTOSTART_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Best-effort size-based rotation. Any IO failure here is swallowed because
+/// the caller (`log_to_file`) is best-effort diagnostics — losing a rotation
+/// just means the next call may overshoot the cap slightly, which is fine.
+fn rotate_autostart_log_if_needed(path: &Path) {
+    let len = match fs::metadata(path) {
+        Ok(m) => m.len(),
+        Err(_) => return,
+    };
+    if len < AUTOSTART_LOG_MAX_BYTES {
+        return;
+    }
+    let rotated = path.with_extension("log.1");
+    // Drop any existing .1 first; rename on Windows fails if the target
+    // already exists, unlike POSIX semantics.
+    let _ = fs::remove_file(&rotated);
+    let _ = fs::rename(path, &rotated);
+}
+
 /// Append a diagnostic line to `~/.openakita/logs/autostart.log`.
 fn log_to_file(msg: &str) {
     let log_dir = setup_logs_dir();
     let _ = fs::create_dir_all(&log_dir);
     let path = log_dir.join("autostart.log");
+    rotate_autostart_log_if_needed(&path);
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -852,7 +887,7 @@ fn bundled_resource_dir(resource_name: &str) -> PathBuf {
     primary
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct RuntimePipIndex {
     id: String,
     url: String,
@@ -876,6 +911,12 @@ struct RuntimeManifest {
     app_version: String,
     wheel_hash: String,
     python_version: String,
+    #[serde(default)]
+    python_seed_fingerprint: String,
+    #[serde(default)]
+    extras: Vec<String>,
+    #[serde(default)]
+    uv_path: String,
     app_venv: RuntimeEnvState,
     agent_venv: RuntimeEnvState,
     pip_index: RuntimePipIndex,
@@ -897,6 +938,8 @@ struct BootstrapManifest {
     wheel: BootstrapWheel,
     #[serde(default)]
     default_pip_index: Option<RuntimePipIndex>,
+    #[serde(default)]
+    wheelhouse: Option<serde_json::Value>,
     #[serde(default)]
     python_seed: Option<serde_json::Value>,
     #[serde(default)]
@@ -1101,11 +1144,6 @@ fn read_runtime_manifest() -> Option<RuntimeManifest> {
 }
 
 fn resolve_runtime_pip_index() -> RuntimePipIndex {
-    if let Some(manifest) = read_runtime_manifest() {
-        if !manifest.pip_index.url.trim().is_empty() {
-            return manifest.pip_index;
-        }
-    }
     if let Ok(url) = std::env::var("OPENAKITA_PIP_INDEX_URL") {
         if !url.trim().is_empty() {
             let trusted_host = std::env::var("OPENAKITA_PIP_TRUSTED_HOST")
@@ -1126,6 +1164,18 @@ fn resolve_runtime_pip_index() -> RuntimePipIndex {
                 url,
                 trusted_host,
             };
+        }
+    }
+    if let Ok(bootstrap) = read_bootstrap_manifest() {
+        if let Some(index) = bootstrap.default_pip_index {
+            if !index.url.trim().is_empty() {
+                return index;
+            }
+        }
+    }
+    if let Some(manifest) = read_runtime_manifest() {
+        if !manifest.pip_index.url.trim().is_empty() {
+            return manifest.pip_index;
         }
     }
     default_pip_index()
@@ -1151,6 +1201,94 @@ fn bootstrap_uv_path() -> PathBuf {
     } else {
         PathBuf::from("uv")
     }
+}
+
+fn app_runtime_extras() -> Vec<String> {
+    vec!["desktop".to_string()]
+}
+
+fn bootstrap_python_seed_fingerprint(bootstrap: &BootstrapManifest) -> String {
+    let Some(seed) = bootstrap.python_seed.as_ref() else {
+        return String::new();
+    };
+    if let Some(hash) = seed.get("sha256").and_then(|v| v.as_str()) {
+        return hash.to_string();
+    }
+    serde_json::to_string(seed).unwrap_or_default()
+}
+
+fn runtime_manifest_mismatch(
+    manifest: &RuntimeManifest,
+    bootstrap: &BootstrapManifest,
+    pip_index: &RuntimePipIndex,
+) -> Option<String> {
+    let expected_version = env!("CARGO_PKG_VERSION");
+    let expected_extras = app_runtime_extras();
+    let expected_python_seed = bootstrap_python_seed_fingerprint(bootstrap);
+    let expected_uv_path = bootstrap_uv_path().to_string_lossy().to_string();
+
+    if manifest.app_version != expected_version {
+        return Some(format!(
+            "app_version changed (manifest={}, expected={})",
+            manifest.app_version, expected_version
+        ));
+    }
+    if manifest.wheel_hash != bootstrap.wheel.sha256 {
+        return Some("wheel_hash changed".into());
+    }
+    if manifest.python_version != bootstrap.python_version {
+        return Some(format!(
+            "python_version changed (manifest={}, expected={})",
+            manifest.python_version, bootstrap.python_version
+        ));
+    }
+    if manifest.python_seed_fingerprint != expected_python_seed {
+        return Some("python_seed changed".into());
+    }
+    if manifest.extras != expected_extras {
+        return Some(format!(
+            "extras changed (manifest={:?}, expected={:?})",
+            manifest.extras, expected_extras
+        ));
+    }
+    if manifest.pip_index != *pip_index {
+        return Some("pip_index changed".into());
+    }
+    if !manifest.uv_path.is_empty() && manifest.uv_path != expected_uv_path {
+        return Some("uv_path changed".into());
+    }
+    if manifest.legacy_mode {
+        return Some("legacy_mode=true".into());
+    }
+    None
+}
+
+fn bootstrap_wheelhouse_dir() -> PathBuf {
+    bootstrap_resource_dir().join("wheels")
+}
+
+fn bootstrap_declares_complete_wheelhouse(bootstrap: &BootstrapManifest) -> bool {
+    let Some(wheelhouse) = bootstrap.wheelhouse.as_ref() else {
+        return false;
+    };
+    wheelhouse
+        .get("complete")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+fn wheelhouse_has_locked_deps(wheel_path: &Path) -> bool {
+    let wheelhouse = bootstrap_wheelhouse_dir();
+    let Ok(entries) = fs::read_dir(&wheelhouse) else {
+        return false;
+    };
+    let target = wheel_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        path.extension().and_then(|e| e.to_str()) == Some("whl")
+            && !name.eq_ignore_ascii_case(target)
+    })
 }
 
 fn managed_python_seed_path() -> Option<PathBuf> {
@@ -1227,6 +1365,7 @@ fn apply_runtime_env_builder(
     filter_path_for_runtime(cmd);
 
     cmd.env("OPENAKITA_RUNTIME_ROOT", runtime_root_dir());
+    cmd.env("OPENAKITA_BOOTSTRAP_DIR", bootstrap_resource_dir());
     cmd.env("OPENAKITA_ENV_PURPOSE", purpose.as_str());
     cmd.env("OPENAKITA_ENV_TRUST_SOURCE", "host-runtime");
     cmd.env("PYTHONNOUSERSITE", "1");
@@ -1710,13 +1849,10 @@ fn ensure_app_venv(
     let started = Instant::now();
     let log_path = runtime_logs_dir().join("app-venv.log");
     let app_py = runtime_venv_python_path(&app_venv_dir());
-    let expected_version = env!("CARGO_PKG_VERSION");
-    let manifest_ok = read_runtime_manifest()
-        .map(|m| {
-            m.app_version == expected_version
-                && m.wheel_hash == bootstrap.wheel.sha256
-                && !m.legacy_mode
-        })
+    let manifest_result = read_runtime_manifest();
+    let manifest_ok = manifest_result
+        .as_ref()
+        .map(|m| runtime_manifest_mismatch(m, bootstrap, pip_index).is_none())
         .unwrap_or(false);
     if manifest_ok && health_check_python(&app_py, &app_runtime_health_code(&app_venv_dir()), &log_path) {
         log_to_file(&format!(
@@ -1726,7 +1862,16 @@ fn ensure_app_venv(
         return Ok(app_py);
     }
 
-    log_to_file("[runtime] ensure_app_venv rebuilding app runtime");
+    if let Some(manifest) = manifest_result.as_ref() {
+        let reason = runtime_manifest_mismatch(manifest, bootstrap, pip_index)
+            .unwrap_or_else(|| "health_check failed".to_string());
+        log_to_file(&format!(
+            "[runtime] ensure_app_venv rebuilding app runtime: {}",
+            reason
+        ));
+    } else {
+        log_to_file("[runtime] ensure_app_venv rebuilding app runtime: missing manifest");
+    }
     let app_py = ensure_venv(&app_venv_dir(), &bootstrap.python_version, &log_path)?;
     let wheel_path = bootstrap_resource_dir().join(&bootstrap.wheel.name);
     if !wheel_path.exists() {
@@ -1735,7 +1880,12 @@ fn ensure_app_venv(
             wheel_path.display()
         ));
     }
-    let wheel_arg = format!("{}[desktop]", wheel_path.display());
+    let extras = app_runtime_extras();
+    let wheel_arg = if extras.is_empty() {
+        wheel_path.display().to_string()
+    } else {
+        format!("{}[{}]", wheel_path.display(), extras.join(","))
+    };
     let mut cmd = Command::new(bootstrap_uv_path());
     cmd.args(["pip", "install", "--python"]);
     cmd.arg(&app_py);
@@ -1748,9 +1898,29 @@ fn ensure_app_venv(
     cmd.args(["--reinstall-package", "openakita"]);
     // `uv pip install` does not support pip's `--prefer-binary` flag.
     // Keep binary preference on Python-side `pip install` calls only.
-    cmd.args(["--index-url", &pip_index.url]);
-    if !pip_index.trusted_host.trim().is_empty() {
-        cmd.args(["--trusted-host", &pip_index.trusted_host]);
+    if bootstrap_declares_complete_wheelhouse(bootstrap) && wheelhouse_has_locked_deps(&wheel_path) {
+        let wheelhouse = bootstrap_wheelhouse_dir();
+        log_to_file(&format!(
+            "[runtime] app wheel install using bundled wheelhouse: {}",
+            wheelhouse.display()
+        ));
+        cmd.arg("--no-index");
+        cmd.arg("--find-links");
+        cmd.arg(wheelhouse);
+    } else {
+        log_to_file(&format!(
+            "[runtime] app wheel install using pip index: {}",
+            pip_index.url
+        ));
+        cmd.args(["--index-url", &pip_index.url]);
+        if !pip_index.trusted_host.trim().is_empty() {
+            cmd.args(["--trusted-host", &pip_index.trusted_host]);
+        }
+        if bootstrap_wheelhouse_dir().is_dir() {
+            log_to_file(
+                "[runtime] bundled wheelhouse present but not marked complete; using pip index",
+            );
+        }
     }
     apply_runtime_bootstrap_env(&mut cmd, Some(pip_index));
     apply_no_window(&mut cmd);
@@ -1809,6 +1979,9 @@ fn write_runtime_manifest(info: &RuntimeEnvInfo, bootstrap: &BootstrapManifest) 
         app_version: env!("CARGO_PKG_VERSION").into(),
         wheel_hash: bootstrap.wheel.sha256.clone(),
         python_version: bootstrap.python_version.clone(),
+        python_seed_fingerprint: bootstrap_python_seed_fingerprint(bootstrap),
+        extras: app_runtime_extras(),
+        uv_path: bootstrap_uv_path().to_string_lossy().to_string(),
         app_venv: RuntimeEnvState {
             path: info.app_venv.to_string_lossy().to_string(),
             status: "ready".into(),
@@ -1847,6 +2020,9 @@ fn mark_legacy_runtime_mode(error: &str) {
         app_version: env!("CARGO_PKG_VERSION").into(),
         wheel_hash,
         python_version,
+        python_seed_fingerprint: String::new(),
+        extras: app_runtime_extras(),
+        uv_path: bootstrap_uv_path().to_string_lossy().to_string(),
         app_venv: RuntimeEnvState {
             path: app_venv_dir().to_string_lossy().to_string(),
             status: "failed".into(),
@@ -1880,6 +2056,9 @@ fn write_runtime_failure_manifest(error: &str) {
         app_version: env!("CARGO_PKG_VERSION").into(),
         wheel_hash,
         python_version,
+        python_seed_fingerprint: String::new(),
+        extras: app_runtime_extras(),
+        uv_path: bootstrap_uv_path().to_string_lossy().to_string(),
         app_venv: RuntimeEnvState {
             path: app_venv_dir().to_string_lossy().to_string(),
             status: "failed".into(),
@@ -1903,10 +2082,18 @@ fn write_runtime_failure_manifest(error: &str) {
 
 fn ensure_dual_runtime_env() -> Result<RuntimeEnvInfo, String> {
     let started = Instant::now();
+    log_to_file("[runtime] phase=prepare-runtime-layout");
     ensure_runtime_layout()?;
     let bootstrap = read_bootstrap_manifest()?;
     let pip_index = resolve_runtime_pip_index();
+    log_to_file(&format!(
+        "[runtime] phase=ensure-app-venv uv={} extras={:?} pip_index={}",
+        bootstrap_uv_path().display(),
+        app_runtime_extras(),
+        pip_index.url
+    ));
     let app_python = ensure_app_venv(&bootstrap, &pip_index)?;
+    log_to_file("[runtime] phase=ensure-agent-venv");
     let agent_python = ensure_agent_venv(&bootstrap, &pip_index)?;
     let info = RuntimeEnvInfo {
         app_python,
@@ -3700,12 +3887,42 @@ fn kill_openakita_orphans() -> Vec<u32> {
             win::CloseHandle(snap);
         }
 
-        // Step 1.5: 直接 kill 孤立的 openakita-server.exe (PyInstaller bundled backend)
+        // Step 1.5: kill orphaned openakita-server.exe (PyInstaller bundled
+        // backend). The original code killed every process named like that on
+        // sight, which is unsafe when the user has another OpenAkita install
+        // running (e.g. portable + installed side by side) — we'd terminate
+        // the other instance's backend. Mirror the python branch and verify
+        // the command line contains the `serve` subcommand before killing;
+        // any other invocation (CLI help, --version, custom scripts launched
+        // by the user) is skipped.
         for ppid in bundled_pids {
-            if is_pid_running(ppid) {
-                let _ = kill_pid(ppid);
-                killed.push(ppid);
+            if !is_pid_running(ppid) {
+                continue;
             }
+            let mut c = Command::new("powershell");
+            c.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!(
+                    "(Get-CimInstance Win32_Process -Filter 'ProcessId={}').CommandLine",
+                    ppid
+                ),
+            ]);
+            apply_no_window(&mut c);
+            let cmdline = c
+                .output()
+                .ok()
+                .map(|out| String::from_utf8_lossy(&out.stdout).to_lowercase())
+                .unwrap_or_default();
+            // Match the canonical backend invocation. We deliberately don't
+            // try to match install-path here — overlapping installs will be
+            // caught by per-workspace PID files in step 1.
+            if !cmdline.contains("serve") {
+                continue;
+            }
+            let _ = kill_pid(ppid);
+            killed.push(ppid);
         }
 
         // Step 2: 对每个 python 进程查命令行，判断是否是 openakita serve 进程
@@ -4684,6 +4901,15 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_millis(1500));
     }
 
+    // Native crash handler: capture SEH exceptions (access violation /
+    // heap corruption / illegal instruction) to ~/.openakita/crashdumps/
+    // *.dmp.  std::panic::set_hook only sees Rust panics, not C-level
+    // crashes from WebView2 / DLLs / GPU drivers, which is where the
+    // 0xc0000005 / 0xc0000374 / 0xc000001d reports actually originate.
+    // No admin / HKLM LocalDumps writes required — the handler runs
+    // entirely in-process.
+    crash_handler::install(crashdumps_dir());
+
     // Global panic hook: capture panics to crash.log + show dialog.
     // 进程级自愈：检测 tao Windows 事件循环的已知 panic
     // ("cannot move state from Destroyed"，对应上游 tao#1180)，落
@@ -5117,6 +5343,7 @@ fn main() {
             http_get_json,
             http_proxy_request,
             backend_fetch,
+            backend_fetch_cancel,
             read_file_base64,
             download_file,
             copy_file_to_downloads,
@@ -8416,9 +8643,67 @@ enum BackendFetchEvent {
     Error { message: String },
 }
 
+/// Active streaming fetches keyed by the frontend-supplied `fetch_id`.
+///
+/// When the JS-side `ReadableStream.cancel()` fires (user closes a chat
+/// turn, navigates away, AbortController.abort, …) the frontend now calls
+/// `backend_fetch_cancel(fetch_id)`. We flip the matching `AtomicBool`
+/// and the spawned chunk loop exits on its next iteration, dropping the
+/// `reqwest::Response` which in turn closes the TCP/SSE connection and
+/// frees the chunk buffers. Without this, the Rust task would continue
+/// reading from a backend that may not stop sending (LLM streams in
+/// particular run to completion), uselessly piling chunks into IPC and
+/// keeping ~10-50 MB of intermediate strings allocated.
+///
+/// Pre-cancel race: if `backend_fetch_cancel` arrives *before*
+/// `backend_fetch` has registered (extremely tight but possible across
+/// the IPC boundary), we still insert the entry as already-cancelled so
+/// the subsequent fetch sees `true` on its first check and short-circuits.
+use std::sync::Arc;
+static MANAGED_FETCHES: Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+fn fetch_cancel_handle(fetch_id: &str) -> Arc<AtomicBool> {
+    if let Ok(mut map) = MANAGED_FETCHES.lock() {
+        return map
+            .entry(fetch_id.to_string())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone();
+    }
+    // Mutex poisoned (a previous panic left the map in an indeterminate
+    // state). Hand the caller a fresh detached handle so the fetch still
+    // runs — it just won't be cancellable from JS. Better than panicking
+    // the Tauri command thread.
+    Arc::new(AtomicBool::new(false))
+}
+
+fn fetch_unregister(fetch_id: &str) {
+    if let Ok(mut map) = MANAGED_FETCHES.lock() {
+        map.remove(fetch_id);
+    }
+}
+
+/// Frontend-callable cancel: flips the cancel flag for an in-flight
+/// `backend_fetch`. Idempotent and never errors — calling cancel on an
+/// unknown id (because the fetch already finished, or hadn't yet
+/// registered) pre-arms a flag so the registration sees it.
+#[tauri::command]
+fn backend_fetch_cancel(fetch_id: String) {
+    let map = MANAGED_FETCHES.lock();
+    if let Ok(mut map) = map {
+        match map.get(&fetch_id) {
+            Some(flag) => flag.store(true, Ordering::SeqCst),
+            None => {
+                map.insert(fetch_id, Arc::new(AtomicBool::new(true)));
+            }
+        }
+    }
+}
+
 #[tauri::command]
 async fn backend_fetch(
     on_event: tauri::ipc::Channel<BackendFetchEvent>,
+    fetch_id: String,
     url: String,
     method: Option<String>,
     headers: Option<std::collections::HashMap<String, String>>,
@@ -8429,15 +8714,30 @@ async fn backend_fetch(
         return Err("backend_fetch only allows localhost URLs".into());
     }
 
+    // Register cancel flag *before* the network round-trip so a cancel
+    // arriving mid-handshake (e.g. user hits stop right after submit)
+    // still aborts.
+    let cancel = fetch_cancel_handle(&fetch_id);
+    if cancel.load(Ordering::SeqCst) {
+        fetch_unregister(&fetch_id);
+        return Err("backend_fetch cancelled before start".into());
+    }
+
     let mut builder = reqwest::Client::builder()
         .no_proxy()
         .connect_timeout(std::time::Duration::from_secs(10));
     if let Some(t) = timeout_secs {
         builder = builder.timeout(std::time::Duration::from_secs(t));
     }
-    let client = builder
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
+    let client = match builder.build() {
+        Ok(c) => c,
+        Err(e) => {
+            // Important: unregister before returning so the cancel-flag
+            // entry doesn't leak forever in MANAGED_FETCHES.
+            fetch_unregister(&fetch_id);
+            return Err(format!("HTTP client error: {e}"));
+        }
+    };
 
     let m = method.as_deref().unwrap_or("GET").to_uppercase();
     let mut req = match m.as_str() {
@@ -8456,10 +8756,13 @@ async fn backend_fetch(
         req = req.body(b);
     }
 
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("HTTP {} failed ({}): {}", m, url, e))?;
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            fetch_unregister(&fetch_id);
+            return Err(format!("HTTP {} failed ({}): {}", m, url, e));
+        }
+    };
 
     let status = resp.status().as_u16();
     let resp_headers: std::collections::HashMap<String, String> = resp
@@ -8468,10 +8771,61 @@ async fn backend_fetch(
         .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
 
+    let fetch_id_for_task = fetch_id.clone();
     tauri::async_runtime::spawn(async move {
         let mut response = resp;
+        // Chunk-read inactivity timeout. `response.chunk().await` has no
+        // built-in deadline: if the backend sent headers and then stops
+        // emitting bytes without closing (Python deadlock, TCP half-open,
+        // kernel buffer wedged), this future hangs forever, the cancel flag
+        // is never observed, the tokio task and the underlying connection
+        // both leak.
+        //
+        // 90s is conservative: legitimate slow models still stream tokens
+        // continuously (long pauses happen during initial prefill or tool
+        // round-trips, both of which complete in seconds). If a real upstream
+        // legitimately needs >90s of silence we surface it as a stream
+        // error — frontend's recovery polling will still rebuild state from
+        // backend session history.
+        const CHUNK_INACTIVITY_TIMEOUT: std::time::Duration =
+            std::time::Duration::from_secs(90);
         loop {
-            match response.chunk().await {
+            if cancel.load(Ordering::SeqCst) {
+                // Drop happens implicitly on loop exit; explicit log here
+                // would be nice but isn't worth the perf cost.
+                break;
+            }
+            // Convert the chunk to Vec<u8> inside the async block so the
+            // Output type doesn't depend on `bytes::Bytes` (which isn't a
+            // direct dependency of this crate and confuses type inference
+            // when the future is wrapped). The copy is cheap — chunks are
+            // typically a few KB of SSE payload that we'd be converting to
+            // String::from_utf8_lossy anyway.
+            let timed: Result<
+                reqwest::Result<Option<Vec<u8>>>,
+                tokio::time::error::Elapsed,
+            > = tokio::time::timeout(CHUNK_INACTIVITY_TIMEOUT, async {
+                response
+                    .chunk()
+                    .await
+                    .map(|opt| opt.map(|b| b.to_vec()))
+            })
+            .await;
+            let chunk_res = match timed {
+                Ok(r) => r,
+                Err(_) => {
+                    // Inactivity timeout. Surface as error so frontend tears
+                    // down the stream and reconciles via session history.
+                    let _ = on_event.send(BackendFetchEvent::Error {
+                        message: format!(
+                            "backend stream stalled for {}s",
+                            CHUNK_INACTIVITY_TIMEOUT.as_secs()
+                        ),
+                    });
+                    break;
+                }
+            };
+            match chunk_res {
                 Ok(Some(chunk)) => {
                     let text = String::from_utf8_lossy(&chunk).to_string();
                     if on_event.send(BackendFetchEvent::Chunk { text }).is_err() {
@@ -8490,6 +8844,9 @@ async fn backend_fetch(
                 }
             }
         }
+        // response drops here → closes TCP connection, frees chunk buffers
+        drop(response);
+        fetch_unregister(&fetch_id_for_task);
     });
 
     Ok(serde_json::json!({
@@ -9463,6 +9820,12 @@ fn build_feedback_zip(
         "global_logs/crash.log",
         opts,
     );
+    zip_add_file(
+        &mut zw,
+        &global_logs.join("autostart.log"),
+        "global_logs/autostart.log",
+        opts,
+    );
     for entry in fs::read_dir(&global_logs).into_iter().flatten().flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
@@ -9476,8 +9839,196 @@ fn build_feedback_zip(
         }
     }
 
+    // ── Native crash dumps ──
+    // Our SetUnhandledExceptionFilter-based crash handler writes
+    // ~5 MB mini dumps to ~/.openakita/crashdumps/openakita-*.dmp.
+    // Cap aggregate at 25 MB so a single bad report cannot blow past
+    // the 30 MB upload limit; keeps newest dumps first.
+    zip_add_dir_capped(
+        &mut zw,
+        &crashdumps_dir(),
+        "crashdumps",
+        opts,
+        25 * 1024 * 1024,
+    );
+
+    // ── Windows Error Reporting metadata + system event log ──
+    // Only available on Windows; on macOS / Linux these calls are no-ops
+    // and contribute nothing to the zip.
+    collect_windows_crash_artifacts(&mut zw, opts);
+
     zw.finish().map_err(|e| format!("zip finish: {e}"))?;
     Ok(dest.to_string_lossy().to_string())
+}
+
+/// Pull Windows-only diagnostic artifacts into a feedback zip:
+///   * `wer/Report.wer` files from `%LOCALAPPDATA%\Microsoft\Windows\WER\
+///     ReportArchive\*` that mention our exe (metadata only — no PII
+///     beyond version + faulting module + exception code).
+///   * The last 30 Application Error / Windows Error Reporting events
+///     for our exe via `wevtutil qe Application`. Plain XML, ~50 KB max.
+///
+/// This is purely additive: any failure (permission denied, WER service
+/// disabled, wevtutil missing) is swallowed silently so the rest of the
+/// bundle still builds.
+#[cfg(windows)]
+fn collect_windows_crash_artifacts(
+    zw: &mut zip::ZipWriter<fs::File>,
+    opts: zip::write::SimpleFileOptions,
+) {
+    let local_appdata = match std::env::var_os("LOCALAPPDATA") {
+        Some(v) => PathBuf::from(v),
+        None => return,
+    };
+    let wer_archive = local_appdata
+        .join("Microsoft")
+        .join("Windows")
+        .join("WER")
+        .join("ReportArchive");
+
+    // WER report directories aren't reliably named: some are
+    // `AppCrash_openakita-setup-center.exe_<hash>`, others are just
+    // `Report.<hash>`. The exe name is always present in the Report.wer
+    // body though, so we filter by (a) dir-name fast path first, (b)
+    // fall back to reading the (small, <30 KB) Report.wer text. Limit
+    // the candidate set to the 30 most recently modified directories so
+    // even a heavily-crashed host doesn't spend minutes scanning.
+    let needle = "openakita";
+    let mut candidates: Vec<(PathBuf, std::time::SystemTime)> = fs::read_dir(&wer_archive)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            if !p.is_dir() {
+                return None;
+            }
+            let m = fs::metadata(&p).and_then(|md| md.modified()).ok()?;
+            Some((p, m))
+        })
+        .collect();
+    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    candidates.truncate(30);
+
+    for (report_dir, _) in candidates {
+        let report_wer = report_dir.join("Report.wer");
+        if !report_wer.is_file() {
+            continue;
+        }
+        let dir_name_lower = report_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let matched = if dir_name_lower.contains(needle) {
+            true
+        } else {
+            // Body match: Report.wer is a tiny INI-like text file with
+            // AppName / AppPath / FaultingModule keys. Read at most
+            // 64 KB to bound worst-case I/O.
+            match fs::read(&report_wer) {
+                Ok(bytes) => {
+                    let scan_len = bytes.len().min(64 * 1024);
+                    let s = String::from_utf8_lossy(&bytes[..scan_len]);
+                    s.to_ascii_lowercase().contains(needle)
+                }
+                Err(_) => false,
+            }
+        };
+        if !matched {
+            continue;
+        }
+        let zip_name = format!(
+            "wer/{}-Report.wer",
+            report_dir.file_name().unwrap_or_default().to_string_lossy()
+        );
+        if zw.start_file(&zip_name, opts).is_ok() {
+            let _ = zw.write_all(&fs::read(&report_wer).unwrap_or_default());
+        }
+    }
+
+    // Pull recent Application Error / WER events for our exe. Narrowing
+    // the XPath to the last 7 days bounds the index scan on busy hosts.
+    let xpath = "*[System[Provider[@Name='Application Error' or @Name='Windows Error Reporting'] \
+                 and TimeCreated[timediff(@SystemTime) <= 604800000]]]"; // last 7 days
+    let ps_cmd = format!(
+        "$ev = Get-WinEvent -LogName Application -MaxEvents 200 -FilterXPath \"{}\" \
+         -ErrorAction SilentlyContinue | \
+         Where-Object {{ $_.Message -match 'openakita' }} | \
+         Select-Object -First 30; \
+         if ($ev) {{ $ev | ForEach-Object {{ \
+           '[{{0}}] {{1}}: {{2}}' -f \
+             $_.TimeCreated.ToString('s'), $_.ProviderName, ($_.Message -replace '\\r?\\n', ' | ') \
+         }} }}",
+        xpath
+    );
+
+    if let Some(out) = run_powershell_with_timeout(&ps_cmd, std::time::Duration::from_secs(15)) {
+        if !out.is_empty() && zw.start_file("wer/event_log_recent.txt", opts).is_ok() {
+            let _ = zw.write_all(&out);
+        }
+    }
+}
+
+/// Spawn `powershell.exe -Command <cmd>` and bound the wall-clock wait.
+/// Returns captured stdout on success, or `None` if the process never
+/// started, was killed by timeout, or printed nothing.
+///
+/// Why custom timeout: `std::process::Command::output()` waits forever
+/// for the child. A pathological Application event log (corrupted index,
+/// remote SACL audit pulling from a slow DC, …) could block the
+/// "send feedback" UI indefinitely. We pump stdout from a reader thread
+/// and use mpsc::recv_timeout to enforce the deadline without taking on
+/// a new crate dependency.
+#[cfg(windows)]
+fn run_powershell_with_timeout(cmd: &str, timeout: std::time::Duration) -> Option<Vec<u8>> {
+    use std::io::Read;
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let mut child = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            cmd,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .stdin(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .ok()?;
+
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::with_capacity(4096);
+        let _ = stdout.read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(buf) => {
+            let _ = child.wait();
+            Some(buf)
+        }
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            None
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn collect_windows_crash_artifacts(
+    _zw: &mut zip::ZipWriter<fs::File>,
+    _opts: zip::write::SimpleFileOptions,
+) {
 }
 
 /// Simple days-since-epoch to civil date (year, month, day).

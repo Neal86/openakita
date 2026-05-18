@@ -7,6 +7,154 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - 2026-04-22
 
+### Chat (Changed) — `[来源:工具]` 反幻觉标签升级为可视化 badge + 工具失败一致性 belt
+
+- **背景**：OpenAkita 在 system prompt 里要求 LLM 给涉及外部事实的句段标注
+  `[来源:工具]` / `[来源:历史]` / `[来源:常识]` / `[来源:不确定]`，作为
+  反幻觉机制的"显式声明"层；`reasoning_engine.py` 的 `_check_source_tag_
+  consistency()` 用 regex 做后置一致性检查，但前端原样以**裸文本**显示这
+  些标签，用户视觉上看到一串 `[来源:工具]` 像是模型"leak 出了系统提示词"，
+  时而出现在 thinking 流、时而出现在主回复里，体验割裂。
+  此外，OpenClaw 的 `MUTATING_FAILURE_ACTION_PATTERN` 启发出第二个互补检
+  测：**工具调用失败 (`is_error=True`)，但 LLM 文本用乐观措辞掩盖**（如
+  "我已成功保存"）—— OpenAkita 此前缺少对应的 belt，verify=completed 路
+  径上的这类幻觉可能直接到用户面前。
+- **前端（A 方案）—— badge 渲染**：
+  - 新增 `apps/setup-center/src/views/chat/components/SourceBadge.tsx`：
+    - `SourceBadge` React 组件 + `TextWithSourceBadges`（纯文本场景）+
+      `useSourceTagFormatter` hook（markdown 场景，对源字符串做 fenced-
+      code 块感知的 HTML span 替换，依托 rehype-raw + rehype-sanitize 已
+      显式允许的 `span` className/title 渲染出来）；
+    - 配色与语义对齐：工具=绿 / 历史=蓝 / 常识=灰 / 不确定=橙；带 tooltip
+      解释每种来源的可信级别。
+  - 接入 6 个渲染入口：`FlatMessageItem` / `MessageBubble`（主消息）、
+    `ThinkingChain` 的 thinking + text entry、`ThinkingBlock`（独立 thinking
+    块）、`OrgMonitorPanel` 的事件文本 + 节点间消息、`OrgBlackboardPanel`
+    的黑板条目——保证 LLM 输出经过的所有 UI 路径都是统一 badge。
+  - 新增 8 个 i18n key（`chat.sourceTag.{tool,history,knowledge,uncertain}`
+    + `chat.sourceTagTip.*`），zh + en 各 4 对；CSS 加 `.srcBadge` 系列样式
+    （`apps/setup-center/src/styles.css`，含 light/dark mode 两套）。
+- **后端（C 方案）—— 工具失败一致性 belt**：
+  - `src/openakita/core/reasoning_engine.py` 新增 `_check_tool_failure_
+    acknowledgement(text, tool_results)`：把 `all_tool_results` 按工具名
+    聚合，**与 `_successful_tool_names()` 严格对偶**——"任一成功 receipt 视
+    为 backing evidence"，因此一个工具被判最终失败的条件是：至少一条
+    is_error=True 且**完全没有**成功 receipt。这避免了 ReAct 多轮重试场
+    景下"第 1 轮失败 → 第 2 轮重试成功"的**正确**流程被误报。
+  - 若至少一个工具最终失败且文本未包含任何中/英文承认词（"失败/无法/未能/
+    报错/错误/异常/权限不足" / `fail/error/unable/cannot/...`）即追加 ⚠️
+    banner（不修改 LLM 原文，仅末尾追加），列出失败工具名 + 数量。
+  - 调用点：`_handle_final_answer` 的 `is_completed=True` 早期返回前——
+    verify 判任务完成但单步工具失败被 LLM 乐观措辞掩盖时，这道 belt 兜
+    住。与 `_check_source_tag_consistency`（成功路径之前已存在）形成上下
+    互补：前者抓"声明工具但未调"，后者抓"工具失败但措辞乐观"。
+- **新增测试**：`tests/unit/test_tool_failure_acknowledgement.py` 共 23 个
+  测试，覆盖：空文本 / 空 results / 全成功 / 单失败触发 banner / 多失败
+  汇总 / 工具名去重 / 5+ 失败截断 / 中文 7 类承认词 / 英文 8 类承认词
+  （含大小写） / 缺失 `tool_name` 字段 fallback / 仅失败工具进 summary /
+  **对偶约定**：同名工具先失败后成功放行 / 先成功后失败放行 / 两工具一恢复
+  一持续失败只报后者 / banner 格式（含 `⚠️` + 分隔线 + "系统检测"）。
+- **rehype-sanitize 白名单加固**：`useMdModules.ts` 的 `buildSanitizeSchema`
+  额外放行 `<span>` 的 `title` 属性。默认 GitHub schema 只放行 `<a>`/`<img>`
+  的 title，否则 SourceBadge 的 tooltip 文案会被静默剥掉，badge 仍渲染但
+  hover 看不到来源解释——这是 belt 加固，不影响其他元素。
+- **覆盖率**：补全 6 个 LLM 输出渲染入口外的 4 个长尾入口——`OrgDashboard.
+  FeedTip`、`OrgEditorView.FeedTip` + blackboard、`OrgMonitorPanel` 的 2 处。
+  至此所有渲染 LLM 自然语言的入口都过 `useSourceTagFormatter`。
+- **零破坏**：所有原有逻辑保持不变；badge 渲染失败时 fallback 仍是原始
+  `[来源:工具]` 文本（rehype-sanitize 严格白名单 + escapeHtml 防注入），
+  3476 个单元测试全过。
+
+### UI (Changed) — SecurityView 路径名单加入 profile-aware 提示
+
+- **背景**：Stage 1 让 `FilesystemHandler._allowed_roots()` 在 `trust` / `off`
+  profile 下短路返回 `[]`（关闭工作区白名单），但 SecurityView 的"路径名单"
+  Tab 在切到这两种方案后**仍然平铺显示工作区列表**且写着"信任方案只减少
+  确认，不会自动扩大路径范围"——与 Stage 1 后的真实行为相反，会让用户
+  误以为 trust 下白名单仍然生效。
+- **修改**：`apps/setup-center/src/views/SecurityView.tsx` zones Tab 增加
+  profile-aware 横幅：
+  - `trust` 方案：amber 警告色横幅，明示"工作区白名单已跳过；列表仅作为
+    切回保护 / 严格 / 自定义方案时的预置；绝对保护清单仍然生效"；
+  - `off` 方案：destructive 警告色横幅，明示"所有路径配置都不强制生效，
+    包括绝对保护清单也不再拦截（这是 off 的全局 kill-switch 设计）"；
+  - `protect` / `strict` / `custom`：不显示横幅（白名单照常生效）。
+- **顺便**：把原硬编码中文 hint 改为 `security.zonesIntro` i18n key，并
+  统一表述为"工作区决定 Agent 文件工具可访问的目录范围（trust / off
+  方案除外）；绝对保护清单在除 off 之外的方案下始终生效"。
+- **新增 i18n key**：`security.zonesIntro` / `security.zonesHintTrustTitle`
+  / `security.zonesHintTrustDesc` / `security.zonesHintOffTitle` /
+  `security.zonesHintOffDesc`（zh + en 各 5 个）。
+- **零后端改动**：profile → 是否强制白名单的映射在前端 5 行 TSX 即可表达；
+  避免新增 `/api/config/security/path-view` endpoint 这种过度抽象（profile
+  只有 5 个固定值，前端硬编码完全足够，且 backend 是 single source of
+  truth 的语义已经通过 `permissionMode` 同步保证）。
+
+### Security (Hardened) — Profile → Engine 端到端契约 invariant 锁定
+
+- **背景**：`SecurityProfileConfig` 设计上是 product-facing 宏，UI 切换时
+  ``_apply_security_profile_defaults`` 把 profile 展开成一组独立字段
+  (``confirmation.mode`` / ``enabled`` / ``sandbox.enabled`` / …) 写入 cfg；
+  runtime 引擎只读独立字段，**不直接看 ``profile.current``**。Stage 1 在
+  ``FilesystemHandler._allowed_roots()`` 引入了**唯一**直接读 ``profile.
+  current`` 的 production-code 消费者，存在"product 层↔runtime 层"漂移的
+  理论风险。
+- **新增 invariant 测试** `tests/unit/test_profile_to_engine_invariants.py`
+  共 19 个测试，从 ``_apply_security_profile_defaults(profile)`` 一路构造
+  到 ``engine.evaluate_tool_call`` 锁住四套 preset 的决策行为：
+  - `trust`: write 任意路径 → ALLOW，read 任意路径 → ALLOW，delete →
+    CONFIRM（matrix safety net 守住 destructive）；
+  - `protect`: write inside workspace → CONFIRM，write outside → CONFIRM，
+    read inside → ALLOW（"保护"意味着写入都要确认）；
+  - `strict`: write inside → CONFIRM，delete → DENY（hard cliff）；
+  - `off`: 任何操作 → ALLOW（global kill switch，连 destructive safety net
+    都跳过——这是 off 的设计意图）。
+- **未引入新的 production code**——纯 test-only 加固。捕捉到的真正回归
+  风险来自：(1) ``_apply_security_profile_defaults`` 字段值漂移；(2)
+  matrix 行为意外松动；(3) Stage 1 ``profile.current`` 直读消费者出现新
+  增导致语义分裂。
+
+### Security (Changed) — `trust` profile 真正信任：filesystem 跳过工作区白名单
+
+- **行为**：`cfg.profile.current == "trust"` 时 `FilesystemHandler._allowed_roots()`
+  返回空列表（与 `off` profile 在本函数行为一致），即**关闭工作区路径白名单**——
+  AI 可以读写任何路径，仅受 `safety_immune` / `shell_risk` / `confirmation` 等
+  其他机制约束。修复前 `trust` 会错误落入 `protect` 分支、按 `cfg.workspace.
+  paths` 卡白名单，与文档"信任 AI 自主选择路径"的语义矛盾。
+- **未变**：`safety_immune.paths` / `cfg.enabled` 全局开关 / `Path.cwd()` fallback
+  / `settings.data_dir` 永远附加。其他 profile (`protect` / `strict` / `custom`)
+  路径白名单逻辑完全不变。
+- **测试**：新增 `tests/unit/test_filesystem_profile_path_whitelist.py`，9 个测试
+  分三层守护：(1) `_allowed_roots()` 在 `off`/`trust`/`enabled=False` 三种短路条件
+  下返回 `[]`；(2) `protect`/`strict`/`custom` 三种 active profile 读取 workspace
+  paths + `settings.data_dir`；(3) E2E `_guard_path_boundary` 在 trust 下放行
+  workspace 外路径、在 protect 下仍拦截。
+
+### Security (Fixed) — policy_v2 占位符展开 P0 修复
+
+- **bug**：`PolicyConfigV2.expand_placeholders` 旧实现用 `if p == "${CWD}":`
+  严格相等比较，导致用户在 `identity/POLICIES.yaml` 里写的
+  `safety_immune.paths: ["${CWD}/secrets/**"]`、`workspace.paths: ["${CWD}/foo"]`
+  等含占位符的**非纯前缀**路径**完全不展开**，以字面字符串进入 PolicyEngineV2，
+  下游 prefix-match 永远失配——自定义 immune/workspace 路径成为**静默 no-op**，
+  无任何 warn。
+- **修复**：新建 `src/openakita/core/policy_v2/path_placeholders.py` 单一职责模块，
+  提供 `resolve_path_template` / `resolve_path_list` 公共 helper，支持 `${CWD}`
+  / `${HOME}` / `${WORKSPACE}` 三个占位符的"非严格相等替换" + 反斜杠归一化。
+  `schema.PolicyConfigV2.expand_placeholders` 与 `safety_immune_defaults.
+  expand_builtin_immune_paths` 都委托给同一份实现。
+- **回归测试**：`tests/unit/test_path_placeholders.py` 共 24 个测试，关键守护
+  `test_dollar_cwd_with_suffix_is_expanded_regression_bug_p0` 防止再次回到旧实现；
+  额外 `test_resolver_output_is_fixed_point_under_engine_normalize` 锁定与下游
+  `engine._normalize_path` 的归一化契约（forward slash / lowercase / single-slash），
+  任一层私自加新归一化都会触发漂移告警。
+- **影响**：升级后用户原本写的 `${CWD}/...` 形式自定义路径会**首次真正生效**——
+  如果之前依赖"这些路径反正没生效"的环境会突然开始按预期保护/拦截。
+- **次要行为变化**：所有从 `POLICIES.yaml` 加载的路径在 cfg 阶段就已归一化为
+  forward slash（例如用户写 `C:\Windows\System32` → cfg 里是 `C:/Windows/System32`）。
+  PolicyEngineV2 的 `_normalize_path` 早已对两端做同样归一化，**match 行为完全不变**；
+  仅 audit-log 输出的路径字符串形式会统一为 forward slash。
+
 ### Added — `plugins/clip-sense` v1.0.0：智剪工坊 AI 视频剪辑插件
 
 - **新插件 ClipSense 智剪工坊**：AI 驱动的视频剪辑助手，支持 4 种剪辑模式

@@ -5,11 +5,24 @@
  */
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useTranslation } from "react-i18next";
+import { Loader2, ShieldAlert, Copy as IconCopy } from "lucide-react";
+import { toast } from "sonner";
 import { safeFetch } from "../providers";
+import { copyToClipboard } from "../utils/clipboard";
 import { onWsEvent } from "../platform";
 import { useMdModules } from "../views/chat/hooks/useMdModules";
 import { FileAttachmentCard } from "./FileAttachmentCard";
 import type { FileAttachment } from "./FileAttachmentCard";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
 
 interface ChatMsg {
   id: string;
@@ -42,6 +55,8 @@ interface TimelineSegment {
   done: boolean;
   /** 上一次 push line 的时间戳（毫秒）；用于抑制 1s 内同行重复 */
   lastPushAt?: number;
+  /** segment 标记为 done 的时间戳（毫秒），用于 30s 内的 busy 复用 */
+  doneAt?: number;
   /** 已加入 files 的 file_path 集合，按 path 去重 */
   filePaths?: Set<string>;
   resultPreview?: string;
@@ -69,6 +84,20 @@ export interface OrgChatPanelProps {
   onClose?: () => void;
   /** Map node IDs to display names so progress lines show readable names. */
   nodeNames?: Record<string, string>;
+}
+
+/**
+ * 一条可被指挥台用作"完成 / 取消"转发目标的 IM 频道。
+ * 与后端 ``ForwardTarget`` dataclass 一一对应（channel + chat_id 是最小可
+ * 寻址单位；thread_id 仅 Telegram topic / Lark thread 用得到）。
+ */
+interface ForwardTargetOption {
+  id: string;            // 渲染用稳定 key
+  label: string;         // UI 标签（bot 名称 / chat 名称）
+  channel: string;       // gateway 适配器 key
+  chat_id: string;
+  thread_id?: string | null;
+  bot_instance_id?: string;
 }
 
 function sessionId(orgId: string, nodeId?: string | null): string {
@@ -137,6 +166,13 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
   // - finalizeResult / send 异常 / 不可恢复重连完成时清空
   // 与 _pendingCmds 解耦的目的：组件内的 React state 才能驱动按键 enable/disable。
   const [pendingCmdId, setPendingCmdId] = useState<string | null>(null);
+  const [stopDialogOpen, setStopDialogOpen] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  // P3：可选的 IM 转发目标。当用户选中一个或多个 bot/聊天，命令完成 / 取消时
+  // 后端会顺手把最终消息投递到这些 IM 频道——指挥台因此成为"统一入口/出口"。
+  // 列表来自 ``GET /api/agents/bots``；每项形如 ``{channel, chat_id, label}``。
+  const [availableForwards, setAvailableForwards] = useState<ForwardTargetOption[]>([]);
+  const [forwardTargets, setForwardTargets] = useState<ForwardTargetOption[]>([]);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const mountedRef = useRef(true);
@@ -153,26 +189,137 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
   useEffect(scrollToBottom, [messages, scrollToBottom]);
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
+  // 拉取可用 IM bot 列表，转成 ForwardTargetOption。
+  // 当前每个 bot 只取它的默认 chat_id（credentials 里的 ``default_chat_id``
+  // 或 ``chat_id``）；没有默认聊天的 bot 暂不展示，避免空 chat_id 报错。
+  // 后续 P3+ 可以让用户在 UI 里手工填 chat_id / thread_id。
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await safeFetch(`${apiBaseUrl}/api/agents/bots`);
+        const data = await res.json();
+        if (cancelled) return;
+        const bots = Array.isArray(data?.bots) ? data.bots : [];
+        const opts: ForwardTargetOption[] = [];
+        for (const b of bots) {
+          if (!b || b.enabled === false) continue;
+          const channel = String(b.type || b.id || "").toLowerCase();
+          const creds = (b.credentials || {}) as Record<string, unknown>;
+          const chatId = String(
+            creds.default_chat_id ?? creds.chat_id ?? creds.openid ?? creds.user_id ?? "",
+          ).trim();
+          if (!channel || !chatId) continue;
+          opts.push({
+            id: `${b.id || channel}:${chatId}`,
+            label: String(b.name || b.id || channel),
+            channel,
+            chat_id: chatId,
+            bot_instance_id: String(b.id || ""),
+          });
+        }
+        if (!cancelled) setAvailableForwards(opts);
+      } catch (err) {
+        if (!cancelled) console.warn("[OrgChat] load forward targets failed:", err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [apiBaseUrl]);
+
   // Load history: backend first, localStorage fallback
+  // 整组织视图额外合并 /api/orgs/{org}/activity（含 IM/桌面/指挥台所有来源），
+  // 让 IM 来的指令、节点互发的消息也能在指挥台直接看到。
   useEffect(() => {
     let cancelled = false;
     setLoaded(false);
     const url = `${apiBaseUrl}/api/sessions/${encodeURIComponent(convId)}/history?limit=${ORG_HISTORY_PAGE_LIMIT}`;
+    const wholeOrgView = !nodeId || String(nodeId).trim() === "";
+
+    const fetchActivityAsMsgs = async (): Promise<ChatMsg[]> => {
+      if (!wholeOrgView) return [];
+      try {
+        const r = await safeFetch(
+          `${apiBaseUrl}/api/orgs/${encodeURIComponent(orgId)}/activity?limit=${ORG_HISTORY_PAGE_LIMIT}`,
+        );
+        const j = await r.json();
+        const arr = Array.isArray(j?.items) ? j.items : [];
+        return arr
+          .slice()
+          .reverse()
+          .map((item: any): ChatMsg => {
+            const ts = typeof item.ts === "string"
+              ? new Date(item.ts).getTime()
+              : (typeof item.ts === "number" ? item.ts * 1000 : Date.now());
+            const sourceCn = (() => {
+              const s = item?.source?.surface;
+              if (s === "im") return `IM·${item?.source?.channel || ""}`;
+              if (s === "desktop_chat") return "桌面聊天";
+              if (s === "org_console") return "指挥台";
+              return s || "组织";
+            })();
+            const flow = item.to_node
+              ? `${item.from_node || "?"} → ${item.to_node}`
+              : (item.from_node || "");
+            const kindLabel = (() => {
+              switch (item.kind) {
+                case "user_command": return "用户指令";
+                case "user_command_cancelled": return "指令取消";
+                case "delegate": return "派单";
+                case "message": return "节点消息";
+                case "broadcast": return "广播";
+                case "task_completed": return "任务完成";
+                case "task_cancelled": return "任务取消";
+                case "command_phase": return "命令状态";
+                case "node_activated": return "节点激活";
+                case "workbench_started": return "工作台开始";
+                case "workbench_succeeded": return "工作台完成";
+                case "workbench_failed": return "工作台失败";
+                case "command": return "指令";
+                default: return item.kind || "事件";
+              }
+            })();
+            const preview = item.content ? `\n> ${String(item.content).slice(0, 240)}` : "";
+            const content = `**[${kindLabel}]** ${sourceCn}${flow ? ` · ${flow}` : ""}${preview}`;
+            return {
+              id: `act-${item.id || ts}`,
+              role: "system",
+              content,
+              timestamp: ts,
+            };
+          });
+      } catch {
+        return [];
+      }
+    };
+
     (async () => {
       try {
-        const res = await safeFetch(url);
+        const [res, activityMsgs] = await Promise.all([
+          safeFetch(url),
+          fetchActivityAsMsgs(),
+        ]);
         const data = await res.json();
         if (cancelled) return;
-        const msgs: ChatMsg[] = (data.messages || []).map((m: any) => ({
+        const histMsgs: ChatMsg[] = (data.messages || []).map((m: any) => ({
           id: m.id || genId(),
           role: m.role || "assistant",
           content: m.content || "",
           timestamp: m.timestamp || Date.now(),
         }));
-        if (msgs.length > 0) {
-          console.log(`[OrgChat] Loaded ${msgs.length} messages from backend for ${convId}`);
-          setMessages(msgs);
-          saveToLocalStorage(convId, msgs);
+        const merged = [...activityMsgs, ...histMsgs].sort(
+          (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
+        );
+        const deduped: ChatMsg[] = [];
+        const seen = new Set<string>();
+        for (const m of merged) {
+          if (m.id && seen.has(m.id)) continue;
+          if (m.id) seen.add(m.id);
+          deduped.push(m);
+        }
+        if (deduped.length > 0) {
+          console.log(`[OrgChat] Loaded ${deduped.length} entries (hist=${histMsgs.length}, activity=${activityMsgs.length}) for ${convId}`);
+          setMessages(deduped);
+          saveToLocalStorage(convId, deduped);
         } else {
           const local = loadFromLocalStorage(convId);
           if (local.length > 0) {
@@ -195,6 +342,113 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
     })();
     return () => { cancelled = true; };
   }, [convId, apiBaseUrl]);
+
+  // IM / 主聊天组织模式在下发命令时会立刻写入桥接会话；已打开的指挥台需主动拉取
+  // 历史，否则要等到用户手动刷新或命令结束事件。
+  //
+  // 整组织视图（panelNode 为空）会接收所有 IM / 桌面 / org_console 发起的命令并刷新；
+  // 节点视图（panelNode 非空）严格按 target 过滤，避免一个节点页面被无关命令污染。
+  // 这与 P1 的设计文档"指挥台 = 所有来源的统一时间线"一致：根视图不再因为
+  // IM 指令带了 target_node_id 就把整个事件丢弃。
+  useEffect(() => {
+    if (!loaded) return;
+    const wholeOrgView = !nodeId || String(nodeId).trim() === "";
+    const orgEvents = new Set([
+      "org:command_started",
+      "org:command_done",
+      "org:command_cancelled",
+      "org:message",
+      "org:broadcast",
+      "org:task_delegated",
+      "org:blackboard_update",
+      "org:workbench_tool_status",
+    ]);
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const refresh = async (): Promise<void> => {
+      try {
+        const histPromise = safeFetch(
+          `${apiBaseUrl}/api/sessions/${encodeURIComponent(convId)}/history?limit=${ORG_HISTORY_PAGE_LIMIT}`,
+        ).then(r => r.json()).catch(() => ({}));
+        const activityPromise = wholeOrgView
+          ? safeFetch(
+              `${apiBaseUrl}/api/orgs/${encodeURIComponent(orgId)}/activity?limit=${ORG_HISTORY_PAGE_LIMIT}`,
+            ).then(r => r.json()).catch(() => ({ items: [] }))
+          : Promise.resolve({ items: [] });
+        const [histData, actData] = await Promise.all([histPromise, activityPromise]);
+        if (!mountedRef.current) return;
+        const histMsgs: ChatMsg[] = (histData.messages || []).map((m: any) => ({
+          id: m.id || genId(),
+          role: m.role || "assistant",
+          content: m.content || "",
+          timestamp: m.timestamp || Date.now(),
+        }));
+        const actMsgs: ChatMsg[] = (Array.isArray(actData?.items) ? actData.items : [])
+          .slice()
+          .reverse()
+          .map((item: any): ChatMsg => {
+            const ts = typeof item.ts === "string"
+              ? new Date(item.ts).getTime()
+              : (typeof item.ts === "number" ? item.ts * 1000 : Date.now());
+            const sourceCn = (() => {
+              const s = item?.source?.surface;
+              if (s === "im") return `IM·${item?.source?.channel || ""}`;
+              if (s === "desktop_chat") return "桌面聊天";
+              if (s === "org_console") return "指挥台";
+              return s || "组织";
+            })();
+            const flow = item.to_node
+              ? `${item.from_node || "?"} → ${item.to_node}`
+              : (item.from_node || "");
+            const preview = item.content ? `\n> ${String(item.content).slice(0, 240)}` : "";
+            const content = `**[${item.kind || "事件"}]** ${sourceCn}${flow ? ` · ${flow}` : ""}${preview}`;
+            return {
+              id: `act-${item.id || ts}`,
+              role: "system",
+              content,
+              timestamp: ts,
+            };
+          });
+        const merged = [...actMsgs, ...histMsgs].sort(
+          (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
+        );
+        const deduped: ChatMsg[] = [];
+        const seen = new Set<string>();
+        for (const m of merged) {
+          if (m.id && seen.has(m.id)) continue;
+          if (m.id) seen.add(m.id);
+          deduped.push(m);
+        }
+        if (deduped.length > 0) {
+          setMessages(deduped);
+          saveToLocalStorage(convId, deduped);
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+
+    const unsub = onWsEvent((event, raw) => {
+      if (!orgEvents.has(event)) return;
+      const d = raw as Record<string, unknown> | null;
+      if (!d || String(d.org_id) !== orgId) return;
+      const panelNode = nodeId != null && String(nodeId).trim() !== "" ? String(nodeId) : "";
+      if (panelNode) {
+        const target = String(
+          d.target_node_id ?? d.to_node ?? d.from_node ?? "",
+        ).trim();
+        if (target && target !== panelNode) return;
+      }
+      // 多个 WS 事件常常密集到达；用 250ms debounce 合并刷新一次，
+      // 避免短时间内连发多次 history/activity 请求。
+      if (pendingTimer) clearTimeout(pendingTimer);
+      pendingTimer = setTimeout(() => { void refresh(); }, 250);
+    });
+    return () => {
+      unsub();
+      if (pendingTimer) clearTimeout(pendingTimer);
+    };
+  }, [loaded, orgId, nodeId, convId, apiBaseUrl]);
 
   // Debounced localStorage write on every messages change
   useEffect(() => {
@@ -336,10 +590,17 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
   // 后端会让 send_command 走"stopped_by_watchdog + cancelled_by_user"分支
   // 正常返回，从而触发 handleSend 中的 finalizeResult 收尾；此处不动本地
   // _pendingCmds / 消息流，避免与 send_command 路径竞争产生重复消息。
-  const handleStop = useCallback(async () => {
+  const handleStop = useCallback(() => {
     if (!pendingCmdId) return;
-    const ok = window.confirm(t("org.chat.confirmForceStop"));
-    if (!ok) return;
+    setStopDialogOpen(true);
+  }, [pendingCmdId]);
+
+  const confirmStop = useCallback(async () => {
+    if (!pendingCmdId) {
+      setStopDialogOpen(false);
+      return;
+    }
+    setStopping(true);
     try {
       await safeFetch(
         `${apiBaseUrl}/api/orgs/${encodeURIComponent(orgId)}/commands/${encodeURIComponent(pendingCmdId)}/cancel`,
@@ -347,6 +608,9 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
       );
     } catch (e) {
       console.warn("[OrgChat] cancel command failed", e);
+    } finally {
+      setStopping(false);
+      setStopDialogOpen(false);
     }
   }, [apiBaseUrl, orgId, pendingCmdId]);
 
@@ -368,13 +632,38 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
 
     const segments: TimelineSegment[] = [];
     const activeSegIdx = new Map<string, number>();
+    // P8.2: (node_id|tool_name|status) -> last emit ts ms，用于 2s 滑窗去重
+    const wbToolStatusDedupe = new Map<string, number>();
     const cmdStartTime = Date.now();
     const activity = { last: Date.now() };
     let lastBlockerSummary = "";
 
+    // P8.2: 30s 内复用 done segment，避免 wb-hh-* 节点 busy → idle → busy
+    // 频繁切换时把一条任务被切成多个碎片。done 之后第一次再 busy 起来
+    // 通常是上游的 fan-out 通知（如 task_accepted 后跟一条 workbench_tool
+    // 重启），保留在同一 segment 里更可读。超过 SEG_REUSE_AFTER_DONE_MS
+    // 还有新 busy 才认为是一段全新的工作。
+    const SEG_REUSE_AFTER_DONE_MS = 30_000;
+
     function findOrCreateSeg(nodeId: string): TimelineSegment {
-      let idx = activeSegIdx.get(nodeId);
-      if (idx != null && !segments[idx].done) return segments[idx];
+      const idx = activeSegIdx.get(nodeId);
+      if (idx != null) {
+        const cur = segments[idx];
+        if (!cur.done) return cur;
+        const sinceDone = Date.now() - (cur.doneAt ?? 0);
+        if (sinceDone <= SEG_REUSE_AFTER_DONE_MS) {
+          // P9.2: 复用 segment 时把上一轮的失败状态一并重置，否则
+          // 节点先失败（max_iterations / timeout）再重启成功的场景下
+          // segment 会一直顶着红色的 ⚠ 和默认展开，掩盖最终成功结果。
+          cur.done = false;
+          cur.doneAt = undefined;
+          cur.failed = false;
+          cur.exitReason = undefined;
+          cur.diagnosis = undefined;
+          cur.resultPreview = undefined;
+          return cur;
+        }
+      }
       const seg: TimelineSegment = {
         nodeId,
         nodeName: nn(nodeId),
@@ -477,7 +766,7 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
           const idx = activeSegIdx.get(nid);
           if (idx != null && segments[idx]) {
             const seg = segments[idx];
-            seg.done = true;
+            seg.done = true; seg.doneAt = Date.now();
             seg.exitReason = exitReason;
             // 软退出在用户界面按完成/等待处理；真正异常交给后续事件显示极简状态。
             if (isSoftOrgExitReason(exitReason)) {
@@ -490,7 +779,7 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
           updatePreview();
         } else if (st === "error") {
           const seg = findOrCreateSeg(nid);
-          seg.done = true;
+          seg.done = true; seg.doneAt = Date.now();
           pushSegLine(seg, t("org.chat.errored", { name: `**${nn(nid)}**` }));
           updatePreview();
         }
@@ -508,10 +797,19 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
         }
       } else if (event === "org:task_complete") {
         const preview = ((d.result_preview || "") as string);
+        const reason = (d.exit_reason as string) || "normal";
         const idx = activeSegIdx.get(nid);
         if (idx != null && segments[idx]) {
           segments[idx].resultPreview = preview;
-          segments[idx].exitReason = (d.exit_reason as string) || "normal";
+          segments[idx].exitReason = reason;
+          // P9.2: 软退出（normal / ask_user / waiting_user / verify_incomplete）
+          // 必须把 failed 打回 false，否则节点曾经被 max_iterations / timeout
+          // 终止过、随后重启成功的轨迹会一直顶着红色 ⚠ 直到这条 command
+          // 全部结束，与"业务上其实成功了"的最终状态矛盾。
+          if (isSoftOrgExitReason(reason)) {
+            segments[idx].failed = false;
+            segments[idx].diagnosis = undefined;
+          }
         }
       } else if (event === "org:task_terminated") {
         const preview = ((d.result_preview || "") as string);
@@ -520,7 +818,7 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
         const idx = activeSegIdx.get(nid);
         if (idx != null && segments[idx]) {
           const seg = segments[idx];
-          seg.done = true;
+          seg.done = true; seg.doneAt = Date.now();
           seg.resultPreview = preview;
           seg.exitReason = reason;
           seg.failed = true;
@@ -535,7 +833,7 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
         const idx = activeSegIdx.get(nid);
         if (idx != null && segments[idx]) {
           const seg = segments[idx];
-          seg.done = true;
+          seg.done = true; seg.doneAt = Date.now();
           seg.resultPreview = preview;
           seg.exitReason = reason;
           if (isSoftOrgExitReason(reason)) {
@@ -555,9 +853,9 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
         updatePreview();
       } else if (event === "org:blackboard_update") {
         const mt = d.memory_type as string;
-        const fname = d.filename as string | undefined;
-        const fpath = d.file_path as string | undefined;
-        const fsize = d.file_size as number | undefined;
+        const fname = (d.filename || d.name) as string | undefined;
+        const fpath = (d.file_path || d.path) as string | undefined;
+        const fsize = (d.file_size ?? d.size) as number | undefined;
         if (mt === "resource" && fname && fpath) {
           const seg = findOrCreateSeg(nid);
           const added = pushSegFile(seg, { filename: fname, file_path: fpath, file_size: fsize });
@@ -587,6 +885,16 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
         const status = (d.status || "") as string;
         const toolName = (d.tool_name || "") as string;
         const error = (d.error || "") as string;
+        // P8.2: 2s 滑窗去重。后端 fan-out + 偶发 retry 会让同一个 (node,
+        // tool, status) 在很短间隔内连续 emit；既会让进度行刷屏也会让
+        // segment 被反复"重启"。同窗口内重复直接跳过。
+        const wbKey = `${nid}|${toolName}|${status}`;
+        const now = Date.now();
+        const lastEmit = wbToolStatusDedupe.get(wbKey) || 0;
+        if (now - lastEmit < 2000) {
+          return;
+        }
+        wbToolStatusDedupe.set(wbKey, now);
         const seg = findOrCreateSeg(nid);
         const line =
           status === "running"
@@ -680,6 +988,13 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
           content: text,
           target_node_id: nodeId || undefined,
           continue_previous: !!opts?.continuePrevious,
+          forward_to: forwardTargets.map(ft => ({
+            channel: ft.channel,
+            chat_id: ft.chat_id,
+            thread_id: ft.thread_id ?? null,
+            bot_instance_id: ft.bot_instance_id ?? "",
+            label: ft.label,
+          })),
         }),
       });
       const data = await res.json();
@@ -765,7 +1080,7 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
         }
       }
     }
-  }, [input, sending, orgId, nodeId, apiBaseUrl, convId, persistToBackend]);
+  }, [input, sending, orgId, nodeId, apiBaseUrl, convId, persistToBackend, forwardTargets]);
 
   const handleContinuePrevious = useCallback(() => {
     handleSend({
@@ -788,7 +1103,26 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
         <div className="ocp-header">
           <div className="ocp-header-info">
             <div className="ocp-header-dot" />
-            <span className="ocp-header-title">{title || (nodeId ? t("org.chat.conversationTitle", { name: nodeId }) : t("org.chat.commandCenter"))}</span>
+            <div className="ocp-header-titles">
+              <span className="ocp-header-title">{title || (nodeId ? t("org.chat.conversationTitle", { name: nodeId }) : t("org.chat.commandCenter"))}</span>
+              {orgId && (
+                <button
+                  type="button"
+                  className="ocp-header-id"
+                  title={`${t("org.chat.copyOrgId")} · ${orgId}`}
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    const ok = await copyToClipboard(orgId);
+                    if (ok) toast.success(t("org.chat.orgIdCopied"));
+                    else toast.error(t("org.chat.orgIdCopyFailed"));
+                  }}
+                >
+                  <span className="ocp-header-id-label">ID</span>
+                  <code className="ocp-header-id-value">{orgId}</code>
+                  <IconCopy size={10} />
+                </button>
+              )}
+            </div>
           </div>
           <div style={{ display: "flex", gap: 4 }}>
             {messages.length > 0 && (
@@ -890,6 +1224,42 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
         </div>
       )}
 
+      {availableForwards.length > 0 && (
+        <div className="ocp-forward-row" aria-label="转发到 IM 渠道">
+          <span className="ocp-forward-label">转发到 IM：</span>
+          {availableForwards.map(opt => {
+            const active = forwardTargets.some(t => t.id === opt.id);
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                className={`ocp-forward-chip${active ? " ocp-forward-chip-on" : ""}`}
+                onClick={() => {
+                  setForwardTargets(prev => active
+                    ? prev.filter(t => t.id !== opt.id)
+                    : [...prev, opt]
+                  );
+                }}
+                title={`${opt.channel}/${opt.chat_id}`}
+              >
+                <span className="ocp-forward-dot" />
+                {opt.label}
+              </button>
+            );
+          })}
+          {forwardTargets.length > 0 && (
+            <button
+              type="button"
+              className="ocp-forward-clear"
+              onClick={() => setForwardTargets([])}
+              title="清空已选 IM 渠道"
+            >
+              清空
+            </button>
+          )}
+        </div>
+      )}
+
       <div className={`ocp-input-area ${compact ? "ocp-compact" : ""}`}>
         <textarea
           ref={inputRef}
@@ -929,6 +1299,42 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
         </button>
       </div>
 
+      <AlertDialog
+        open={stopDialogOpen}
+        onOpenChange={(open) => {
+          if (stopping) return;
+          setStopDialogOpen(open);
+        }}
+      >
+        <AlertDialogContent className="sm:max-w-[460px]">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <span className="grid size-8 place-items-center rounded-lg border border-red-500/20 bg-red-500/10 text-red-600">
+                <ShieldAlert size={16} />
+              </span>
+              {t("org.chat.forceStopTitle")}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("org.chat.confirmForceStop")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={stopping}>
+              {t("common.cancel", "取消")}
+            </AlertDialogCancel>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={stopping}
+              onClick={() => void confirmStop()}
+            >
+              {stopping && <Loader2 className="mr-2 size-4 animate-spin" />}
+              {t("org.chat.forceStopConfirm", "强制终止")}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <style>{CHAT_CSS}</style>
     </div>
   );
@@ -957,6 +1363,32 @@ const CHAT_CSS = `
 }
 @keyframes ocp-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 .ocp-header-title { font-size: 13px; font-weight: 600; }
+.ocp-header-titles { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ocp-header-id {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  border: 1px dashed var(--border, rgba(99,102,241,0.35));
+  background: transparent;
+  color: var(--muted, #64748b);
+  cursor: pointer;
+  width: fit-content;
+  max-width: 260px;
+  user-select: none;
+  transition: all 0.15s;
+}
+.ocp-header-id:hover {
+  background: var(--hover-bg, rgba(99,102,241,0.08));
+  color: var(--primary, #6366f1);
+  border-color: var(--primary, #6366f1);
+}
+.ocp-header-id-label { font-weight: 600; letter-spacing: 0.05em; opacity: 0.75; }
+.ocp-header-id-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  max-width: 200px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .ocp-close {
   width: 28px; height: 28px; border: none; border-radius: 6px;
   background: transparent; color: var(--muted, #64748b);
@@ -1047,6 +1479,42 @@ const CHAT_CSS = `
 }
 
 /* ─── Input ─── */
+/* ─── Forward-to-IM chip row (P3) ─── */
+.ocp-forward-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 6px 12px 0 12px;
+  font-size: 11px; color: var(--muted, #64748b);
+  border-top: 1px dashed var(--line, rgba(51,65,85,0.4));
+}
+.ocp-forward-label { font-weight: 600; letter-spacing: 0.04em; }
+.ocp-forward-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--line, rgba(99,102,241,0.35));
+  background: transparent; color: var(--muted, #64748b);
+  cursor: pointer; font-size: 11px;
+  transition: all 0.15s;
+}
+.ocp-forward-chip:hover { color: var(--text); border-color: var(--primary, #6366f1); }
+.ocp-forward-chip-on {
+  background: var(--primary, #6366f1); color: white;
+  border-color: var(--primary, #6366f1);
+  box-shadow: 0 0 8px rgba(99,102,241,0.4);
+}
+.ocp-forward-chip-on .ocp-forward-dot { background: white; box-shadow: 0 0 4px white; }
+.ocp-forward-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--muted, #64748b);
+}
+.ocp-forward-clear {
+  margin-left: auto;
+  padding: 2px 8px; border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent; color: var(--muted, #64748b);
+  cursor: pointer; font-size: 11px;
+}
+.ocp-forward-clear:hover { color: #ef4444; border-color: rgba(239,68,68,0.3); }
+
 .ocp-input-area {
   padding: 10px 12px;
   border-top: 1px solid var(--line, rgba(51,65,85,0.5));

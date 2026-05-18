@@ -414,15 +414,21 @@ ORG_NODE_TOOLS: list[dict] = [
                 "file_attachments": {
                     "type": "array",
                     "description": (
-                        "如果本次交付涉及文件（无论通过 write_file 还是 run_shell 产出），"
-                        "必须在此字段声明，否则用户看不到附件。file_path 可以是相对于"
-                        "组织工作区的路径或绝对路径。"
+                        "如果本次交付涉及文件（无论通过 write_file / run_shell 产出，"
+                        "或来自插件返回的 local_paths / output_path / video_path 等），"
+                        "必须在此字段声明，否则用户看不到附件。\n"
+                        "- 字段名必须是 file_attachments（不是 attachments）\n"
+                        "- 每项必须含 filename + file_path（必填）\n"
+                        "- file_path 必须是真实存在的本地文件路径，可以相对于"
+                        "组织工作区也可以是绝对路径\n"
+                        "示例：file_attachments=[{\"filename\": \"scene_01.png\","
+                        " \"file_path\": \"data/plugin_assets/hh/.../scene_01.png\"}]"
                     ),
                     "items": {
                         "type": "object",
                         "properties": {
-                            "filename": {"type": "string", "description": "文件显示名"},
-                            "file_path": {"type": "string", "description": "文件路径（相对于组织工作区或绝对路径）"},
+                            "filename": {"type": "string", "description": "文件显示名（含扩展名，如 scene_01.png）"},
+                            "file_path": {"type": "string", "description": "文件路径（相对于组织工作区或绝对路径，必须真实存在）"},
                             "description": {"type": "string", "description": "文件说明（可选）"},
                         },
                         "required": ["filename", "file_path"],
@@ -434,13 +440,23 @@ ORG_NODE_TOOLS: list[dict] = [
     },
     {
         "name": "org_accept_deliverable",
-        "description": "验收通过下级提交的交付物。",
+        "description": (
+            "验收通过下级提交的交付物，关闭该任务链。\n"
+            "- 收到下级 TASK_DELIVERED 消息后应立即调用本工具关闭 chain；"
+            "未关闭的 chain 会被视作仍在进行中，整个用户指令不会被判定为完成。\n"
+            "- 用 org_list_delegated_tasks 可以查询当前有哪些 chain 处于 delivered 状态待你验收。\n"
+            "- 反模式：把 chain 留在 delivered 而直接给上级写最终回复——这会触发"
+            "watchdog 把任务判为未完成并强制重做。"
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "task_chain_id": {"type": "string", "description": "任务链 ID"},
-                "from_node": {"type": "string", "description": "交付人节点 ID"},
-                "feedback": {"type": "string", "description": "验收意见（可选）"},
+                "task_chain_id": {
+                    "type": "string",
+                    "description": "完整的任务链 ID（来自下级 TASK_DELIVERED 消息或 org_list_delegated_tasks）。允许前缀缩写，但前缀必须唯一，否则系统会返回候选列表并要求重试。",
+                },
+                "from_node": {"type": "string", "description": "交付人节点 ID（即下级 node_id）"},
+                "feedback": {"type": "string", "description": "验收意见（可选；不写默认 \"验收通过\"）"},
             },
             "required": ["task_chain_id", "from_node"],
         },

@@ -37,6 +37,7 @@ import type {
   ChainSummaryItem,
   ChatDisplayMode,
   PlanApprovalEvent,
+  OrgTimelineEntry,
 } from "../types";
 import { genId, formatTime, formatDate, timeAgo } from "../utils";
 import { notifyError } from "../utils/notify";
@@ -63,7 +64,7 @@ import {
   IDLE_THRESHOLD_MS, IDLE_TOKEN_THRESHOLD, PASTE_CHAR_THRESHOLD, UNDO_MAX_STEPS,
   exportConversation, appendAuthToken, stripLegacySummary,
   sanitizeStoredMessages, loadMessagesFromStorage, saveMessagesToStorage, STORED_MESSAGE_WINDOW,
-  buildChainFromSummary, formatAskUserAnswer, patchMessagesWithBackend,
+  buildChainFromSummary, formatAskUserAnswer, patchMessagesWithBackend, patchMessagesWithBackendDetailed,
   classifyError, basename, formatToolDescription, generateGroupSummary,
   ERROR_META, SVG_PATHS, getNextSpinnerTip, shouldRenderConversationMessages,
 } from "./chat/utils/chatHelpers";
@@ -469,11 +470,6 @@ export function ChatView({
   const orgCommandPendingRef = useRef(false);
   const activeOrgCommandRef = useRef<{ orgId: string; commandId: string } | null>(null);
 
-  // Org 协调可视化面板状态
-  const [orgNodeStates, setOrgNodeStates] = useState<Map<string, { status: string; task?: string; ts: number }>>(new Map());
-  const [orgFlowPanelOpen, setOrgFlowPanelOpen] = useState(true);
-  const [orgDelegations, setOrgDelegations] = useState<{ from: string; to: string; task: string; ts: number }[]>([]);
-
   useEffect(() => {
     if (!orgMenuOpen) return;
     const handleClickOutside = (e: MouseEvent) => {
@@ -829,7 +825,7 @@ export function ChatView({
   const hydrateSeqRef = useRef(0);
 
   const mapBackendHistoryToMessages = useCallback(
-    (rows: { id: string; index?: number; role: string; content: string; timestamp: number; chain_summary?: ChainSummaryItem[]; artifacts?: ChatArtifact[]; ask_user?: { question: string; options?: { id: string; label: string }[]; questions?: ChatAskQuestion[] }; usage?: ChatMessage["usage"] }[]): ChatMessage[] => {
+    (rows: { id: string; index?: number; role: string; content: string; timestamp: number; chain_summary?: ChainSummaryItem[]; artifacts?: ChatArtifact[]; attachments?: ChatAttachment[]; org_timeline?: OrgTimelineEntry[]; ask_user?: { question: string; options?: { id: string; label: string }[]; questions?: ChatAskQuestion[] }; usage?: ChatMessage["usage"] }[]): ChatMessage[] => {
       return rows.map((m) => ({
         id: m.id,
         ...(typeof m.index === "number" ? { historyIndex: m.index } : {}),
@@ -838,6 +834,8 @@ export function ChatView({
         timestamp: m.timestamp,
         ...(m.chain_summary?.length ? { thinkingChain: buildChainFromSummary(m.chain_summary) } : {}),
         ...(m.artifacts?.length ? { artifacts: m.artifacts } : {}),
+        ...(m.attachments?.length ? { attachments: m.attachments } : {}),
+        ...(m.org_timeline?.length ? { orgTimeline: m.org_timeline } : {}),
         ...(m.ask_user ? { askUser: m.ask_user, content: "" } : {}),
         ...(m.usage ? { usage: m.usage } : {}),
       }));
@@ -1741,15 +1739,74 @@ export function ChatView({
         setMessages((prev) => [...prev, { id: genId(), role: "system", content: "可用角色: default, business, tech_expert, butler, girlfriend, boyfriend, family, jarvis\n用法: /persona <角色ID>", timestamp: Date.now() }]);
       }
     }},
-    { id: "agent", label: "切换 Agent", description: "在多 Agent 间切换（handoff 模式）", action: (args) => {
-      if (args) {
-        setInputValue(`请切换到 Agent「${args}」来处理接下来的任务。`);
-      } else {
-        setMessages((prev) => [...prev, { id: genId(), role: "system", content: "用法: /agent <Agent名称>。在 handoff 模式下，AI 会自动在 Agent 间切换。", timestamp: Date.now() }]);
+    { id: "agent", label: "切换 Agent", description: "切换当前会话的 Agent", action: (args) => {
+      // 真切换：直接写 selectedAgent（下一条消息会随 chat 请求带上 agent_profile_id
+      // 由后端 _apply_agent_profile 写入 session.context，与 IM `/切换` 语义对齐）。
+      const trimmed = (args || "").trim();
+      if (!trimmed) {
+        const lines = agentProfiles.map((p) => {
+          const marker = p.id === selectedAgent ? " ⬅️ 当前" : "";
+          return `- \`${p.id}\` — ${p.icon || "🤖"} ${p.name}: ${p.description}${marker}`;
+        });
+        const body = lines.length
+          ? `**可用 Agent**（共 ${agentProfiles.length} 个）：\n${lines.join("\n")}\n\n用法：\`/agent <agent_id>\``
+          : "暂无可用 Agent。请检查 Agent 配置或稍后再试。";
+        setMessages((prev) => [...prev, { id: genId(), role: "system", content: body, timestamp: Date.now() }]);
+        return;
       }
+      const q = trimmed.toLowerCase();
+      // 与 @ 选择器一致：先精确 id 命中，再宽松匹配 id/name
+      const exact = agentProfiles.find((p) => p.id.toLowerCase() === q);
+      const candidates = exact ? [exact] : agentProfiles.filter(
+        (p) => p.id.toLowerCase().includes(q) || p.name.toLowerCase().includes(q),
+      );
+      if (candidates.length === 0) {
+        setMessages((prev) => [...prev, {
+          id: genId(), role: "system",
+          content: `❌ 未找到 Agent \`${trimmed}\`。\n发送 \`/agent\` 不带参数可以查看所有 Agent。`,
+          timestamp: Date.now(),
+        }]);
+        return;
+      }
+      if (candidates.length > 1) {
+        const lines = candidates.map((p) => `- \`${p.id}\` — ${p.icon || "🤖"} ${p.name}`);
+        setMessages((prev) => [...prev, {
+          id: genId(), role: "system",
+          content: `🔍 匹配到 ${candidates.length} 个 Agent，请用更精确的 id：\n${lines.join("\n")}`,
+          timestamp: Date.now(),
+        }]);
+        return;
+      }
+      const target = candidates[0];
+      if (target.id === selectedAgent) {
+        setMessages((prev) => [...prev, {
+          id: genId(), role: "system",
+          content: `ℹ️ 当前已是 ${target.icon || "🤖"} **${target.name}**`,
+          timestamp: Date.now(),
+        }]);
+        return;
+      }
+      setSelectedAgent(target.id);
+      setMessages((prev) => [...prev, {
+        id: genId(), role: "system",
+        content: `✅ 已切换到 ${target.icon || "🤖"} **${target.name}** (\`${target.id}\`)`,
+        timestamp: Date.now(),
+      }]);
     }},
     { id: "agents", label: "查看 Agent 列表", description: "显示可用的 Agent 列表", action: () => {
-      setMessages((prev) => [...prev, { id: genId(), role: "system", content: "Agent 列表取决于 handoff 配置。当前可通过 /agent <名称> 手动请求切换。", timestamp: Date.now() }]);
+      if (!agentProfiles.length) {
+        setMessages((prev) => [...prev, { id: genId(), role: "system", content: "暂无可用 Agent。请检查 Agent 配置或稍后再试。", timestamp: Date.now() }]);
+        return;
+      }
+      const lines = agentProfiles.map((p) => {
+        const marker = p.id === selectedAgent ? " ⬅️ 当前" : "";
+        return `- \`${p.id}\` — ${p.icon || "🤖"} ${p.name}: ${p.description}${marker}`;
+      });
+      setMessages((prev) => [...prev, {
+        id: genId(), role: "system",
+        content: `**可用 Agent**（共 ${agentProfiles.length} 个）：\n${lines.join("\n")}\n\n切换：\`/agent <agent_id>\``,
+        timestamp: Date.now(),
+      }]);
     }},
     { id: "org", label: "组织模式", description: "切换到组织编排模式，向组织下命令", action: (args) => {
       if (args === "off" || args === "关闭") {
@@ -1853,7 +1910,7 @@ export function ChatView({
       };
     }
     return cmds;
-  }, [endpoints, chatMode, orgList, orgMode, thinkingMode, thinkingDepth, activeConvId, apiBase]);
+  }, [endpoints, chatMode, orgList, orgMode, thinkingMode, thinkingDepth, activeConvId, apiBase, agentProfiles, selectedAgent]);
 
   // ── 新建对话 ──
   const newConversation = useCallback(() => {
@@ -2063,6 +2120,10 @@ export function ChatView({
     if (!convId) {
       convId = genId();
       skipConvLoadRef.current = true;
+      // React state updates asynchronously; update refs immediately so the
+      // optimistic first turn renders before SSE/WebSocket events arrive.
+      activeConvIdRef.current = convId;
+      latestActiveConvIdRef.current = convId;
       setActiveConvId(convId);
       setConversations((prev) => [{
         id: convId!,
@@ -2074,9 +2135,11 @@ export function ChatView({
         agentProfileId: selectedAgent,
         endpointId: selectedEndpoint !== "auto" ? selectedEndpoint : undefined,
         endpointPolicy: selectedEndpoint !== "auto" ? selectedEndpointPolicy : undefined,
-        orgMode: Boolean(orgMode && selectedOrgId),
-        orgId: orgMode && selectedOrgId ? selectedOrgId : undefined,
-        orgNodeId: orgMode && selectedOrgId ? selectedOrgNodeId || undefined : undefined,
+        orgMode: Boolean(orgRouteOverride || (orgMode && selectedOrgId)),
+        orgId: orgRouteOverride?.orgId || (orgMode && selectedOrgId ? selectedOrgId : undefined),
+        orgNodeId: orgRouteOverride
+          ? orgRouteOverride.nodeId || undefined
+          : (orgMode && selectedOrgId ? selectedOrgNodeId || undefined : undefined),
       }, ...prev]);
     } else {
       updateConvStatus(convId, "running");
@@ -2404,10 +2467,36 @@ export function ChatView({
       let currentThinking = "";
       let isThinking = false;
       let currentToolCalls: ChatToolCall[] = [];
+      const currentToolCallsByKey = new Map<string, ChatToolCall>();
+      const currentToolCallOrder: string[] = [];
+      const syncCurrentToolCalls = () => {
+        currentToolCalls = currentToolCallOrder
+          .map((key) => currentToolCallsByKey.get(key))
+          .filter((tc): tc is ChatToolCall => Boolean(tc));
+      };
+      const upsertToolCall = (key: string, tc: ChatToolCall) => {
+        if (!currentToolCallsByKey.has(key)) currentToolCallOrder.push(key);
+        currentToolCallsByKey.set(key, tc);
+        syncCurrentToolCalls();
+      };
+      const findToolCallKey = (toolName: string, callId?: string) => {
+        if (callId) {
+          const byId = currentToolCallOrder.find((key) => currentToolCallsByKey.get(key)?.id === callId);
+          if (byId) return byId;
+        }
+        for (let i = currentToolCallOrder.length - 1; i >= 0; i -= 1) {
+          const key = currentToolCallOrder[i];
+          const tc = currentToolCallsByKey.get(key);
+          if (tc?.tool === toolName && tc.status === "running") return key;
+        }
+        return null;
+      };
       let currentPlan: ChatTodo | null = null;
       let currentAsk: ChatAskUser | null = null;
       let currentAgent: string | null = null;
       let currentArtifacts: ChatArtifact[] = [];
+      let currentAttachments: ChatAttachment[] = [];
+      let currentOrgTimeline: OrgTimelineEntry[] = [];
       let currentSources: ChatSource[] = [];
       let currentMcpCalls: ChatMcpCall[] = [];
       let currentError: ChatErrorInfo | null = null;
@@ -2519,13 +2608,34 @@ export function ChatView({
                   setOrgCommandPending(true);
                 }
                 currentStreamStatus = t("chat.orgProcessing", "组织正在处理中...");
+                // 把"命令已下发"写进 timeline 而不是 currentContent，
+                // 这样组织的过程展示与最终回复彻底分离。
+                currentOrgTimeline = [
+                  ...currentOrgTimeline,
+                  {
+                    status: "started",
+                    summary: t("chat.orgTimelineStartedFull", "组织命令已下发，等待节点接管…"),
+                    timestamp: Date.now(),
+                  },
+                ];
                 break;
               }
               case "org_progress": {
                 const summary = ((event as any).summary || "") as string;
+                const nodeId = ((event as any).node_id || "") as string;
+                const category = ((event as any).category || (event as any).label || "") as string;
                 if (summary) {
                   currentStreamStatus = null;
-                  currentContent += `${currentContent ? "\n" : ""}> ${summary}`;
+                  currentOrgTimeline = [
+                    ...currentOrgTimeline,
+                    {
+                      status: "progress",
+                      summary,
+                      nodeId: nodeId || null,
+                      category: category || null,
+                      timestamp: Date.now(),
+                    },
+                  ];
                 }
                 break;
               }
@@ -2533,6 +2643,14 @@ export function ChatView({
                 activeOrgCommandRef.current = null;
                 orgCommandPendingRef.current = false;
                 setOrgCommandPending(false);
+                currentOrgTimeline = [
+                  ...currentOrgTimeline,
+                  {
+                    status: "done",
+                    summary: t("chat.orgTimelineDoneFull", "组织命令已结束"),
+                    timestamp: Date.now(),
+                  },
+                ];
                 break;
               }
               case "user_insert": {
@@ -2651,6 +2769,9 @@ export function ChatView({
               case "text_replace":
                 currentStreamStatus = null;
                 currentContent = event.content ?? "";
+                if (Array.isArray(event.attachments)) {
+                  currentAttachments = event.attachments;
+                }
                 break;
               case "tool_intent_preview": {
                 // C23 P2-3: tool_executor 在跑批之前先发这个事件，每个 tool_call
@@ -2786,8 +2907,9 @@ export function ChatView({
                   sctx.pollingTimer = setInterval(doFetch, 5000);
                 }
 
-                currentToolCalls = [...currentToolCalls, { tool: toolName, args: event.args, status: "running", id: callId }];
                 const _tcId = callId || genId();
+                const toolCallKey = `${thisConvId}:${assistantMsg.id}:${_tcId}`;
+                upsertToolCall(toolCallKey, { tool: toolName, args: event.args, status: "running", id: _tcId });
                 const _desc = formatToolDescription(toolName, event.args);
                 const newTc: ChainToolCall = { toolId: _tcId, tool: toolName, args: event.args, status: "running", description: _desc };
                 if (currentChainGroup) {
@@ -2844,14 +2966,20 @@ export function ChatView({
                     .then((data) => { if (data?.profiles) setAgentProfiles(data.profiles); })
                     .catch(() => {});
                 }
-                let matched = false;
-                currentToolCalls = currentToolCalls.map((tc) => {
-                  if (matched) return tc;
-                  const idMatch = callId && tc.id && tc.id === callId;
-                  const nameMatch = !callId && tc.tool === toolName && tc.status === "running";
-                  if (idMatch || nameMatch) { matched = true; return { ...tc, result: event.result, status: "done" as const }; }
-                  return tc;
-                });
+                const toolCallKey = findToolCallKey(toolName, callId);
+                if (toolCallKey) {
+                  const prev = currentToolCallsByKey.get(toolCallKey);
+                  if (prev) upsertToolCall(toolCallKey, { ...prev, result: event.result, status: "done" as const });
+                } else {
+                  const fallbackId = callId || genId();
+                  upsertToolCall(`${thisConvId}:${assistantMsg.id}:${fallbackId}`, {
+                    id: fallbackId,
+                    tool: toolName,
+                    args: {},
+                    result: event.result,
+                    status: "done",
+                  });
+                }
                 if (currentChainGroup) {
                   const grp: ChainGroup = currentChainGroup;
                   let chainMatched = false;
@@ -2880,6 +3008,75 @@ export function ChatView({
                     ],
                   };
                   chainGroups = chainGroups.map((g, i) => i === chainGroups.length - 1 ? currentChainGroup! : g);
+                }
+                break;
+              }
+              case "config_hint": {
+                // Structured hint emitted right after tool_call_end when a
+                // handler raised ToolConfigError. We MUST surface it in TWO
+                // places:
+                //
+                //   1. ChatMessage.toolCalls[].configHints   — used by the
+                //      legacy ToolCallsGroup render path (only active when
+                //      thinkingChain is empty, e.g. some IM-imported messages).
+                //   2. currentChainGroup.entries [config_hint kind] — used by
+                //      ThinkingChain in the default UX where showChain=true.
+                //      Without this branch, the card would silently disappear
+                //      whenever the agent produced any thinkingChain — which
+                //      is essentially every ReAct turn.
+                //
+                // The hint is intentionally NOT serialized into the LLM
+                // context (backend strips ``_hint`` before tool_result
+                // reaches working_messages) — it only exists in the UI state.
+                const hintToolUseId = event.tool_use_id || "";
+                const hintPayload = {
+                  scope: event.scope,
+                  error_code: event.error_code,
+                  title: event.title,
+                  message: event.message,
+                  actions: event.actions,
+                };
+                // ── 1) legacy ChatToolCall.configHints ──
+                // Skip the silent mass-attach risk: when both sides are empty
+                // strings, ``"" === ""`` would match every id-less tool call.
+                // In practice ``tool_id`` is always a UUID, but guard anyway.
+                if (hintToolUseId) {
+                  const toolCallKey = findToolCallKey("", hintToolUseId);
+                  if (toolCallKey) {
+                    const tc = currentToolCallsByKey.get(toolCallKey);
+                    if (tc) {
+                      const existing = tc.configHints || [];
+                      upsertToolCall(toolCallKey, { ...tc, configHints: [...existing, hintPayload] });
+                    }
+                  }
+                }
+                // ── 2) thinkingChain entry — visible in the default UX ──
+                // We append even if currentChainGroup is missing thinking;
+                // the chain UI handles a "tool-only" group fine.
+                if (!currentChainGroup) {
+                  currentChainGroup = { iteration: chainGroups.length + 1, entries: [], toolCalls: [], hasThinking: false, collapsed: false };
+                  chainGroups = [...chainGroups, currentChainGroup];
+                }
+                {
+                  const grp: ChainGroup = currentChainGroup;
+                  // De-dupe by (error_code, scope, title) within the same
+                  // group — handlers that retry the same tool with the same
+                  // failure shouldn't stack identical cards.
+                  const dedupeKey = `${hintPayload.error_code}|${hintPayload.scope}|${hintPayload.title}`;
+                  const alreadyShown = grp.entries.some(
+                    (e) => e.kind === "config_hint" &&
+                      `${e.hint.error_code}|${e.hint.scope}|${e.hint.title}` === dedupeKey,
+                  );
+                  if (!alreadyShown) {
+                    currentChainGroup = {
+                      ...grp,
+                      entries: [
+                        ...grp.entries,
+                        { kind: "config_hint" as const, toolId: hintToolUseId, hint: hintPayload },
+                      ],
+                    };
+                    chainGroups = chainGroups.map((g, i) => i === chainGroups.length - 1 ? currentChainGroup! : g);
+                  }
                 }
                 break;
               }
@@ -3084,9 +3281,11 @@ export function ChatView({
                     askUser: currentAsk,
                     errorInfo: currentError,
                     artifacts: currentArtifacts.length > 0 ? [...currentArtifacts] : null,
+                    attachments: currentAttachments.length > 0 ? [...currentAttachments] : null,
                     sources: currentSources.length > 0 ? [...currentSources] : null,
                     mcpCalls: currentMcpCalls.length > 0 ? [...currentMcpCalls] : null,
                     thinkingChain: chainGroups.length > 0 ? chainGroups.map(g => ({ ...g })) : null,
+                    orgTimeline: currentOrgTimeline.length > 0 ? currentOrgTimeline.map(e => ({ ...e })) : null,
                     streaming: true,
                   }];
                 });
@@ -3286,9 +3485,11 @@ export function ChatView({
                     askUser: currentAsk,
                     errorInfo: currentError,
                     artifacts: currentArtifacts.length > 0 ? [...currentArtifacts] : null,
+                    attachments: currentAttachments.length > 0 ? [...currentAttachments] : null,
                     sources: currentSources.length > 0 ? [...currentSources] : null,
                     mcpCalls: currentMcpCalls.length > 0 ? [...currentMcpCalls] : null,
                     thinkingChain: chainGroups.length > 0 ? chainGroups.map(g => ({ ...g })) : null,
+                    orgTimeline: currentOrgTimeline.length > 0 ? currentOrgTimeline.map(e => ({ ...e })) : null,
                     usage: assistantMsg.usage ?? m.usage,
                     streaming: event.type !== "done",
                     streamStatus: event.type === "done" ? null : currentStreamStatus,
@@ -3366,12 +3567,19 @@ export function ChatView({
               const rows = Array.isArray(data?.messages) ? data.messages : [];
               if (!rows.length) return;
               setMessages((prev) => {
-                const patched = patchMessagesWithBackend(prev, rows);
-                const noop = patched === prev;
+                const patchResult = patchMessagesWithBackendDetailed(prev, rows);
+                const patched = patchResult.messages;
+                const noop = !patchResult.changed;
+                const assistant = prev.find((m) => m.id === assistantMsg.id);
                 logger.info("Chat", "history_patch", {
                   convId,
                   rows: rows.length,
                   applied: !noop,
+                  fallback: patchResult.stats.matchedByFallback,
+                  byId: patchResult.stats.matchedById,
+                  byHistoryIndex: patchResult.stats.matchedByHistoryIndex,
+                  patched: patchResult.stats.patched,
+                  localAssistantEmpty: Boolean(assistant && !assistant.content && !assistant.askUser),
                 });
                 if (noop) return prev;
                 const liveCtx = streamContexts.current.get(thisConvId);
@@ -4226,6 +4434,23 @@ export function ChatView({
     [filteredConversations]
   );
 
+  const quickStartItems = useMemo(() => [
+    { id: "research", icon: <IconBarChart size={20} />, text: t("chat.quickStart.research", "帮我做一份 OpenAkita 竞品分析") },
+    { id: "ppt", icon: <IconPlan size={20} />, text: t("chat.quickStart.ppt", "帮我生成一份项目汇报 PPT 大纲") },
+    { id: "search", icon: <IconGlobe size={20} />, text: t("chat.quickStart.search", "帮我搜索 OpenAkita 的最新动态") },
+    { id: "email", icon: <IconMail size={20} />, text: t("chat.quickStart.email", "帮我写一封商务邮件") },
+    { id: "summary", icon: <IconClipboard size={20} />, text: t("chat.quickStart.summary", "帮我总结一下今天的工作内容") },
+    { id: "translate", icon: <IconGlobe size={20} />, text: t("chat.quickStart.translate", "帮我把这段话翻译成英文") },
+  ], [i18n.language, t]);
+  const quickStartCardWidth = useMemo(() => {
+    const textUnits = Math.max(
+      ...quickStartItems.map((item) =>
+        Array.from(item.text).reduce((total, char) => total + (char.charCodeAt(0) <= 0xff ? 0.55 : 1), 0)
+      )
+    );
+    return `calc(${textUnits}em + 82px)`;
+  }, [quickStartItems]);
+
   // ── 未启动服务提示 ──
   if (!serviceRunning) {
     return (
@@ -4541,21 +4766,15 @@ export function ChatView({
                 <div className="text-base font-semibold">{t("chat.emptyTitle")}</div>
                 <div className="mt-1 text-sm text-muted-foreground">{t("chat.emptyDesc")}</div>
               </div>
-              <div className="grid w-full max-w-[520px] grid-cols-1 gap-3 sm:grid-cols-2">
-                {[
-                  { id: "research", icon: <IconBarChart size={20} />, text: t("chat.quickStart.research", "帮我做一份 OpenAkita 竞品分析") },
-                  { id: "ppt", icon: <IconPlan size={20} />, text: t("chat.quickStart.ppt", "帮我生成一份项目汇报 PPT 大纲") },
-                  { id: "search", icon: <IconGlobe size={20} />, text: t("chat.quickStart.search", "帮我搜索 OpenAkita 的最新动态") },
-                  { id: "email", icon: <IconMail size={20} />, text: t("chat.quickStart.email", "帮我写一封商务邮件") },
-                  { id: "summary", icon: <IconClipboard size={20} />, text: t("chat.quickStart.summary", "帮我总结一下今天的工作内容") },
-                  { id: "translate", icon: <IconGlobe size={20} />, text: t("chat.quickStart.translate", "帮我把这段话翻译成英文") },
-                ].map((item) => (
+              <div className="inline-grid max-w-full grid-cols-1 gap-3 sm:grid-cols-2">
+                {quickStartItems.map((item) => (
                   <button
                     key={item.id}
                     onClick={() => setInputValue(item.text)}
                     className="quickStartCard"
                     style={{
                       display: "flex", alignItems: "center", gap: 10,
+                      width: quickStartCardWidth, maxWidth: "100%",
                       padding: "14px 16px", borderRadius: 14,
                       border: "1px solid var(--line)", background: "var(--panel2)",
                       cursor: "pointer", textAlign: "left", fontSize: 13,
@@ -4721,59 +4940,6 @@ export function ChatView({
                 onRemove={() => setPendingAttachments((prev) => prev.filter((_, i) => i !== idx))}
               />
             ))}
-          </div>
-        )}
-
-        {/* Org Flow Status Panel */}
-        {orgCommandPending && orgNodeStates.size > 0 && (
-          <div style={{
-            margin: "0 16px 8px", borderRadius: 12,
-            border: "1px solid var(--border, rgba(255,255,255,0.1))",
-            background: "var(--card, rgba(0,0,0,0.03))",
-            overflow: "hidden",
-            transition: "opacity 0.2s ease",
-            flexShrink: 0,
-          }}>
-            <button
-              onClick={() => setOrgFlowPanelOpen(p => !p)}
-              style={{
-                width: "100%", display: "flex", alignItems: "center", gap: 8,
-                padding: "8px 14px", border: "none", background: "transparent",
-                color: "var(--text)", cursor: "pointer", fontSize: 13, fontWeight: 600,
-              }}
-            >
-              <span>{orgFlowPanelOpen ? "▼" : "▶"}</span>
-              <span>{t("chat.orgFlowPanel", "组织协调状态")}</span>
-              <span style={{ marginLeft: "auto", fontSize: 11, opacity: 0.6 }}>
-                {orgNodeStates.size} {t("chat.orgNodes", "节点")}
-              </span>
-            </button>
-            {orgFlowPanelOpen && (
-              <div style={{ padding: "4px 14px 12px", display: "flex", flexWrap: "wrap", gap: 8, maxHeight: 120, overflowY: "auto" }}>
-                {Array.from(orgNodeStates.entries()).map(([nid, ns]) => {
-                  const color = ns.status === "busy" ? "#22c55e" : ns.status === "done" || ns.status === "idle" ? "#3b82f6" : ns.status === "error" ? "#ef4444" : ns.status === "timeout" ? "#f59e0b" : "#6b7280";
-                  const dotColor = ns.status === "busy" ? "#22c55e" : ns.status === "done" || ns.status === "idle" ? "#3b82f6" : ns.status === "error" ? "#ef4444" : ns.status === "timeout" ? "#eab308" : "#9ca3af";
-                  return (
-                    <div key={nid} style={{
-                      display: "flex", alignItems: "center", gap: 6,
-                      padding: "4px 10px", borderRadius: 8, fontSize: 12,
-                      background: `${color}15`, border: `1px solid ${color}30`,
-                    }}>
-                      <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: dotColor }} />
-                      <span style={{ fontWeight: 600 }}>{nid}</span>
-                      {ns.task && <span style={{ opacity: 0.7, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{ns.task}</span>}
-                    </div>
-                  );
-                })}
-                {orgDelegations.length > 0 && (
-                  <div style={{ width: "100%", marginTop: 4, fontSize: 11, opacity: 0.6 }}>
-                    {orgDelegations.slice(-5).map((d, i) => (
-                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 4 }}><IconClipboard size={11} /> {d.from} → {d.to}: {d.task.slice(0, 40)}</div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
           </div>
         )}
 

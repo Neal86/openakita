@@ -3578,6 +3578,14 @@ button.btnApplyRestart:hover {
   color: var(--danger, #ef4444);
 }
 
+/* Inline ConfigHintCard inside the ReAct chain timeline.
+ * Slightly inset so it visually belongs to the current iteration but stands
+ * apart from regular tool_end rows; the card itself owns the colored border. */
+.chainNarrConfigHint {
+  margin: 4px 0 4px 16px;
+  animation: chainFadeIn 0.18s ease;
+}
+
 .chainNarrToolSummary {
   font-weight: 600;
   white-space: nowrap;
@@ -5030,25 +5038,32 @@ body > div[id*="sm-" i] {
 }
 .plugin-readme-content strong { color: var(--fg); }
 
-/* Message action buttons (edit / regenerate) — hover to show */
+/* Message action buttons (copy / edit / regenerate / rewind) — appear on
+   bubble hover, brighten on direct button hover. Sized to sit comfortably
+   alongside the 11px footer text without dominating the row. */
 .msgActionBtn {
   opacity: 0;
-  transition: opacity 0.18s, background-color 0.15s;
+  transition: opacity 0.18s ease, background-color 0.15s ease;
   background: none;
   border: none;
-  border-radius: 6px;
+  border-radius: 5px;
   cursor: pointer;
-  font-size: 13px;
-  padding: 3px 5px;
+  font-size: 12px;
+  padding: 2px 4px;
   line-height: 1;
+  color: inherit;
 }
+/* Bubble-hover floor: keep buttons clearly discoverable but not louder
+   than the footer text they sit next to. ~0.4 mirrors the previous
+   effective brightness when the parent .msgActions had opacity: 0.35. */
 .msgBubbleWrap:hover .msgActionBtn,
 .flatMsgItem:hover .msgActionBtn {
-  opacity: 0.95;
+  opacity: 0.45;
 }
+/* Direct hover on the button itself = clear affordance feedback. */
 .msgActionBtn:hover {
   opacity: 1 !important;
-  background-color: var(--accent-bg, rgba(128, 128, 128, 0.15));
+  background-color: var(--accent-bg, rgba(128, 128, 128, 0.12));
 }
 
 /* Quick start cards — hover effect */
@@ -5081,3 +5096,360 @@ body > div[id*="sm-" i] {
   50% { transform: scale(1.2); opacity: 1; }
 }
 
+/* ──────────────────────────────────────────────────────────────────────────
+ * 来源标签 badge —— 把 [来源:工具] / [来源:历史] / [来源:常识] / [来源:不确定]
+ * 从裸文本渲染成彩色徽章。详见 SourceBadge.tsx。
+ * 配色保持与现有 var(--ok) / var(--brand) / var(--muted) / var(--warn) 语义对齐：
+ *   工具 → 绿色（已被工具验证 → 高可信）
+ *   历史 → 蓝色（信息源自上下文）
+ *   常识 → 灰色（模型训练知识，中性）
+ *   不确定 → 橙色（提醒用户警惕）
+ * ────────────────────────────────────────────────────────────────────────── */
+.srcBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  margin: 0 2px;
+  border-radius: 999px;
+  font-size: 0.78em;
+  font-weight: 600;
+  line-height: 1.45;
+  vertical-align: baseline;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  user-select: none;
+  cursor: help;
+  font-style: normal;
+}
+
+/* When SourceBadge is hosted inside the message footer (msgActions),
+   the surrounding font-size drops to 11px — which would compute the
+   default 0.78em as ~8.6px and become unreadable. Pin a fixed compact
+   size and tighter padding so the badge still reads clearly while
+   matching the slim footer line height. Opacity is dialed down to
+   harmonize with the muted timestamp/tokens line; hovering restores
+   full saturation so the title tooltip remains comfortable to read. */
+.msgActions .srcBadge {
+  font-size: 10px;
+  padding: 0 5px;
+  line-height: 1.5;
+  margin: 0;
+  opacity: 0.55;
+  transition: opacity 0.15s ease;
+}
+.msgActions .srcBadge:hover {
+  opacity: 1;
+}
+
+.srcBadge-tool {
+  background: rgba(34, 197, 94, 0.10);
+  color: #16a34a;
+  border-color: rgba(34, 197, 94, 0.25);
+}
+.srcBadge-history {
+  background: rgba(59, 130, 246, 0.10);
+  color: #2563eb;
+  border-color: rgba(59, 130, 246, 0.25);
+}
+.srcBadge-knowledge {
+  background: rgba(148, 163, 184, 0.10);
+  color: #64748b;
+  border-color: rgba(148, 163, 184, 0.30);
+}
+.srcBadge-uncertain {
+  background: rgba(245, 158, 11, 0.10);
+  color: #d97706;
+  border-color: rgba(245, 158, 11, 0.30);
+}
+
+[data-theme="dark"] .srcBadge-tool {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border-color: rgba(34, 197, 94, 0.30);
+}
+[data-theme="dark"] .srcBadge-history {
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+  border-color: rgba(59, 130, 246, 0.30);
+}
+[data-theme="dark"] .srcBadge-knowledge {
+  background: rgba(148, 163, 184, 0.12);
+  color: #cbd5e1;
+  border-color: rgba(148, 163, 184, 0.32);
+}
+[data-theme="dark"] .srcBadge-uncertain {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  border-color: rgba(245, 158, 11, 0.32);
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   useExpandPanel() flash highlight (web-search panel + future targets)
+   ----------------------------------------------------------------------
+   When ConfigHintCard's "前往配置" button navigates to a settings panel,
+   the panel briefly pulses to draw the user's eye to where they landed.
+   Set via JS: el.setAttribute("data-expand-flash", "true") for ~1.4s.
+   ───────────────────────────────────────────────────────────────────── */
+@keyframes openakitaExpandFlash {
+  0% {
+    box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.45);
+    background: rgba(37, 99, 235, 0.08);
+  }
+  60% {
+    box-shadow: 0 0 0 6px rgba(37, 99, 235, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(37, 99, 235, 0);
+    background: transparent;
+  }
+}
+
+[data-expand-flash] {
+  animation: openakitaExpandFlash 1.4s ease-out;
+  border-radius: var(--radius, 12px);
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   Web search provider panel (config → tools-and-skills → web-search)
+   ───────────────────────────────────────────────────────────────────── */
+.wsProviderGrid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+@media (min-width: 720px) {
+  .wsProviderGrid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.wsProviderCard {
+  border: 1px solid var(--line, rgba(17, 24, 39, 0.10));
+  border-radius: var(--radius, 12px);
+  padding: 12px 14px;
+  background: var(--panel, rgba(255, 255, 255, 0.88));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.wsProviderCard:hover {
+  border-color: rgba(37, 99, 235, 0.35);
+}
+
+.wsProviderCard[data-active="true"] {
+  border-color: rgba(37, 99, 235, 0.55);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.10);
+}
+
+.wsProviderCard[data-available="false"] .wsProviderTitle {
+  opacity: 0.85;
+}
+
+.wsProviderHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.wsProviderTitle {
+  font-weight: 600;
+  font-size: 0.95em;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wsProviderBadges {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.wsBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.72em;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+
+.wsBadge-active {
+  background: rgba(37, 99, 235, 0.10);
+  color: #1d4ed8;
+  border-color: rgba(37, 99, 235, 0.30);
+}
+
+.wsBadge-available {
+  background: rgba(16, 185, 129, 0.10);
+  color: #047857;
+  border-color: rgba(16, 185, 129, 0.30);
+}
+
+.wsBadge-unconfigured {
+  background: rgba(148, 163, 184, 0.12);
+  color: #64748b;
+  border-color: rgba(148, 163, 184, 0.30);
+}
+
+.wsBadge-recommended {
+  background: rgba(245, 158, 11, 0.10);
+  color: #b45309;
+  border-color: rgba(245, 158, 11, 0.30);
+}
+
+.wsProviderActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.wsProviderTestResult {
+  font-size: 0.82em;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px solid rgba(148, 163, 184, 0.20);
+  white-space: pre-wrap;
+}
+
+.wsProviderTestResult[data-state="ok"] {
+  background: rgba(16, 185, 129, 0.08);
+  border-color: rgba(16, 185, 129, 0.30);
+  color: #047857;
+}
+
+.wsProviderTestResult[data-state="error"] {
+  background: rgba(239, 68, 68, 0.08);
+  border-color: rgba(239, 68, 68, 0.28);
+  color: #b91c1c;
+}
+
+[data-theme="dark"] .wsProviderCard {
+  background: rgba(15, 23, 42, 0.55);
+}
+
+[data-theme="dark"] .wsBadge-active {
+  background: rgba(37, 99, 235, 0.20);
+  color: #93c5fd;
+}
+
+[data-theme="dark"] .wsBadge-available {
+  background: rgba(16, 185, 129, 0.20);
+  color: #6ee7b7;
+}
+
+[data-theme="dark"] .wsBadge-unconfigured {
+  background: rgba(148, 163, 184, 0.20);
+  color: #cbd5e1;
+}
+
+[data-theme="dark"] .wsBadge-recommended {
+  background: rgba(245, 158, 11, 0.20);
+  color: #fcd34d;
+}
+
+[data-theme="dark"] .wsProviderTestResult[data-state="ok"] {
+  color: #6ee7b7;
+}
+
+[data-theme="dark"] .wsProviderTestResult[data-state="error"] {
+  color: #fca5a5;
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   ConfigHintCard (chat → tool failure → user-actionable card)
+   Inline alert rendered next to the failed tool call. Color-coded by the
+   ``error_code`` carried in the SSE config_hint event.
+   ───────────────────────────────────────────────────────────────────── */
+.configHintCard {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius, 12px);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.08);
+  color: var(--text);
+}
+
+.configHintCard[data-code="missing_credential"],
+.configHintCard[data-code="auth_failed"] {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.06);
+}
+
+.configHintCard[data-code="rate_limited"],
+.configHintCard[data-code="content_filter"] {
+  border-color: rgba(245, 158, 11, 0.40);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.configHintCard[data-code="network_unreachable"] {
+  border-color: rgba(59, 130, 246, 0.35);
+  background: rgba(59, 130, 246, 0.06);
+}
+
+.configHintCardTitle {
+  font-weight: 600;
+  font-size: 0.92em;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.configHintCardMessage {
+  font-size: 0.86em;
+  color: var(--muted, rgba(17, 24, 39, 0.55));
+  line-height: 1.5;
+}
+
+.configHintCardActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.configHintAction {
+  padding: 4px 10px;
+  font-size: 0.82em;
+  border-radius: 6px;
+  border: 1px solid var(--line, rgba(17, 24, 39, 0.15));
+  background: var(--panel, white);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.configHintAction:hover {
+  border-color: rgba(37, 99, 235, 0.45);
+  background: rgba(37, 99, 235, 0.06);
+}
+
+.configHintAction[data-primary="true"] {
+  background: rgba(37, 99, 235, 0.10);
+  border-color: rgba(37, 99, 235, 0.40);
+  color: #1d4ed8;
+}
+
+.configHintAction[data-primary="true"]:hover {
+  background: rgba(37, 99, 235, 0.18);
+}
+
+[data-theme="dark"] .configHintAction {
+  background: rgba(15, 23, 42, 0.60);
+}
+
+[data-theme="dark"] .configHintAction[data-primary="true"] {
+  color: #93c5fd;
+}

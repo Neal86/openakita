@@ -5,6 +5,7 @@ import { stripLegacySummary } from "../utils/chatHelpers";
 import { formatTime } from "../../../utils";
 import { ThinkingChain, ThinkingBlock, ToolCallsGroup } from "./ThinkingChain";
 import { ArtifactList } from "./Artifacts";
+import { OrgTimelineCard } from "./OrgTimeline";
 import { AskUserBlock } from "./AskUser";
 import { ErrorCard } from "./ErrorCard";
 import { AttachmentPreview } from "./AttachmentPreview";
@@ -12,6 +13,8 @@ import { SpinnerTipDisplay } from "./SpinnerTipDisplay";
 import { SourceStrip } from "./SourceStrip";
 import { PlanCard } from "./PlanCard";
 import { MCPCallStrip } from "./MCPCallStrip";
+import { MarkdownContent } from "./MarkdownContent";
+import { useSourceTagFormatter, extractTrailingSourceTag, SourceBadge } from "./SourceBadge";
 import { IconClipboard, IconEdit, IconRefresh, IconRewind } from "../../../icons";
 
 export const MessageBubble = memo(function MessageBubble({
@@ -48,6 +51,7 @@ export const MessageBubble = memo(function MessageBubble({
   onPlanStepAction?: (action: "skip" | "retry", stepIdx: number, description: string) => void;
 }) {
   const { t } = useTranslation();
+  const formatSourceTags = useSourceTagFormatter();
   const isUser = msg.role === "user";
   const isAssistant = msg.role === "assistant";
   const usageTotal = msg.usage
@@ -55,6 +59,14 @@ export const MessageBubble = memo(function MessageBubble({
     : 0;
   const showUsage = Boolean(msg.usage && usageTotal > 0);
   const usagePrefix = msg.usage?.usage_estimated ? "~" : "";
+
+  // Peel off the trailing [来源:X] tag (assistant only) so the badge can ride
+  // the footer line instead of taking its own paragraph at the bottom of the
+  // bubble. User messages never carry these tags, so the helper is no-op there.
+  const rawBody = isUser ? msg.content : stripLegacySummary(msg.content || "");
+  const { stripped: bodyContent, trailingType: footerSourceType } =
+    isUser ? { stripped: rawBody, trailingType: null } : extractTrailingSourceTag(rawBody);
+
   return (
     <div className="msgBubbleWrap" style={{ display: "flex", flexDirection: "column", alignItems: isUser ? "flex-end" : "flex-start", marginBottom: 16, position: "relative" }}>
       {!isUser && msg.agentName && (
@@ -88,6 +100,10 @@ export const MessageBubble = memo(function MessageBubble({
           <ThinkingChain chain={msg.thinkingChain} streaming={!!msg.streaming} showChain={showChain} onSkipStep={onSkipStep} />
         )}
 
+        {msg.orgTimeline && msg.orgTimeline.length > 0 && (
+          <OrgTimelineCard entries={msg.orgTimeline} streaming={!!msg.streaming} />
+        )}
+
         {msg.streaming && !msg.content && msg.streamStatus && msg.thinkingChain && msg.thinkingChain.length > 0 && (
           <SpinnerTipDisplay statusText={msg.streamStatus} />
         )}
@@ -103,16 +119,13 @@ export const MessageBubble = memo(function MessageBubble({
           <PlanCard plan={msg.todo} onStepAction={onPlanStepAction} />
         )}
 
-        {msg.content && (isUser ? msg.content : stripLegacySummary(msg.content)) && (
-          <div className={isUser ? "chatMdContent chatMdContentUser" : "chatMdContent"}>
-            {mdModules ? (
-              <mdModules.ReactMarkdown remarkPlugins={mdModules.remarkPlugins} rehypePlugins={mdModules.rehypePlugins}>
-                {isUser ? msg.content : stripLegacySummary(msg.content)}
-              </mdModules.ReactMarkdown>
-            ) : (
-              <div style={{ whiteSpace: "pre-wrap" }}>{isUser ? msg.content : stripLegacySummary(msg.content)}</div>
-            )}
-          </div>
+        {bodyContent && (
+          <MarkdownContent
+            content={formatSourceTags(bodyContent)}
+            mdModules={mdModules}
+            className={isUser ? "chatMdContent chatMdContentUser" : "chatMdContent"}
+            streaming={!!msg.streaming}
+          />
         )}
 
         {msg.streaming && !msg.content && (!msg.thinkingChain || msg.thinkingChain.length === 0) && (
@@ -145,24 +158,25 @@ export const MessageBubble = memo(function MessageBubble({
           <ErrorCard error={msg.errorInfo} onRetry={onRetry ? () => onRetry(msg.id) : undefined} />
         )}
       </div>
-      <div className="msgActions" style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, opacity: 0.35, marginTop: 2, paddingLeft: 2, paddingRight: 2 }}>
-        <span>{formatTime(msg.timestamp)}</span>
+      <div className="msgActions" style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, marginTop: 2, paddingLeft: 2, paddingRight: 2 }}>
+        {footerSourceType && <SourceBadge type={footerSourceType} />}
+        <span style={{ opacity: 0.35 }}>{formatTime(msg.timestamp)}</span>
         {showUsage && msg.usage && (
-          <span style={{ opacity: 0.7 }} title={`${msg.usage.usage_estimated ? "Estimated · " : ""}In: ${msg.usage.input_tokens} · Out: ${msg.usage.output_tokens}`}>
+          <span style={{ opacity: 0.25 }} title={`${msg.usage.usage_estimated ? "Estimated · " : ""}In: ${msg.usage.input_tokens} · Out: ${msg.usage.output_tokens}`}>
             {usagePrefix}{usageTotal} tokens
           </span>
         )}
         {!msg.streaming && msg.content && (
-          <button className="msgActionBtn" onClick={() => navigator.clipboard.writeText(msg.content).catch(() => {})} title={t("chat.copyMessage", "复制")}><IconClipboard size={13} /></button>
+          <button className="msgActionBtn" onClick={() => navigator.clipboard.writeText(msg.content).catch(() => {})} title={t("chat.copyMessage", "复制")}><IconClipboard size={12} /></button>
         )}
         {isUser && !msg.streaming && onEdit && (
-          <button className="msgActionBtn" onClick={() => onEdit(msg.id)} title={t("chat.edit", "编辑")}><IconEdit size={13} /></button>
+          <button className="msgActionBtn" onClick={() => onEdit(msg.id)} title={t("chat.edit", "编辑")}><IconEdit size={12} /></button>
         )}
         {isAssistant && !msg.streaming && onRegenerate && (
-          <button className="msgActionBtn" onClick={() => onRegenerate(msg.id)} title={t("chat.regenerate", "重新生成")}><IconRefresh size={13} /></button>
+          <button className="msgActionBtn" onClick={() => onRegenerate(msg.id)} title={t("chat.regenerate", "重新生成")}><IconRefresh size={12} /></button>
         )}
         {!isLast && !msg.streaming && onRewind && (
-          <button className="msgActionBtn" onClick={() => onRewind(msg.id)} title={t("chat.rewind", "回到这里")}><IconRewind size={13} /></button>
+          <button className="msgActionBtn" onClick={() => onRewind(msg.id)} title={t("chat.rewind", "回到这里")}><IconRewind size={12} /></button>
         )}
       </div>
     </div>

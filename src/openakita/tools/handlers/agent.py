@@ -463,7 +463,11 @@ class AgentToolHandler:
         custom_prompt = (params.get("custom_prompt") or "").strip()
         persistent = bool(params.get("persistent", False))
         identity_mode = params.get("identity_mode") or "shared"
-        memory_mode = params.get("memory_mode") or "shared"
+        # Phase 2b.2：优先接受新名 `memory_isolation`，回退到旧名 `memory_mode`。
+        # 两个都给则以新名为准（与 AgentProfile.from_dict 行为一致）。
+        memory_mode = (
+            params.get("memory_isolation") or params.get("memory_mode") or "shared"
+        )
         memory_inherit_global = params.get("memory_inherit_global", True)
 
         if not name:
@@ -582,6 +586,8 @@ class AgentToolHandler:
                 gw = _main_mod._message_gateway
                 if gw:
                     orch.set_gateway(gw)
+                    if hasattr(gw, "set_orchestrator"):
+                        gw.set_orchestrator(orch)
                 _main_mod._orchestrator = orch
                 logger.warning(
                     "[AgentToolHandler] Orchestrator was None — lazily created as fallback"

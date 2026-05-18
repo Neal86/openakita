@@ -68,6 +68,69 @@ def test_is_plugin_tool_skips_org_prefix(runtime):
     assert runtime._is_plugin_tool(agent, "org_delegate_task") is False
 
 
+def _make_agent_with_real_pluginapi_shape(
+    *tool_names: str,
+    plugin_id: str = "happyhorse-video",
+) -> SimpleNamespace:
+    """Stand-in agent whose plugin reports its tools as ``list[str]`` —
+    matching the actual shape of ``PluginAPI._registered_tools``
+    (``src/openakita/plugins/api.py:264`` does ``extend(tool_names)``
+    where ``tool_names`` is ``list[str]``).
+
+    Without this regression coverage the dict-shape ``_make_agent_with_plugin_tool``
+    hides the bug where production lookups always miss.
+    """
+    plugin = SimpleNamespace(
+        manifest=SimpleNamespace(id=plugin_id, display_name_zh="HappyHorse"),
+        api=SimpleNamespace(_registered_tools=list(tool_names)),
+    )
+    pm = SimpleNamespace(
+        loaded_plugins={plugin_id: plugin},
+        host_refs={},
+        _external_host_refs={},
+    )
+    pm.get_loaded = lambda pid: plugin if pid == plugin_id else None
+    return SimpleNamespace(_plugin_manager=pm)
+
+
+def test_is_plugin_tool_handles_list_of_strings_pluginapi_shape(runtime):
+    """Regression for the silent disable: PluginAPI stores tool names as
+    ``list[str]``, but ``_is_plugin_tool`` historically only looked for
+    ``dict[name=...]``. That made the asset registration hook a no-op for
+    every real plugin (e.g. happyhorse-video) and starved the blackboard
+    of mp4/png RESOURCE entries."""
+    agent = _make_agent_with_real_pluginapi_shape("hh_i2v", "hh_image_create")
+    assert runtime._is_plugin_tool(agent, "hh_i2v") is True
+    assert runtime._is_plugin_tool(agent, "hh_image_create") is True
+    assert runtime._is_plugin_tool(agent, "not_a_plugin_tool") is False
+
+
+def test_plugin_id_for_tool_handles_list_of_strings(runtime):
+    agent = _make_agent_with_real_pluginapi_shape(
+        "hh_i2v",
+        plugin_id="happyhorse-video",
+    )
+    assert OrgRuntime._plugin_id_for_tool(agent, "hh_i2v") == "happyhorse-video"
+    assert OrgRuntime._plugin_id_for_tool(agent, "no_such_tool") == ""
+
+
+def test_is_plugin_tool_ignores_non_string_non_dict_entries(runtime):
+    """Defensive: a plugin that registered nothing useful (e.g. None /
+    int sneaked into the list) must not crash the enumerator."""
+    plugin = SimpleNamespace(
+        manifest=SimpleNamespace(id="weird-plugin"),
+        api=SimpleNamespace(_registered_tools=[None, 42, "", "ok_tool"]),
+    )
+    pm = SimpleNamespace(
+        loaded_plugins={"weird-plugin": plugin},
+        host_refs={},
+        _external_host_refs={},
+    )
+    agent = SimpleNamespace(_plugin_manager=pm)
+    assert runtime._is_plugin_tool(agent, "ok_tool") is True
+    assert runtime._is_plugin_tool(agent, "no") is False
+
+
 async def test_record_plugin_asset_local_path_registers_attachment(runtime, tmp_path):
     """Local files already on disk should be hardlinked / copied into the
     workspace and registered as task attachments."""

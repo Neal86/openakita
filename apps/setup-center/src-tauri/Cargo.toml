@@ -1,6 +1,6 @@
 [package]
 name = "openakita-setup-center"
-version = "1.27.11"
+version = "1.27.12"
 description = "OpenAkita Setup Center"
 authors = ["OpenAkita"]
 license = "AGPL-3.0-only"
@@ -32,6 +32,10 @@ base64 = "0.22.1"
 getrandom = "0.3"
 
 once_cell = "1"
+# Direct dep so we can use tokio::time::timeout for backend_fetch chunk
+# inactivity. tokio is already pulled in transitively by reqwest/tauri at
+# 1.50.x; declaring it here just makes the `time` feature explicit.
+tokio = { version = "1", features = ["time"] }
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-autostart = "2.5.1"
@@ -47,4 +51,18 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+# Used by src/crash_handler.rs to install SetUnhandledExceptionFilter +
+# MiniDumpWriteDump for native crashes (0xc0000005 / 0xc0000374 / 0xc000001d).
+# Dumps land in ~/.openakita/crashdumps/openakita-{pid}-{ts}.dmp and are
+# auto-packaged by build_feedback_zip so users can submit them via the
+# normal "send feedback" flow without admin rights or HKLM LocalDumps.
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_Kernel",
+  "Win32_System_Memory",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+] }
 

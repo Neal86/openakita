@@ -782,7 +782,18 @@ def build_system_prompt(
                     context_window,
                 )
             )
-            _use_compact = _profile == PromptProfile.CONSUMER_CHAT or _tier == PromptTier.SMALL
+            # Phase 5：compact Memory Guide 设为默认（节省 ~600 token/轮）。
+            # 完整版只在以下场景才用：
+            #  1) LOCAL_AGENT profile 且 LARGE tier（大上下文窗口，模型有空间消化教学性 prompt）；
+            #  2) 用户显式设置 OPENAKITA_PROMPT_VERBOSE_MEMORY_GUIDE=1。
+            # 短窗口 / CONSUMER_CHAT 一律 compact —— 这些场景模型通常按 token 数计费，
+            # 也是用户最容易感知"慢"的地方。
+            _verbose_env = os.environ.get("OPENAKITA_PROMPT_VERBOSE_MEMORY_GUIDE", "").strip()
+            _verbose_override = _verbose_env in {"1", "true", "yes", "on"}
+            _eligible_for_full = (
+                _profile == PromptProfile.LOCAL_AGENT and _tier == PromptTier.LARGE
+            )
+            _use_compact = not (_verbose_override or _eligible_for_full)
             memory_section = _build_memory_section(
                 memory_manager=memory_manager,
                 task_description=task_description,
@@ -2047,6 +2058,54 @@ def _adaptive_memory_budget(
     return base_budget, False, False
 
 
+_SHORT_CHITCHAT_TRIGGERS: tuple[str, ...] = (
+    "ok",
+    "okay",
+    "好",
+    "好的",
+    "嗯",
+    "嗯嗯",
+    "继续",
+    "go",
+    "next",
+    "你好",
+    "hi",
+    "hello",
+    "hey",
+    "thanks",
+    "谢谢",
+    "thx",
+    "ty",
+    "?",
+    "？",
+)
+
+
+def _is_short_chitchat(text: str | None) -> bool:
+    """判断 user 输入是否属于纯交互信号、不应触发后台多路语义召回。
+
+    判断标准（满足任一即跳过 Layer 4）：
+    - 空或全空白；
+    - 去空白后长度 ≤ 4 个字符；
+    - 去掉首尾标点空白后整段等于明确的交互词（见 ``_SHORT_CHITCHAT_TRIGGERS``）。
+
+    不会跳过的情况（保守判定）：
+    - 含问号但更长 —— 可能是真问题；
+    - 含 ``:`` / ``：`` / 路径 / 关键字 —— 可能是命令或地址，让 retrieval 兜底。
+    """
+    if not text:
+        return True
+    stripped = text.strip()
+    if not stripped:
+        return True
+    if len(stripped) <= 4:
+        return True
+    normalized = stripped.strip(".。！!？?…~ ").lower()
+    if normalized in _SHORT_CHITCHAT_TRIGGERS:
+        return True
+    return False
+
+
 def _build_memory_section(
     memory_manager: Optional["MemoryManager"],
     task_description: str,
@@ -2118,8 +2177,14 @@ def _build_memory_section(
 
     # Layer 4: Active Retrieval. Always use the current task as a query so
     # external providers can recall context before every agent run.
+    # Phase 5：短消息 + 没有 IntentAnalyzer 给出关键词时，跳过多路召回。
+    # 理由：
+    #   - 这类输入（"ok"、"嗯"、"继续"、"你好"）召回质量很差，但每次都打满 5 路 + reranker；
+    #   - 用户感知到的"慢"主要在这种轻量交互；
+    #   - identity slot（Layer 2 Core Memory）依然注入，不影响用户身份信息的可用性。
     retrieval_query = " ".join(memory_keywords or []) or task_description
-    if retrieval_query:
+    has_explicit_keywords = bool(memory_keywords)
+    if retrieval_query and (has_explicit_keywords or not _is_short_chitchat(task_description)):
         retrieved = _retrieve_by_query(memory_manager, retrieval_query, max_tokens=500)
         if retrieved:
             parts.append(f"## 相关记忆（自动检索）\n\n{retrieved}")
@@ -2378,8 +2443,20 @@ def _should_inject_rule(rule: object, query_terms: set[str]) -> tuple[bool, str]
     return False, "unrelated"
 
 
+# Phase 5：MEMORY.md 内容进程级缓存。
+# 每轮 build_system_prompt 都会调用 _get_core_memory()，原实现每次都 read_text +
+# 段落级 truncate，对长 MEMORY.md 是非平凡开销，也容易因为字节级差异打破 LLM provider
+# 的 prompt 缓存命中。这里以 (path, mtime_ns, max_chars) 为 key 做内存缓存，文件被
+# 改动时 mtime 变化自然失效，不需要手动 invalidate。
+# - 缓存只有 in-process，不写盘；
+# - 缓存大小受 _CORE_MEMORY_CACHE_MAX 控制，超出后按插入顺序丢弃；
+# - 每条 entry 都同时持有原文 hash，损坏 / 编码异常时静默降级回读盘。
+_CORE_MEMORY_CACHE: dict[tuple[str, int, int], str] = {}
+_CORE_MEMORY_CACHE_MAX = 32
+
+
 def _get_core_memory(memory_manager: Optional["MemoryManager"], max_chars: int = 600) -> str:
-    """获取 MEMORY.md 核心记忆（损坏时自动 fallback 到 .bak）
+    """获取 MEMORY.md 核心记忆（损坏时自动 fallback 到 .bak），带 mtime 失效缓存。
 
     截断策略委托给 ``truncate_memory_md``：按段落拆分，规则段落优先保留。
     """
@@ -2389,21 +2466,43 @@ def _get_core_memory(memory_manager: Optional["MemoryManager"], max_chars: int =
     if not memory_path:
         return ""
 
-    content = ""
     for path_to_try in [memory_path, memory_path.with_suffix(memory_path.suffix + ".bak")]:
-        if not path_to_try.exists():
+        try:
+            stat = path_to_try.stat()
+        except (FileNotFoundError, OSError):
             continue
+        cache_key = (str(path_to_try), stat.st_mtime_ns, max_chars)
+        cached = _CORE_MEMORY_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
         try:
             content = path_to_try.read_text(encoding="utf-8").strip()
-            if content:
-                break
         except Exception:
             continue
+        if not content:
+            continue
 
-    if not content:
-        return ""
+        truncated = truncate_memory_md(content, max_chars)
+        # 按插入顺序丢弃旧条目，避免长期运行下缓存膨胀。
+        # 并发模型：缓存是 in-process dict，GIL 保证单个 key 写入是原子的，
+        # mtime 是 key 的一部分意味着不会读到脏数据。多线程同时触发 eviction
+        # 时可能短暂超过上限或重复 pop 同一 key，都是无害的自纠正情况；
+        # 极罕见的 ``RuntimeError: dictionary changed size during iteration``
+        # 也吞掉，让本次调用走未缓存路径即可。
+        if len(_CORE_MEMORY_CACHE) >= _CORE_MEMORY_CACHE_MAX:
+            try:
+                oldest_key = next(iter(_CORE_MEMORY_CACHE))
+                _CORE_MEMORY_CACHE.pop(oldest_key, None)
+            except (StopIteration, RuntimeError):
+                pass
+        try:
+            _CORE_MEMORY_CACHE[cache_key] = truncated
+        except Exception:
+            pass
+        return truncated
 
-    return truncate_memory_md(content, max_chars)
+    return ""
 
 
 _EXPERIENCE_ITEM_MAX_CHARS = 200

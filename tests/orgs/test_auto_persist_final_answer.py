@@ -5,7 +5,7 @@
 2. ``runtime._register_file_output`` 成功登记后计数器 +1；
 3. ``runtime._node_files_registered_in_task`` 不同 (org, node) 互不干扰；
 4. ``tool_handler.auto_persist_node_final_answer``：
-   - body 不足 200 字直接 None；
+   - body 不足阈值直接 None；
    - workspace=None 直接 None；
    - 正常路径走 _auto_persist_deliverable + _register_file_output 唯一登记入口，
      返回 ``{filename, file_path, file_size}``；
@@ -81,6 +81,7 @@ def runtime_with_blackboard(persisted_org, mock_runtime, org_dir, tmp_path):
     rt._manager = mock_runtime._manager
     rt._active_orgs = {persisted_org.id: persisted_org}
     rt._node_files_registered_in_task = {}
+    rt._node_file_attachments_in_task = {}
     rt._tool_handler = OrgToolHandler(rt)
     # 文件类型标签字典（来自原 __init__ 默认）
     rt._FILE_EXT_LABELS = {
@@ -120,6 +121,13 @@ class TestRegisterFileOutputCounter:
         assert registered is not None
         assert registered["filename"] == "report.md"
         assert rt._node_files_registered_in_task[cache_key] == 1
+        assert rt._node_file_attachments_in_task[cache_key] == [
+            {
+                "filename": "report.md",
+                "file_path": str(f.resolve()),
+                "file_size": f.stat().st_size,
+            }
+        ]
 
         registered2 = rt._register_file_output(
             persisted_org.id, node_id,
@@ -130,6 +138,7 @@ class TestRegisterFileOutputCounter:
         )
         assert registered2 is not None
         assert rt._node_files_registered_in_task[cache_key] == 2
+        assert len(rt._node_file_attachments_in_task[cache_key]) == 1
 
     def test_missing_file_does_not_increment(
         self, runtime_with_blackboard, persisted_org, tmp_path
@@ -242,6 +251,7 @@ class TestAutoPersistNodeFinalAnswer:
         # counter 通过唯一登记入口 +1
         cache_key = f"{persisted_org.id}:{node_id}"
         assert rt._node_files_registered_in_task[cache_key] == 1
+        assert rt._node_file_attachments_in_task[cache_key][0]["file_path"] == str(p)
 
     def test_path_traversal_in_title_is_neutralized(
         self, runtime_with_blackboard, persisted_org, tmp_path

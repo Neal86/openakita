@@ -426,6 +426,15 @@ def _mode_from_security(sec: dict[str, Any] | None) -> str:
     return "smart" if sec else "yolo"
 
 
+def _normalize_confirmation_mode(mode: Any) -> str:
+    """Return the canonical policy_v2 confirmation mode for UI consumers."""
+    aliases = {"yolo": "trust", "smart": "default", "cautious": "strict"}
+    value = aliases.get(str(mode or "").strip().lower(), str(mode or "").strip().lower())
+    if value in ("trust", "default", "accept_edits", "strict", "dont_ask"):
+        return value
+    return "default"
+
+
 def _apply_permission_mode_defaults(sec: dict[str, Any], mode: str) -> None:
     """Synchronize high-level permission mode with granular security defaults.
 
@@ -1120,6 +1129,59 @@ async def reorder_endpoints(body: ReorderEndpointsRequest, request: Request):
     }
 
 
+class SyncEndpointModelsRequest(BaseModel):
+    name: str
+    endpoint_type: str = "endpoints"
+    timeout: float = 15.0
+
+
+@router.post("/api/config/sync-endpoint-models")
+async def sync_endpoint_models(body: SyncEndpointModelsRequest, request: Request):
+    """Probe a relay/aggregator endpoint's actual model catalog.
+
+    Returns the freshly probed model list plus persistence metadata.
+    On probe failure (auth, network, unsupported route) returns
+    ``{"status": "error", "error": ...}`` with the previous catalog
+    preserved on disk — the UI keeps showing the old dropdown plus
+    the new error banner instead of going blank.
+
+    Body::
+
+        {"name": "yunwu-relay", "endpoint_type": "endpoints", "timeout": 15.0}
+    """
+    mgr = _get_endpoint_manager()
+    try:
+        result = mgr.sync_endpoint_models(
+            body.name,
+            endpoint_type=body.endpoint_type,
+            timeout=max(2.0, min(60.0, float(body.timeout or 15.0))),
+        )
+    except KeyError as e:
+        return {"status": "not_found", "error": str(e), "name": body.name}
+    except ValueError as e:
+        return {"status": "error", "error": str(e), "name": body.name}
+    except Exception as e:  # noqa: BLE001 — surface raw error to UI
+        logger.error("[Config API] sync-endpoint-models failed: %s", e, exc_info=True)
+        return {"status": "error", "error": str(e), "name": body.name}
+
+    # Live providers carry an in-memory copy of EndpointConfig; refresh
+    # so the catalog filter in LLMClient._filter_eligible_endpoints
+    # takes effect immediately without requiring a process restart.
+    reload_result = _trigger_reload(request)
+
+    return {
+        "status": "ok" if result["ok"] else "error",
+        "ok": result["ok"],
+        "name": result["name"],
+        "model_count": result["model_count"],
+        "models": result["models"],
+        "synced_at": result["synced_at"],
+        "error": result["error"],
+        "version": mgr.get_version(),
+        "reload": reload_result,
+    }
+
+
 @router.post("/api/config/update-settings")
 async def update_endpoint_settings(body: UpdateSettingsRequest, request: Request):
     """Merge settings into llm_endpoints.json via EndpointManager."""
@@ -1711,10 +1773,13 @@ async def preview_security_config(body: dict | None = None):
             cfg, _report = load_policies_from_dict({"security": proposed_security}, strict=False)
             engine = make_preview_engine(cfg)
         else:
-            engine = make_preview_engine()
-            from openakita.core.policy_v2.global_engine import get_config_v2
+            from openakita.core.policy_v2.loader import load_policies_from_dict
 
-            cfg = get_config_v2()
+            data = _read_policies_yaml()
+            if data is None:
+                return {"status": "error", "message": "无法读取当前配置文件"}
+            cfg, _report = load_policies_from_dict(data, strict=False)
+            engine = make_preview_engine(cfg)
     except Exception as exc:
         return {"status": "error", "message": f"构建预览引擎失败: {exc}"}
 
@@ -2284,15 +2349,16 @@ async def read_security_confirmation():
     data = _read_policies_yaml()
     if data is None:
         return {
-            "mode": "yolo",
+            "mode": "trust",
             "timeout_seconds": 60,
             "default_on_timeout": "deny",
             "confirm_ttl": 120,
             "aggregation_window_seconds": 0.0,
         }
     c = data.get("security", {}).get("confirmation", {})
+    raw_mode = c.get("mode", _mode_from_security(data.get("security", {})))
     return {
-        "mode": c.get("mode", _mode_from_security(data.get("security", {}))),
+        "mode": _normalize_confirmation_mode(raw_mode),
         "timeout_seconds": c.get("timeout_seconds", 60),
         "default_on_timeout": c.get("default_on_timeout", "deny"),
         "confirm_ttl": c.get("confirm_ttl", 120),
@@ -2318,9 +2384,18 @@ async def write_security_confirmation(body: _ConfirmationUpdate):
     sec = data.setdefault("security", {})
     conf = sec.setdefault("confirmation", {})
     if body.mode is not None:
-        aliases = {"yolo": "trust", "smart": "default", "cautious": "strict"}
-        m = aliases.get(str(body.mode), str(body.mode))
-        if m not in ("trust", "default", "accept_edits", "strict", "dont_ask"):
+        raw_mode = str(body.mode).strip().lower()
+        m = _normalize_confirmation_mode(raw_mode)
+        if raw_mode not in (
+            "trust",
+            "default",
+            "accept_edits",
+            "strict",
+            "dont_ask",
+            "yolo",
+            "smart",
+            "cautious",
+        ):
             return {"status": "error", "message": f"无效 mode: {body.mode}"}
         conf["mode"] = m
         _mark_security_profile_custom(sec)

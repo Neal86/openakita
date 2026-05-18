@@ -96,6 +96,88 @@ def mock_response_factory():
 
 
 # ---------------------------------------------------------------------------
+# Helpers for the (text, ConfigHint | None) tuple return type introduced by
+# the web_search provider refactor (see src/openakita/tools/tool_hints.py).
+#
+# Existing tests that only care about the LLM-facing text can use these to
+# stay readable instead of repeating ``text, _ = await executor.execute_tool(...)``
+# everywhere. New tests that DO care about the hint (e.g. the
+# WebSearchHandler tests) should unpack the tuple directly.
+# ---------------------------------------------------------------------------
+
+
+async def call_tool_text(executor, tool_name, tool_input, **kwargs) -> str:
+    """Run ``executor.execute_tool`` and return only the LLM-facing text.
+
+    Drops the ``ConfigHint`` part of the tuple. Use in tests that pre-date
+    the hint side-channel and only assert on the result string.
+    """
+    text, _hint = await executor.execute_tool(tool_name, tool_input, **kwargs)
+    return text
+
+
+async def call_tool_with_policy_text(
+    executor, tool_name, tool_input, policy_result, **kwargs
+) -> str:
+    """Run ``execute_tool_with_policy`` and return only the text portion."""
+    text, _hint = await executor.execute_tool_with_policy(
+        tool_name, tool_input, policy_result, **kwargs
+    )
+    return text
+
+
+@pytest.fixture
+def call_tool_text_helper():
+    """Fixture wrapper around :func:`call_tool_text` for tests that prefer DI."""
+    return call_tool_text
+
+
+# ---------------------------------------------------------------------------
+# 全局禁用桌面通知 - 防止 pytest 误弹 Windows Toast / macOS / Linux 系统通知
+#
+# 背景：tests/unit/test_scheduler_executor_status.py 等测试通过 ``trigger_now``
+# 真实执行 ``TaskExecutor.execute``，链路会触达 ``_send_end_notification``，
+# 后者会调用 ``notify_task_completed_async`` 真去 PowerShell 弹 Toast。
+# 表象是每跑一次 scheduler 测试就在桌面右下角连续弹好几条
+# "✅ OpenAkita 任务完成 / daily research"，体感极差且查不到源头。
+#
+# 这里在 autouse fixture 中把整个 desktop_notify 模块的发送函数替换成 no-op，
+# 同时把 settings.desktop_notify_enabled 关掉作为双保险。
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _disable_desktop_notifications(monkeypatch):
+    """禁止测试过程中弹出真实的桌面通知。"""
+    # fail-soft：模块未导入时静默跳过（pytest collection 阶段可能还没 import）
+    try:
+        from openakita.core import desktop_notify as _dn
+    except Exception:
+        return
+
+    async def _noop_async(*_args, **_kwargs):
+        return False
+
+    def _noop_sync(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(_dn, "send_desktop_notification", _noop_sync, raising=False)
+    monkeypatch.setattr(
+        _dn, "send_desktop_notification_async", _noop_async, raising=False
+    )
+    monkeypatch.setattr(_dn, "notify_task_completed", _noop_sync, raising=False)
+    monkeypatch.setattr(
+        _dn, "notify_task_completed_async", _noop_async, raising=False
+    )
+
+    # 双保险：把 settings.desktop_notify_enabled 也置为 False，覆盖任何动态导入
+    try:
+        from openakita.config import settings as _settings
+
+        monkeypatch.setattr(_settings, "desktop_notify_enabled", False, raising=False)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # C8b-1: 自动隔离 process-wide policy v2 singletons across tests.
 #
 # ``DeathSwitchTracker`` 累积 consecutive_denials；不重置时一个 test 的连续

@@ -147,14 +147,23 @@ class MangaWanxiangClient(BaseVendorClient):
             return {}
 
     def _refresh_settings(self) -> dict[str, Any]:
-        """Re-read settings + push to inherited ``base_url`` / ``timeout``."""
+        """Re-read settings + push to inherited ``base_url`` / ``timeout``.
+
+        ``dashscope_base_url`` (set by the plugin layer when a relay
+        endpoint is active) wins over the region-based default — that's
+        how relay station overrides actually take effect on the wire.
+        """
         cur = self._current_settings()
-        region = str(cur.get("dashscope_region") or "beijing").lower()
-        self.base_url = (
-            DASHSCOPE_BASE_URL_SG
-            if region in ("sg", "singapore", "intl")
-            else DASHSCOPE_BASE_URL_BJ
-        )
+        relay_base = str(cur.get("dashscope_base_url") or "").strip()
+        if relay_base:
+            self.base_url = relay_base
+        else:
+            region = str(cur.get("dashscope_region") or "beijing").lower()
+            self.base_url = (
+                DASHSCOPE_BASE_URL_SG
+                if region in ("sg", "singapore", "intl")
+                else DASHSCOPE_BASE_URL_BJ
+            )
         try:
             t = float(cur.get("dashscope_timeout") or 60.0)
             if t > 0:
@@ -244,6 +253,15 @@ class MangaWanxiangClient(BaseVendorClient):
         if model not in {DEFAULT_MODEL, DEFAULT_MODEL_PRO}:
             raise ValueError(
                 f"unknown model {model!r}; expected {DEFAULT_MODEL!r} or {DEFAULT_MODEL_PRO!r}"
+            )
+        supported = self._current_settings().get("dashscope_supported_models") or []
+        if supported and model.strip().lower() not in {
+            str(m or "").strip().lower() for m in supported
+        }:
+            raise VendorError(
+                f"中转站模型目录不包含 DashScope 图像模型 {model!r}",
+                kind=ERROR_KIND_CLIENT,
+                status=422,
             )
 
         content: list[dict[str, str]] = [{"text": prompt}]

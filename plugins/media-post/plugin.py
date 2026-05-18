@@ -209,9 +209,70 @@ class Plugin(PluginBase):
 
     async def _async_init(self) -> None:
         await self._tm.init()
-        api_key = await self._tm.get_config("dashscope_api_key")
+        cfg = await self._tm.get_all_config()
+        api_key, base_url = self._resolve_vlm_endpoint(cfg)
         if api_key:
-            self._vlm_client = MediaPostVlmClient(api_key)
+            self._vlm_client = MediaPostVlmClient(api_key, base_url=base_url) if base_url else MediaPostVlmClient(api_key)
+
+    def _resolve_vlm_endpoint(self, cfg: dict) -> tuple[str, str]:
+        """Resolve DashScope VLM api_key + base_url honouring an optional
+        relay reference in ``dashscope_relay_endpoint`` (with policy in
+        ``dashscope_relay_fallback_policy``).
+
+        Returns an empty base_url when no relay override is in effect,
+        so the caller knows it can rely on MediaPostVlmClient's built-in
+        DASHSCOPE_BASE_URL default.
+        """
+        api_key = str(cfg.get("dashscope_api_key") or "")
+        relay_name = str(cfg.get("dashscope_relay_endpoint") or "").strip()
+        if not relay_name:
+            return api_key, ""
+        try:
+            from openakita.relay import (
+                SettingsRelayResolutionError,
+                apply_relay_override,
+            )
+
+            merged = apply_relay_override(
+                {
+                    "api_key": api_key,
+                    "base_url": "",
+                    "relay_endpoint": relay_name,
+                    "relay_fallback_policy": str(
+                        cfg.get("dashscope_relay_fallback_policy") or "official"
+                    ),
+                },
+                required_capability="vision",
+                plugin_name="media-post",
+            )
+        except (ImportError, ModuleNotFoundError) as exc:
+            logger.info(
+                "media-post: openakita.relay not importable (%s); "
+                "keeping per-plugin DashScope endpoint",
+                exc,
+            )
+            return api_key, ""
+        except SettingsRelayResolutionError as exc:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=400, detail=exc.user_message) from exc
+        ref = merged.get("_relay_reference")
+        unsupported = [
+            model
+            for model in ("qwen-vl-max", "qwen-plus")
+            if ref is not None and hasattr(ref, "supports_model") and not ref.supports_model(model)
+        ]
+        if unsupported:
+            policy = str(cfg.get("dashscope_relay_fallback_policy") or "official")
+            msg = (
+                f"中转站 {relay_name!r} 不支持 media-post 需要的模型: "
+                f"{', '.join(unsupported)}"
+            )
+            if policy == "strict":
+                from fastapi import HTTPException
+                raise HTTPException(status_code=400, detail=msg)
+            logger.warning("%s; falling back to per-plugin DashScope endpoint", msg)
+            return api_key, ""
+        return str(merged.get("api_key") or ""), str(merged.get("base_url") or "")
 
     async def on_unload(self) -> None:
         for tid, handle in list(self._task_handles.items()):
@@ -456,13 +517,32 @@ class Plugin(PluginBase):
         @router.put("/settings")
         async def update_settings(body: ConfigUpdateBody) -> dict[str, str]:
             await self._tm.set_configs(body.updates)
-            if "dashscope_api_key" in body.updates:
-                key = body.updates["dashscope_api_key"]
+            endpoint_keys = {
+                "dashscope_api_key",
+                "dashscope_relay_endpoint",
+                "dashscope_relay_fallback_policy",
+            }
+            if endpoint_keys & body.updates.keys():
+                saved_full = await self._tm.get_all_config()
+                key, base_url = self._resolve_vlm_endpoint(saved_full)
                 if key:
                     if self._vlm_client is None:
-                        self._vlm_client = MediaPostVlmClient(key)
+                        self._vlm_client = (
+                            MediaPostVlmClient(key, base_url=base_url)
+                            if base_url
+                            else MediaPostVlmClient(key)
+                        )
                     else:
-                        self._vlm_client.update_api_key(key)
+                        # VLM client has no update_base_url helper today.
+                        # Rebuild on every endpoint change so relay -> official
+                        # also resets the stored host instead of keeping the old
+                        # relay base_url alive.
+                        await self._vlm_client.close()
+                        self._vlm_client = (
+                            MediaPostVlmClient(key, base_url=base_url)
+                            if base_url
+                            else MediaPostVlmClient(key)
+                        )
                 else:
                     self._vlm_client = None
             return {"status": "ok"}

@@ -2139,11 +2139,22 @@ class Agent:
                 logger.debug(f"[Sticker] initialization skipped/failed: {e}")
 
         # === 从记忆系统加载 PERSONA_TRAIT ===
+        # Phase 3：用 iter_cached 替代直接遍历 _memories，自动排除
+        # legacy_quarantine / pending_consolidation 这两个隔离桶 ——
+        # persona_trait 是塑造 Agent 人格的高优先级数据，绝不能让旧版本身份
+        # 冲突的 trait 或后台合成产物悄悄混进来。
         try:
+            iter_cached = getattr(self.memory_manager, "iter_cached", None)
+            if iter_cached is None:
+                cached_iter = (
+                    m for m in self.memory_manager._memories.values()
+                )  # 老接口降级（理论上 v4+ 都走 iter_cached）
+            else:
+                cached_iter = iter_cached()
             persona_memories = [
                 m.to_dict()
-                for m in self.memory_manager._memories.values()
-                if m.type.value == "persona_trait"
+                for m in cached_iter
+                if getattr(getattr(m, "type", None), "value", "") == "persona_trait"
             ]
             if persona_memories:
                 self.persona_manager.load_traits_from_memories(persona_memories)
@@ -2716,6 +2727,7 @@ class Agent:
                         description=server.name or "",
                         transport=transport,
                         url=server.url or "",
+                        headers=dict(server.headers or {}),
                         cwd=server.config_dir or "",
                     )
                 )
@@ -4644,29 +4656,17 @@ class Agent:
     def _resolve_memory_workspace_id(session: Any | None) -> str:
         """Choose the memory workspace for a session.
 
-        IM sessions use the bot namespace so multiple bots do not share long-term
-        memory by accident. Desktop/API/CLI keep the historical "default"
-        workspace unless an explicit metadata override is set.
+        Phase 2a：抽到 ``memory.workspace_resolver`` 模块。
+
+        默认行为保持与 v3 一致：IM session 用 bot namespace、desktop/api/cli/web
+        用 "default"。当用户**显式 opt-in**（环境变量
+        ``OPENAKITA_DESKTOP_PROJECT_WORKSPACE=1`` 或 session.metadata
+        ``memory_workspace_mode='project'``）时才切到项目哈希工作区，
+        让不同项目目录下的桌面对话互相隔离。
         """
-        if session is None:
-            return "default"
+        from ..memory.workspace_resolver import resolve_memory_workspace_id
 
-        metadata = getattr(session, "metadata", {}) or {}
-        explicit = metadata.get("memory_workspace_id")
-        if explicit:
-            return str(explicit)
-
-        channel = str(getattr(session, "channel", "") or "")
-        if channel in {"desktop", "api", "cli", "web"}:
-            return "default"
-
-        namespace = (
-            getattr(session, "bot_instance_id", None)
-            or metadata.get("bot_instance_id")
-            or channel
-            or "default"
-        )
-        return str(namespace)
+        return resolve_memory_workspace_id(session)
 
     async def _prepare_session_context(
         self,

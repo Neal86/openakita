@@ -14,28 +14,34 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, UploadFile, File
-from pydantic import BaseModel, Field
-
-from openakita.plugins.api import PluginAPI, PluginBase
+from fastapi import APIRouter, File, HTTPException, UploadFile
+from pydantic import BaseModel
+from tongyi_dashscope_client import DashScopeClient, DashScopeError
 from tongyi_inline.storage_stats import collect_storage_stats
 from tongyi_inline.upload_preview import (
     add_upload_preview_route,
     build_preview_url,
 )
-
-from tongyi_dashscope_client import DashScopeClient, DashScopeError
 from tongyi_models import (
-    IMAGE_MODELS, MODELS_BY_ID, MODELS_BY_CATEGORY,
-    STYLE_REPAINT_PRESETS, SKETCH_STYLES, RECOMMENDED_SIZES,
     ECOMMERCE_SCENE_PRESETS,
-    get_model, get_models_for_category, model_to_dict,
+    IMAGE_MODELS,
+    RECOMMENDED_SIZES,
+    SKETCH_STYLES,
+    STYLE_REPAINT_PRESETS,
+    get_model,
+    get_models_for_category,
+    model_to_dict,
 )
 from tongyi_prompt_optimizer import (
-    optimize_prompt, PromptOptimizeError, get_prompt_guide_data,
-    PROMPT_TEMPLATES, generate_ecommerce_prompts,
+    PROMPT_TEMPLATES,
+    PromptOptimizeError,
+    generate_ecommerce_prompts,
+    get_prompt_guide_data,
+    optimize_prompt,
 )
 from tongyi_task_manager import TaskManager
+
+from openakita.plugins.api import PluginAPI, PluginBase
 
 logger = logging.getLogger(__name__)
 
@@ -198,12 +204,88 @@ class Plugin(PluginBase):
     async def _async_init(self) -> None:
         await self._tm.init()
         config = await self._tm.get_all_config()
-        api_key = config.get("dashscope_api_key", "")
+        api_key, base_url = self._resolve_effective_endpoint(config)
         if api_key:
             self._client = DashScopeClient(
-                api_key, base_url=config.get("dashscope_base_url") or None,
+                api_key, base_url=base_url or None,
             )
         self._start_polling()
+
+    def _resolve_effective_endpoint(
+        self,
+        config: dict[str, Any],
+        *,
+        target_model: str = "",
+    ) -> tuple[str, str]:
+        """Resolve api_key + base_url for the DashScope client, honouring
+        an optional relay_endpoint reference in plugin settings.
+
+        When ``dashscope_relay_endpoint`` names a relay registered in
+        OpenAkita's shared relay registry (see ``openakita.relay``),
+        its base_url + api_key win over the per-plugin fields. Failure
+        mode is governed by ``dashscope_relay_fallback_policy``:
+        ``"official"`` (default) warns and keeps the per-plugin values,
+        ``"strict"`` raises HTTPException so the user must fix the
+        relay name before continuing.
+
+        Import is lazy so the plugin still loads in distributions that
+        ship without the openakita host package.
+        """
+        api_key = str(config.get("dashscope_api_key") or "")
+        base_url = str(config.get("dashscope_base_url") or "")
+        relay_name = str(config.get("dashscope_relay_endpoint") or "").strip()
+        if not relay_name:
+            return api_key, base_url
+        try:
+            from openakita.relay import (
+                SettingsRelayResolutionError,
+                apply_relay_override,
+            )
+
+            merged = apply_relay_override(
+                {
+                    "api_key": api_key,
+                    "base_url": base_url,
+                    "relay_endpoint": relay_name,
+                    "relay_fallback_policy": str(
+                        config.get("dashscope_relay_fallback_policy") or "official"
+                    ),
+                },
+                required_capability="image",
+                plugin_name="tongyi-image",
+            )
+        except (ImportError, ModuleNotFoundError) as exc:
+            logger.info(
+                "tongyi-image: openakita.relay not importable (%s); "
+                "keeping per-plugin DashScope endpoint",
+                exc,
+            )
+            return api_key, base_url
+        except SettingsRelayResolutionError as exc:
+            # strict policy + missing relay → surface the user_message so
+            # the plugin Settings UI banner has actionable text. We use
+            # the same DashScopeError type the rest of the plugin uses
+            # for vendor-config errors so the UI handler does not need a
+            # new branch.
+            raise DashScopeError(
+                code="RelayResolutionError",
+                message=exc.user_message,
+                status_code=400,
+            ) from exc
+        ref = merged.get("_relay_reference")
+        if (
+            target_model
+            and ref is not None
+            and hasattr(ref, "supports_model")
+            and not ref.supports_model(target_model)
+        ):
+            policy = str(config.get("dashscope_relay_fallback_policy") or "official")
+            msg = f"中转站 {relay_name!r} 不支持 tongyi-image 当前模型: {target_model}"
+            if policy == "strict":
+                raise DashScopeError(code="RelayModelUnsupported", message=msg, status_code=400)
+            logger.warning("%s; falling back to per-plugin DashScope endpoint", msg)
+            return api_key, base_url
+        return str(merged.get("api_key") or ""), str(merged.get("base_url") or "")
 
     async def on_unload(self) -> None:
         if self._poll_task and not self._poll_task.done():
@@ -315,6 +397,13 @@ class Plugin(PluginBase):
             model_id = config.get("default_model", "wan27-pro")
 
         model_info = get_model(model_id)
+        config = await self._tm.get_all_config()
+        model_str = model_info.model_id if model_info else model_id
+        key, base_url = self._resolve_effective_endpoint(config, target_model=model_str)
+        if key:
+            if self._client is not None:
+                await self._client.close()
+            self._client = DashScopeClient(key, base_url=base_url or None)
         prompt = params.get("prompt", "") or params.get("edit_instruction", "")
 
         try:
@@ -890,7 +979,6 @@ class Plugin(PluginBase):
                 raise HTTPException(status_code=400, detail="API Key 未配置")
 
             scenes = body.scenes or [s["id"] for s in ECOMMERCE_SCENE_PRESETS]
-            base_images = body.images or []
             model_id = body.model or (await self._tm.get_all_config()).get(
                 "default_model", "wan27-pro"
             )
@@ -1086,7 +1174,6 @@ class Plugin(PluginBase):
         @router.post("/upload")
         async def upload_file(file: UploadFile = File(...)) -> dict:
             content = await file.read()
-            ext = Path(file.filename or "file").suffix.lower()
             assets_dir = self._api.get_data_dir() / "uploads"
             assets_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1109,6 +1196,8 @@ class Plugin(PluginBase):
             cfg = await self._tm.get_all_config()
             cfg.setdefault("dashscope_api_key", "")
             cfg.setdefault("dashscope_base_url", "")
+            cfg.setdefault("dashscope_relay_endpoint", "")
+            cfg.setdefault("dashscope_relay_fallback_policy", "official")
             return {"ok": True, "config": cfg}
 
         @router.put("/settings")
@@ -1121,22 +1210,24 @@ class Plugin(PluginBase):
             await self._tm.set_configs(cleaned)
             saved = await self._tm.get_all_config()
 
-            if "dashscope_api_key" in cleaned or "dashscope_base_url" in cleaned:
-                key = saved.get("dashscope_api_key", "")
-                base_url = saved.get("dashscope_base_url", "") or None
+            endpoint_keys = {
+                "dashscope_api_key",
+                "dashscope_base_url",
+                "dashscope_relay_endpoint",
+                "dashscope_relay_fallback_policy",
+            }
+            if endpoint_keys & cleaned.keys():
+                key, base_url = self._resolve_effective_endpoint(saved)
                 if self._client is not None:
                     await self._client.close()
                     self._client = None
                 if key:
-                    self._client = DashScopeClient(key, base_url=base_url)
+                    self._client = DashScopeClient(key, base_url=base_url or None)
             return {"ok": True, "config": saved}
 
         @router.get("/models")
         async def list_models(category: str | None = None) -> dict:
-            if category:
-                models = get_models_for_category(category)
-            else:
-                models = IMAGE_MODELS
+            models = get_models_for_category(category) if category else IMAGE_MODELS
             return {"ok": True, "models": [model_to_dict(m) for m in models]}
 
         @router.get("/models/{model_id}")

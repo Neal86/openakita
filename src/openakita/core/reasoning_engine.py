@@ -89,12 +89,79 @@ _PER_TOOL_NAME_TASK_LIMITS: dict[str, int] = {
 }
 
 
+from ..tools.tool_hints import ConfigHint
 from .token_tracking import TokenTrackingContext, reset_tracking_context, set_tracking_context
 from .tool_executor import ToolExecutor
 
 logger = logging.getLogger(__name__)
 
 _SSE_RESULT_PREVIEW_CHARS = 32000
+
+
+def _unpack_tool_result(value: Any) -> tuple[str, ConfigHint | None]:
+    """Defensively unpack a value returned by ``execute_tool*``.
+
+    All ``ToolExecutor`` paths are supposed to return ``(text, hint)`` after
+    the type sweep. This helper accepts both the new tuple shape and the
+    legacy plain-string shape (in case any callsite outside this module
+    hasn't migrated yet) and normalizes to ``(str, ConfigHint | None)``.
+    Centralizing the unwrap keeps the 5+ tool-call sites in this file short
+    and consistent.
+    """
+    if isinstance(value, tuple) and len(value) == 2:
+        text, hint = value
+        return ("" if text is None else str(text)), hint
+    return ("" if value is None else str(value)), None
+
+
+def _build_tool_end_events(
+    *,
+    tool_name: str,
+    tool_id: str,
+    result_text: str,
+    hint: ConfigHint | None,
+    is_error: bool,
+    result_summary: str = "",
+    extra: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Build the SSE event sequence for a finished tool call.
+
+    Always emits a ``tool_call_end``. When ``hint`` is non-None, also emits a
+    ``config_hint`` event carrying the structured payload that ``ChatView``
+    accumulates into ``currentConfigHints[tool_use_id]`` for ``ConfigHintCard``
+    rendering. ``hint`` is intentionally NOT serialized into the
+    ``tool_result_msg`` content — the LLM never sees it.
+
+    The two-event sequence is required (not a single combined event) so
+    existing frontend code that only knows ``tool_call_end`` keeps working;
+    UIs that opt into the hint just listen for the new event type.
+    """
+    end_event: dict[str, Any] = {
+        "type": "tool_call_end",
+        "tool": tool_name,
+        "result": result_text[:_SSE_RESULT_PREVIEW_CHARS],
+        "id": tool_id,
+        "is_error": is_error,
+        "result_summary": result_summary,
+    }
+    if extra:
+        end_event.update(extra)
+    events: list[dict[str, Any]] = [end_event]
+    if hint is not None:
+        events.append({
+            "type": "config_hint",
+            "tool_use_id": tool_id,
+            "scope": hint.scope,
+            "error_code": hint.error_code,
+            "title": hint.title,
+            "message": hint.message,
+            # Copy actions to plain dicts so downstream JSON serializers don't
+            # have to special-case the dataclass; ConfigHint.actions is already
+            # a list[dict] but we re-shallow-copy each entry to be safe against
+            # callers that mutate.
+            "actions": [dict(a) for a in hint.actions],
+        })
+    return events
 _CACHEABLE_READONLY_TOOLS = frozenset({"web_fetch", "web_search", "news_search"})
 _READONLY_EXPLORATION_TOOLS = frozenset({
     "read_file",
@@ -665,6 +732,135 @@ def _check_source_tag_consistency(
                 "\"已查到/已执行/已读到\"等动作完成短语可能不准确，请你核实。"
             )
     return None
+
+
+# 工具失败 vs 助手乐观措辞 一致性检测（参考 OpenClaw MUTATING_FAILURE_ACTION_PATTERN）。
+#
+# 设计动机：现有 _check_source_tag_consistency 只检"声明 [来源:工具] 但未调工具"；
+# 还有一类常见幻觉它检不到——**工具已执行但失败（is_error=True），LLM 却给出
+# 乐观成功措辞**（如"我已成功保存"），用户被误导。OpenClaw 用一段长 regex 把
+# mutating verb 和 failure context window 配对来贴 warning，本函数做中文等价版：
+#
+# 1. 扫描本轮 tool_results，统计 is_error=True 的工具名 / 数量。
+# 2. 如果一个失败都没有 → 无事可做，直接返回 None。
+# 3. 否则扫描 LLM 文本，看是否包含任意"失败 / 出错 / 无法 / 未能 / 报错"等
+#    中英文承认关键词。
+#    - 命中：说明 LLM 已经在文本里如实告知用户失败 → 无需 banner，返回 None。
+#    - 全部未命中 → 追加 ⚠️ 提示，让用户警惕"工具失败但措辞乐观"的幻觉。
+#
+# 关键设计取舍（与 OpenClaw 的差异）：
+# - OpenClaw 用 mutating-verb + 100-char window 做配对，精度高但 regex 复杂、
+#   维护成本高；本函数只做关键词存在性检查，false-positive 由 banner 措辞"请核对"
+#   兜底，false-negative 由其他守卫（_guard_unbacked_action_claim / verify）兜底。
+# - 不修改 LLM 原文，只追加 banner，保持与 _check_source_tag_consistency 同风格。
+_FAILURE_ACKNOWLEDGE_ZH: tuple[str, ...] = (
+    "失败",
+    "出错",
+    "出现错误",
+    "报错",
+    "错误",
+    "异常",
+    "无法",
+    "未能",
+    "没能",
+    "不能",
+    "失误",
+    "未成功",
+    "没成功",
+    "受阻",
+    "被拒",
+    "拒绝",
+    "拒绝执行",
+    "权限不足",
+    "找不到",
+    "未找到",
+    "不存在",
+)
+
+_FAILURE_ACKNOWLEDGE_EN: tuple[str, ...] = (
+    "fail",
+    "failed",
+    "failure",
+    "error",
+    "errored",
+    "unable",
+    "cannot",
+    "can't",
+    "couldn't",
+    "could not",
+    "didn't work",
+    "doesn't work",
+    "did not work",
+    "not found",
+    "denied",
+    "permission",
+    "forbidden",
+    "rejected",
+    "issue",
+    "problem",
+)
+
+
+def _check_tool_failure_acknowledgement(
+    text: str,
+    tool_results: list[dict] | None,
+) -> str | None:
+    """检测：本次任务存在最终失败的工具调用，但 LLM 文本完全没承认任何失败。
+
+    与 _check_source_tag_consistency 互补——后者抓"声明工具但未调"的伪标注幻觉；
+    本函数抓"工具失败但措辞乐观"的成功幻觉。参考 OpenClaw 的 MUTATING_FAILURE_ACTION
+    检测思路，简化为关键词存在性检查（中英双语），匹配 LLM 输出的双语场景。
+
+    **对偶约定**：与 `_successful_tool_names()` 保持一致——任一成功 receipt 视为
+    "该工具有 backing evidence"。因此一个工具被判"最终失败"的条件是：
+        - 至少有一条 is_error=True 的 receipt
+        - 且**完全没有**成功 receipt（同名工具在后续 iter 没重试成功）
+
+    这样可以避免 ReAct 多轮场景下"第 1 次失败 → 第 2 次重试成功"的**正确**
+    流程被误报。如果不做这一层聚合，banner 会在重试成功的所有正常用例里
+    持续打扰用户。
+
+    返回值：
+    - None：无最终失败 / LLM 已经承认了失败 → 无需处理
+    - str：要追加到回答末尾的警告 banner 文本
+    """
+    if not text or not tool_results:
+        return None
+
+    # 把 receipts 按工具名聚合"是否曾经成功过"——按出现顺序记录失败工具，
+    # 保留 dict insertion order 以便 banner 给出稳定的展示顺序。
+    failed_once: dict[str, int] = {}  # tool_name → 失败次数（仅用作存在性）
+    ever_succeeded: set[str] = set()
+    for tr in tool_results:
+        if not isinstance(tr, dict):
+            continue
+        tn = tr.get("tool_name") or tr.get("name") or "(未知工具)"
+        if tr.get("is_error"):
+            failed_once[tn] = failed_once.get(tn, 0) + 1
+        else:
+            ever_succeeded.add(tn)
+
+    failed_tools = [name for name in failed_once if name not in ever_succeeded]
+    if not failed_tools:
+        return None
+
+    if any(kw in text for kw in _FAILURE_ACKNOWLEDGE_ZH):
+        return None
+
+    text_lower = text.lower()
+    if any(kw in text_lower for kw in _FAILURE_ACKNOWLEDGE_EN):
+        return None
+
+    fail_summary = "、".join(failed_tools[:5])
+    if len(failed_tools) > 5:
+        fail_summary += f" 等 {len(failed_tools)} 个"
+
+    return (
+        "\n\n---\n"
+        f"⚠️ **系统检测**：本次任务中有 {len(failed_tools)} 个工具调用以失败告终"
+        f"（{fail_summary}），但上述回答未提及任何失败 / 错误。"
+        "请你核对结果，必要时让我重试或换种方式。"
+    )
 
 
 _CLAIMED_TOOL_TO_FRAGMENTS: dict[str, tuple[str, ...]] = {
@@ -1455,6 +1651,39 @@ class ReasoningEngine:
                     )
                     item["compacted_after_token_anomaly"] = True
 
+    @staticmethod
+    def _is_pending_confirm_result(result: Any) -> bool:
+        """True when a tool_result represents a CONFIRM placeholder.
+
+        PolicyEngineV2 → ToolExecutor 拦截到 CONFIRM 决策时会返回一个
+        ``is_error=True`` 的占位 tool_result。两条等价路径：
+
+        * 有人值守 / 兜底 confirm：dict 带 ``_security_confirm`` metadata，
+          body 是"⚠️ 需要用户确认 …"。
+        * 无人值守 unattended_strategy（``ask_owner`` / ``defer_to_inbox`` /
+          ``defer_to_owner``）：dict 带 ``_deferred_approval_id``，body 是
+          "⏸️ 工具调用 ... 需要 owner 批准 ..."。
+
+        从 ReAct 的角度，这不是"工具失败"，而是"工具被推迟到用户/owner
+        决策之后"，不应被记入 ``_tool_failure_counter`` 或触发
+        ``本轮所有工具调用均失败`` 的回滚——否则 LLM 会反复重试同一条
+        调用、被 Supervisor 当成死循环终止，或者整个组织 chain 被回滚到
+        不可恢复的位置。
+        """
+        if not isinstance(result, dict):
+            return False
+        if result.get("_security_confirm"):
+            return True
+        if result.get("_deferred_approval_id"):
+            return True
+        content = str(result.get("content", ""))
+        return (
+            "⚠️ 需要用户确认" in content
+            or "已向用户发送确认请求" in content
+            or "需要 owner 批准" in content
+            or content.startswith("⏸️")
+        )
+
     def _should_rollback(
         self,
         tool_results: list[dict],
@@ -1471,6 +1700,9 @@ class ReasoningEngine:
         ``tool_results`` 对齐），用于把 plan/todo 家族工具的 ❌ 入参校验
         反馈从"批失败"中剔除——否则只调用了一个 update_todo_step 又恰好
         触发了字段校验提示，就会被算作"本轮所有工具调用均失败"而触发回滚。
+
+        CONFIRM 占位（``_security_confirm`` metadata）也跳过批失败统计：
+        这类结果代表"等用户/owner 决策"，不是工具失败本身。
 
         Returns:
             (should_rollback, reason)
@@ -1494,6 +1726,10 @@ class ReasoningEngine:
             # 避免回滚注入"请尝试完全不同的方法"覆盖工具的"禁止替代"指引
             if "[行为指引]" in content:
                 return False, ""
+
+            # CONFIRM 占位不是失败，是"等用户决策"。从批失败统计里剔除。
+            if self._is_pending_confirm_result(result):
+                continue
 
             # Plan/todo 家族工具的 ❌ 是 schema 校验提示，不计入批失败
             if tool_calls and i < len(tool_calls):
@@ -2461,7 +2697,17 @@ class ReasoningEngine:
                         if other_receipts:
                             delivery_receipts = other_receipts
                             self._last_delivery_receipts = other_receipts
-                        # 保留其他工具的 tool_result 内容
+                        # ``run()`` is the non-streaming path (CLI / single-shot
+                        # API): there is no SSE channel to forward hints on, so
+                        # we drop them. We MUST still pop the ``_hint`` field
+                        # to keep it out of LLM history (``working_messages``).
+                        # Streaming paths (``reason_stream`` / ``run_stream``)
+                        # have their own pop-and-yield logic that surfaces the
+                        # hint as a ``config_hint`` SSE event.
+                        if other_results:
+                            for _tr in other_results:
+                                if isinstance(_tr, dict):
+                                    _tr.pop("_hint", None)
                         other_tool_results = other_results if other_results else []
                         all_tool_results.extend(other_tool_results)
                     if _mode_blocked_results:
@@ -2719,6 +2965,15 @@ class ReasoningEngine:
                     allow_interrupt_checks=self._state.interrupt_enabled,
                     capture_delivery_receipts=True,
                 )
+                # ``run()`` is non-streaming — no SSE channel to forward hints
+                # on. Drop the ``_hint`` field after popping so it never reaches
+                # ``working_messages`` (LLM history). Streaming paths
+                # (``reason_stream`` / ``run_stream``) yield ``config_hint``
+                # events from their own pop sites.
+                if tool_results:
+                    for _tr in tool_results:
+                        if isinstance(_tr, dict):
+                            _tr.pop("_hint", None)
                 _deferred_results = [
                     tr
                     for tr in tool_results
@@ -2788,8 +3043,10 @@ class ReasoningEngine:
                     _tc_name = tc.get("name", "")
                     result_content = ""
                     is_error = False
+                    raw_result: Any = None
                     if i < len(tool_results):
-                        r = tool_results[i]
+                        raw_result = tool_results[i]
+                        r = raw_result
                         result_content = (
                             str(r.get("content", "")) if isinstance(r, dict) else str(r)
                         )
@@ -2801,14 +3058,23 @@ class ReasoningEngine:
                             m in result_content
                             for m in ["❌", "⚠️ 工具执行错误", "错误类型:", "⚠️ 策略拒绝:"]
                         )
-                    self._record_tool_result(
-                        _tc_name,
-                        success=not is_error,
-                        tool_args=tc.get("input", tc.get("arguments", {})),
-                    )
+                    pending_confirm = self._is_pending_confirm_result(raw_result)
+                    if not pending_confirm:
+                        # CONFIRM 占位不是工具失败，不更新失败计数器；
+                        # 否则同一个 org_freeze_node 调用会被一个"等审批"占位
+                        # 连刷 3 次失败 → 触发回滚到不可恢复的位置。
+                        self._record_tool_result(
+                            _tc_name,
+                            success=not is_error,
+                            tool_args=tc.get("input", tc.get("arguments", {})),
+                        )
                     _r_summary = self._summarize_tool_result(_tc_name, result_content)
                     if _r_summary:
-                        _icon = "❌" if is_error else "✅"
+                        _icon = (
+                            "🕒"
+                            if pending_confirm
+                            else ("❌" if is_error else "✅")
+                        )
                         await _emit_progress(f"{_icon} {_r_summary}")
 
                 if receipts:
@@ -4582,6 +4848,7 @@ class ReasoningEngine:
                                         _confirm_timeout,
                                     )
                                     _bus.cleanup(t_id)
+                                _hint: ConfigHint | None = None
                                 if _decision in (
                                     "allow",
                                     "allow_once",
@@ -4595,7 +4862,7 @@ class ReasoningEngine:
                                         # via ``getattr``——duck-typed across v1/v2.
                                         from .policy_v2.models import PolicyDecisionV2 as _PD2
 
-                                        r = await self._tool_executor.execute_tool_with_policy(
+                                        _raw = await self._tool_executor.execute_tool_with_policy(
                                             tool_name=t_name,
                                             tool_input=t_args if isinstance(t_args, dict) else {},
                                             policy_result=_PD2(
@@ -4609,7 +4876,7 @@ class ReasoningEngine:
                                             ),
                                             session_id=conversation_id,
                                         )
-                                        r = str(r) if r else ""
+                                        r, _hint = _unpack_tool_result(_raw)
                                         _tool_is_error = False
                                     except Exception as exc:
                                         r = f"Tool error after security confirmation: {exc}"
@@ -4623,26 +4890,28 @@ class ReasoningEngine:
                                 _security_confirm_interrupted_ask = True
                             else:
                                 _tool_is_error = False
+                                _hint = None
                                 try:
-                                    r = await self._tool_executor.execute_tool_with_policy(
+                                    _raw = await self._tool_executor.execute_tool_with_policy(
                                         tool_name=t_name,
                                         tool_input=t_args if isinstance(t_args, dict) else {},
                                         policy_result=_pr,
                                         session_id=conversation_id,
                                     )
-                                    r = str(r) if r else ""
+                                    r, _hint = _unpack_tool_result(_raw)
                                 except Exception as exc:
                                     r = f"Tool error: {exc}"
                                     _tool_is_error = True
                             _ask_result_summary = self._summarize_tool_result(t_name, r)
-                            yield {
-                                "type": "tool_call_end",
-                                "tool": t_name,
-                                "result": r[:_SSE_RESULT_PREVIEW_CHARS],
-                                "id": t_id,
-                                "is_error": _tool_is_error,
-                                "result_summary": _ask_result_summary or "",
-                            }
+                            for _evt in _build_tool_end_events(
+                                tool_name=t_name,
+                                tool_id=t_id,
+                                result_text=r,
+                                hint=_hint,
+                                is_error=_tool_is_error,
+                                result_summary=_ask_result_summary or "",
+                            ):
+                                yield _evt
                             # chain_text: 结果摘要
                             if _ask_result_summary:
                                 yield {"type": "chain_text", "content": _ask_result_summary}
@@ -5104,13 +5373,14 @@ class ReasoningEngine:
                                 "allow_always",
                                 "sandbox",
                             )
+                            _confirm_hint: ConfigHint | None = None
                             if _confirmed_allowed:
                                 try:
                                     # C8b-6a: pass v2 PolicyDecisionV2 directly (duck-typed
                                     # with v1 PolicyResult on ``.metadata``).
                                     from .policy_v2.models import PolicyDecisionV2 as _PD2
 
-                                    result_text = await self._tool_executor.execute_tool_with_policy(
+                                    _raw = await self._tool_executor.execute_tool_with_policy(
                                         tool_name=tool_name,
                                         tool_input=_tool_args_dict,
                                         policy_result=_PD2(
@@ -5123,7 +5393,7 @@ class ReasoningEngine:
                                         ),
                                         session_id=conversation_id,
                                     )
-                                    result_text = str(result_text) if result_text else ""
+                                    result_text, _confirm_hint = _unpack_tool_result(_raw)
                                     _confirm_is_error = False
                                 except Exception as exc:
                                     result_text = f"Tool error after security confirmation: {exc}"
@@ -5134,14 +5404,15 @@ class ReasoningEngine:
                                     "不要再执行该操作，请选择安全替代方案或说明无法继续。"
                                 )
                                 _confirm_is_error = True
-                            yield {
-                                "type": "tool_call_end",
-                                "tool": tool_name,
-                                "result": result_text[:_SSE_RESULT_PREVIEW_CHARS],
-                                "id": tool_id,
-                                "is_error": _confirm_is_error,
-                                "result_summary": self._summarize_tool_result(tool_name, result_text) or "",
-                            }
+                            for _evt in _build_tool_end_events(
+                                tool_name=tool_name,
+                                tool_id=tool_id,
+                                result_text=result_text,
+                                hint=_confirm_hint,
+                                is_error=_confirm_is_error,
+                                result_summary=self._summarize_tool_result(tool_name, result_text) or "",
+                            ):
+                                yield _evt
                             tool_results_for_msg.append(
                                 {
                                     "type": "tool_result",
@@ -5157,6 +5428,11 @@ class ReasoningEngine:
 
                         # 将工具执行与 cancel_event / skip_event 三路竞速
                         # 注意: 不在此处 clear_skip()，让已到达的 skip 信号自然被竞速消费
+                        # ``_stream_hint`` 仅在 tool_exec_task 自然完成且 handler
+                        # 抛 ToolConfigError 时非 None；cancel/skip/timeout 路径
+                        # 显式置 None（policy: side-channel hint 只反映 handler
+                        # 内部产生的可纠正配置问题，不污染 user-initiated 中断）。
+                        _stream_hint: ConfigHint | None = None
                         try:
                             tool_exec_task = asyncio.create_task(
                                 self._tool_executor.execute_tool_with_policy(
@@ -5200,8 +5476,10 @@ class ReasoningEngine:
                                     f"[SkipStep-Stream] Tool {tool_name} skipped: {_skip_reason}"
                                 )
                             elif tool_exec_task in done_set:
-                                result_text = tool_exec_task.result()
-                                result_text = str(result_text) if result_text else ""
+                                # task.result() 现在是 (text, hint) 元组
+                                result_text, _stream_hint = _unpack_tool_result(
+                                    tool_exec_task.result()
+                                )
                                 self._remember_readonly_tool_result(
                                     tool_name,
                                     tool_args,
@@ -5230,26 +5508,29 @@ class ReasoningEngine:
                                 }
                             session.context.handoff_events.clear()
                         _end_result_summary = self._summarize_tool_result(tool_name, result_text) or ""
-                        # 跳过时发送 tool_call_skipped 事件通知前端
+                        # 跳过 / 取消 / 超时 路径 hint 已显式置 None；只有正常完成
+                        # 路径才会带着 _stream_hint（由 ToolConfigError 触发）。
                         if _stream_skipped:
-                            yield {
-                                "type": "tool_call_end",
-                                "tool": tool_name,
-                                "result": result_text[:_SSE_RESULT_PREVIEW_CHARS],
-                                "id": tool_id,
-                                "skipped": True,
-                                "is_error": False,
-                                "result_summary": _end_result_summary,
-                            }
+                            for _evt in _build_tool_end_events(
+                                tool_name=tool_name,
+                                tool_id=tool_id,
+                                result_text=result_text,
+                                hint=None,
+                                is_error=False,
+                                result_summary=_end_result_summary,
+                                extra={"skipped": True},
+                            ):
+                                yield _evt
                         else:
-                            yield {
-                                "type": "tool_call_end",
-                                "tool": tool_name,
-                                "result": result_text[:_SSE_RESULT_PREVIEW_CHARS],
-                                "id": tool_id,
-                                "is_error": _tool_is_error,
-                                "result_summary": _end_result_summary,
-                            }
+                            for _evt in _build_tool_end_events(
+                                tool_name=tool_name,
+                                tool_id=tool_id,
+                                result_text=result_text,
+                                hint=_stream_hint if not _stream_cancelled else None,
+                                is_error=_tool_is_error,
+                                result_summary=_end_result_summary,
+                            ):
+                                yield _evt
 
                         if _stream_cancelled:
                             tool_results_for_msg.append(
@@ -5482,12 +5763,19 @@ class ReasoningEngine:
                             self._budget.record_tool_calls(len(_non_denied_tool_names))
 
                         # 记录工具成功/失败状态（遍历 decision.tool_calls 保持索引对齐，
-                        # 包含策略拒绝的工具，与 run() 一致）
+                        # 包含策略拒绝的工具，与 run() 一致）。
+                        # CONFIRM 占位（``_security_confirm`` metadata）跳过统计，
+                        # 不计入失败计数器，避免后续被错误判定为"连续失败"或
+                        # "本轮全失败"触发回滚。
                         for i, tc_rec in enumerate(decision.tool_calls):
                             _tc_name = tc_rec.get("name", "")
                             r_content = ""
+                            raw_r: Any = None
                             if i < len(tool_results_for_msg):
-                                r_content = str(tool_results_for_msg[i].get("content", ""))
+                                raw_r = tool_results_for_msg[i]
+                                r_content = str(raw_r.get("content", "")) if isinstance(raw_r, dict) else str(raw_r)
+                            if self._is_pending_confirm_result(raw_r):
+                                continue
                             is_error = any(
                                 m in r_content
                                 for m in ["❌", "⚠️ 工具执行错误", "错误类型:", "⚠️ 策略拒绝:"]
@@ -7244,6 +7532,14 @@ class ReasoningEngine:
                 )
 
                 if is_completed:
+                    # P0-2 阶段 4：工具失败 vs 助手乐观措辞 一致性检测（成功路径 belt）
+                    # verify=completed 说明任务整体被判完成，但单步工具失败可能被
+                    # LLM 用乐观措辞掩盖。此处补一道 banner 提醒用户核对。
+                    failure_warning = _check_tool_failure_acknowledgement(
+                        cleaned_text, all_tool_results
+                    )
+                    if failure_warning:
+                        return cleaned_text + failure_warning
                     return cleaned_text
 
                 verify_incomplete_count += 1

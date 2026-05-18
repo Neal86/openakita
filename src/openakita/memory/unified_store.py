@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,12 @@ from .types import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# (event_kind, payload)
+# - kind="upsert", payload=SemanticMemory  (post-save or post-update, fresh state)
+# - kind="delete", payload=memory_id (str)
+StoreObserver = Callable[[str, Any], None]
 
 
 class UnifiedStore:
@@ -57,6 +65,48 @@ class UnifiedStore:
         self._fts5_fallback: FTS5Backend | None = None
         if self.search.backend_type != "fts5":
             self._fts5_fallback = FTS5Backend(self.db)
+
+        # Observer list — any code that wants to mirror semantic-memory state
+        # (e.g. MemoryManager._memories cache) registers here. Observers are
+        # invoked synchronously after the DB write commits, but *outside* of
+        # MemoryStorage's lock; each observer is responsible for its own
+        # thread-safety. Exceptions in one observer never affect the write or
+        # other observers.
+        self._observers: list[StoreObserver] = []
+        self._observer_lock = threading.Lock()
+
+    # ======================================================================
+    # Observer hooks
+    # ======================================================================
+
+    def register_observer(self, fn: StoreObserver) -> None:
+        """Register a callback fired after every committed semantic write.
+
+        Callable signature: ``fn(kind, payload)`` where ``kind`` is
+        ``"upsert"`` (payload is the persisted ``SemanticMemory``) or
+        ``"delete"`` (payload is the deleted ``memory_id`` string).
+
+        Registrations are additive; no de-duplication. Caller owns lifecycle
+        (there is no ``unregister`` because the only producer of observers is
+        ``MemoryManager``, which lives for the process).
+        """
+        with self._observer_lock:
+            self._observers.append(fn)
+
+    def _fire(self, kind: str, payload: Any) -> None:
+        """Snapshot observers under lock, then invoke each without holding it."""
+        with self._observer_lock:
+            observers = tuple(self._observers)
+        for fn in observers:
+            try:
+                fn(kind, payload)
+            except Exception as exc:  # noqa: BLE001 - observers must never break writes
+                logger.debug(
+                    "[UnifiedStore] observer %s raised on %s: %s",
+                    getattr(fn, "__qualname__", repr(fn)),
+                    kind,
+                    exc,
+                )
 
     @staticmethod
     def _is_active_dict(memory: dict) -> bool:
@@ -121,6 +171,10 @@ class UnifiedStore:
                 "tags": memory.tags,
             },
         )
+        # Cache mirrors (MemoryManager._memories) and any other downstream
+        # state get synced via this fire. Dedup short-circuit above returns
+        # before this point intentionally — duplicates do not change cache.
+        self._fire("upsert", memory)
         return memory.id
 
     def _check_semantic_duplicate(
@@ -171,8 +225,10 @@ class UnifiedStore:
 
     def update_semantic(self, memory_id: str, updates: dict) -> bool:
         ok = self.db.update_memory(memory_id, updates)
+        if not ok:
+            return False
         reindex_fields = {"content", "type", "priority", "importance_score", "tags"}
-        if ok and reindex_fields.intersection(updates):
+        if reindex_fields.intersection(updates):
             self.search.delete(memory_id)
             mem = self.db.get_memory(memory_id)
             if mem and self._is_active_dict(mem):
@@ -186,17 +242,34 @@ class UnifiedStore:
                         "tags": mem.get("tags", []),
                     },
                 )
-        return ok
+        # Re-fetch as SemanticMemory so observers see the new state. If the
+        # update marked the row as superseded / expired, the active-only fetch
+        # returns None and we fire ``delete`` instead — observers treat both
+        # as "this id is no longer visible".
+        fresh = self.get_semantic(memory_id)
+        if fresh is not None:
+            self._fire("upsert", fresh)
+        else:
+            self._fire("delete", memory_id)
+        return True
 
     def delete_semantic(self, memory_id: str) -> bool:
         self.search.delete(memory_id)
-        return self.db.delete_memory(memory_id)
+        ok = self.db.delete_memory(memory_id)
+        if ok:
+            self._fire("delete", memory_id)
+        return ok
 
     def cleanup_expired(self) -> int:
         expired_ids = self.db.get_expired_memory_ids()
         count = self.db.cleanup_expired()
         for memory_id in expired_ids:
             self.search.delete(memory_id)
+            # Each expired row is gone from DB & search; tell observers so
+            # they stop returning ghosts. count may be < len(expired_ids) on
+            # partial cleanups but firing per-id is still correct (no-op for
+            # observers if the id was already absent).
+            self._fire("delete", memory_id)
         return count
 
     def bump_access(self, memory_ids: list[str]) -> None:
@@ -437,8 +510,17 @@ class UnifiedStore:
         rows = self.db.search_episodes(**kwargs)
         return [Episode.from_dict(r) for r in rows]
 
-    def get_recent_episodes(self, days: int = 7, limit: int = 10) -> list[Episode]:
-        return self.search_episodes(days=days, limit=limit)
+    def get_recent_episodes(
+        self,
+        days: int = 7,
+        limit: int = 10,
+        *,
+        user_id: str | None = None,
+        workspace_id: str | None = None,
+    ) -> list[Episode]:
+        return self.search_episodes(
+            days=days, limit=limit, user_id=user_id, workspace_id=workspace_id
+        )
 
     def update_episode(self, episode_id: str, updates: dict) -> bool:
         return self.db.update_episode(episode_id, updates)
@@ -456,6 +538,75 @@ class UnifiedStore:
 
     def save_scratchpad(self, scratchpad: Scratchpad) -> None:
         self.db.save_scratchpad(scratchpad.to_dict())
+
+    # ======================================================================
+    # Session Tenants (v4) — lifecycle 反查租户用
+    # ======================================================================
+
+    def upsert_session_tenant(
+        self, session_id: str, user_id: str, workspace_id: str
+    ) -> None:
+        self.db.upsert_session_tenant(session_id, user_id, workspace_id)
+
+    def get_session_tenant(self, session_id: str) -> tuple[str, str] | None:
+        return self.db.get_session_tenant(session_id)
+
+    def list_known_tenants(self) -> list[tuple[str, str]]:
+        return self.db.list_known_tenants()
+
+    def iter_owned_session_ids(
+        self,
+        *,
+        user_id: str,
+        workspace_id: str | None = None,
+    ) -> list[str]:
+        return self.db.iter_owned_session_ids(user_id=user_id, workspace_id=workspace_id)
+
+    def migrate_workspace_id(
+        self,
+        *,
+        from_workspace_id: str,
+        to_workspace_id: str,
+        user_id: str,
+        scope: str = "user",
+    ) -> int:
+        return self.db.migrate_workspace_id(
+            from_workspace_id=from_workspace_id,
+            to_workspace_id=to_workspace_id,
+            user_id=user_id,
+            scope=scope,
+        )
+
+    def record_scope_audit(
+        self,
+        memory_id: str,
+        *,
+        old_scope: str,
+        new_scope: str,
+        reason: str,
+        old_user_id: str = "",
+        new_user_id: str = "",
+        migration_version: str = "runtime",
+    ) -> None:
+        self.db.record_scope_audit(
+            memory_id,
+            old_scope=old_scope,
+            new_scope=new_scope,
+            reason=reason,
+            old_user_id=old_user_id,
+            new_user_id=new_user_id,
+            migration_version=migration_version,
+        )
+
+    # ======================================================================
+    # _schema_meta 通用键值（持久化 sentinel 用）
+    # ======================================================================
+
+    def get_meta(self, key: str) -> str | None:
+        return self.db.get_meta(key)
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.db.set_meta(key, value)
 
     # ======================================================================
     # Conversation Turns

@@ -252,6 +252,7 @@ class OrgRuntime:
         # 产生的真实附件重复落盘。
         # key = "{org_id}:{node_id}"（与 _node_last_activity 对齐），值 = int。
         self._node_files_registered_in_task: dict[str, int] = {}
+        self._node_file_attachments_in_task: dict[str, list[dict]] = {}
 
         # 工作台节点：本任务内由 plugin tool hook 自动登记的附件清单。
         # _record_plugin_asset_output 成功 register 时 append，
@@ -329,6 +330,59 @@ class OrgRuntime:
     def _release_tool_inflight(self, key: str) -> None:
         """释放工具在途锁；幂等。"""
         self._tool_inflight_keys.pop(key, None)
+
+    def _org_setting(
+        self,
+        org_or_id: Any,
+        key: str,
+        default: Any,
+    ) -> Any:
+        """Look up a per-org tunable, falling back to a global default.
+
+        Reads from ``Organization.runtime_overrides[key]`` when the
+        organization has one defined, otherwise returns ``default``.
+        Unknown ids / missing keys / type-mismatched values silently
+        fall back so a typo in ``org.json`` cannot brick the runtime.
+
+        This is the single read-point for per-org runtime tunables —
+        callers must NOT poke ``org.runtime_overrides`` directly so we
+        can keep the contract (default fall-back, type coercion) in
+        one place.
+
+        Args:
+            org_or_id: An ``Organization`` instance or its id string.
+            key: The override key to read (e.g. ``"command_timeout_secs"``).
+            default: The fallback value when the override is missing.
+
+        Returns:
+            The override value coerced to ``type(default)`` when
+            possible; otherwise ``default``.
+        """
+        try:
+            org = self.get_org(org_or_id) if isinstance(org_or_id, str) else org_or_id
+            if org is None:
+                return default
+            ro = getattr(org, "runtime_overrides", None) or {}
+            if key not in ro:
+                return default
+            raw = ro[key]
+            if raw is None:
+                return default
+            if isinstance(default, bool):
+                return bool(raw)
+            if isinstance(default, int) and not isinstance(default, bool):
+                try:
+                    return int(raw)
+                except (TypeError, ValueError):
+                    return default
+            if isinstance(default, float):
+                try:
+                    return float(raw)
+                except (TypeError, ValueError):
+                    return default
+            return raw
+        except Exception:
+            return default
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1401,6 +1455,7 @@ class OrgRuntime:
             # 都会让该 counter +1。auto-persist 兜底仅在 counter==0 时触发，
             # 杜绝"LLM 已自己写过文件 + 系统又兜底落盘"的双写。
             self._node_files_registered_in_task[cache_key] = 0
+            self._node_file_attachments_in_task[cache_key] = []
             # plugin hook 登记附件缓冲清零：本任务内由 _record_plugin_asset_output
             # 产生的附件会累计到这里，供 _handle_org_submit_deliverable 在 LLM
             # 未传 file_attachments 时自动取用。
@@ -1447,7 +1502,7 @@ class OrgRuntime:
             #      在要"附件/文件类"成果，否则强行落盘是噪音；
             #   3. 本任务内 _register_file_output 计数 == 0 —— LLM 没自己
             #      产出过任何文件（写过的不重复）；
-            #   4. result_text 是有意义的长文（≥200 字符）—— 短回复落盘
+            #   4. result_text 是有意义的正文（由 tool_handler 阈值把关）—— 短回复落盘
             #      只会污染 workspace。
             # 任何异常仅 warning，不影响主流程。
             persisted_attachment: dict | None = None
@@ -1468,7 +1523,8 @@ class OrgRuntime:
                 and expects_artifact
                 and files_registered == 0
                 and isinstance(result_text, str)
-                and len(result_text.strip()) >= 200
+                and len(result_text.strip())
+                >= self._tool_handler._FINAL_ANSWER_AUTO_PERSIST_MIN_CHARS
             ):
                 try:
                     workspace_for_persist = self._resolve_org_workspace(org)
@@ -1777,6 +1833,15 @@ class OrgRuntime:
 
             is_root = (node.level == 0 or not org.get_parent(node.id))
             if is_root:
+                visible_attachments = self._node_file_attachments_in_task.get(cache_key, [])
+                if persisted_attachment is not None and not any(
+                    str(a.get("file_path") or "").lower() == str(
+                        persisted_attachment.get("file_path") or ""
+                    ).lower()
+                    for a in visible_attachments
+                    if isinstance(a, dict)
+                ):
+                    visible_attachments = [*visible_attachments, persisted_attachment]
                 # 只有来源属于"用户可见终态"的激活才允许写入 _latest_root_result。
                 # 见 _origin_from_msg_type 与 _FINAL_RESULT_ORIGINS：
                 # - user_command：send_command 下发的首次激活
@@ -1797,6 +1862,7 @@ class OrgRuntime:
                     origin=origin,
                     is_normal=is_normal,
                     exit_reason=exit_reason,
+                    file_attachments=visible_attachments or None,
                 )
 
             # 非正常结束时不触发 post-task hook（避免把"部分/失败结果"再次下发下游）；
@@ -1810,6 +1876,8 @@ class OrgRuntime:
                 "exit_reason": exit_reason,
                 **tool_stats,
             }
+            if persisted_attachment is not None:
+                return_payload["file_attachments"] = [persisted_attachment]
             if diagnosis:
                 return_payload["diagnosis"] = diagnosis
             if is_soft_verify:
@@ -1986,12 +2054,92 @@ class OrgRuntime:
         self, agent: Any, prompt: str, session_id: str,
         org: Organization, node: OrgNode,
     ) -> str:
-        """Run a single agent task (no timeout wrapper)."""
+        """Run a single agent task (with per-node runtime_overrides).
+
+        Honours two optional knobs from ``OrgNode.runtime_overrides``
+        (falling back to ``Organization.runtime_overrides`` for
+        ``max_iterations`` only — wall-clock timeouts are intentionally
+        node-scoped):
+
+        * ``max_iterations`` (int): caps the ReAct loop count for THIS
+          delegated task by setting ``reasoning_engine._max_iterations_override``.
+          The override is consumed in one chat call (see
+          ``reasoning_engine.py``) so subsequent reuse of the cached
+          agent is unaffected.
+        * ``max_task_seconds`` (int): wraps ``agent.chat`` in
+          ``asyncio.wait_for`` so a stuck plugin / network hang cannot
+          burn the whole user command. On timeout we treat it as a
+          retryable cancellation rather than a hard failure.
+
+        Nodes (or organizations) without these keys keep exactly the
+        legacy ``await agent.chat(...)`` behaviour.
+        """
         from openakita.core.errors import UserCancelledError
 
+        node_ro = getattr(node, "runtime_overrides", None) or {}
+        org_ro = getattr(org, "runtime_overrides", None) or {}
+
+        max_iter = node_ro.get("max_iterations")
+        if max_iter is None:
+            max_iter = org_ro.get("max_iterations")
         try:
-            response = await agent.chat(prompt, session_id=session_id)
+            max_iter_int = int(max_iter) if max_iter is not None else None
+        except (TypeError, ValueError):
+            max_iter_int = None
+        if (
+            max_iter_int and max_iter_int > 0
+            and hasattr(agent, "reasoning_engine")
+        ):
+            try:
+                agent.reasoning_engine._max_iterations_override = max_iter_int
+            except Exception:
+                logger.debug(
+                    "[OrgRuntime] failed to apply max_iterations override "
+                    "for %s:%s", org.id, node.id, exc_info=True,
+                )
+
+        max_task_seconds = node_ro.get("max_task_seconds")
+        try:
+            max_task_seconds_f: float | None = (
+                float(max_task_seconds)
+                if max_task_seconds is not None and float(max_task_seconds) > 0
+                else None
+            )
+        except (TypeError, ValueError):
+            max_task_seconds_f = None
+
+        try:
+            if max_task_seconds_f is not None:
+                response = await asyncio.wait_for(
+                    agent.chat(prompt, session_id=session_id),
+                    timeout=max_task_seconds_f,
+                )
+            else:
+                response = await agent.chat(prompt, session_id=session_id)
             return response or ""
+        except TimeoutError:
+            logger.warning(
+                "[OrgRuntime] Task wall-clock timeout (max_task_seconds=%s) "
+                "for %s:%s — returning soft-failure marker",
+                max_task_seconds_f, org.id, node.id,
+            )
+            chain_id = self.get_current_chain_id(org.id, node.id)
+            if chain_id:
+                try:
+                    from openakita.orgs.models import TaskStatus
+                    from openakita.orgs.project_store import ProjectStore
+                    store = ProjectStore(self._manager._org_dir(org.id))
+                    task = store.find_task_by_chain(chain_id)
+                    if task and task.status == TaskStatus.IN_PROGRESS:
+                        store.update_task(task.project_id, task.id, {
+                            "status": TaskStatus.CANCELLED,
+                        })
+                except Exception as e:
+                    logger.debug(
+                        "[OrgRuntime] Failed to mark task cancelled on timeout: %s",
+                        e,
+                    )
+            return f"(节点 {node.id} 任务超时 {int(max_task_seconds_f)}s 自动终止)"
         except (asyncio.CancelledError, UserCancelledError) as cancel_err:
             logger.info(f"[OrgRuntime] Task cancelled for {node.id}: {type(cancel_err).__name__}")
             chain_id = self.get_current_chain_id(org.id, node.id)
@@ -2139,6 +2287,36 @@ class OrgRuntime:
                 "write_file", "read_file", "edit_file", "list_directory",
             }
 
+        # P7.4: per-node ``runtime_overrides.allowed_tools / denied_tools``.
+        # Semantics chosen so AIGC-style overrides actually take effect:
+        #   - allowed_tools (list[str], non-empty): becomes the explicit
+        #     non-org / non-_KEEP allow-list. We DROP the default
+        #     ``allowed_external`` and rebuild it from allowed_tools — this
+        #     lets a coordinator node (whose default allowed_external is
+        #     empty) opt back into write_file / read_file without us also
+        #     having to alter every category mapping.
+        #   - denied_tools (list[str]): subtracted from the final
+        #     allowed_external. Useful when a node mostly wants the
+        #     category default but with a couple of tools removed.
+        # Both fields are advisory: org_* tools (delegate / accept / etc.)
+        # and the ``_KEEP`` planning helpers are unaffected so the node
+        # can still participate in the orchestration protocol.
+        _ro = getattr(node, "runtime_overrides", None) or {}
+        _ro_allow = _ro.get("allowed_tools")
+        if isinstance(_ro_allow, list) and _ro_allow:
+            allow_set = {
+                t for t in _ro_allow
+                if isinstance(t, str) and t
+                and not t.startswith("org_")
+                and t not in _KEEP
+            }
+            allowed_external = allow_set
+        _ro_deny = _ro.get("denied_tools")
+        if isinstance(_ro_deny, list) and _ro_deny:
+            allowed_external = allowed_external - {
+                t for t in _ro_deny if isinstance(t, str) and t
+            }
+
         per_node_tools = build_org_node_tools(org, node)
         per_node_by_name: dict[str, dict] = {t["name"]: t for t in per_node_tools}
 
@@ -2245,9 +2423,58 @@ class OrgRuntime:
                 0, int(getattr(_settings, "force_tool_call_max_retries", 0))
             )
 
+        # 组织节点是自治 AI Agent，没有人挂在交互回路里——预先建立一个
+        # ``is_unattended=True`` 的 CLI Session，让 PolicyEngineV2 step 11 的
+        # unattended 分支能正常工作；否则 org_* 工具的 CONFIRM 决策会一直没人
+        # 应答，整个任务卡在"等用户确认"的死路径。
+        # 同时把 channel 标成 ``org``，便于 audit log 区分内部 RPC 与 desktop。
+        self._prepare_unattended_session(agent, org, node)
+
         self._register_org_tool_handler(agent, org.id, node.id)
 
         return agent
+
+    @staticmethod
+    def _prepare_unattended_session(
+        agent: Any, org: Organization, node: OrgNode
+    ) -> None:
+        """Pre-create the agent's CLI session marked as unattended.
+
+        Organization nodes are autonomous AI agents — no human is waiting to
+        click "Allow" in the UI. Without this flag, PolicyEngineV2 step 12
+        terminates any UNKNOWN/CONTROL_PLANE/EXEC_CAPABLE call with a
+        synthetic "⚠️ 需要用户确认" tool_result, which the ReAct loop counts
+        as failure and rolls back — so org_delegate_task / org_send_message
+        / org_write_blackboard etc. all die at the first invocation.
+
+        Setting ``is_unattended=True`` routes the same calls to step 11's
+        unattended strategy (auto_approve / defer_to_owner depending on
+        config), unblocking the autonomous loop. We also set the channel to
+        ``org:{org_id}`` so audit logs can distinguish intra-org RPC from
+        user-driven desktop calls.
+        """
+        try:
+            from ..sessions.session import Session
+
+            sess = Session.create(
+                channel=f"org:{org.id}",
+                chat_id=f"node:{node.id}",
+                user_id=f"agent:{node.id}",
+            )
+            sess.is_unattended = True
+            sess.unattended_strategy = ""
+            sess.set_metadata("channel", f"org:{org.id}")
+            sess.set_metadata("is_unattended", True)
+            sess.set_metadata("org_id", org.id)
+            sess.set_metadata("node_id", node.id)
+            sess.set_metadata("_memory_manager", agent.memory_manager)
+            agent._cli_session = sess
+        except Exception:
+            logger.debug(
+                "[OrgRuntime] failed to pre-create unattended session "
+                "for node %s in org %s",
+                node.id, org.id, exc_info=True,
+            )
 
     @staticmethod
     def _build_workbench_prompt_section(
@@ -4279,6 +4506,7 @@ class OrgRuntime:
         origin: str,
         is_normal: bool,
         exit_reason: str,
+        file_attachments: list[dict] | None = None,
     ) -> dict | None:
         """Cache the best root-node answer that is safe to show to the user.
 
@@ -4318,6 +4546,8 @@ class OrgRuntime:
             }
 
         if payload is not None:
+            if file_attachments:
+                payload["file_attachments"] = list(file_attachments)
             self._latest_root_result[org_id] = payload
         return payload
 
@@ -4349,9 +4579,22 @@ class OrgRuntime:
             return v
 
         # 软看门狗只关注连续无真实进展，不限制有持续产出的长任务。
-        warn_secs = _cfg("org_command_stuck_warn_secs", 900)
-        autostop_secs = _cfg("org_command_stuck_autostop_secs", 3600)
-        hard_cap = _cfg("org_command_timeout_secs", 0)
+        # 全局默认从 settings 读；当 org 在 runtime_overrides 里给出更激进
+        # 的阈值（如 AIGC 工作室希望 120s 就告警，30 分钟硬截止），用
+        # ``_org_setting`` 覆盖回来。其他组织 runtime_overrides 为空时，
+        # 完全维持原 settings 行为。
+        warn_secs_default = _cfg("org_command_stuck_warn_secs", 900)
+        autostop_secs_default = _cfg("org_command_stuck_autostop_secs", 3600)
+        hard_cap_default = _cfg("org_command_timeout_secs", 0)
+        warn_secs = self._org_setting(
+            tracker.org_id, "command_stuck_warn_secs", warn_secs_default,
+        )
+        autostop_secs = self._org_setting(
+            tracker.org_id, "command_stuck_autostop_secs", autostop_secs_default,
+        )
+        hard_cap = self._org_setting(
+            tracker.org_id, "command_timeout_secs", hard_cap_default,
+        )
         # 死锁早停：全员 IDLE + 无消息 + 仍有 open chain 持续多久后立即收口。
         # 比 autostop 更激进——后者要等 1 小时；deadlock 路径默认 90 秒就能
         # 把"chain 漏关 / mailbox 路径异常 / root 没收到 task_complete"这类
@@ -5008,6 +5251,14 @@ class OrgRuntime:
         ``handler_registry.has_tool()`` check in ``_execute_tool_impl``.
         Without this, org tools are either blocked by the mandatory-todo
         policy or rejected as "unknown tools".
+
+        Return contract: matches ``ToolExecutor.execute_tool_with_policy``,
+        i.e. ``(text, ConfigHint | None)``. ``org_*`` shortcut path returns
+        ``(text, None)`` — org tools are runtime-internal RPCs and don't
+        surface user-correctable config hints. Original-call path forwards
+        any hint through unchanged so a downstream plugin tool that raises
+        :class:`ToolConfigError` (e.g. missing API key) still reaches the
+        chat UI.
         """
         if not hasattr(agent, "reasoning_engine"):
             return
@@ -5022,10 +5273,13 @@ class OrgRuntime:
         async def _patched_with_policy(
             tool_name: str, tool_input: dict, policy_result: Any = None,
             *, session_id: str | None = None,
-        ) -> str:
+        ) -> tuple[str, Any]:
             self._node_last_activity[f"{org_id}:{node_id}"] = time.monotonic()
             if tool_name.startswith("org_"):
-                return await tool_handler.handle(tool_name, tool_input, org_id, node_id)
+                # org_* RPCs return plain str; lift to tuple to match the
+                # caller's expected contract (``ToolResultWithHint``).
+                _org_text = await tool_handler.handle(tool_name, tool_input, org_id, node_id)
+                return _org_text, None
             is_plugin_tool = self._is_plugin_tool(agent, tool_name)
             if is_plugin_tool:
                 # Plugin 工具往往是长 poll（通义生图分钟级、Seedance 视频
@@ -5046,7 +5300,7 @@ class OrgRuntime:
                     {"tool_name": tool_name, "input": str(tool_input)[:_LIM_EVENT]},
                 )
             try:
-                result = await original_with_policy(
+                _raw = await original_with_policy(
                     tool_name, tool_input, policy_result, session_id=session_id,
                 )
             except Exception as exc:
@@ -5065,6 +5319,21 @@ class OrgRuntime:
                         {"tool_name": tool_name, "error": str(exc)[:_LIM_EVENT]},
                     )
                 raise
+
+            # Original returns (text, hint). Unpack so downstream code that
+            # reads ``result`` as a string (json parsing, file output trace,
+            # plan bridging) keeps working. Hint is forwarded unchanged.
+            if isinstance(_raw, tuple) and len(_raw) == 2:
+                result, _hint_passthrough = _raw
+            else:
+                # Defensive: pre-migration shape; treat as plain text.
+                result = _raw
+                _hint_passthrough = None
+            if result is None:
+                result = ""
+            elif not isinstance(result, str):
+                result = str(result)
+
             if tool_name in ("create_plan", "update_plan_step", "complete_plan"):
                 chain_id = getattr(agent, "_org_context", {}).get("current_chain_id") or ""
                 if chain_id:
@@ -5096,6 +5365,11 @@ class OrgRuntime:
                     plugin_ok = True
                 try:
                     ws = getattr(agent, "_org_context", {}).get("workspace")
+                    plugin_id = self._plugin_id_for_tool(agent, tool_name)
+                    logger.debug(
+                        "[OrgRuntime] plugin asset hook fired: org=%s node=%s tool=%s plugin=%s",
+                        org_id, node_id, tool_name, plugin_id or "plugin",
+                    )
                     enhanced = await self._record_plugin_asset_output(
                         agent, org_id, node_id, tool_name, tool_input, result,
                         workspace=ws,
@@ -5103,8 +5377,10 @@ class OrgRuntime:
                     if enhanced is not None:
                         result = enhanced
                 except Exception:
-                    logger.debug(
-                        "[OrgRuntime] failed to record plugin asset output",
+                    logger.warning(
+                        "[OrgRuntime] failed to record plugin asset output "
+                        "(org=%s node=%s tool=%s)",
+                        org_id, node_id, tool_name,
                         exc_info=True,
                     )
                 self._touch_trackers_for_org(org_id)
@@ -5120,7 +5396,7 @@ class OrgRuntime:
                         node_id,
                         {"tool_name": tool_name},
                     )
-            return result
+            return result, _hint_passthrough
 
         executor.execute_tool_with_policy = _patched_with_policy
 
@@ -5284,6 +5560,18 @@ class OrgRuntime:
             self._node_files_registered_in_task[counter_key] = (
                 self._node_files_registered_in_task.get(counter_key, 0) + 1
             )
+            attachments = self._node_file_attachments_in_task.setdefault(counter_key, [])
+            registered_attachment = {
+                "filename": resolved_name,
+                "file_path": str(p),
+                "file_size": size_bytes,
+            }
+            if not any(
+                isinstance(a, dict)
+                and str(a.get("file_path") or "").lower() == str(p).lower()
+                for a in attachments
+            ):
+                attachments.append(registered_attachment)
         except Exception:
             pass
 
@@ -5636,6 +5924,13 @@ class OrgRuntime:
         so the lookup is O(1) per call. Re-computation only happens when the
         attribute is missing — at which point we walk
         ``agent._plugin_manager.loaded_plugins.values()`` once.
+
+        ``PluginAPI._registered_tools`` is ``list[str]`` in production
+        (see ``src/openakita/plugins/api.py``); historically this helper
+        treated entries as dicts and so produced an empty set, silently
+        disabling :py:meth:`_record_plugin_asset_output` for every plugin
+        tool. We now accept both shapes so the asset-registration hook
+        actually fires for the real PluginAPI list-of-strings shape.
         """
         if not tool_name or tool_name.startswith("org_"):
             return False
@@ -5647,11 +5942,14 @@ class OrgRuntime:
                 try:
                     for lp in pm.loaded_plugins.values():
                         for t in getattr(lp.api, "_registered_tools", None) or []:
-                            n = t.get("name") if isinstance(t, dict) else None
-                            if n:
-                                cached.add(n)
+                            if isinstance(t, str) and t:
+                                cached.add(t)
+                            elif isinstance(t, dict):
+                                n = t.get("name")
+                                if isinstance(n, str) and n:
+                                    cached.add(n)
                 except Exception:
-                    logger.debug(
+                    logger.warning(
                         "[OrgRuntime] failed to enumerate plugin tool names",
                         exc_info=True,
                     )
@@ -5665,6 +5963,9 @@ class OrgRuntime:
         Returns the plugin id, or an empty string if the mapping cannot be
         established (e.g. PluginManager not attached). The result is only
         used for namespacing the on-disk asset directory.
+
+        Accepts both ``list[str]`` (PluginAPI's actual shape) and
+        ``list[dict]`` so legacy callers / tests keep working.
         """
         pm = getattr(agent, "_plugin_manager", None)
         if pm is None:
@@ -5672,7 +5973,10 @@ class OrgRuntime:
         try:
             for lp in pm.loaded_plugins.values():
                 for t in getattr(lp.api, "_registered_tools", None) or []:
-                    if isinstance(t, dict) and t.get("name") == tool_name:
+                    if isinstance(t, str):
+                        if t == tool_name:
+                            return lp.manifest.id
+                    elif isinstance(t, dict) and t.get("name") == tool_name:
                         return lp.manifest.id
         except Exception:
             return ""
@@ -5807,28 +6111,115 @@ class OrgRuntime:
         #   3. image_urls / video_url：远端 URL，httpx 流式下载
         candidates: list[dict] = []
 
-        for raw in payload.get("local_paths") or []:
-            if isinstance(raw, str) and raw:
-                candidates.append({"kind": "local", "src": raw})
-        # video_path / image_path 也按本地路径处理（plugin 可能用单数字段）
-        for key in ("video_path", "image_path"):
-            v = payload.get(key)
-            if isinstance(v, str) and v:
-                candidates.append({"kind": "local", "src": v})
+        seen_local: set[str] = set()
+        seen_asset: set[str] = set()
+        seen_url: set[str] = set()
 
-        for raw in payload.get("asset_ids") or []:
-            if isinstance(raw, str) and raw:
+        def _add_local(raw: object) -> None:
+            if isinstance(raw, str) and raw and raw not in seen_local:
+                seen_local.add(raw)
+                candidates.append({"kind": "local", "src": raw})
+
+        def _add_asset(raw: object) -> None:
+            if isinstance(raw, str) and raw and raw not in seen_asset:
+                seen_asset.add(raw)
                 candidates.append({"kind": "asset", "asset_id": raw})
 
+        def _add_url(raw: object, ext_hint: str = ".bin") -> None:
+            if (
+                isinstance(raw, str)
+                and raw
+                and not raw.startswith("data:")
+                and raw not in seen_url
+            ):
+                seen_url.add(raw)
+                candidates.append({"kind": "url", "url": raw, "ext_hint": ext_hint})
+
+        def _guess_ext_hint(key: str) -> str:
+            kl = key.lower()
+            if "video" in kl:
+                return ".mp4"
+            if "audio" in kl:
+                return ".mp3"
+            if "image" in kl or "frame" in kl or "thumb" in kl or "preview" in kl:
+                return ".png"
+            return ".bin"
+
+        # ── 顶层扫描白名单 ────────────────────────────────────────────────
+        # local files
+        for raw in payload.get("local_paths") or []:
+            _add_local(raw)
+        for key in (
+            "video_path",
+            "image_path",
+            "output_path",
+            "audio_path",
+            "last_frame_path",
+            "first_frame_path",
+            "cover_path",
+            "thumbnail_path",
+        ):
+            _add_local(payload.get(key))
+
+        # asset bus refs
+        for raw in payload.get("asset_ids") or []:
+            _add_asset(raw)
+
+        # remote URLs (plural / singular)
         for raw in payload.get("image_urls") or []:
-            if isinstance(raw, str) and raw and not raw.startswith("data:"):
-                candidates.append({"kind": "url", "url": raw, "ext_hint": ".png"})
-        v = payload.get("video_url")
-        if isinstance(v, str) and v and not v.startswith("data:"):
-            candidates.append({"kind": "url", "url": v, "ext_hint": ".mp4"})
-        v = payload.get("audio_url")
-        if isinstance(v, str) and v and not v.startswith("data:"):
-            candidates.append({"kind": "url", "url": v, "ext_hint": ".mp3"})
+            _add_url(raw, ".png")
+        for raw in payload.get("video_urls") or []:
+            _add_url(raw, ".mp4")
+        for raw in payload.get("audio_urls") or []:
+            _add_url(raw, ".mp3")
+        for key in (
+            "video_url",
+            "audio_url",
+            "image_url",
+            "preview_url",
+            "last_frame_url",
+            "first_frame_url",
+            "cover_url",
+            "thumbnail_url",
+        ):
+            _add_url(payload.get(key), _guess_ext_hint(key))
+
+        # ── 递归扫描 segments[*] / shots[*] / outputs[*] ─────────────────
+        for container_key in ("segments", "shots", "outputs", "items", "clips"):
+            container = payload.get(container_key)
+            if not isinstance(container, list):
+                continue
+            for seg in container:
+                if not isinstance(seg, dict):
+                    continue
+                for raw in seg.get("local_paths") or []:
+                    _add_local(raw)
+                for sk in (
+                    "path",
+                    "video_path",
+                    "image_path",
+                    "output_path",
+                    "audio_path",
+                    "last_frame_path",
+                    "first_frame_path",
+                    "cover_path",
+                    "thumbnail_path",
+                ):
+                    _add_local(seg.get(sk))
+                for raw in seg.get("asset_ids") or []:
+                    _add_asset(raw)
+                for sk in (
+                    "url",
+                    "video_url",
+                    "audio_url",
+                    "image_url",
+                    "preview_url",
+                    "last_frame_url",
+                    "first_frame_url",
+                    "cover_url",
+                    "thumbnail_url",
+                ):
+                    _add_url(seg.get(sk), _guess_ext_hint(sk))
 
         if not candidates:
             return None

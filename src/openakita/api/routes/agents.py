@@ -121,6 +121,9 @@ class ProfileCreateRequest(BaseModel):
     endpoint_policy: Literal["prefer", "require"] = "prefer"
     identity_mode: Literal["shared", "custom"] = "shared"
     memory_mode: Literal["shared", "isolated"] = "shared"
+    # Phase 2b.2：memory_isolation 是 memory_mode 的语义化别名（推荐前端切到这个）。
+    # 同时传两个时，memory_isolation 优先（与 AgentProfile.from_dict 行为一致）。
+    memory_isolation: Literal["shared", "isolated"] | None = None
     memory_inherit_global: bool = True
     runtime_env_mode: Literal["shared", "agent", "custom"] = "shared"
     runtime_env_dependencies: list[str] = Field(default_factory=list)
@@ -146,6 +149,8 @@ class ProfileUpdateRequest(BaseModel):
     endpoint_policy: Literal["prefer", "require"] | None = None
     identity_mode: Literal["shared", "custom"] | None = None
     memory_mode: Literal["shared", "isolated"] | None = None
+    # Phase 2b.2：memory_isolation 同上
+    memory_isolation: Literal["shared", "isolated"] | None = None
     memory_inherit_global: bool | None = None
     runtime_env_mode: Literal["shared", "agent", "custom"] | None = None
     runtime_env_dependencies: list[str] | None = None
@@ -501,7 +506,8 @@ async def create_agent_profile(body: ProfileCreateRequest):
         preferred_endpoint=body.preferred_endpoint,
         endpoint_policy=body.endpoint_policy,
         identity_mode=body.identity_mode,
-        memory_mode=body.memory_mode,
+        # Phase 2b.2：优先使用新别名 memory_isolation，回退到旧 memory_mode。
+        memory_mode=body.memory_isolation or body.memory_mode,
         memory_inherit_global=body.memory_inherit_global,
         runtime_env_mode=body.runtime_env_mode,
         runtime_env_dependencies=body.runtime_env_dependencies,

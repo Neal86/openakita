@@ -407,10 +407,23 @@ type BackendHistoryMessage = {
   usage?: ChatMessage["usage"];
 };
 
-export function patchMessagesWithBackend(
+export type BackendPatchStats = {
+  matchedByHistoryIndex: number;
+  matchedById: number;
+  matchedByFallback: number;
+  patched: number;
+};
+
+export type BackendPatchResult = {
+  messages: ChatMessage[];
+  changed: boolean;
+  stats: BackendPatchStats;
+};
+
+export function patchMessagesWithBackendDetailed(
   localMsgs: ChatMessage[],
   backendMsgs: BackendHistoryMessage[],
-): ChatMessage[] {
+): BackendPatchResult {
   const backendAssistant = backendMsgs.filter((m) => m.role === "assistant");
   const backendByHistoryIndex = new Map<number, BackendHistoryMessage>();
   const backendById = new Map<string, BackendHistoryMessage>();
@@ -419,13 +432,24 @@ export function patchMessagesWithBackend(
     if (m.id) backendById.set(m.id, m);
   });
   const usedBackendMessages = new Set<BackendHistoryMessage>();
-  let fallbackAssistantIdx = 0;
+  const stats: BackendPatchStats = {
+    matchedByHistoryIndex: 0,
+    matchedById: 0,
+    matchedByFallback: 0,
+    patched: 0,
+  };
 
-  const claimBackendForLocalMessage = (m: ChatMessage): BackendHistoryMessage | undefined => {
+  const lastLocalAssistantIndex = localMsgs.reduce(
+    (last, m, index) => (m.role === "assistant" ? index : last),
+    -1,
+  );
+
+  const claimBackendForLocalMessage = (m: ChatMessage, localIndex: number): BackendHistoryMessage | undefined => {
     if (typeof m.historyIndex === "number") {
       const indexed = backendByHistoryIndex.get(m.historyIndex);
       if (indexed && !usedBackendMessages.has(indexed)) {
         usedBackendMessages.add(indexed);
+        stats.matchedByHistoryIndex += 1;
         return indexed;
       }
     }
@@ -433,13 +457,19 @@ export function patchMessagesWithBackend(
     const byId = backendById.get(m.id);
     if (byId && !usedBackendMessages.has(byId)) {
       usedBackendMessages.add(byId);
+      stats.matchedById += 1;
       return byId;
     }
 
-    while (fallbackAssistantIdx < backendAssistant.length) {
-      const candidate = backendAssistant[fallbackAssistantIdx++];
+    if (localIndex !== lastLocalAssistantIndex) {
+      return undefined;
+    }
+
+    for (let i = backendAssistant.length - 1; i >= 0; i -= 1) {
+      const candidate = backendAssistant[i];
       if (!usedBackendMessages.has(candidate)) {
         usedBackendMessages.add(candidate);
+        stats.matchedByFallback += 1;
         return candidate;
       }
     }
@@ -447,9 +477,9 @@ export function patchMessagesWithBackend(
   };
 
   let changed = false;
-  const patched = localMsgs.map((m) => {
+  const patched = localMsgs.map((m, index) => {
     if (m.role !== "assistant") return m;
-    const backend = claimBackendForLocalMessage(m);
+    const backend = claimBackendForLocalMessage(m, index);
     if (!backend) return m;
 
     const patches: Partial<ChatMessage> = {};
@@ -480,11 +510,19 @@ export function patchMessagesWithBackend(
 
     if (Object.keys(patches).length > 0) {
       changed = true;
+      stats.patched += 1;
       return { ...m, ...patches };
     }
     return m;
   });
-  return changed ? patched : localMsgs;
+  return { messages: changed ? patched : localMsgs, changed, stats };
+}
+
+export function patchMessagesWithBackend(
+  localMsgs: ChatMessage[],
+  backendMsgs: BackendHistoryMessage[],
+): ChatMessage[] {
+  return patchMessagesWithBackendDetailed(localMsgs, backendMsgs).messages;
 }
 
 // ── 错误分类 ──

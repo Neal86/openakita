@@ -146,6 +146,10 @@ def make_default_settings() -> dict[str, Any]:
         "api_key": "",
         "base_url": DASHSCOPE_BASE_URL_BJ,
         "timeout": 60.0,
+        # Shared relay registry (see openakita.relay). Empty by default so
+        # users who never set up a relay keep the per-plugin direct path.
+        "relay_endpoint": "",
+        "relay_fallback_policy": "official",
     }
 
 
@@ -251,6 +255,42 @@ class AvatarDashScopeClient(BaseVendorClient):
             cur = {}
         merged = make_default_settings()
         merged.update({k: v for k, v in cur.items() if v not in (None, "")})
+
+        # Relay override (optional): when ``relay_endpoint`` is set the
+        # plugin's effective base_url/api_key come from the shared
+        # registry. Failure mode is governed by relay_fallback_policy.
+        # Import is lazy so plugin still loads if openakita.relay is
+        # missing (e.g. bundled distribution without the host package).
+        if str(merged.get("relay_endpoint") or "").strip():
+            try:
+                from openakita.relay import (
+                    SettingsRelayResolutionError,
+                    apply_relay_override,
+                )
+
+                merged = apply_relay_override(
+                    merged,
+                    default_base_url=DASHSCOPE_BASE_URL_BJ,
+                    required_capability="video",
+                    plugin_name="avatar-studio",
+                )
+            except (ImportError, ModuleNotFoundError) as exc:
+                logger.info(
+                    "avatar-studio: openakita.relay not importable (%s); "
+                    "keeping per-plugin base_url/api_key.",
+                    exc,
+                )
+            except SettingsRelayResolutionError as exc:
+                # Strict-policy mis-config — surface as our own vendor
+                # error so the plugin UI shows the same error shape it
+                # already shows for auth / quota issues.
+                raise VendorError(
+                    exc.user_message,
+                    status=None,
+                    retryable=False,
+                    kind=ERROR_KIND_CLIENT,
+                ) from exc
+
         # Live-update inherited fields so retry/timeout reflect Settings.
         try:
             self.timeout = float(merged.get("timeout") or 60.0)
@@ -267,6 +307,22 @@ class AvatarDashScopeClient(BaseVendorClient):
             "Authorization": f"Bearer {api_key}" if api_key else "",
             "Content-Type": "application/json",
         }
+
+    def _assert_relay_supports_model(self, model: str) -> None:
+        s = self._settings()
+        ref = s.get("_relay_reference")
+        if ref is None or not hasattr(ref, "supports_model") or ref.supports_model(model):
+            return
+        relay_name = str(s.get("relay_endpoint") or "").strip() or getattr(ref, "name", "")
+        raise VendorError(
+            (
+                f"中转站 {relay_name!r} 的模型目录不包含 {model!r}。"
+                "请在 LLM 配置页重新 Sync Models，或切换到该中转站支持的模型。"
+            ),
+            status=422,
+            retryable=False,
+            kind=ERROR_KIND_CLIENT,
+        )
 
     def update_api_key(self, api_key: str) -> None:
         """Fast path used by ``PUT /settings``; the next call also re-reads."""
@@ -565,6 +621,7 @@ class AvatarDashScopeClient(BaseVendorClient):
             "model": MODEL_S2V_DETECT,
             "input": {"image_url": image_url},
         }
+        self._assert_relay_supports_model(MODEL_S2V_DETECT)
         try:
             resp = await self.post_json(PATH_S2V_DETECT, json_body=body, timeout=30.0)
         except VendorError as e:
@@ -600,6 +657,7 @@ class AvatarDashScopeClient(BaseVendorClient):
         params: dict[str, Any] = {"resolution": resolution}
         if duration is not None:
             params["duration"] = float(duration)
+        self._assert_relay_supports_model(MODEL_S2V)
         body = {
             "model": MODEL_S2V,
             "input": {"image_url": image_url, "audio_url": audio_url},
@@ -632,6 +690,7 @@ class AvatarDashScopeClient(BaseVendorClient):
         input_obj: dict[str, Any] = {"video_url": video_url, "audio_url": audio_url}
         if ref_image_url:
             input_obj["ref_image_url"] = ref_image_url
+        self._assert_relay_supports_model(MODEL_VIDEORETALK)
         body = {
             "model": MODEL_VIDEORETALK,
             "input": input_obj,
@@ -652,6 +711,7 @@ class AvatarDashScopeClient(BaseVendorClient):
         mode_pro: bool = False,
         watermark: bool = False,
     ) -> str:
+        self._assert_relay_supports_model(MODEL_ANIMATE_MIX)
         body = {
             "model": MODEL_ANIMATE_MIX,
             "input": {"image_url": image_url, "video_url": video_url},
@@ -670,6 +730,7 @@ class AvatarDashScopeClient(BaseVendorClient):
         mode_pro: bool = False,
         watermark: bool = False,
     ) -> str:
+        self._assert_relay_supports_model(MODEL_ANIMATE_MOVE)
         body = {
             "model": MODEL_ANIMATE_MOVE,
             "input": {
@@ -708,6 +769,7 @@ class AvatarDashScopeClient(BaseVendorClient):
         # function arg is kept as ``ref_images_url`` for symmetry with
         # the wan2.7 method and the UI's payload key. See
         # https://help.aliyun.com/zh/model-studio/wan2-5-image-edit-api-reference
+        self._assert_relay_supports_model(MODEL_I2I)
         body = {
             "model": MODEL_I2I,
             "input": {"prompt": prompt, "images": list(ref_images_url)},
@@ -731,6 +793,7 @@ class AvatarDashScopeClient(BaseVendorClient):
                 retryable=False,
                 kind=ERROR_KIND_CLIENT,
             )
+        self._assert_relay_supports_model(model)
         content: list[dict[str, str]] = [{"text": prompt}]
         for url in ref_images_url:
             content.append({"image": url})
@@ -820,6 +883,7 @@ class AvatarDashScopeClient(BaseVendorClient):
                 retryable=False,
                 kind="auth",
             )
+        self._assert_relay_supports_model(MODEL_COSYVOICE_V2)
 
         # The dashscope SDK reads credentials from a *module-level* global
         # (`dashscope.api_key`) or the `DASHSCOPE_API_KEY` env var rather

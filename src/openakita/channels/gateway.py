@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from ..sessions import Session, SessionManager
 from ..utils.errors import format_user_friendly_error as format_user_friendly_error  # re-export
@@ -991,6 +991,21 @@ class MessageGateway:
         # 外部注入的 shutdown_event（由 main.py 调用 set_shutdown_event 设置）
         self._shutdown_event: asyncio.Event | None = None
 
+        # 外部注入的 AgentOrchestrator 引用（由 main.py 调用 set_orchestrator 设置）
+        # 用途：
+        #   1. /切换 /状态 /重置 等多Agent命令的可用性判断
+        #   2. 流式/非流式分支决策（有编排时禁用 wait_for 墙钟超时，
+        #      改由 Orchestrator 自带的 idle/hard timeout 监控活跃度）
+        #   3. 流式 IM 路径在有编排时改走 handle_message，保证多 Bot/profile 路由生效
+        self._orchestrator_ref: Any = None
+
+        # 外部注入的 channel-deps 安装错误快照（由 main.py 调用 set_channel_install_errors）
+        # 形如 ``{"lark-oapi": "镜像源 ... 在 600s 内未完成下载", ...}``。
+        # 仅作为 fallback：当适配器 start() 抛 ImportError 但 reason 里只有
+        # "缺少依赖: pip install xxx" 这种笼统提示时，用 pip 包名反查更具体
+        # 的错误尾巴，附加到 _failed_adapter_reasons 里供 IM 行 tooltip 渲染。
+        self._channel_install_errors: dict[str, str] = {}
+
         # ==================== 进度事件流（Plan/Deliver 等）====================
         # 目标：把“执行过程进度展示”下沉到网关侧，避免模型/工具刷屏。
         self._progress_buffers: dict[str, list[str]] = {}  # session_key -> [lines]
@@ -1304,6 +1319,17 @@ class MessageGateway:
                 "  `/切换` / `/switch` — 列出或切换 Agent",
                 "  `/状态` / `/status` — 查看当前 Agent 信息",
                 "  `/重置` / `/agent_reset` — 重置为默认 Agent",
+                "",
+                "**组织（Org）指挥台:**",
+                "  `/org list` / `/组织 列表` — 列出可用组织",
+                "  `/org bind <组织名>` / `/组织 绑定 <组织名>` — 绑定当前会话",
+                "  `/org status` / `/组织 状态` — 查看当前绑定",
+                "  `/org unbind` / `/组织 解绑` — 解除绑定",
+                "  `@组织 <任务>` / `@org <task>` — 向已绑定组织下达指令",
+                "  `/org <组织名> <任务>` / `/组织 <组织名> <任务>` — 直接下达（不需先绑定）",
+                "  `/org running` / `/组织 在跑` — 查看正在跑的命令进度",
+                "  `/org cancel` / `/组织 取消` — 立即取消正在跑的命令",
+                "  `/org last` / `/组织 上次` — 重新看上一条命令的结果",
                 "",
             ]
         )
@@ -1808,7 +1834,14 @@ class MessageGateway:
                 logger.info(f"Started adapter: {name}")
             except Exception as e:
                 failed.append(name)
-                failed_reasons[name] = str(e)
+                reason = str(e)
+                # 若 reason 只是 "缺少依赖: pip install xxx" 之类笼统提示，
+                # 用 channel-deps 安装错误快照补充更具体的根因（超时/版本冲突/网络）
+                install_err = self._resolve_install_error_for_adapter(name)
+                if install_err and ("缺少依赖" in reason or "ImportError" in reason
+                                    or "No module" in reason or not reason):
+                    reason = f"{reason}（原因：{install_err}）" if reason else install_err
+                failed_reasons[name] = reason
                 adapter._running = False
                 logger.error(f"Failed to start adapter {name}: {e}")
 
@@ -2206,6 +2239,43 @@ class MessageGateway:
         self._restart_cmd_handler._shutdown_event = event
         logger.debug("RestartCommandHandler shutdown_event set")
 
+    def set_orchestrator(self, orchestrator: Any) -> None:
+        """注入 AgentOrchestrator 引用（由 main.py 在 Orchestrator/Gateway 都就绪后调用）。
+
+        必须双向注入（这里 + ``orchestrator.set_gateway(gateway)``），否则：
+        - IM 输入 ``/状态`` ``/切换`` 等命令会被告知"系统正在初始化"
+        - 流式 IM 路径会绕过 Orchestrator，多 Bot 的 ``agent_profile_id`` 路由失效
+        """
+        self._orchestrator_ref = orchestrator
+        logger.info(
+            "[Gateway] AgentOrchestrator reference set "
+            "(stream-routing and /switch /status /reset commands now enabled)"
+        )
+
+    def set_channel_install_errors(self, errors: dict[str, str]) -> None:
+        """注入 channel-deps 自动安装的逐包错误快照（由 main.py 在依赖巡检后调用）。
+
+        让适配器启动失败时，IM 行 tooltip 能从"缺少依赖: pip install lark-oapi"
+        升级到"缺少依赖: pip install lark-oapi（原因：镜像源 ... 在 600s 内
+        未完成下载）"。
+        """
+        self._channel_install_errors = dict(errors or {})
+
+    def _resolve_install_error_for_adapter(self, adapter_name: str) -> str | None:
+        """根据适配器名查 channel-deps 安装错误快照里对应 pip 包的错误尾巴。"""
+        if not self._channel_install_errors:
+            return None
+        try:
+            from openakita.channels.deps import CHANNEL_DEPS
+        except Exception:
+            return None
+        channel_type = str(adapter_name).split(":", 1)[0]
+        for _, pip_name in CHANNEL_DEPS.get(channel_type, []):
+            err = self._channel_install_errors.get(pip_name)
+            if err:
+                return f"{pip_name}: {err[-200:]}"
+        return None
+
     # ==================== 适配器管理 ====================
 
     async def register_adapter(self, adapter: ChannelAdapter) -> None:
@@ -2323,6 +2393,25 @@ class MessageGateway:
             await self._restart_cmd_handler.handle_restart_command(session_key, message)
             return
         # ==================== /终极重启指令拦截 ====================
+
+        # ==================== 组织控制 fast-path ====================
+        # /org cancel  /org running  /org last —— 这三条**不能**进消息队列：
+        # 当一条 `/org <name> <task>` 已经在 _try_handle_org_command 的等待循环
+        # 里阻塞时，session 的处理 task 还在运行，新消息默认会被加入中断队列、
+        # 直到旧任务结束才被处理。但这三条本来就是用来 "对正在运行的命令进行
+        # 干预 / 查询" 的，必须立刻执行——因此在这里直通处理后 return，绕过
+        # _message_queue 与 per-session 串行机制。
+        _org_ctrl = self._is_org_control_command(_raw_text)
+        if _org_ctrl is not None:
+            try:
+                handled = await self._handle_org_control_command(message, _org_ctrl)
+            except Exception as exc:
+                logger.warning("[IM] org control command failed: %s", exc, exc_info=True)
+                handled = False
+                await self._send_response(message, f"指令执行失败：{_format_user_error(exc)}")
+            if handled:
+                return
+        # ==================== /组织控制 fast-path ====================
 
         # ==================== 中断快路径（无锁检测） ====================
         # 在获取 interrupt_lock 之前做低成本文本检测，减少锁竞争
@@ -2862,6 +2951,383 @@ class MessageGateway:
                     return str(org_id), task
         return None
 
+    def _get_org_manager(self):
+        """从 OrgCommandService 链路上取出 OrgManager 单例。
+
+        IM 端按名字/ID 解析组织时用。拿不到（服务未就绪）时返回 None。
+        """
+        try:
+            from openakita.orgs.command_service import get_command_service
+
+            svc = get_command_service()
+            if svc is None:
+                return None
+            runtime = getattr(svc, "_runtime", None)
+            return getattr(runtime, "_manager", None) if runtime else None
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    # 组织命令在 IM 会话上的"当前/历史"追踪
+    # ------------------------------------------------------------------
+    # 给 /org cancel /org running /org last 三条 fast-path 命令使用：
+    # - current_org_command: 正在跑的命令信息（提交后写入，结束/取消后清空）
+    # - last_org_command: 上一条已结束的命令（用 /org last 可重新拉到）
+    # 两个字段都存在 session.metadata 里，跨重启亦可恢复（受 session 持久化）。
+
+    @staticmethod
+    def _record_current_org_command(
+        session: Session,
+        *,
+        org_id: str,
+        org_name: str,
+        command_id: str,
+        task_preview: str,
+    ) -> None:
+        import time as _time
+
+        session.set_metadata(
+            "current_org_command",
+            {
+                "org_id": org_id,
+                "org_name": org_name,
+                "command_id": command_id,
+                "task_preview": (task_preview or "")[:200],
+                "started_at": _time.time(),
+            },
+        )
+
+    @staticmethod
+    def _finish_current_org_command(
+        session: Session,
+        *,
+        result_text: str,
+    ) -> None:
+        """把 current_org_command 迁移到 last_org_command 槽位（成功或失败结尾都调一次）。"""
+        import time as _time
+
+        cur = session.get_metadata("current_org_command") or None
+        if isinstance(cur, dict):
+            session.set_metadata(
+                "last_org_command",
+                {
+                    **cur,
+                    "result_text": (result_text or "")[:4000],
+                    "finished_at": _time.time(),
+                },
+            )
+        session.set_metadata("current_org_command", None)
+
+    def _format_current_org_command(self, session: Session) -> str:
+        """`/org running` 的回复体生成。会主动调一次命令服务拿最新 phase / busy。"""
+        cur = session.get_metadata("current_org_command") or None
+        if not isinstance(cur, dict) or not cur.get("command_id"):
+            return (
+                "当前没有正在跑的组织命令。\n"
+                "用 `/org bind <组织名>` 绑定后，再 `@组织 <任务>` 派发。"
+            )
+        org_id = str(cur.get("org_id") or "")
+        command_id = str(cur.get("command_id") or "")
+        org_name = str(cur.get("org_name") or "")
+        preview = str(cur.get("task_preview") or "")
+        try:
+            from openakita.orgs.command_service import get_command_service
+
+            svc = get_command_service()
+            status_obj = svc.get_status(org_id, command_id) if svc else None
+        except Exception:
+            status_obj = None
+
+        head = f"「{org_name}」(ID: {org_id})" if org_name else org_id
+        lines = [
+            f"📍 当前正在跑：{head}",
+            f"  • 命令 ID：`{command_id}`",
+            f"  • 任务：{preview}",
+        ]
+        if isinstance(status_obj, dict):
+            phase = status_obj.get("phase") or status_obj.get("status") or "unknown"
+            lines.append(f"  • 阶段：{phase}")
+            elapsed = status_obj.get("elapsed_s")
+            if isinstance(elapsed, (int, float)):
+                lines.append(f"  • 已运行：{elapsed:.0f} 秒")
+            busy = status_obj.get("busy_nodes") or []
+            if isinstance(busy, list) and busy:
+                shown = ", ".join(str(n) for n in busy[:5])
+                more = f" 等 {len(busy)} 个" if len(busy) > 5 else ""
+                lines.append(f"  • 忙碌节点：{shown}{more}")
+            blockers = status_obj.get("blockers") or []
+            if isinstance(blockers, list) and blockers:
+                lines.append(f"  • 阻塞数：{len(blockers)}")
+            warn = status_obj.get("warning")
+            if warn:
+                lines.append(f"  • ⚠️ {warn}")
+        lines.append("\n如要叫停，发送 `/org cancel`。")
+        return "\n".join(lines)
+
+    def _format_last_org_command(self, session: Session) -> str:
+        """`/org last` 的回复体生成。"""
+        last = session.get_metadata("last_org_command") or None
+        if not isinstance(last, dict):
+            return "本会话还没有任何已完成的组织命令记录。"
+        org_name = str(last.get("org_name") or "")
+        org_id = str(last.get("org_id") or "")
+        preview = str(last.get("task_preview") or "")
+        result = str(last.get("result_text") or "")
+        head = f"「{org_name}」(ID: {org_id})" if org_name else org_id
+        lines = [f"📜 上次组织命令：{head}", f"  • 任务：{preview}", "", "结果："]
+        lines.append(result if result else "(无结果)")
+        return "\n".join(lines)
+
+    async def _handle_org_control_command(
+        self,
+        message: UnifiedMessage,
+        normalized: str,
+    ) -> bool:
+        """fast-path 处理 /org cancel /org running /org last 三条命令。
+
+        返回 True 表示命令已处理（调用方应立即 return，不要继续走消息队列）。
+        这条 fast-path 不依赖 session.lock / processing_sessions，因此即使
+        当前会话已有一条组织命令在 `await queue.get()` 阻塞，新指令仍能立刻
+        响应——这正是修这三条命令要解决的核心痛点。
+        """
+        session = self.session_manager.get_session(
+            channel=message.channel,
+            chat_id=message.chat_id,
+            user_id=message.user_id,
+            thread_id=message.thread_id,
+            bot_instance_id=self._get_message_bot_instance_id(message),
+            create_if_missing=False,
+        )
+        if session is None:
+            await self._send_response(message, "当前会话不存在或已过期，请先发送一条普通消息建立会话。")
+            return True
+
+        if normalized in ("/org cancel", "/组织 取消"):
+            cur = session.get_metadata("current_org_command") or None
+            if not isinstance(cur, dict) or not cur.get("command_id"):
+                await self._send_response(message, "当前没有正在跑的组织命令可以取消。")
+                return True
+            org_id = str(cur.get("org_id") or "")
+            command_id = str(cur.get("command_id") or "")
+            try:
+                from openakita.orgs.command_service import get_command_service
+
+                svc = get_command_service()
+                if svc is None:
+                    await self._send_response(message, "组织命令服务尚未初始化，请稍后再试。")
+                    return True
+                result = await svc.cancel(org_id, command_id)
+            except Exception as exc:
+                logger.warning("[IM] /org cancel failed: %s", exc, exc_info=True)
+                await self._send_response(message, f"取消失败：{_format_user_error(exc)}")
+                return True
+            if not result:
+                await self._send_response(message, "未找到该组织命令（可能已被清理）。")
+                return True
+            if result.get("already_done"):
+                await self._send_response(message, "命令已经结束，无需取消。")
+                return True
+            await self._send_response(
+                message,
+                f"✅ 已发起取消，命令 ID：`{command_id}`。\n"
+                "组织会在执行完当前最小步骤后停止；最终结果（含「cancelled_by_user」）"
+                "将通过此前那条派发回执的等待循环发回。",
+            )
+            return True
+
+        if normalized in ("/org running", "/组织 在跑"):
+            await self._send_response(message, self._format_current_org_command(session))
+            return True
+
+        if normalized in ("/org last", "/组织 上次"):
+            await self._send_response(message, self._format_last_org_command(session))
+            return True
+
+        return False
+
+    @staticmethod
+    def _is_org_control_command(text: str) -> str | None:
+        """识别 fast-path 控制指令；命中返回归一化后的小写字符串，否则 None。"""
+        if not text:
+            return None
+        t = text.strip().lower()
+        if t in (
+            "/org cancel",
+            "/org running",
+            "/org last",
+            "/组织 取消",
+            "/组织 在跑",
+            "/组织 上次",
+        ):
+            return t
+        return None
+
+    def _resolve_org_query(self, query: str) -> tuple[str | None, str | None]:
+        """把用户在 IM 里输入的"组织名或 ID"解析成真实 org_id。
+
+        返回 ``(org_id, error_message)``：
+        - 解析成功：``(org_id, None)``。
+        - 失败/歧义：``(None, 用户可见的中文提示)``，调用方直接把提示回给用户。
+        """
+        q = (query or "").strip()
+        if not q:
+            return None, "用法：/org bind <组织名 或 组织ID>"
+        mgr = self._get_org_manager()
+        if mgr is None:
+            return None, "组织管理器尚未就绪，请稍后再试。"
+        org_id, candidates = mgr.resolve_id_by_name_or_id(q)
+        if org_id:
+            return org_id, None
+        if candidates:
+            lines = [f"找到 {len(candidates)} 个名为「{q}」的组织，请用更精确的名字或直接用 ID 指定："]
+            for c in candidates[:10]:
+                created = (c.get("created_at") or "")[:10]
+                lines.append(f"  • {c.get('name', '')}  ID: {c.get('id', '')}  创建于 {created}")
+            if len(candidates) > 10:
+                lines.append(f"  …还有 {len(candidates) - 10} 个未显示")
+            return None, "\n".join(lines)
+        return None, f"未找到组织「{q}」。请用 `/org list` 或在桌面端查看可用组织名。"
+
+    @staticmethod
+    def _format_org_command_status_card(
+        *,
+        org_display: str,
+        command_id: str,
+        progress_lines: list[str],
+        done: bool = False,
+    ) -> str:
+        lines = [
+            f"已向组织 {org_display} 下发指令，命令 ID：`{command_id}`",
+            "• 查看进度：`/org running`",
+            "• 立即取消：`/org cancel`",
+            "• 重看上次结果：`/org last`",
+            "（期间您发的其他普通消息会排队等待至命令结束）",
+            "",
+            "组织进度：",
+        ]
+        if progress_lines:
+            for line in progress_lines[-12:]:
+                lines.append(f"• {line}")
+        else:
+            lines.append("• 等待组织开始处理")
+        if done:
+            lines.append("")
+            lines.append("✅ 命令已完成")
+        return "\n".join(lines)
+
+    async def _send_org_status_card(
+        self,
+        message: UnifiedMessage,
+        content: str,
+    ) -> str | None:
+        """发送可更新的组织状态卡片；失败时退回普通发送。"""
+        adapter = self._adapters.get(message.channel)
+        if not adapter:
+            await self._send_response(message, content)
+            return None
+        outgoing_meta = dict(message.metadata) if message.metadata else {}
+        if message.channel_user_id:
+            outgoing_meta["channel_user_id"] = message.channel_user_id
+        outgoing = OutgoingMessage.text(
+            chat_id=message.chat_id,
+            text=content,
+            reply_to=message.channel_message_id,
+            thread_id=message.thread_id,
+            parse_mode="markdown",
+            metadata=outgoing_meta,
+        )
+        try:
+            msg_id = await adapter.send_message(outgoing)
+            if not self._is_im_send_delivered(msg_id):
+                return None
+            return str(msg_id or "") or None
+        except Exception:
+            logger.debug("[IM] org status card send failed; falling back", exc_info=True)
+            await self._send_response(message, content)
+            return None
+
+    async def _patch_org_status_card(
+        self,
+        message: UnifiedMessage,
+        card_id: str | None,
+        content: str,
+        *,
+        done: bool = False,
+    ) -> bool:
+        """尽量就地更新组织状态卡片。
+
+        - 飞书 / Lark：走 CardKit / PatchMessage（``_patch_card_content``），无新消息。
+        - 其它带 ``edit_message`` 能力的通道（Telegram 等）：调 ``edit_message``，
+          这样在 Telegram 等聊天里也能像飞书一样**只更新同一条消息**，
+          而不是每条进度都新发一条灰色消息。
+        - DingTalk 的 ``_patch_card_content`` 需要 ``_CardState``，gateway 这里
+          没法构造；DingTalk 退化为重新发普通消息（与之前一致）。
+        """
+        if not card_id:
+            return False
+        adapter = self._adapters.get(message.channel)
+        if not adapter:
+            return False
+
+        base_channel = (message.channel or "").split(":")[0].split("_")[0]
+
+        # 飞书 / Lark 走原有 CardKit 路径，UI 一致性最好。
+        if base_channel in {"feishu", "lark"} and hasattr(adapter, "_patch_card_content"):
+            sk = None
+            if hasattr(adapter, "_make_session_key"):
+                try:
+                    sk = adapter._make_session_key(message.chat_id, message.thread_id)
+                except Exception:
+                    sk = None
+            try:
+                return bool(await adapter._patch_card_content(card_id, content, sk, final=done))
+            except TypeError:
+                try:
+                    return bool(await adapter._patch_card_content(card_id, content, sk))
+                except Exception:
+                    return False
+            except Exception:
+                return False
+
+        # 其它支持原生编辑消息的通道（Telegram 等）。
+        if getattr(adapter, "has_capability", None) and adapter.has_capability("edit_message"):
+            try:
+                ok = await adapter.edit_message(
+                    message.chat_id,
+                    card_id,
+                    content,
+                    parse_mode="markdown",
+                )
+                return bool(ok)
+            except TypeError:
+                try:
+                    return bool(await adapter.edit_message(message.chat_id, card_id, content))
+                except Exception:
+                    return False
+            except Exception:
+                return False
+
+        return False
+
+    @staticmethod
+    def _append_attachment_media_lines(final_text: str, attachments: list[dict]) -> str:
+        media_lines: list[str] = []
+        seen: set[str] = set()
+        for att in attachments:
+            if not isinstance(att, dict):
+                continue
+            file_path = str(att.get("file_path") or att.get("path") or "").strip()
+            if not file_path:
+                continue
+            key = file_path.lower().replace("\\", "/")
+            if key in seen:
+                continue
+            seen.add(key)
+            media_lines.append(f"MEDIA: {file_path}")
+        if not media_lines:
+            return final_text
+        return (final_text or "文件已生成。").rstrip() + "\n\n" + "\n".join(media_lines)
+
     async def _try_handle_org_command(
         self,
         message: UnifiedMessage,
@@ -2873,11 +3339,25 @@ class MessageGateway:
         if lowered.startswith(("/org bind ", "/组织 绑定 ")):
             parts = text.split(maxsplit=2)
             if len(parts) < 3:
-                await self._send_response(message, "用法：/org bind <org_id>")
+                await self._send_response(message, "用法：/org bind <组织名 或 组织ID>")
                 return True
-            session.set_metadata("bound_org_id", parts[2].strip())
+            query = parts[2].strip()
+            org_id, err = self._resolve_org_query(query)
+            if err:
+                await self._send_response(message, err)
+                return True
+            mgr = self._get_org_manager()
+            display_name = ""
+            if mgr is not None:
+                try:
+                    org_obj = mgr.get(org_id) if org_id else None
+                    display_name = org_obj.name if org_obj else ""
+                except Exception:
+                    display_name = ""
+            session.set_metadata("bound_org_id", org_id)
             self.session_manager.mark_dirty()
-            await self._send_response(message, f"已绑定组织：{parts[2].strip()}")
+            label = f"「{display_name}」(ID: {org_id})" if display_name else org_id
+            await self._send_response(message, f"已绑定组织：{label}")
             return True
         if lowered in ("/org unbind", "/组织 解绑"):
             session.set_metadata("bound_org_id", "")
@@ -2885,14 +3365,59 @@ class MessageGateway:
             await self._send_response(message, "已取消当前 IM 会话的组织绑定。")
             return True
         if lowered in ("/org status", "/组织 状态"):
-            org_id = session.get_metadata("bound_org_id") or ""
-            await self._send_response(message, f"当前绑定组织：{org_id or '未绑定'}")
+            bound = session.get_metadata("bound_org_id") or ""
+            if not bound:
+                await self._send_response(message, "当前未绑定组织。用 `/org bind <组织名>` 绑定。")
+                return True
+            mgr = self._get_org_manager()
+            display_name = ""
+            if mgr is not None:
+                try:
+                    org_obj = mgr.get(bound)
+                    display_name = org_obj.name if org_obj else ""
+                except Exception:
+                    display_name = ""
+            if display_name:
+                await self._send_response(message, f"当前绑定组织：「{display_name}」(ID: {bound})")
+            else:
+                await self._send_response(message, f"当前绑定组织：{bound}（注意：该组织可能已被删除或归档）")
+            return True
+        if lowered in ("/org list", "/组织 列表"):
+            mgr = self._get_org_manager()
+            if mgr is None:
+                await self._send_response(message, "组织管理器尚未就绪，请稍后再试。")
+                return True
+            try:
+                orgs = mgr.list_orgs(include_archived=False)
+            except Exception as exc:
+                await self._send_response(message, f"列出组织失败：{exc}")
+                return True
+            if not orgs:
+                await self._send_response(message, "当前没有任何已创建的组织。")
+                return True
+            lines = [f"当前共 {len(orgs)} 个组织："]
+            for o in orgs[:20]:
+                lines.append(
+                    f"  • {o.get('name', '')}  [{o.get('status', '')}]  ID: {o.get('id', '')}"
+                )
+            if len(orgs) > 20:
+                lines.append(f"  …还有 {len(orgs) - 20} 个未显示")
+            lines.append("\n下达指令：`/org bind <组织名>` 后用 `@组织 <任务>`")
+            await self._send_response(message, "\n".join(lines))
             return True
 
         parsed = self._parse_org_command(text, session)
         if parsed is None:
             return False
-        org_id, task = parsed
+        org_query, task = parsed
+
+        # 把用户输入的"组织名或 ID"解析为真实 ID。@组织/@org 简短形式时
+        # ``_parse_org_command`` 已经返回 session 里 bound 好的真实 id，再走一遍解析
+        # 仍然安全（id 精确匹配自身）。
+        org_id, err = self._resolve_org_query(org_query)
+        if err:
+            await self._send_response(message, err)
+            return True
 
         try:
             from openakita.orgs.command_service import (
@@ -2930,30 +3455,98 @@ class MessageGateway:
                 surface="im",
                 target=f"{message.channel}:{message.chat_id}:{message.user_id}",
             )
+            mgr = self._get_org_manager()
+            org_name = ""
+            if mgr is not None:
+                try:
+                    org_obj = mgr.get(org_id)
+                    org_name = org_obj.name if org_obj else ""
+                except Exception:
+                    org_name = ""
+            self._record_current_org_command(
+                session,
+                org_id=org_id,
+                org_name=org_name,
+                command_id=command_id,
+                task_preview=task,
+            )
+            self.session_manager.mark_dirty()
             try:
+                progress_lines: list[str] = []
+                progress_seen: set[str] = set()
+                org_display = f"「{org_name}」" if org_name else org_id
+                status_card_id: str | None = None
                 if chat_type != "group":
-                    await self._send_response(message, f"已向组织 {org_id} 下发指令，命令 ID：{command_id}")
+                    status_card_id = await self._send_org_status_card(
+                        message,
+                        self._format_org_command_status_card(
+                            org_display=org_display,
+                            command_id=command_id,
+                            progress_lines=progress_lines,
+                        ),
+                    )
+                final_text = ""
                 while True:
                     item = await queue.get()
                     if item.get("type") == "org_progress":
-                        summary = item.get("summary") or ""
+                        summary = str(item.get("summary") or "").strip()
                         if summary and chat_type != "group":
-                            await self._send_response(message, f"组织进度：{summary}")
+                            if summary in progress_seen:
+                                continue
+                            progress_seen.add(summary)
+                            progress_lines.append(summary)
+                            status_text = self._format_org_command_status_card(
+                                org_display=org_display,
+                                command_id=command_id,
+                                progress_lines=progress_lines,
+                            )
+                            patched = await self._patch_org_status_card(
+                                message,
+                                status_card_id,
+                                status_text,
+                            )
+                            if not patched and not status_card_id:
+                                await self._send_response(message, f"组织进度：{summary}")
                         continue
                     if item.get("type") == "org_command_done":
                         result = item.get("result")
                         error = item.get("error")
+                        attachments: list[dict] = []
                         if isinstance(result, dict):
                             final_text = str(result.get("result") or result.get("error") or result)
+                            raw_attachments = result.get("file_attachments") or []
+                            if isinstance(raw_attachments, list):
+                                attachments = [a for a in raw_attachments if isinstance(a, dict)]
                         else:
                             final_text = str(error or result or "组织命令已完成")
+                        if attachments:
+                            final_text = self._append_attachment_media_lines(final_text, attachments)
                         session.add_message("user", text, message_id=message.id)
                         session.add_message("assistant", final_text)
+                        self._finish_current_org_command(session, result_text=final_text)
                         self.session_manager.mark_dirty()
+                        if chat_type != "group":
+                            await self._patch_org_status_card(
+                                message,
+                                status_card_id,
+                                self._format_org_command_status_card(
+                                    org_display=org_display,
+                                    command_id=command_id,
+                                    progress_lines=progress_lines,
+                                    done=True,
+                                ),
+                                done=True,
+                            )
                         await self._send_response(message, final_text)
                         return True
             finally:
                 svc.unsubscribe_summary(command_id, queue)
+                # 防御：如果 finally 走到这里时 current_org_command 还没被清，
+                # 强制把它转入 last_org_command 槽位，避免后续 /org running 误指。
+                cur_now = session.get_metadata("current_org_command") or None
+                if isinstance(cur_now, dict) and cur_now.get("command_id") == command_id:
+                    self._finish_current_org_command(session, result_text="(无最终回复)")
+                    self.session_manager.mark_dirty()
         except Exception as exc:
             logger.warning("[IM] org command failed: %s", exc, exc_info=True)
             await self._send_response(message, f"组织命令提交失败：{_format_user_error(exc)}")
@@ -3179,29 +3772,14 @@ class MessageGateway:
             # ==================== 正常消息处理流程 ====================
 
             # 0. Bot 开关检查（必须在 typing 之前，避免禁用会话触发 typing）
-            bot_namespace = self._get_message_bot_instance_id(message)
             if not self.bot_config.is_enabled(bot_namespace, message.chat_id, message.user_id):
                 logger.debug(
                     f"[Gateway] Bot disabled for {bot_namespace}:{message.chat_id}:{message.user_id}, skipping"
                 )
                 return
 
-            # 1. 启动持续 typing 状态（覆盖预处理 + Agent 全流程）
-            typing_task = asyncio.create_task(self._keep_typing(message))
-
-            # 2. 预处理钩子
-            for hook in self._pre_process_hooks:
-                try:
-                    message = await hook(message)
-                except Exception as hook_err:
-                    logger.warning(
-                        f"[Gateway] Pre-process hook {hook.__qualname__} failed: {hook_err}"
-                    )
-
-            # 3. 媒体预处理（下载图片、语音转文字）
-            await self._preprocess_media(message)
-
-            # 4. 获取或创建会话
+            # 1. 先获取或创建会话。组织指挥台命令会在启动 typing 之前处理，
+            # 避免飞书/Telegram 先创建“思考中...”卡片，短命令回复后又被补发或撤回。
             _msg_sender_name = (message.metadata or {}).get("sender_name", "")
             _msg_chat_name = (message.metadata or {}).get("chat_name", "")
             session = self.session_manager.get_session(
@@ -3245,6 +3823,23 @@ class MessageGateway:
             org_handled = await self._try_handle_org_command(message, session, user_text)
             if org_handled:
                 return
+
+            # 2. 启动持续 typing 状态（覆盖预处理 + Agent 全流程）。
+            # 只有会进入普通 Agent 的消息才需要这个提示；/org list、/org bind、
+            # /org <组织名> 的解析错误等都会在上面直接返回。
+            typing_task = asyncio.create_task(self._keep_typing(message))
+
+            # 3. 预处理钩子
+            for hook in self._pre_process_hooks:
+                try:
+                    message = await hook(message)
+                except Exception as hook_err:
+                    logger.warning(
+                        f"[Gateway] Pre-process hook {hook.__qualname__} failed: {hook_err}"
+                    )
+
+            # 4. 媒体预处理（下载图片、语音转文字）
+            await self._preprocess_media(message)
 
             # 4.1 多Bot绑定：将 adapter 配置的 agent_profile_id 写入新 session
             self._apply_bot_agent_profile(session, bot_namespace)
