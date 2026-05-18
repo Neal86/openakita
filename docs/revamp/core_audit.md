@@ -61,9 +61,9 @@ default unless a parity test surfaces a better placement.
 | `agent_output_guard.py` | 86 | **MOVE** | `agent/output_guard.py` | Already small. |
 | `prompt_assembler.py` | 157 | **MOVE** | `agent/prompt.py` | The legacy single-pass assembler; the new `prompt/builder.py` (already in repo) is the multi-layer builder. We keep the assembler as the agent's view-into-builder until the parity harness is happy. |
 | `output_formatter.py` | 101 | **MOVE** | `agent/output_formatter.py` | Pure functions; stable. |
-| `errors.py` | 15 | **MOVE** | `agent/errors.py` | Trivial. |
-| `state.py` | 75 | **MOVE** | merge into `agent/state.py` | Trivial. |
-| `working_facts.py` | 53 | **MOVE** | `agent/working_facts.py` | Trivial. |
+| `errors.py` | 15 | **MOVE — done** | `agent/errors.py` | Shipped 2026-05-18 in commit `feat(agent): port errors and working_facts (MOVE)`. Legacy path is now a re-export shim until Phase 8. |
+| `state.py` | 75 | **DELETE — Phase 8** (re-classified) | n/a | Re-classified during the actual port: a workspace-wide search for `core.state` returns zero importers in production code, so the audit's original "MOVE → merge into agent/state.py" is wrong on two counts. (1) The merge target (`agent/state.py`) is the port of the unrelated 431-line `core/agent_state.py` and shares no symbols with this 75-line `StateStore` / `AppState` module. (2) Nothing imports it, so the cleanest action is mechanical removal at Phase 8. We leave the file untouched so a stray future caller would still find it during the burn-in window. |
+| `working_facts.py` | 53 | **MOVE — done** | `agent/working_facts.py` | Shipped 2026-05-18 in commit `feat(agent): port errors and working_facts (MOVE)`. Legacy path is now a re-export shim until Phase 8. |
 | `token_budget.py` | 78 | **MOVE** | `agent/token_budget.py` | Numeric helpers. |
 | `confirmation_state.py` | 113 | **MOVE** | `agent/confirmation.py` | Tight. |
 | `microcompact.py` | 155 | **MOVE** | `agent/microcompact.py` | Tight; consumed by context manager. |
@@ -113,9 +113,9 @@ them out of scope. Touching them risks needless churn.
 
 ### Vestigial — DELETE at Phase 8
 
-None identified at audit time. Every file under `core/` is in active
-use as of `revamp/v2` HEAD. If Phase 2 surfaces dead code, mark it
-here and delete in the Phase 8 mechanical commit.
+| File | LOC | Verdict | Notes |
+|---|---:|---|---|
+| `state.py` | 75 | **DELETE** | Re-classified from MOVE during the actual port (see the MOVE table). Zero importers in production code (workspace-wide search for `core.state` / `from openakita.core.state` / `from .core.state` is empty). The Tauri Rust file mentioning `AppState` is unrelated. Removed mechanically at Phase 8. |
 
 ## Aggregate sizing
 
@@ -132,9 +132,11 @@ below maps to one commit in the Phase 2 series.
 
 1. `feat(agent): scaffold v2 agent package skeleton` — empty
    modules, `agent/__init__.py` re-exporting nothing yet, plus
-   `tests/parity/` shell.
-2. `feat(agent): port errors / state / working_facts (MOVE)` — three
-   trivial moves, single commit because none has external deps.
+   `tests/parity/` shell. **Substantively shipped** before audit
+   was written (see `agent/state.py`).
+2. **Done** — `feat(agent): port errors and working_facts (MOVE)`
+   landed 2026-05-18. `core/state.py` was re-classified to DELETE
+   when the port revealed it has zero importers.
 3. `feat(agent): port identity, persona, output_guard, output_formatter (MOVE)`.
 4. `feat(agent): port permission, audit, validators (MOVE)` — covers
    plan §8 keep-as-is candidates.

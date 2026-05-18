@@ -16,7 +16,7 @@ A user-led ADR review is the gate to flip them all to `Accepted`.
 |---|---|---|---|
 | 0 — ADRs (10 docs) | **Complete** | 10 | n/a |
 | 1 — Foundation (runtime/ leaf modules) | **Complete** | 8 | 99 runtime tests |
-| 2 — Agent rewrite | **In progress (audit + state shell only)** | 1 (`agent/state.py`) + 1 audit doc | 17 agent tests |
+| 2 — Agent rewrite | **In progress (audit + 2 MOVE commits)** | 2 (`agent/state.py`, `agent/errors.py`+`agent/working_facts.py`) + 1 audit doc | 32 agent tests |
 | 3 — Runtime engine (supervisor + messenger + guardrail + state graph) | **Complete (G3 review pending)** | 6 (`ledger`, `stall_detector`, `supervisor`, `messenger`, `guardrail/`, `state_graph`) | 110 new runtime tests |
 | 4 — Nodes | **Complete incl. plugin loader (G4 review pending)** | 7 (`base`+sig fix, `tool_node`, `llm_node`, `condition_node`+`human_review_node`, `workbench_node`+`manifest`, `happyhorse-video` adoption, `plugins/manager.py` WORKBENCH discovery) | 89 new tests (`test_nodes_*`) + 5 plugin smoke tests + 5 manifest discovery tests |
 | 5 — Templates | **Schema + registry + 4 builtins shipped (G5 review pending)** | 6 (`schema`, `registry`, `aigc_video_studio`, `software_team`, `startup_company`, `content_ops`+discovery test) | 75 template tests |
@@ -24,11 +24,12 @@ A user-led ADR review is the gate to flip them all to `Accepted`.
 | 7 — Cutover + data migration | Pending | 0 | — |
 | 8 — Legacy removal | Pending | 0 | — |
 
-Total to date: **42 code commits + 10 ADR commits + 3 docs commits =
-55 commits on `revamp/v2`**, all lint-clean (ruff over the v2 surface),
-test-green (373 / 373 across `tests/runtime/`, `tests/agent/`,
+Total to date: **43 code commits + 10 ADR commits + 4 docs commits =
+57 commits on `revamp/v2`**, all lint-clean (ruff over the v2 surface),
+test-green (595 / 595 across `tests/runtime/`, `tests/agent/`,
 `tests/api/`, `tests/unit/test_plugins/`, `tests/orgs/`, and
-`plugins/happyhorse-video/tests/test_workbench_manifest.py`).
+`plugins/happyhorse-video/tests/test_workbench_manifest.py`; the
+larger total reflects v1 unit tests that the move shims keep green).
 
 ### 2026-05-18 mid-cycle plan-vs-reality review
 
@@ -170,7 +171,15 @@ replaces (with line count), and the rough effort.
 ### Phase 2 — Agent core, remaining slices
 
 The agent's leaf modules above the Phase-1 foundation. Each is one
-focused commit with tests.
+focused commit with tests. Already done:
+
+| Module | ADR | Replaces | Status |
+|---|---|---|---|
+| `agent/state.py` | ADR-0003 | `core/agent_state.py` | **Done.** Phase-1 era port; 17 tests. |
+| `agent/errors.py` | ADR-0003 | `core/errors.py` | **Done.** Move with re-export shim; 4 tests. |
+| `agent/working_facts.py` | ADR-0003 | `core/working_facts.py` | **Done.** Move with re-export shim; 11 tests. |
+
+Remaining:
 
 | Module | ADR | Replaces | Legacy lines | Cap (lines) |
 |---|---|---|---|---|
@@ -272,13 +281,11 @@ log` reader can diff the world before / after.
 1. Read this `STATUS.md` first, then `docs/revamp/PLAN_AUDIT.md`
    and `docs/revamp/core_audit.md` for the rationale behind the
    Phase 2 commit plan.
-2. **Recommended next slice — Phase 2 commit 2** of the plan in
-   `docs/revamp/core_audit.md` §"Sub-commit plan for Phase 2": port
-   `core/errors.py` + `core/state.py` + `core/working_facts.py` into
-   `agent/` as MOVE-only commits with import-path updates. These
-   are the three smallest files (15 + 75 + 53 LOC), zero behaviour
-   change, single commit. They unblock larger ports because every
-   subsequent agent module imports at least one of them.
+2. **Recommended next slice — Phase 2 commit 3 in the audit plan**:
+   port `core/identity.py` + `core/persona.py` + `core/output_guard.py`
+   + `core/output_formatter.py` as MOVE-only commits with re-export
+   shims. These are well-scoped, well-tested, and unblock the
+   prompt-builder pipeline.
 3. After (2): walk the MOVE list in `core_audit.md` in the order
    given. Each commit:
    * moves one tightly-scoped legacy file to `agent/`,
