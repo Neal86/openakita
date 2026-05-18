@@ -74,7 +74,8 @@ cold-session `org_id` rehydration in `MessageGateway` (#3).
 | `415226a7` | P-RC-2 P2.5 | feat(setup-center): render ProgressLedgerTimeline component | +219 / -2 | +4 (vitest) | ADR-0006 |
 | `a9cd8f82` | P-RC-2 P2.6 | feat(setup-center): OrgChatPanel switches to v2 stream when org is v2-bound | +153 / -2 | +2 (vitest) | ADR-0006 |
 | `7bd3c29b` | P-RC-2 P2.7 | feat(setup-center): mount TemplatePickerDrawer in OrgEditorView | +169 / -1 | +1 (vitest) | ADR-0006 |
-| _this commit_ | P-RC-2 P2.8 | feat(setup-center): bump asset version + stale bundle banner | +290 (src/test) | +2 (vitest) +3 (pytest) | ADR-0007 |
+| `0bfad7de` | P-RC-2 P2.8 | feat(setup-center): bump asset version + stale bundle banner | +339 / -1 | +2 (vitest) +3 (pytest) | ADR-0007 |
+| _this commit_ | P-RC-2 P2.9 | docs(revamp): G-RC-2 gate review + STATUS scoreboard update | +220 / 0 | 0 | — |
 
 ## P-RC-3 — Multi-process-safe v2 persistence
 
