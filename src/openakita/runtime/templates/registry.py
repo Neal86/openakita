@@ -1,0 +1,353 @@
+"""Template registry — discovery, validation, instantiation.
+
+Per ADR-0008, the :class:`TemplateRegistry` is the single source of
+truth for which templates exist, their schema, and how to clone one
+into a fresh :class:`runtime.models.OrgV2`.
+
+Built-in templates self-register on import via the :func:`template`
+decorator. Application bootstrap (Phase 7) imports the
+``runtime.templates.builtin`` package and the registry is populated
+as a side effect — no manual registration needed.
+
+The registry is process-local; callers can construct private
+registries for tests, or use :data:`GLOBAL_REGISTRY` in production.
+"""
+
+from __future__ import annotations
+
+import importlib
+import logging
+import pkgutil
+from collections.abc import Callable, Iterable
+from typing import Any
+
+from ..models import (
+    DefaultsSpec as RuntimeDefaultsSpec,
+)
+from ..models import (
+    EdgeV2,
+    NodeRuntimeOverrides,
+    NodeV2,
+    OrgStatus,
+    OrgV2,
+    WorkbenchBinding,
+    new_edge_id,
+    new_node_id,
+    new_org_id,
+)
+from .schema import (
+    TemplateSpec,
+    TemplateValidationError,
+    WorkbenchBindingSpec,
+)
+
+__all__ = [
+    "GLOBAL_REGISTRY",
+    "TemplateRegistry",
+    "discover_builtins",
+    "template",
+]
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Decorator + module-level pending list
+# ---------------------------------------------------------------------------
+
+TemplateFactory = Callable[[], TemplateSpec]
+"""``factory() -> TemplateSpec``.
+
+Built-in templates are functions returning a fresh, fully-populated
+:class:`TemplateSpec`. Returning a fresh value (rather than a module-
+level constant) means the dataclass instance is created lazily, only
+when the template is actually instantiated.
+"""
+
+
+_PENDING: list[TemplateFactory] = []
+
+
+def template(factory: TemplateFactory) -> TemplateFactory:
+    """Decorator that schedules a built-in template for registration.
+
+    The factory is queued in a process-global list; the registry's
+    :meth:`bootstrap` method drains it. We do the work lazily so
+    importing :mod:`runtime.templates` has no side effects.
+    """
+    _PENDING.append(factory)
+    return factory
+
+
+# ---------------------------------------------------------------------------
+# Registry
+# ---------------------------------------------------------------------------
+
+
+class TemplateRegistry:
+    """Process-local catalog of :class:`TemplateSpec` records."""
+
+    def __init__(self) -> None:
+        self._templates: dict[str, TemplateSpec] = {}
+
+    # ------------------------------------------------------------------
+    # CRUD-ish surface
+    # ------------------------------------------------------------------
+
+    def register(self, spec: TemplateSpec) -> None:
+        spec.validate()
+        if spec.id in self._templates:
+            existing = self._templates[spec.id]
+            if existing is spec:
+                return
+            raise TemplateValidationError(
+                f"template id {spec.id!r} is already registered with version "
+                f"{existing.version}; refusing to overwrite with version "
+                f"{spec.version}"
+            )
+        self._templates[spec.id] = spec
+
+    def get(self, template_id: str) -> TemplateSpec:
+        try:
+            return self._templates[template_id]
+        except KeyError as exc:
+            raise KeyError(
+                f"unknown template id {template_id!r}; "
+                f"known: {sorted(self._templates)}"
+            ) from exc
+
+    def list(self) -> list[TemplateSpec]:
+        return sorted(self._templates.values(), key=lambda t: t.id)
+
+    def __contains__(self, template_id: str) -> bool:
+        return template_id in self._templates
+
+    def __len__(self) -> int:
+        return len(self._templates)
+
+    def clear(self) -> None:
+        """Drop every registration. Useful for tests; callers must
+        re-register or call :meth:`bootstrap` afterwards."""
+        self._templates.clear()
+
+    # ------------------------------------------------------------------
+    # Bulk bootstrap
+    # ------------------------------------------------------------------
+
+    def bootstrap(self, factories: Iterable[TemplateFactory] | None = None) -> int:
+        """Drain pending decorators and register their products.
+
+        Returns the number of templates registered. Iterating the
+        global pending list is destructive: factories already executed
+        are removed so a re-bootstrap is idempotent.
+        """
+        registered = 0
+        if factories is None:
+            factories = list(_PENDING)
+            _PENDING.clear()
+        for factory in factories:
+            spec = factory()
+            self.register(spec)
+            registered += 1
+        return registered
+
+    # ------------------------------------------------------------------
+    # Instantiation — TemplateSpec -> OrgV2
+    # ------------------------------------------------------------------
+
+    def instantiate(
+        self,
+        template_id: str,
+        *,
+        name: str,
+        description: str | None = None,
+        overrides: dict[str, Any] | None = None,
+    ) -> OrgV2:
+        """Clone the template into a fresh :class:`OrgV2`.
+
+        ``overrides`` is a small whitelist of safely-applicable knobs;
+        anything else must be edited on the resulting org afterwards.
+        Supported keys today:
+
+        - ``defaults`` (dict): merge into the template defaults
+          (max_turns, max_stalls, suspect_secs, stream_channels).
+        - ``node_persona_prompts`` (dict[str, str]): per-node-id
+          overrides for ``persona_prompt``.
+        - ``node_runtime_overrides`` (dict[str, dict]): per-node-id
+          overrides applied to NodeRuntimeOverrides.
+
+        Unknown keys raise TemplateValidationError so a typo is loud.
+        """
+        spec = self.get(template_id)
+        spec.validate()
+        overrides = dict(overrides or {})
+        unknown = overrides.keys() - {
+            "defaults",
+            "node_persona_prompts",
+            "node_runtime_overrides",
+        }
+        if unknown:
+            raise TemplateValidationError(
+                f"unknown override keys: {sorted(unknown)}; allowed: "
+                f"defaults, node_persona_prompts, node_runtime_overrides"
+            )
+        node_personas = dict(overrides.get("node_persona_prompts") or {})
+        node_runtimes = dict(overrides.get("node_runtime_overrides") or {})
+        defaults_overrides = dict(overrides.get("defaults") or {})
+        for nid in node_personas:
+            if not isinstance(nid, str):
+                raise TemplateValidationError(
+                    "node_persona_prompts keys must be strings"
+                )
+            try:
+                spec.get_node(nid)
+            except KeyError as exc:
+                raise TemplateValidationError(
+                    f"node_persona_prompts references unknown node id {nid!r}"
+                ) from exc
+        for nid in node_runtimes:
+            try:
+                spec.get_node(nid)
+            except KeyError as exc:
+                raise TemplateValidationError(
+                    f"node_runtime_overrides references unknown node id {nid!r}"
+                ) from exc
+
+        org_id = new_org_id()
+        # Mint fresh NodeIds and remember the mapping role-handle -> NodeId.
+        id_map: dict[str, str] = {n.id: new_node_id() for n in spec.nodes}
+
+        nodes: list[NodeV2] = []
+        for spec_node in spec.nodes:
+            persona = node_personas.get(spec_node.id, spec_node.persona_prompt)
+            runtime_payload = spec_node.runtime.to_jsonable()
+            runtime_payload.update(node_runtimes.get(spec_node.id, {}))
+            try:
+                runtime = NodeRuntimeOverrides.from_jsonable(runtime_payload)
+            except Exception as exc:  # noqa: BLE001
+                raise TemplateValidationError(
+                    f"runtime override merge for node {spec_node.id!r} failed: {exc}"
+                ) from exc
+            wb = (
+                _binding_to_runtime(spec_node.workbench)
+                if spec_node.workbench is not None
+                else None
+            )
+            nodes.append(
+                NodeV2(
+                    id=id_map[spec_node.id],
+                    org_id=org_id,
+                    type=spec_node.type,
+                    role=spec_node.role,
+                    label=spec_node.label,
+                    persona_prompt=persona,
+                    tool_subset=spec_node.tool_subset,
+                    workbench=wb,
+                    runtime_overrides=runtime,
+                )
+            )
+
+        edges: list[EdgeV2] = [
+            EdgeV2(
+                id=new_edge_id(),
+                org_id=org_id,
+                src=id_map[edge.src],
+                dst=id_map[edge.dst],
+                kind=edge.kind,
+            )
+            for edge in spec.edges
+        ]
+
+        defaults = _merge_defaults(spec.defaults, defaults_overrides)
+
+        org = OrgV2(
+            id=org_id,
+            name=name,
+            template_id=spec.id,
+            description=description if description is not None else spec.description,
+            nodes=nodes,
+            edges=edges,
+            defaults=defaults,
+            status=OrgStatus.CREATED,
+        )
+        return org
+
+
+# ---------------------------------------------------------------------------
+# Discovery — auto-import every module under runtime.templates.builtin
+# ---------------------------------------------------------------------------
+
+
+def discover_builtins(package: str = "openakita.runtime.templates.builtin") -> int:
+    """Import every submodule of ``package`` so its ``@template``
+    decorators register themselves.
+
+    Returns the number of modules imported.
+    """
+    try:
+        pkg = importlib.import_module(package)
+    except ModuleNotFoundError:
+        logger.debug("template builtin package %s not present yet", package)
+        return 0
+    if not hasattr(pkg, "__path__"):
+        return 0
+    imported = 0
+    for info in pkgutil.iter_modules(pkg.__path__):
+        if info.name.startswith("_"):
+            continue
+        importlib.import_module(f"{package}.{info.name}")
+        imported += 1
+    return imported
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _binding_to_runtime(spec: WorkbenchBindingSpec) -> WorkbenchBinding:
+    return WorkbenchBinding(
+        plugin_id=spec.plugin_id,
+        mode=spec.mode,
+        capabilities=spec.capabilities,
+    )
+
+
+def _merge_defaults(
+    spec_defaults: object, overrides: dict[str, Any]
+) -> RuntimeDefaultsSpec:
+    """Merge the template's :class:`DefaultsSpec` with override knobs."""
+    base = {
+        "max_turns": spec_defaults.max_turns,  # type: ignore[attr-defined]
+        "max_stalls": spec_defaults.max_stalls,  # type: ignore[attr-defined]
+        "suspect_secs": spec_defaults.suspect_secs,  # type: ignore[attr-defined]
+        "stream_channels": spec_defaults.stream_channels,  # type: ignore[attr-defined]
+    }
+    allowed = set(base.keys())
+    unknown = overrides.keys() - allowed
+    if unknown:
+        raise TemplateValidationError(
+            f"unknown defaults override keys: {sorted(unknown)}; "
+            f"allowed: {sorted(allowed)}"
+        )
+    base.update(overrides)
+    if "stream_channels" in base and not isinstance(base["stream_channels"], tuple):
+        base["stream_channels"] = tuple(base["stream_channels"])
+    return RuntimeDefaultsSpec(**base)
+
+
+# ---------------------------------------------------------------------------
+# Module singleton
+# ---------------------------------------------------------------------------
+
+
+GLOBAL_REGISTRY = TemplateRegistry()
+"""Process-wide singleton.
+
+Application bootstrap should call::
+
+    discover_builtins()
+    GLOBAL_REGISTRY.bootstrap()
+
+once at startup. Tests should construct their own
+:class:`TemplateRegistry` instances to avoid cross-test contamination.
+"""

@@ -17,6 +17,12 @@ This package is populated incrementally during Phase 5:
 
 from __future__ import annotations
 
+from .registry import (
+    GLOBAL_REGISTRY,
+    TemplateRegistry,
+    discover_builtins,
+    template,
+)
 from .schema import (
     DefaultsSpec,
     EdgeSpec,
@@ -31,10 +37,14 @@ from .schema import (
 __all__ = [
     "DefaultsSpec",
     "EdgeSpec",
+    "GLOBAL_REGISTRY",
     "GuardrailSpec",
     "NodeRuntimeOverridesSpec",
     "NodeSpec",
+    "TemplateRegistry",
     "TemplateSpec",
     "TemplateValidationError",
     "WorkbenchBindingSpec",
+    "discover_builtins",
+    "template",
 ]
