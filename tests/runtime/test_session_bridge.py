@@ -98,3 +98,118 @@ def test_protocol_isinstance_check() -> None:
         return None
 
     assert isinstance(lookup, SessionOrgLookup)
+
+# ---------------------------------------------------------------------------
+# P-RC-2: cold-session rehydration in MessageGateway._lookup_org_id_for_session
+# (closes G-RC-1 residual risk #3)
+# ---------------------------------------------------------------------------
+
+
+class _FakeSession:
+    """Tiny stand-in for ``openakita.sessions.session.Session``.
+
+    The lookup only ever calls ``get_metadata(key)`` so we keep the
+    surface minimal. Real :class:`Session` is heavy (touches disk
+    paths, lock fixtures) and not worth wiring up for one method.
+    """
+
+    def __init__(self, *, bound_org_id: str | None) -> None:
+        self._meta = {"bound_org_id": bound_org_id} if bound_org_id else {}
+
+    def get_metadata(self, key: str) -> str | None:
+        return self._meta.get(key)
+
+
+class _FakeSessionManager:
+    def __init__(
+        self,
+        *,
+        hot: dict[str, _FakeSession] | None = None,
+        cold: dict[str, _FakeSession] | None = None,
+        recover_raises: bool = False,
+    ) -> None:
+        self._sessions: dict[str, _FakeSession] = dict(hot or {})
+        self._cold = dict(cold or {})
+        self._recover_raises = recover_raises
+        self.recover_calls: list[str] = []
+
+    def _try_recover_session_from_disk(self, session_key: str) -> _FakeSession | None:
+        self.recover_calls.append(session_key)
+        if self._recover_raises:
+            raise RuntimeError("disk corruption simulated")
+        return self._cold.get(session_key)
+
+
+def _make_lookup(sm: _FakeSessionManager):
+    """Construct a bare ``MessageGateway`` and bind the fake manager.
+
+    We deliberately bypass ``MessageGateway.__init__`` because the
+    real constructor wires registries, queues, and adapter slots we
+    do not need for this lookup-only test. ``__new__`` gives us an
+    instance whose only attribute we touch is ``session_manager``.
+    """
+    from openakita.channels.gateway import MessageGateway
+
+    gw = MessageGateway.__new__(MessageGateway)
+    gw.session_manager = sm  # type: ignore[assignment]
+    return gw._lookup_org_id_for_session
+
+
+def test_lookup_returns_org_id_from_hot_session() -> None:
+    """Sanity: warm path still works (the existing P-RC-1 case)."""
+    sm = _FakeSessionManager(
+        hot={"telegram:chat:user": _FakeSession(bound_org_id="org_warm")},
+    )
+    lookup = _make_lookup(sm)
+    assert lookup("telegram:chat:user") == "org_warm"
+    # Warm hits must not call into the disk recovery path.
+    assert sm.recover_calls == []
+
+
+def test_lookup_rehydrates_cold_session_from_disk() -> None:
+    """Cold path: session not in ``_sessions`` -> recover from disk -> org_id."""
+    sm = _FakeSessionManager(
+        hot={},
+        cold={"feishu:chat:user": _FakeSession(bound_org_id="org_cold")},
+    )
+    lookup = _make_lookup(sm)
+    assert lookup("feishu:chat:user") == "org_cold"
+    assert sm.recover_calls == ["feishu:chat:user"]
+
+
+def test_lookup_returns_none_for_cold_unbound_session() -> None:
+    """Cold session exists on disk but is not bound to any org."""
+    sm = _FakeSessionManager(
+        hot={},
+        cold={"wecom:chat:user": _FakeSession(bound_org_id=None)},
+    )
+    lookup = _make_lookup(sm)
+    assert lookup("wecom:chat:user") is None
+
+
+def test_lookup_returns_none_when_disk_recovery_misses() -> None:
+    """Cold path that finds nothing on disk must return None, not crash."""
+    sm = _FakeSessionManager(hot={}, cold={})
+    lookup = _make_lookup(sm)
+    assert lookup("qq:chat:user") is None
+    assert sm.recover_calls == ["qq:chat:user"]
+
+
+def test_lookup_swallows_disk_recovery_exception() -> None:
+    """The runtime contract forbids the lookup from raising."""
+    sm = _FakeSessionManager(hot={}, cold={}, recover_raises=True)
+    lookup = _make_lookup(sm)
+    assert lookup("dingtalk:chat:user") is None
+
+
+def test_lookup_handles_missing_recover_helper() -> None:
+    """Older session managers without the disk-recovery helper still work."""
+
+    class _NoRecover:
+        _sessions: dict[str, _FakeSession] = {}
+
+    from openakita.channels.gateway import MessageGateway
+
+    gw = MessageGateway.__new__(MessageGateway)
+    gw.session_manager = _NoRecover()  # type: ignore[assignment]
+    assert gw._lookup_org_id_for_session("any:key") is None

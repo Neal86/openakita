@@ -183,14 +183,17 @@ IM "中止" / "/cancel" / abort verb
    ``runtime/llm/``) is reserved for P-RC-4 per the continuation
    plan §5.1. Document this in the rollout runbook.
 3. **Session reverse lookup**: ``MessageGateway._lookup_org_id_for_session``
-   reads ``session_manager._sessions`` directly (the private
-   dict). When the session is on disk and not yet rehydrated, the
-   lookup returns ``None`` and the canary dispatch declines.
-   This matches today's IM behaviour (cold sessions go through
-   the create-on-demand path of ``session_manager.get_session``),
-   but means a freshly restarted process will not route canary
-   IM traffic until the session is in memory. Address in P-RC-2
-   by making the lookup honour ``recover_from_disk`` as well.
+   read ``session_manager._sessions`` directly (the private dict)
+   in P-RC-1, so a freshly restarted process did not route canary
+   IM traffic until the session was rehydrated by an explicit
+   ``get_session(create_if_missing=True)`` call.
+   *Status: addressed in P-RC-2 commit P2.2 (lookup now falls
+   through to ``SessionManager._try_recover_session_from_disk``
+   on a hot-dict miss and reads ``bound_org_id`` off the recovered
+   session metadata; six new unit tests in
+   ``tests/runtime/test_session_bridge.py`` cover hot, cold-bound,
+   cold-unbound, miss-on-disk, recover-raises, and missing-helper
+   cases).*
 4. **Commit 80d23766 BOM**: the very first P-RC-1 commit
    (``chore(revamp): standardise progress ledger ...``) was
    written with PowerShell's BOM-emitting ``Out-File -Encoding

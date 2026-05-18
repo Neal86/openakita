@@ -1051,15 +1051,36 @@ class MessageGateway:
         ``/org bind`` handler (see ``_handle_org_command``). Returns
         ``None`` for unbound sessions or any internal failure (never
         raises -- the runtime contract forbids it).
+
+        P-RC-2 (G-RC-1 residual risk #3): when the session is not in
+        the hot ``_sessions`` dict, we fall through to
+        ``SessionManager._try_recover_session_from_disk`` so a freshly
+        restarted process still routes canary IM traffic to v2 instead
+        of forcing every cold session through legacy until the first
+        ``get_session(create_if_missing=True)`` rehydrates it.
         """
         try:
             sessions = getattr(self.session_manager, "_sessions", None)
-            if not isinstance(sessions, dict):
+            if isinstance(sessions, dict):
+                session = sessions.get(session_key)
+                if session is not None:
+                    bound = session.get_metadata("bound_org_id") or ""
+                    return str(bound) if bound else None
+            # Cold path: try to rehydrate from disk WITHOUT mutating the
+            # hot dict. We reuse the existing private recovery helper
+            # because re-implementing the JSON read here would mean two
+            # places to touch when the session schema evolves.
+            recover = getattr(
+                self.session_manager,
+                "_try_recover_session_from_disk",
+                None,
+            )
+            if recover is None:
                 return None
-            session = sessions.get(session_key)
-            if session is None:
+            recovered = recover(session_key)
+            if recovered is None:
                 return None
-            bound = session.get_metadata("bound_org_id") or ""
+            bound = recovered.get_metadata("bound_org_id") or ""
             return str(bound) if bound else None
         except Exception:
             return None
