@@ -663,75 +663,25 @@ def _get_action_claim_re() -> "re.Pattern[str]":
     return pat
 
 
-def _get_action_done_re() -> "re.Pattern[str]":
-    """检测 LLM 文本中"已经查到/已经读到/我刚才执行"等动作完成短语。
-
-    与 `_get_action_claim_re()` 的区别：
-    - `_get_action_claim_re()` 偏外部状态变化（"已发送/已删除/已写入"），用于隐式 REPLY 分支
-    - `_get_action_done_re()` 偏数据获取动作（"已查/已读/已搜/已检"），用于"未调用工具但
-      声称已完成查询/读取"场景的临时兜底（P0-2 阶段 0）
-
-    阶段 3 完成 identity + 后置一致性检测全面上线后，本检测可作为 belt-and-suspenders 保留。
-    """
-    import re as _re
-
-    pat = getattr(_get_action_done_re, "_cached", None)
-    if pat is not None:
-        return pat
-    pat = _re.compile(
-        r"(?:"
-        r"已经?(?:查|读|删|改|发|执行|完成|保存|写|跑|搜|检索|获取|拉取|下载)"
-        r"|我刚(?:才|刚)?(?:执行|完成|查到|读到|跑|发|删|改|写|拉|获取)"
-        r")"
-    )
-    _get_action_done_re._cached = pat  # type: ignore[attr-defined]
-    return pat
+# Extracted to runtime/state_graph/guards/_text_patterns.py (P-RC-5 P5.2);
+# re-exported here under the legacy private name for backward compat.
+from openakita.runtime.state_graph.guards._text_patterns import (  # noqa: E402
+    action_done_re as _get_action_done_re,
+)
 
 
-# 来源标签检测（P0-2 阶段 3：后置一致性检测）
-def _get_source_tag_re() -> "re.Pattern[str]":
-    """匹配 [来源:工具] / [来源:历史] / [来源:常识] / [来源:不确定] 标签。"""
-    import re as _re
-
-    pat = getattr(_get_source_tag_re, "_cached", None)
-    if pat is not None:
-        return pat
-    pat = _re.compile(r"\[来源[:：]\s*(工具|历史|常识|不确定)\s*\]")
-    _get_source_tag_re._cached = pat  # type: ignore[attr-defined]
-    return pat
+# Extracted to runtime/state_graph/guards/_text_patterns.py (P-RC-5 P5.2);
+# re-exported here under the legacy private name for backward compat.
+from openakita.runtime.state_graph.guards._text_patterns import (  # noqa: E402
+    source_tag_re as _get_source_tag_re,
+)
 
 
-def _check_source_tag_consistency(
-    text: str, tools_executed_count: int
-) -> str | None:
-    """检查回答中的来源标签与实际工具调用次数是否一致。
-
-    P0-2 阶段 3：后置一致性检测。
-
-    返回值：
-    - None：一致，无需任何处理
-    - str：要追加到回答末尾的警告 banner 文本（不替换原文，让用户看到原文+提示）
-    """
-    if not text:
-        return None
-    tag_re = _get_source_tag_re()
-    if "[来源:工具]" in text or "[来源：工具]" in text:
-        if tools_executed_count == 0:
-            return (
-                "\n\n---\n"
-                "⚠️ **系统检测**：本轮回答声明了 `[来源:工具]`，但实际未调用任何工具。"
-                "标注不准确，请将上述结论视为来自训练知识（[来源:常识]）或历史对话，"
-                "如需精确事实请告诉我去查证。"
-            )
-    # 无任何来源标签，但出现"动作完成短语"，且未调用工具 → 隐性"已完成"幻觉
-    if tools_executed_count == 0:
-        if not tag_re.search(text) and _get_action_done_re().search(text):
-            return (
-                "\n\n---\n"
-                "⚠️ **系统提示**：本轮未实际调用任何工具，上述"
-                "\"已查到/已执行/已读到\"等动作完成短语可能不准确，请你核实。"
-            )
-    return None
+# Extracted to runtime/state_graph/guards/source_tag.py (P-RC-5 P5.2);
+# re-exported here under the legacy private name for backward compat.
+from openakita.runtime.state_graph.guards.source_tag import (  # noqa: E402
+    check_source_tag_consistency as _check_source_tag_consistency,
+)
 
 
 # 工具失败 vs 助手乐观措辞 一致性检测（参考 OpenClaw MUTATING_FAILURE_ACTION_PATTERN）。
