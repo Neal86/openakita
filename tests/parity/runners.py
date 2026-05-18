@@ -388,6 +388,136 @@ def _smart_truncate_eval(smart_truncate_fn, case: ParityCase) -> ParityResult:
     )
 
 
+# ---------------------------------------------------------------------------
+# Kind 11 — normalize_confirmation_answer parity
+# ---------------------------------------------------------------------------
+
+
+def _confirm_normalize_v1(case: ParityCase) -> ParityResult:
+    from openakita.core.confirmation_state import normalize_confirmation_answer
+
+    return _confirm_normalize_eval(normalize_confirmation_answer, case)
+
+
+def _confirm_normalize_v2(case: ParityCase) -> ParityResult:
+    from openakita.agent.confirmation import normalize_confirmation_answer
+
+    return _confirm_normalize_eval(normalize_confirmation_answer, case)
+
+
+def _confirm_normalize_eval(normalize_fn, case: ParityCase) -> ParityResult:
+    decision = normalize_fn(case.inputs["answer"])
+    return ParityResult(
+        final_message=decision.value if hasattr(decision, "value") else str(decision),
+        success=True,
+        extras={"decision_name": getattr(decision, "name", str(decision))},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Kind 12 — DomainAllowlist decide() parity
+# ---------------------------------------------------------------------------
+
+
+def _domain_allowlist_v1(case: ParityCase) -> ParityResult:
+    from openakita.core.domain_allowlist import DomainAllowlist
+
+    return _domain_allowlist_eval(DomainAllowlist, case)
+
+
+def _domain_allowlist_v2(case: ParityCase) -> ParityResult:
+    from openakita.agent.domain_allowlist import DomainAllowlist
+
+    return _domain_allowlist_eval(DomainAllowlist, case)
+
+
+def _domain_allowlist_eval(domain_cls, case: ParityCase) -> ParityResult:
+    allowlist = domain_cls()
+    conv_id = case.inputs["conversation_id"]
+    for host in case.inputs.get("blocked", []):
+        allowlist.block(conv_id, host)
+    for host in case.inputs.get("allowed", []):
+        allowlist.approve(conv_id, host)
+    decision = allowlist.decide(conv_id, case.inputs["host"])
+    listing = allowlist.list_for(conv_id)
+    return ParityResult(
+        final_message=decision,
+        success=(decision == "allow"),
+        extras={
+            "decision": decision,
+            "blocked": sorted(listing.get("blocked", [])),
+            "allowed": sorted(listing.get("allowed", [])),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Kind 13 — user_profile alias→key resolution parity
+# ---------------------------------------------------------------------------
+
+
+def _user_profile_resolve_v1(case: ParityCase) -> ParityResult:
+    from openakita.core.user_profile import resolve_profile_key
+
+    return _user_profile_resolve_eval(resolve_profile_key, case)
+
+
+def _user_profile_resolve_v2(case: ParityCase) -> ParityResult:
+    from openakita.agent.user_profile import resolve_profile_key
+
+    return _user_profile_resolve_eval(resolve_profile_key, case)
+
+
+def _user_profile_resolve_eval(resolve_fn, case: ParityCase) -> ParityResult:
+    key = resolve_fn(case.inputs["alias"])
+    return ParityResult(
+        final_message=key or "",
+        success=bool(key),
+        extras={"resolved": key, "found": key is not None},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Kind 14 — capabilities namespace+id builder parity
+# ---------------------------------------------------------------------------
+
+
+def _capability_id_v1(case: ParityCase) -> ParityResult:
+    from openakita.core.capabilities import build_capability_id, build_namespace, normalize_slug
+
+    return _capability_id_eval(build_capability_id, build_namespace, normalize_slug, case)
+
+
+def _capability_id_v2(case: ParityCase) -> ParityResult:
+    from openakita.agent.capabilities import build_capability_id, build_namespace, normalize_slug
+
+    return _capability_id_eval(build_capability_id, build_namespace, normalize_slug, case)
+
+
+def _capability_id_eval(build_id_fn, build_ns_fn, normalize_fn, case: ParityCase) -> ParityResult:
+    namespace = build_ns_fn(
+        case.inputs["origin"],
+        plugin_id=case.inputs.get("plugin_id", ""),
+        project_id=case.inputs.get("project_id", ""),
+    )
+    cap_id = build_id_fn(
+        case.inputs["kind"],
+        case.inputs["local_id"],
+        origin=case.inputs["origin"],
+        plugin_id=case.inputs.get("plugin_id", ""),
+        project_id=case.inputs.get("project_id", ""),
+    )
+    slug_norm = normalize_fn(case.inputs["local_id"])
+    return ParityResult(
+        final_message=cap_id,
+        success=True,
+        extras={
+            "namespace": namespace,
+            "slug_normalized": slug_norm,
+        },
+    )
+
+
 V1_RUNNERS: dict[str, RunnerFn] = {
     "permission_mode": _permission_v1,
     "token_budget": _token_budget_v1,
@@ -399,6 +529,10 @@ V1_RUNNERS: dict[str, RunnerFn] = {
     "brain_response": _brain_response_v1,
     "reasoning_decision": _reasoning_decision_v1,
     "primary_agent": _primary_agent_v1,
+    "confirm_normalize": _confirm_normalize_v1,
+    "domain_allowlist": _domain_allowlist_v1,
+    "user_profile_resolve": _user_profile_resolve_v1,
+    "capability_id": _capability_id_v1,
 }
 
 V2_RUNNERS: dict[str, RunnerFn] = {
@@ -412,6 +546,10 @@ V2_RUNNERS: dict[str, RunnerFn] = {
     "brain_response": _brain_response_v2,
     "reasoning_decision": _reasoning_decision_v2,
     "primary_agent": _primary_agent_v2,
+    "confirm_normalize": _confirm_normalize_v2,
+    "domain_allowlist": _domain_allowlist_v2,
+    "user_profile_resolve": _user_profile_resolve_v2,
+    "capability_id": _capability_id_v2,
 }
 
 
