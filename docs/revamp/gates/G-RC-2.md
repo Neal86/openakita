@@ -157,8 +157,10 @@ budget per N4).
 
 ## G-RC-2 review notes
 
-* **Drain-on-close**: ``_wait_until_drained`` polls every 5 ms
-  rather than blocking on a per-subscriber ``asyncio.Event``.
+* **Drain-on-close**: ``_wait_until_drained`` yields each
+  event-loop tick via ``await asyncio.sleep(0)`` with a 2.0 s
+  deadline rather than blocking on a per-subscriber
+  ``asyncio.Event``.
   Polling was chosen because subscribers can opt out of the
   drain (``drain_on_close=False``) and the bus must terminate
   promptly when ALL drain-eligible queues empty -- a polling
