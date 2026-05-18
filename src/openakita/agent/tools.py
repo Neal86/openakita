@@ -27,9 +27,9 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
-from openakita.core.tool_executor import ToolExecutor as _LegacyToolExecutorImpl
-from openakita.core.tool_executor import ToolResultWithHint as _LegacyToolResultWithHint
-from openakita.core.tool_executor import ToolSkipped as _LegacyToolSkipped
+from openakita.core._tool_executor_legacy import ToolExecutor as _LegacyToolExecutorImpl
+from openakita.core._tool_executor_legacy import ToolResultWithHint as _LegacyToolResultWithHint
+from openakita.core._tool_executor_legacy import ToolSkipped as _LegacyToolSkipped
 from openakita.runtime.io import (
     DEFAULT_TOOL_RESULT_MAX_CHARS as _V2_DEFAULT_TOOL_RESULT_MAX_CHARS,
 )
