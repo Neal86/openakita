@@ -132,7 +132,8 @@ loses its sentinel allowance for these three files.
 | `b010bdae` | P-RC-4 P4.10pre | refactor(runtime/io): re-anchor v2 smart_truncate marker to legacy Chinese text for byte-faithful parity | +/-3 (truncate.py marker text) | 0 (test updated, no count delta) | ADR-0001 |
 | `b57a2ed6` | P-RC-4 P4.10 | feat(agent): implement real agent/tools.py on extracted helpers (~280 LOC) | +346 (agent/tools.py 56->347; +221 real SLOC) | 0 (parity tests already cover behaviour; new methods covered indirectly) | ADR-0001 |
 | `cd69cd60` | P-RC-4 P4.11a | refactor(core): rename core/tool_executor.py to _tool_executor_legacy.py (pure git mv) | rename only | 0 | ADR-0001 |
-| _this commit_ | P-RC-4 P4.11b | refactor(core): replace core/tool_executor.py body with thin import shim | core/tool_executor.py 1818->41 (lazy __getattr__ re-export); agent/tools.py imports updated to use _tool_executor_legacy | 0 | ADR-0001 |
+| `8e8e7da7` | P-RC-4 P4.11b | refactor(core): replace core/tool_executor.py body with thin import shim | core/tool_executor.py 1818->41 (lazy __getattr__ re-export); agent/tools.py imports updated to use _tool_executor_legacy | 0 | ADR-0001 |
+| _this commit_ | P-RC-4 P4.12 | test(parity): real parity for ToolExecutor (5 fixtures + __file__ divergence) | +124 (test_tools_parity.py) + 5 JSON fixtures | +7 (5 fixtures + __file__ + class-identity) | ADR-0001 |
 | _this commit_ | P-RC-4 P4.10 | feat(agent): implement real agent/tools.py on extracted helpers (~280 LOC) | +330 (agent/tools.py 56->401) | -0 (no new tests; parity tests cover behaviour) | ADR-0001 |
  refactor(core): replace core/brain.py body with thin import shim | core/brain 2015 -> 19 (shim), _brain_legacy preserves legacy body | 0 | ADR-0001, ADR-0003 |
 
