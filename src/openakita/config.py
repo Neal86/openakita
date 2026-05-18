@@ -750,21 +750,43 @@ class Settings(BaseSettings):
         description="只读探索连续无新信息的硬终止轮数，0=禁用（默认）。建议值 10~15",
     )
 
-    # === Runtime v2（fork 重写运行时）开关 ===
-    # 控制 src/openakita/runtime/ 下的 v2 运行时（dual-ledger Supervisor、
-    # NodeProtocol、TemplateRegistry 等）是否被外部 API / channels 暴露。
-    # 默认关闭：v2 还在并行验证阶段，旧 orgs/ 路径继续作为生产路径。
-    # 打开后：
-    #   - /api/v2/orgs/templates 系列路由被挂载（来自 runtime/templates/）
-    #   - 后续 Phase 6 的 channels gateway 会按 org 选择 v2 supervisor 路径
-    # 设置：在 .env 里写 RUNTIME_V2_ENABLED=true 或在 settings 上动态切换。
+    # === Runtime v2 (fork-style rewrite runtime) flag ===
+    # Controls whether the v2 runtime under src/openakita/runtime/
+    # (dual-ledger Supervisor, NodeProtocol, TemplateRegistry, etc.)
+    # exposes its public API surface (the /api/v2/orgs/* routes) and
+    # its frontend facade.
+    #
+    # Phase 7 cutover (commit c2884076 on revamp/v2) flipped this
+    # default to True: the v2 facade is now on by default. The local
+    # v2.0.0-rc1 tag is built on this assumption.
+    #
+    # WHAT IS ACTUALLY ON WHEN True:
+    #   - GET /api/v2/orgs/templates and the orgs CRUD routes are
+    #     served from runtime/templates/ + runtime/orgs/store.py.
+    #   - settings.runtime_v2_enabled is the master kill switch for
+    #     the entire v2 surface.
+    #
+    # WHAT IS NOT YET ON EVEN WHEN True (per docs/revamp/PLAN_AUDIT.md
+    # and the post-RC continuation plan, P-RC-1):
+    #   - IM traffic (Telegram / Feishu / DingTalk / WeCom / QQ / OneBot)
+    #     still flows through the legacy OrgRuntime in channels/gateway.py.
+    #     The v2 dispatch path is canary-gated by a forthcoming
+    #     ``runtime_v2_canary_orgs`` allow-list (added in P-RC-1); orgs
+    #     not on that list keep running on legacy regardless of this flag.
+    #
+    # ROLLBACK: see docs/revamp/rollback.md. The short version is
+    # ``RUNTIME_V2_ENABLED=false`` in .env plus restoring data/orgs.db
+    # from the legacy backup written by scripts/migrate_orgs_to_v2.py.
     runtime_v2_enabled: bool = Field(
         default=True,
         description=(
-            "灰度开关：是否启用 src/openakita/runtime/ 下的 v2 运行时及其 API "
-            "facade（v2 模板、v2 supervisor）。Phase 7 cutover 已翻转为 True。"
-            "如需回退到 legacy 路径仅暴露 v1 endpoints，在 .env 里写 "
-            "RUNTIME_V2_ENABLED=false 即可。"
+            "Master gate for the v2 runtime facade (src/openakita/runtime/) "
+            "and its /api/v2/orgs routes. Phase 7 cutover defaulted this "
+            "to True; IM channels still take the legacy path unless their "
+            "org id is added to the (P-RC-1) runtime_v2_canary_orgs "
+            "allow-list. To roll back to legacy-only, set "
+            "RUNTIME_V2_ENABLED=false in .env and follow "
+            "docs/revamp/rollback.md."
         ),
     )
 
