@@ -4,7 +4,7 @@
      Parsed by tests/revamp/_ledger.py + tests/parity/test_no_facade.py. -->
 current_phase: P-RC-9
 
-> **Sub-phase status (2026-05-19, G-RC-9.1 Nit-3 closed)**: P9.0 closed, P9.1 closed (Nit-3 of 5 cleared; 4 nits ride to G-RC-9), P-RC-10 charter recorded, Q-A/Q-B/Q-C locked in. **HARD STOP** -- P9.2 ProjectStore NOT started; awaiting operator review of `docs/revamp/gates/G-RC-9.1.md` before resuming.
+> **Sub-phase status (2026-05-19, G-RC-9.2 sign-off)**: P9.0 closed, P9.1 closed (Nit-3 of 5 cleared; 4 ride to G-RC-9), P9.2 ProjectStore closed (parity 6/6, contract 18 x 2 = 36/36, no v1 touch). **HARD STOP** -- P9.3 NodeScheduler NOT started; awaiting operator review of `docs/revamp/gates/G-RC-9.2.md` before resuming.
 
 > Source of truth for every commit landed on ``revamp/v3-orgs``
 > during the P-RC-9 ``src/openakita/orgs/`` integral migration.
@@ -107,3 +107,5 @@ current_phase: P-RC-9
 | _this commit_ | P-RC-9 P9.2d | test(parity/orgs): activate 6 project_store parity fixtures (xfail -> pass) | +PLACEHOLDER (test_project_store_parity.py REPLACE: 20-line xfail placeholder -> ~280-line fixture suite + ledger) | +6 / -1 xfail | ADR-0011 (subsystem decomposition); P-RC-9-PLAN section 5.2 ignore set |
 | _this commit_ | P-RC-9 P9.2e | test(runtime/orgs): add 10 project_store contract cases (read-back/IDs/recalc/delete) across both backends -> 20 collected tests | +PLACEHOLDER (test_project_store_contract.py NEW 276 + ledger) | +20 | ADR-0011 (Protocol-typed subsystem); ADR-0012 (no shim under v1) |
 | _this commit_ | P-RC-9 P9.2e2 | test(runtime/orgs): add 8 project_store contract cases (malformed/schema/concurrent/perf) -> +16 collected tests, total 36 | +PLACEHOLDER (test_project_store_contract.py +229/-5 + ledger) | +16 | ADR-0011 (Protocol-typed subsystem); ADR-0013 (perf envelope; wall-clock concurrent-write SLA) |
+
+| _this commit_ | P-RC-9 G-RC-9.2 | docs(revamp): write G-RC-9.2 mini-gate (P9.2 ProjectStore sign-off) | +PLACEHOLDER (G-RC-9.2.md NEW 292 + ledger +3) | 0 | ADR-0011; ADR-0012; ADR-0013 |
