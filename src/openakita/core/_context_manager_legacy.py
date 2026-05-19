@@ -19,11 +19,11 @@ from typing import Any
 from urllib.parse import urlparse
 
 from ..tracing.tracer import get_tracer
+from ._tool_executor_legacy import OVERFLOW_MARKER
 from .context_utils import DEFAULT_MAX_CONTEXT_TOKENS
 from .context_utils import estimate_tokens as _shared_estimate_tokens
 from .context_utils import get_max_context_tokens as _shared_get_max_context_tokens
 from .token_tracking import TokenTrackingContext, reset_tracking_context, set_tracking_context
-from .tool_executor import OVERFLOW_MARKER
 
 logger = logging.getLogger(__name__)
 CHARS_PER_TOKEN = 2  # JSON 序列化后约 2 字符 = 1 token
@@ -931,7 +931,7 @@ class ContextManager:
                     if item.get("type") == "text":
                         texts.append(item.get("text", ""))
                     elif item.get("type") == "tool_use":
-                        from .tool_executor import smart_truncate as _st
+                        from ._tool_executor_legacy import smart_truncate as _st
 
                         name = item.get("name", "unknown")
                         input_data = item.get("input", {})
@@ -941,7 +941,7 @@ class ContextManager:
                         )
                         texts.append(f"[调用工具: {name}, 参数: {input_summary}]")
                     elif item.get("type") == "tool_result":
-                        from .tool_executor import smart_truncate as _st
+                        from ._tool_executor_legacy import smart_truncate as _st
 
                         result_text = str(item.get("content", ""))
                         result_text, _ = _st(

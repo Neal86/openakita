@@ -12,9 +12,9 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .agent import Agent
+    from ._agent_legacy import Agent
+    from ._brain_legacy import Brain
     from .agent_state import AgentState, TaskState, TaskStatus
-    from .brain import Brain
     from .errors import UserCancelledError
     from .identity import Identity
     from .ralph import RalphLoop
@@ -31,11 +31,11 @@ __all__ = [
 ]
 
 _LAZY_IMPORTS = {
-    "Agent": (".agent", "Agent"),
+    "Agent": ("._agent_legacy", "Agent"),
     "AgentState": (".agent_state", "AgentState"),
     "TaskState": (".agent_state", "TaskState"),
     "TaskStatus": (".agent_state", "TaskStatus"),
-    "Brain": (".brain", "Brain"),
+    "Brain": ("._brain_legacy", "Brain"),
     "Identity": (".identity", "Identity"),
     "RalphLoop": (".ralph", "RalphLoop"),
     "UserCancelledError": (".errors", "UserCancelledError"),

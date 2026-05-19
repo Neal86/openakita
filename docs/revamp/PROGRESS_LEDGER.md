@@ -238,7 +238,8 @@ the residual-risk note.
 | `23f8e05b` | P-RC-7 P7.6 | refactor(api+agent): retarget Agent + smart_truncate imports to openakita.agent.* | +8 / -8 (8 files, 8 imports rewritten) | 0 | ADR-0001, ADR-0003 |
 | `e8638ea1` | P-RC-7 P7.7 | fix(core/_agent_legacy): break circular import (confirmation_state <-> agent.confirmation <-> agent.core) | +4 / -1 (1 import retargeted to canonical home) | +26 collectable (test_api_chat.py no longer ImportErrors) | ADR-0003 |
 | `7d595b2d` | P-RC-7 P7.8 | refactor(tests): mechanical mass-migrate 119 shim imports across 59 test files (prep for shim deletion) | +122 / -150 (59 files; public->agent.*, private->core._<x>_legacy) | 0 | ADR-0001, ADR-0003 |
-| _this commit_ | P-RC-7 P7.9 | refactor(tests): retarget last 13 shim-path references to `_*_legacy` + fix MINIMAL_PROMPT_TOOLS regression | +25 / -19 (10 test files; 6 module-level imports, 3 monkeypatch strings, 3 patch() targets, 4 KIND_MODULES entries) | 0 (test_intent_prompt_contract.py back to collectable) | ADR-0001, ADR-0003 |
+| `d3535673` | P-RC-7 P7.9 | refactor(tests): retarget last 13 shim-path references to `_*_legacy` + fix MINIMAL_PROMPT_TOOLS regression | +25 / -19 (10 test files; 6 module-level imports, 3 monkeypatch strings, 3 patch() targets, 4 KIND_MODULES entries) | 0 (test_intent_prompt_contract.py back to collectable) | ADR-0001, ADR-0003 |
+| _this commit_ | P-RC-7 P7.10 | refactor(core): retarget all 32 internal `from .X` shim references in legacy modules to `from ._X_legacy` (decouples legacy bodies from shim files in prep for P7.11 shim deletion) | +108 / -96 (8 files; 34 import retargets + ruff I001 cleanup on _reasoning_engine_legacy.py introduced by my new sibling import lines) | 0 | ADR-0001, ADR-0003 |
 
 ## P-RC-8 — Endgame (renames, docs, acceptance, release)
 

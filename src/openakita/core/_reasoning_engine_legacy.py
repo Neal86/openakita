@@ -33,9 +33,9 @@ from ..api.routes.websocket import broadcast_event
 from ..config import settings
 from ..llm.converters.tools import PARSE_ERROR_KEY
 from ..tracing.tracer import get_tracer
+from ._context_manager_legacy import ContextManager
+from ._context_manager_legacy import _CancelledError as _CtxCancelledError
 from .agent_state import AgentState, TaskState, TaskStatus
-from .context_manager import ContextManager
-from .context_manager import _CancelledError as _CtxCancelledError
 from .errors import UserCancelledError
 from .loop_budget_guard import LoopBudgetGuard
 from .resource_budget import BudgetAction, ResourceBudget, create_budget_from_settings
@@ -90,8 +90,8 @@ _PER_TOOL_NAME_TASK_LIMITS: dict[str, int] = {
 
 
 from ..tools.tool_hints import ConfigHint
+from ._tool_executor_legacy import ToolExecutor
 from .token_tracking import TokenTrackingContext, reset_tracking_context, set_tracking_context
-from .tool_executor import ToolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +319,7 @@ def _apply_tool_result_budget(
     max_total: int | None = None,
 ) -> list[dict]:
     """Proportionally truncate tool results if total exceeds budget."""
-    from .tool_executor import OVERFLOW_MARKER, save_overflow
+    from ._tool_executor_legacy import OVERFLOW_MARKER, save_overflow
 
     if max_total is None:
         max_total = int(getattr(settings, "context_tool_results_total_chars", 80_000) or 80_000)
@@ -383,6 +383,32 @@ def _compact_cached_tool_content(tool_name: str, content: str) -> str:
 # Mode-based tool filtering
 # ---------------------------------------------------------------------------
 
+# --- mode/intent/shell-write guards extracted to runtime.state_graph.guards.tool_filters ---
+# Legacy private aliases kept for backward compatibility with downstream
+# code that still touches the private spellings (incl. reasoning_engine
+# internals patched in P-RC-5). See runtime/state_graph/guards/tool_filters.py
+# for the canonical implementations.
+from ..runtime.state_graph.guards.tool_filters import (
+    CHAT_INTENT_CORE_TOOLS as _CHAT_INTENT_CORE_TOOLS,
+)
+from ..runtime.state_graph.guards.tool_filters import (
+    SHELL_WRITE_PATTERNS as _SHELL_WRITE_PATTERNS,
+)
+from ..runtime.state_graph.guards.tool_filters import (
+    filter_tools_by_intent as _filter_tools_by_intent,
+)
+from ..runtime.state_graph.guards.tool_filters import (
+    filter_tools_by_mode as _filter_tools_by_mode,
+)
+from ..runtime.state_graph.guards.tool_filters import (
+    get_mode_ruleset as _get_mode_ruleset,
+)
+from ..runtime.state_graph.guards.tool_filters import (
+    is_shell_write_command as _is_shell_write_command,
+)
+from ..runtime.state_graph.guards.tool_filters import (
+    should_block_tool as _should_block_tool,
+)
 from .permission import (
     ASK_MODE_RULESET,
     COORDINATOR_MODE_RULESET,
@@ -394,22 +420,6 @@ from .permission import (
 )
 from .permission import (
     disabled as permission_disabled,
-)
-
-
-# --- mode/intent/shell-write guards extracted to runtime.state_graph.guards.tool_filters ---
-# Legacy private aliases kept for backward compatibility with downstream
-# code that still touches the private spellings (incl. reasoning_engine
-# internals patched in P-RC-5). See runtime/state_graph/guards/tool_filters.py
-# for the canonical implementations.
-from ..runtime.state_graph.guards.tool_filters import (
-    CHAT_INTENT_CORE_TOOLS as _CHAT_INTENT_CORE_TOOLS,
-    SHELL_WRITE_PATTERNS as _SHELL_WRITE_PATTERNS,
-    filter_tools_by_intent as _filter_tools_by_intent,
-    filter_tools_by_mode as _filter_tools_by_mode,
-    get_mode_ruleset as _get_mode_ruleset,
-    is_shell_write_command as _is_shell_write_command,
-    should_block_tool as _should_block_tool,
 )
 
 
@@ -455,19 +465,11 @@ class Checkpoint:
 
 # Extracted to runtime/state_graph/guards/unbacked_action.py (P-RC-5 P5.6);
 # re-exported here under the legacy private names for backward compat.
-from openakita.runtime.state_graph.guards.unbacked_action import (  # noqa: E402
-    action_claim_re as _get_action_claim_re,
-    extract_unbacked_verbs as _extract_unbacked_verbs,
-    guard_unbacked_action_claim as _guard_unbacked_action_claim,
-)
-
-
 # Extracted to runtime/state_graph/guards/_text_patterns.py (P-RC-5 P5.2);
 # re-exported here under the legacy private name for backward compat.
 from openakita.runtime.state_graph.guards._text_patterns import (  # noqa: E402
     action_done_re as _get_action_done_re,
 )
-
 
 # Extracted to runtime/state_graph/guards/_text_patterns.py (P-RC-5 P5.2);
 # re-exported here under the legacy private name for backward compat.
@@ -475,6 +477,44 @@ from openakita.runtime.state_graph.guards._text_patterns import (  # noqa: E402
     source_tag_re as _get_source_tag_re,
 )
 
+# Extracted to runtime/state_graph/guards/_verb_tool_map.py (P-RC-5 P5.5);
+# re-exported here under the legacy private names for backward compat.
+from openakita.runtime.state_graph.guards._verb_tool_map import (  # noqa: E402
+    CLAIMED_TOOL_TO_FRAGMENTS as _CLAIMED_TOOL_TO_FRAGMENTS,
+)
+from openakita.runtime.state_graph.guards._verb_tool_map import (
+    VERB_TO_TOOL_FRAGMENTS as _VERB_TO_TOOL_FRAGMENTS,
+)
+
+# Extracted to runtime/state_graph/guards/conversation_state.py (P-RC-5 P5.7);
+# re-exported here under the legacy private names for backward compat.
+from openakita.runtime.state_graph.guards.conversation_state import (  # noqa: E402
+    HARD_USER_BLOCKER_TOOL_MARKERS as _HARD_USER_BLOCKER_TOOL_MARKERS,
+)
+from openakita.runtime.state_graph.guards.conversation_state import (
+    RECOVERABLE_TOOL_ERROR_MARKERS as _RECOVERABLE_TOOL_ERROR_MARKERS,
+)
+from openakita.runtime.state_graph.guards.conversation_state import (
+    USER_BLOCKED_ACTIONS as _USER_BLOCKED_ACTIONS,
+)
+from openakita.runtime.state_graph.guards.conversation_state import (
+    USER_BLOCKED_MARKERS as _USER_BLOCKED_MARKERS,
+)
+from openakita.runtime.state_graph.guards.conversation_state import (
+    has_recoverable_tool_issue as _has_recoverable_tool_issue,
+)
+from openakita.runtime.state_graph.guards.conversation_state import (
+    looks_like_waiting_for_user_response as _looks_like_waiting_for_user_response,
+)
+
+# Extracted to runtime/state_graph/guards/recap_context.py (P-RC-5 P5.4);
+# re-exported here under the legacy private name for backward compat.
+from openakita.runtime.state_graph.guards.recap_context import (  # noqa: E402
+    RECAP_NEAR_RE as _RECAP_NEAR_RE,
+)
+from openakita.runtime.state_graph.guards.recap_context import (
+    is_recap_context as _is_recap_context,
+)
 
 # Extracted to runtime/state_graph/guards/source_tag.py (P-RC-5 P5.2);
 # re-exported here under the legacy private name for backward compat.
@@ -482,6 +522,11 @@ from openakita.runtime.state_graph.guards.source_tag import (  # noqa: E402
     check_source_tag_consistency as _check_source_tag_consistency,
 )
 
+# Extracted to runtime/state_graph/guards/tool_failure_ack.py (P-RC-5 P5.3);
+# re-exported here under the legacy private name for backward compat.
+from openakita.runtime.state_graph.guards.tool_failure_ack import (  # noqa: E402
+    FAILURE_ACKNOWLEDGE_EN as _FAILURE_ACKNOWLEDGE_EN,
+)
 
 # 工具失败 vs 助手乐观措辞 一致性检测（参考 OpenClaw MUTATING_FAILURE_ACTION_PATTERN）。
 #
@@ -503,58 +548,25 @@ from openakita.runtime.state_graph.guards.tool_failure_ack import (  # noqa: E40
     FAILURE_ACKNOWLEDGE_ZH as _FAILURE_ACKNOWLEDGE_ZH,
 )
 
-
-
-# Extracted to runtime/state_graph/guards/tool_failure_ack.py (P-RC-5 P5.3);
-# re-exported here under the legacy private name for backward compat.
-from openakita.runtime.state_graph.guards.tool_failure_ack import (  # noqa: E402
-    FAILURE_ACKNOWLEDGE_EN as _FAILURE_ACKNOWLEDGE_EN,
-)
-
-
-
-
 # Extracted to runtime/state_graph/guards/tool_failure_ack.py (P-RC-5 P5.3);
 # re-exported here under the legacy private name for backward compat.
 from openakita.runtime.state_graph.guards.tool_failure_ack import (  # noqa: E402
     check_tool_failure_acknowledgement as _check_tool_failure_acknowledgement,
 )
 
-
-# Extracted to runtime/state_graph/guards/_verb_tool_map.py (P-RC-5 P5.5);
-# re-exported here under the legacy private names for backward compat.
-from openakita.runtime.state_graph.guards._verb_tool_map import (  # noqa: E402
-    CLAIMED_TOOL_TO_FRAGMENTS as _CLAIMED_TOOL_TO_FRAGMENTS,
-    VERB_TO_TOOL_FRAGMENTS as _VERB_TO_TOOL_FRAGMENTS,
-)
-
-
-
-
 # Extracted to runtime/state_graph/guards/tool_failure_ack.py (P-RC-5 P5.3);
 # re-exported here under the legacy private name for backward compat.
 from openakita.runtime.state_graph.guards.tool_failure_ack import (  # noqa: E402
     successful_tool_names as _successful_tool_names,
 )
-
-
-# Extracted to runtime/state_graph/guards/recap_context.py (P-RC-5 P5.4);
-# re-exported here under the legacy private name for backward compat.
-from openakita.runtime.state_graph.guards.recap_context import (  # noqa: E402
-    RECAP_NEAR_RE as _RECAP_NEAR_RE,
-    is_recap_context as _is_recap_context,
+from openakita.runtime.state_graph.guards.unbacked_action import (  # noqa: E402
+    action_claim_re as _get_action_claim_re,
 )
-
-
-# Extracted to runtime/state_graph/guards/conversation_state.py (P-RC-5 P5.7);
-# re-exported here under the legacy private names for backward compat.
-from openakita.runtime.state_graph.guards.conversation_state import (  # noqa: E402
-    HARD_USER_BLOCKER_TOOL_MARKERS as _HARD_USER_BLOCKER_TOOL_MARKERS,
-    RECOVERABLE_TOOL_ERROR_MARKERS as _RECOVERABLE_TOOL_ERROR_MARKERS,
-    USER_BLOCKED_ACTIONS as _USER_BLOCKED_ACTIONS,
-    USER_BLOCKED_MARKERS as _USER_BLOCKED_MARKERS,
-    has_recoverable_tool_issue as _has_recoverable_tool_issue,
-    looks_like_waiting_for_user_response as _looks_like_waiting_for_user_response,
+from openakita.runtime.state_graph.guards.unbacked_action import (
+    extract_unbacked_verbs as _extract_unbacked_verbs,
+)
+from openakita.runtime.state_graph.guards.unbacked_action import (
+    guard_unbacked_action_claim as _guard_unbacked_action_claim,
 )
 
 
@@ -7423,7 +7435,7 @@ class ReasoningEngine:
         当单条消息的文本内容超过 max_single_tokens 估算值时，
         保留开头和结尾各一半，中间截断并插入提示。
         """
-        from .context_manager import ContextManager
+        from ._context_manager_legacy import ContextManager
 
         truncated = False
         result = []
@@ -7487,7 +7499,7 @@ class ReasoningEngine:
         较早的消息，直到估算 token 数降到 target_tokens 以下。
         返回 True 表示确实做了截断。
         """
-        from .context_manager import ContextManager
+        from ._context_manager_legacy import ContextManager
 
         total = ContextManager.static_estimate_tokens(
             str([m.get("content", "") for m in working_messages])

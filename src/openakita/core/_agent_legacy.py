@@ -96,17 +96,18 @@ from ..tools.mcp import mcp_client
 from ..tools.mcp_catalog import mcp_catalog as _shared_mcp_catalog
 from ..tools.shell import ShellTool
 from ..tools.web import WebTool
+from ._brain_legacy import Brain, Context
+from ._context_manager_legacy import ContextManager
+from ._context_manager_legacy import _CancelledError as _CtxCancelledError
+from ._reasoning_engine_legacy import ReasoningEngine
+from ._tool_executor_legacy import ToolExecutor
 from .agent_state import AgentState
-from .brain import Brain, Context
-from .context_manager import ContextManager
-from .context_manager import _CancelledError as _CtxCancelledError
 from .context_utils import get_max_context_tokens as _shared_get_max_context_tokens
 from .context_utils import get_raw_context_window as _shared_get_raw_context_window
 from .errors import UserCancelledError
 from .identity import Identity
 from .prompt_assembler import PromptAssembler
 from .ralph import RalphLoop, Task, TaskResult
-from .reasoning_engine import ReasoningEngine
 from .response_handler import (
     INTERNAL_TRACE_MARKERS,
     INTERNAL_TRACE_SECTION_PREFIXES,
@@ -124,7 +125,6 @@ from .token_tracking import (
     reset_tracking_context,
     set_tracking_context,
 )
-from .tool_executor import ToolExecutor
 from .user_profile import get_profile_manager
 
 _DESKTOP_AVAILABLE: bool | None = None  # None = not yet checked
@@ -514,7 +514,7 @@ from ..runtime.desktop.attachments import (
 )
 
 # 上下文管理常量（部分迁移至 context_manager.py，压缩相关仍需就地定义）
-from .context_manager import CHARS_PER_TOKEN, CHUNK_MAX_TOKENS
+from ._context_manager_legacy import CHARS_PER_TOKEN, CHUNK_MAX_TOKENS
 
 COMPRESSION_RATIO = 0.15
 LARGE_TOOL_RESULT_THRESHOLD = 5000
@@ -3880,7 +3880,7 @@ class Agent:
         逐条扫描，tokens > threshold 的 tool_result 调 LLM 压缩为精简摘要，
         保留结构（role/type 等不变）。
         """
-        from .tool_executor import OVERFLOW_MARKER
+        from ._tool_executor_legacy import OVERFLOW_MARKER
 
         result = []
         for msg in messages:
@@ -4099,7 +4099,7 @@ class Agent:
                     if item.get("type") == "text":
                         texts.append(item.get("text", ""))
                     elif item.get("type") == "tool_use":
-                        from .tool_executor import smart_truncate as _st
+                        from ._tool_executor_legacy import smart_truncate as _st
 
                         name = item.get("name", "unknown")
                         input_data = item.get("input", {})
@@ -4109,7 +4109,7 @@ class Agent:
                         )
                         texts.append(f"[调用工具: {name}, 参数: {input_summary}]")
                     elif item.get("type") == "tool_result":
-                        from .tool_executor import smart_truncate as _st
+                        from ._tool_executor_legacy import smart_truncate as _st
 
                         raw_content = item.get("content", "")
                         if isinstance(raw_content, list):
@@ -4349,7 +4349,7 @@ class Agent:
             logger.warning(f"[HardTruncate] Dropped earliest message (role={removed_role})")
 
         if dropped_messages:
-            from .context_manager import ContextManager
+            from ._context_manager_legacy import ContextManager
 
             ContextManager._enqueue_dropped_for_extraction(dropped_messages, self.memory_manager)
 
@@ -6943,7 +6943,7 @@ class Agent:
         调用方将返回值存入消息的 ``tool_summary`` 元数据字段（不要拼入 content）。
         空字符串表示无工具调用。
         """
-        from .tool_executor import save_overflow, smart_truncate
+        from ._tool_executor_legacy import save_overflow, smart_truncate
 
         trace = (
             getattr(self, "_last_finalized_trace", None)
@@ -7340,12 +7340,12 @@ class Agent:
                 getattr(session.context, "summary", None) if hasattr(session, "context") else None
             )
             if summary:
-                from .tool_executor import smart_truncate as _st
+                from ._tool_executor_legacy import smart_truncate as _st
 
                 summary_trunc, _ = _st(summary, 600, save_full=False, label="topic_summary")
                 context_parts.append(f"对话摘要: {summary_trunc}")
 
-        from .tool_executor import smart_truncate as _st
+        from ._tool_executor_legacy import smart_truncate as _st
 
         recent = session_messages[-6:]
         dialog_lines: list[str] = []
@@ -7739,7 +7739,7 @@ class Agent:
         # schema，token 浪费 + LLM 分心同时治本。
         _engine_tools = self._effective_tools
         try:
-            from .reasoning_engine import _filter_tools_by_intent
+            from ._reasoning_engine_legacy import _filter_tools_by_intent
 
             _engine_tools = _filter_tools_by_intent(
                 _engine_tools,
@@ -8575,7 +8575,7 @@ class Agent:
 
                     # ── 结构性错误快速熔断 ──
                     from ..llm.types import AllEndpointsFailedError as _Aefe
-                    from .reasoning_engine import ReasoningEngine
+                    from ._reasoning_engine_legacy import ReasoningEngine
 
                     if isinstance(e, _Aefe) and e.is_structural:
                         _already = getattr(self, "_task_structural_stripped", False)
