@@ -106,9 +106,18 @@ flip + final ``ProgressLedger`` checkpoint.
   cancel verb plumbs ``Messenger.cancel(org_id)`` ->
   ``CancellationToken.cancel()`` (P1.5 `a97fa73b`).
 
-**Status: Pass.** The 5 integration cases are green and the cancel
-verb is wired. The < 2 s wall-clock bound is the asyncio test
-fixture's default and is asserted by the canary E2E too.
+**Status: Pass-with-caveat.** The 5 integration cases are green and
+the cancel verb is wired. The < 2 s wall-clock bound, however, is
+not asserted by an explicit wall-clock assertion in any test today;
+current evidence is structural (cooperative cancel verb wired
+through ``Messenger.cancel(org_id)`` -> ``CancellationToken.cancel()``
++ checkpoint-save call ordering inside ``Supervisor.run()``) and the
+asyncio test loop happens to fast-resolve the timer well under 2 s.
+**Caveat (P8.7-doc-fix).** A wall-clock budget assertion (e.g.
+``perf_counter()`` start/stop around the IM cancel ->
+``cancelled`` checkpoint write) is **deferred to P-RC-9** alongside
+the new ``orgs/`` subsystem tests; until then the < 2 s figure is
+documentary (the asyncio fixture default), not measured.
 
 **Evidence.**
 

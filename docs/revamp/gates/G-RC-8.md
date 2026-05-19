@@ -255,14 +255,19 @@ plan and is documented in ``docs/revamp/P-RC-9-CHARTER.md``.
    gated on a future "v2 classes fully standalone" refactor (also
    P-RC-9-scope or later).
 3. **The directory renames Q-B asked about.** Skipped per default.
-4. **The 22 pre-existing failures the broader test sweep surfaces
+4. **The 24 pre-existing failures the broader test sweep surfaces
    in tests/component/ + tests/unit/test_c{8,13,18,23}_ + tests/legacy/
-   + tests/orgs/.** These are caused by P-RC-7's shim deletion
-   removing ``core/agent.py`` etc.; the gate selectors in P-RC-7 +
-   P-RC-8 do not include those files because they are end-of-life
-   coverage that depends on the legacy filesystem layout. They
-   are documented here so the next operator does not chase them
-   as P-RC-8 regressions.
+   + tests/orgs/ + the two production-side entry-point ImportError
+   sites** (24 failed = 22 in tests/legacy fixture-scan + 2
+   production-side entry-point ImportError). These are caused by
+   P-RC-7's shim deletion removing ``core/agent.py`` etc.; the gate
+   selectors in P-RC-7 + P-RC-8 do not include those files because
+   they are end-of-life coverage that depends on the legacy
+   filesystem layout. Two of the 24 failures were
+   ``main.py:28`` and ``mcp_server.py:75`` still importing the
+   deleted ``core/agent`` shim -- a real release blocker missed by
+   P-RC-7's narrow gate selector. Closed by P8.7-fix ``c676b759``;
+   rc2 tag re-applied to that commit train.
 
 ## Final continuation-plan closeout
 
@@ -275,6 +280,51 @@ plan and is documented in ``docs/revamp/P-RC-9-CHARTER.md``.
 * P-RC-6 (agent real + sentinels closed) -- signed (G-RC-6).
 * P-RC-7 (caller migration + shim removal) -- signed (G-RC-7).
 * **P-RC-8 (endgame) -- signed (G-RC-8, this gate).**
+
+
+## Post-gate hotfix: P8.7-fix (entry-point ImportError)
+
+After the initial G-RC-8 sign-off and the local ``v2.0.0-rc2`` tag
+was cut, an independent audit (auditor task
+``0a53785d-c992-41f8-bc1a-5352c9fdd8bc``) returned a **BLOCK**
+verdict against the tag with two confirmed release blockers:
+
+* ``src/openakita/main.py:28`` had a top-level
+  ``from .core.agent import Agent`` -- ``openakita.exe --help``
+  exited 1 with ``ModuleNotFoundError: No module named
+  'openakita.core.agent'`` at CLI startup.
+* ``src/openakita/mcp_server.py:75`` had the same import inside
+  ``MCPServer._ensure_agent()`` -- import OK, runtime crash on the
+  first MCP request.
+
+Both slipped through P-RC-7 because the caller-migration gate
+selector (``tests/runtime + tests/agent + tests/api + tests/parity
++ tests/unit/test_plugins``) does not exercise the CLI or MCP
+server entry points.
+
+**Unlock sequence executed.**
+
+1. ``git tag -d v2.0.0-rc2`` (local-only tag, never pushed).
+2. Commit ``c676b759`` (P8.7-fix): one-line
+   ``from .core.agent import Agent`` -> ``from .agent.core import Agent``
+   in both files (mirroring the P-RC-7 commit ``95b01f25`` pattern
+   used for the other 239 callers), plus a new
+   ``tests/integration/test_entrypoints.py`` with three smoke
+   checks (import ``openakita.main``, import
+   ``openakita.mcp_server``, ``python -m openakita --help`` exit 0).
+3. Commit ``<this commit>`` (P8.7-doc-fix): this section + the §4
+   correction + the ACCEPTANCE.md #2 caveat + the
+   P-RC-9-CHARTER.md LOC reconciliation.
+4. ``git tag -a v2.0.0-rc2`` re-applied to the head of the
+   P8.7 commit train (still local-only).
+
+**Lesson learned (P-RC-8 LL-1).** Future shim removals MUST run a
+full-source ``git grep -nE "from \.core\.<deleted>"`` (and the
+absolute form ``from openakita.core.<deleted>``) across the entire
+``src/`` tree before declaring the gate complete -- not just the
+narrow gate-selector subset of tests. The CLI entry point
+(``main.py``) and the MCP stdio server (``mcp_server.py``) are
+production import sites that the gate selector skipped.
 
 P-RC-9 (orgs/ integral migration) is a separate plan, not part of
 the continuation plan, and the operator chooses whether and when

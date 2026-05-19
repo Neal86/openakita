@@ -9,9 +9,14 @@ can pick the work up without re-discovering the scope.
 P-RC-8 is the **terminal phase of the continuation plan**; nothing
 in this charter is implemented on the `v2.0.0-rc2` tag. The legacy
 `src/openakita/orgs/` package (~880 KB across 26 files, 86
-production import sites, 2533 LOC of v1 REST in
-`api/routes/orgs.py`) is **still live** on `revamp/v2` and is the
-canonical implementation operators use until P-RC-9 lands.
+production import sites, 2145 LOC of v1 REST in
+`api/routes/orgs.py`[^loc]) is **still live** on `revamp/v2` and is
+the canonical implementation operators use until P-RC-9 lands.
+
+[^loc]: Measured with ``wc -l src/openakita/api/routes/orgs.py`` on
+    revision ``c676b759`` (P8.7-fix). Earlier drafts of this
+    charter cited 2300 and 2533; both were stale and have been
+    reconciled to the single verified figure by P8.7-doc-fix.
 
 ## Why orgs/ couldn't be deleted in P-RC-7
 
@@ -22,7 +27,7 @@ package shipped during P-RC-3 is **storage-only** (`SqliteOrgStore`
 equivalents for the six subsystems v1 `orgs/` provides, so a
 mechanical `git rm -r src/openakita/orgs/` would break:
 
-* `api/routes/orgs.py` — 2300 LOC of REST endpoints that call
+* `api/routes/orgs.py` -- 2145 LOC of REST endpoints[^loc] that call
   `OrgManager.create()`, `OrgRuntime.dispatch()`,
   `OrgCommandService.command()`, `ProjectStore.list()`, …
 * `api/server.py` — startup wiring that registers v1 routes.
