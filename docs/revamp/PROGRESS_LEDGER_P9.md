@@ -4,7 +4,7 @@
      Parsed by tests/revamp/_ledger.py + tests/parity/test_no_facade.py. -->
 current_phase: P-RC-9
 
-> **Sub-phase status (2026-05-19, G-RC-9.3 sign-off)**: P9.0 closed, P9.1 closed (Nit-3 of 5 cleared; 4 ride to G-RC-9), P9.2 closed (parity 6/6, contract 36/36), P9.3 NodeScheduler closed (parity 4/4, contract 12/12, all 4 G-RC-9.2 nits folded in, no v1 touch). **HARD STOP** -- P9.4 OrgCommandService NOT started; awaiting operator review of `docs/revamp/gates/G-RC-9.3.md` before resuming. P9.4 is the big one (700 src + 500 tests + ADR-0013 wall-clock SLA) and gets its own executor run.
+> **Sub-phase status (2026-05-19, P9.4a0 land)**: P9.0 closed, P9.1 closed (Nit-3 of 5 cleared; 4 ride to G-RC-9), P9.2 closed (parity 6/6, contract 36/36), P9.3 NodeScheduler closed (parity 4/4, contract 12/12, all 4 G-RC-9.2 nits folded in, no v1 touch). P9.4 OrgCommandService IN FLIGHT -- P9.4a0 ships ``command_models.py`` (data classes + ``new_command_id`` monotonic-counter mint, Nit-1 fold-in). Charter: 700 src + 500 tests + ADR-0013 wall-clock SLA across 7-9 commits.
 
 > Source of truth for every commit landed on ``revamp/v3-orgs``
 > during the P-RC-9 ``src/openakita/orgs/`` integral migration.
@@ -133,3 +133,21 @@ current_phase: P-RC-9
 | _this commit_ | P-RC-9 P9.3c | test(parity/orgs): activate 4 node_scheduler parity fixtures (xfail -> pass; next-fire 1-ms safety net + dispatch-prompt v1==v2) | +PLACEHOLDER (test_node_scheduler_parity.py REPLACE: 28-line xfail placeholder -> ~310-line fixture suite + ledger) | +4 / -1 xfail | ADR-0011 (subsystem decomposition); P-RC-9-PLAN section 5.2 next-fire-time 1-ms tolerance |
 | _this commit_ | P-RC-9 P9.3d | test(runtime/orgs): add 12 node_scheduler contract cases (compute_next_fire + lifecycle + cancel/reload + 4x25 concurrent + dispatch + missing-id) | +PLACEHOLDER (test_node_scheduler_contract.py NEW 316 + ledger) | +12 | ADR-0011 (Protocol-typed subsystem); ADR-0013 (Nit-2 fold-in concurrency stress: 4 coroutines x 25 reloads = 100 ops) |
 | _this commit_ | P-RC-9 G-RC-9.3 | docs(revamp): write G-RC-9.3 mini-gate (P9.3 NodeScheduler sign-off) | +PLACEHOLDER (G-RC-9.3.md NEW 325 + ledger +3) | 0 | ADR-0011; ADR-0012; ADR-0013; G-RC-9.2 Nit-1/2/3/4 fold-in |
+
+## P9.4 -- OrgCommandService (charter subsystem #4)
+
+> Implements ADR-0011 subsystem #4 (charter section 1) -- the
+> BIGGEST P-RC-9 subsystem (v1 963 LOC). Replaces v1
+> ``openakita.orgs.command_service.OrgCommandService`` with a
+> Protocol-typed, dependency-injected v2 surface under
+> ``runtime/orgs/`` that implements the
+> :class:`CommandDispatcher` boundary already defined by P9.3
+> ``runtime.orgs.node_scheduler``. The cancel verb in the v2
+> path is the closure of ACCEPTANCE.md #2 (Pass-with-caveat ->
+> Pass) via the three wall-clock SLA tests from ADR-0013
+> (landed in P9.4e).
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-9 P9.4a0 | feat(runtime/orgs): add v2 command models (Request/Response/Source/ForwardTarget + Surface/Scope enums + monotonic-counter id mint) | +PLACEHOLDER (command_models.py NEW 374 + __init__.py +12 + ledger) | 0 | ADR-0011 (subsystem decomposition; shared model layer for OrgCommandService); ADR-0012 (no shim under v1); Nit-1 fold-in from G-RC-9.2 (monotonic-counter id mint) |
+
