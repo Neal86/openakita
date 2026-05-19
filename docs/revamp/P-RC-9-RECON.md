@@ -242,4 +242,173 @@ budget derived from extracted symbol count, dependency arrows.
 **Topological order:** P9.1 -> P9.2 -> P9.3 -> P9.4 -> P9.5 ->
 P9.6 -> P9.7 -> P9.8 -> P9.9 -> P9.10.
 
-<!-- P9.0b ends here. P9.0b2 appends sections 1c-1f + appendices. -->
+## 1c. Caller catalog (86 src sites, 216 test sites)
+
+Captured via::
+
+    git grep -nE 'from openakita\.orgs' -- src/openakita/ > recon/callers_src.txt
+    git grep -nE 'from openakita\.orgs' -- tests/        > recon/callers_tests.txt
+
+### Production callers by submodule (86 total)
+
+| submodule imported | sites | top external consumers |
+|---|---:|---|
+| ``.models`` | 32 | ``api/routes/orgs.py`` (most), ``api/routes/chat.py`` (1), intra-orgs (8) |
+| ``.project_store`` | 26 | almost all intra-orgs + ``api/routes/orgs.py`` (lines 2071, 2080) |
+| ``.command_service`` | 8 | ``api/routes/orgs.py`` (22, 1287), ``channels/gateway.py`` (5 sites) |
+| ``.manager`` | 5 | ``api/routes/orgs.py`` (3 sites for OrgNameConflictError), ``api/server.py`` (2 wiring sites) |
+| ``.tool_categories`` | 3 | ``api/routes/orgs.py`` (174, 903), intra-orgs (1) |
+| ``.runtime`` | 2 | ``api/server.py`` (wiring), ``core/_reasoning_engine_legacy.py:7920`` (lazy import) |
+| ``.blackboard`` | 2 | ``api/routes/orgs.py`` (1018, 1045) |
+| ``.event_router`` | 1 | ``api/routes/orgs.py`` |
+| ``.plugin_workbench_templates`` | 1 | ``api/routes/orgs.py`` (234) |
+| ``.templates`` | 1 | ``api/server.py`` |
+
+**Unique src files importing orgs (13):** ``api/routes/orgs.py``
+(24 imports), ``api/server.py`` (4), ``channels/gateway.py`` (5),
+``api/routes/chat.py`` (1), ``core/_reasoning_engine_legacy.py``
+(1), plus 8 intra-``orgs/`` files (which all disappear in P9.9
+anyway).
+
+**External callers that must migrate (P9.8 scope):** 5 files --
+``api/routes/orgs.py`` (becomes v2-REST file in P9.7),
+``api/server.py``, ``channels/gateway.py``, ``api/routes/chat.py``,
+``core/_reasoning_engine_legacy.py`` (the runtime import is lazy
+and will fall through to v2 once OrgRuntime moves).
+
+**Migration order priority** (fewest callers first):
+1. ``.event_router`` (1 site) -- bundled into P9.4 OrgCommandService.
+2. ``.plugin_workbench_templates`` (1 site) -- bundled into P9.5.
+3. ``.runtime`` (2 sites) -- migrated when P9.6 lands.
+4. ``.blackboard`` (2 sites) -- migrated in P9.1 itself.
+5. ``.tool_categories`` (3 sites) -- preserved verbatim under
+   ``runtime/orgs/tool_categories.py``; 1-line import rewrites.
+6. ``.manager`` (5 sites) -- migrated in P9.5.
+7. ``.command_service`` (8 sites) -- migrated in P9.4.
+8. ``.project_store`` (26 sites) -- migrated in P9.2.
+9. ``.models`` (32 sites) -- migrated last (P9.8) because the
+   models are duck-typing-stable across v1/v2 and a single bulk
+   rewrite is safe once every other surface is on v2.
+
+### Test callers (216 sites across 48 files under tests/orgs/)
+
+Top test-file importers (count of orgs imports per file):
+
+* ``test_plan_features.py`` (44), ``test_external_tools.py`` (9),
+  ``test_execution_robustness.py`` (9),
+  ``test_org_affinity_attach_fix.py`` (8),
+  ``test_reference_resolution.py`` (8), ``test_tool_handler.py``
+  (7), ``test_transparency_autonomy.py`` (6),
+  ``test_file_delivery_pipeline.py`` (5), ``test_api.py`` (5),
+  ``test_org_orchestration_fix.py`` (5), ``conftest.py`` (5),
+  ``test_tool_inflight.py`` (5), ``test_llm_integration.py`` (4),
+  ``test_external_tools_e2e.py`` (4),
+  ``test_org_delegate_self_misjudge_repro.py`` (4).
+* Cross-cutting integration tests:
+  ``tests/integration/test_gateway_org_control.py`` (5),
+  ``tests/unit/test_org_setup_tool.py`` (3),
+  ``tests/unit/test_remaining_qa_fixes.py`` (2),
+  ``tests/orgs/test_prompt_api_e2e.py`` (2).
+
+**Decision (defaults for Q-B):** ``tests/orgs/`` is **deleted** in
+P9.9 as a coherent block (the v2 subsystems get their own test
+suite under ``tests/runtime/orgs/`` and ``tests/parity/orgs/``).
+Tests that exercise behaviour the v2 surface still owns are
+re-pointed; tests that exercise legacy implementation detail are
+dropped.
+
+## 1d. REST surface
+
+Captured via ``git grep -nE '^@router\.' -- src/openakita/api/routes/orgs.py``.
+
+* **v1 ``orgs.py``:** 89 endpoints, 2 145 LOC. HTTP verb mix:
+  39 POST, 36 GET, 7 PUT, 7 DELETE.
+* **v2 ``orgs_v2.py``:** 8 endpoints (template list/get/instantiate
+  + CRUD list/create/get/patch/delete).
+* **v2 ``orgs_v2_stream.py``:** 1 endpoint
+  (``GET /api/v2/orgs/{id}/stream`` SSE).
+* **Delta:** 89 - 9 = **80 endpoints with no v2 equivalent**. Each
+  is a 1:1 migration unit in P9.7. They cluster into 12 groups:
+  1. Avatars / presets (3)
+  2. Templates / import / export (6)
+  3. Org CRUD (5; partially covered by v2)
+  4. Schedules (5)
+  5. Node identity + MCP (4)
+  6. Lifecycle (start/stop/pause/resume/reset, 5)
+  7. Commands (3)
+  8. Broadcast / im-reply (2)
+  9. Node freeze / online state (5)
+  10. Memory + policies + inbox (16)
+  11. Scaling (5)
+  12. Reports / status / activity / events / stats / tasks (20)
+
+P9.7 ships **all 80** as ``/api/v2/orgs/...`` endpoints with
+identical request/response shapes, then P9.9 removes v1 endpoints
+(or leaves a 1-release deprecation shim per Q-B in the plan).
+
+## 1e. Test surface
+
+* ``tests/orgs/*.py`` -- **48 files**. Most exercise a single
+  legacy submodule (e.g. ``test_blackboard.py``, ``test_messenger.py``).
+* ``tests/integration/test_gateway_org_control.py`` -- IM-side
+  command verb integration; will move alongside P9.4 + P9.8.
+* ``tests/integration/test_v2_im_canary_e2e.py`` +
+  ``test_v2_im_cancel.py`` -- already v2-only; will gain wall-clock
+  budget assertions in P9.4 per ADR-0013.
+* ``tests/unit/test_org_setup_tool.py``,
+  ``test_remaining_qa_fixes.py`` -- migrate during P9.8.
+
+**Parity harness design (Phase 5 of plan):** new
+``tests/parity/orgs/`` directory mirroring ``tests/parity/``
+pattern, one runner pair per subsystem (v1 from
+``openakita.orgs``, v2 from ``openakita.runtime.orgs``), fixtures
+= recorded JSON inputs + expected outputs. Skeleton lands at
+P9.0i; activation per subsystem at P9.1..P9.6.
+
+## 1f. v2 ``runtime/orgs/`` existing surface
+
+| file | LOC | exports |
+|---|---:|---|
+| ``__init__.py`` | 20 | ``JsonOrgStore``, ``OrgNotFound``, ``SqliteOrgStore``, ``get_default_store``, ``reset_default_store`` |
+| ``store.py`` | 204 | ``JsonOrgStore`` (CRUD + factory + singleton); also ``OrgNotFound``, ``_build_store``, ``get_default_store``, ``reset_default_store`` |
+| ``sqlite_store.py`` | 188 | ``SqliteOrgStore`` (same contract as JsonOrgStore, multi-process safe) |
+
+**Total existing v2 surface:** 3 files, 412 LOC -- storage-only,
+duck-typed contract verified by
+``tests/runtime/orgs/test_store_contract.py`` (18 cases).
+
+What the existing surface does **not** include and what P9.1-P9.6
+must add: every behaviour above the persistence layer -- runtime,
+manager, command service, blackboard (legacy is a three-tier
+memory system separate from the v2 store), project store, node
+scheduler.
+
+The factory pattern (``get_default_store()`` /
+``reset_default_store()``) is a good template for the other 6
+subsystems: each will expose a similar process-wide singleton +
+test-friendly reset helper so callers don't have to plumb
+instances through.
+
+## Appendix A -- baseline pytest counts (reproducible)
+
+* ``.venv/Scripts/python.exe -m pytest tests/runtime tests/agent
+  tests/api tests/parity tests/unit/test_plugins -q --tb=no`` ->
+  ``1123 passed, 1 skipped, 5 xfailed in 10.44s``.
+* ``.venv/Scripts/python.exe -m pytest
+  tests/integration/test_v2_im_canary_e2e.py
+  tests/integration/test_v2_im_cancel.py
+  tests/integration/test_entrypoints.py -q --tb=no`` ->
+  ``8 passed in 6.81s``.
+* ``.venv/Scripts/python.exe scripts/revamp_loc_audit.py`` ->
+  ``exit 0`` (all 15 tracked files within budget).
+
+## Appendix B -- captured files (working tree only, not checked in)
+
+* ``recon/callers_src.txt`` (86 lines)
+* ``recon/callers_tests.txt`` (216 lines)
+* ``recon/orgs_symbols.txt`` (99 top-level symbols across 26 files)
+* ``recon/runtime_public_methods.txt`` (38 public method names
+  on ``OrgRuntime``)
+
+The ``recon/`` directory is intentionally not committed (analysis
+artefact); the numeric summaries above are authoritative.
