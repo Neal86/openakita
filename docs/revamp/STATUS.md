@@ -93,6 +93,33 @@ Both unblock G3/G4 sign-off. The remaining caveats are paperwork
 fully scoped by `docs/revamp/core_audit.md` (the audit the plan §8
 mandated at Phase 2 entry; previously missing).
 
+## P-RC-10 -- ``runtime/`` hygiene flattening (DEFERRED; charter only)
+
+P-RC-9 plan section 7 Q-A accepts default (a) "keep
+``runtime/orgs/`` under ``runtime/`` for now" -- which formally
+defers the ``runtime/`` wholesale flattening that becomes
+attractive once v1 is dead. ``docs/revamp/P-RC-10-CHARTER.md``
+captures the scope, three-category split (A keep / B fold to
+``agent/`` / C case-by-case), trigger conditions, and the
+v2.1.0 release relationship.
+
+* Status: NOT executed. Charter only -- no source moves yet.
+* Trigger: P-RC-9 fully shipped + ``v2.0.0-rc3`` stable >= 1
+  week + G-RC-9 audit PASS + ACCEPTANCE 5/5 + (recommended)
+  ``v2.0.0`` merged + tagged.
+* Scope: 9-10 sub-moves, 15-25 commits, 1-2 weeks one
+  engineer. Pattern: physical ``git mv`` + import redirect, no
+  shim (no v1 around to confuse).
+* Future ADR: ADR-0014 (added at P-RC-10.0) will warn plugin
+  authors that paths under ``runtime/{llm,io,context,desktop,
+  guardrail}`` move in v2.1.0.
+
+The charter exists for the same reason ``P-RC-9-CHARTER.md``
+existed during the P-RC-8 closeout: so the next agent picking
+up the work after the v2.0.0 release does not have to
+re-discover the scope or the rationale.
+
+
 ## What v2 already delivers
 
 The dual-ledger orchestration that ADR-0004 promises is end-to-end

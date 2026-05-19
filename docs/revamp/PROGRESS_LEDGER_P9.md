@@ -42,3 +42,14 @@ current_phase: P-RC-9
 | ``2d60189c`` | P-RC-9 P9.0h | docs(adr): add ADR-0013 (wall-clock SLA tests for cancel + checkpoint) | +123 (new ADR) | 0 | ADR-0013 |
 | ``066524d4`` | P-RC-9 P9.0i | feat(tests): scaffold tests/parity/orgs/ harness skeleton (6 xfail placeholders) | +~200 (new package: __init__ + conftest + README + 6 test files) | +6 xfailed | ADR-0011 (subsystem list anchors the 6 placeholders) |
 | _this commit_ | P-RC-9 P9.0z | docs(revamp): write G-RC-9.0 mini-gate (P9.0 baseline ready) | +183 (new gate file) | 0 | --- (gate review; cites ADR-0011/0012/0013) |
+
+## P-RC-10 charter + Q decisions (post-P9.0z paperwork, pre-P9.1)
+
+> Two paperwork commits that close the G-RC-9.0 review's open
+> items (deferred-work charter for ``runtime/`` flattening +
+> Q-A/Q-B/Q-C decision lock-in) BEFORE P9.1 OrgBlackboard work
+> opens. Both commits are pure docs; no source touched.
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-10 charter | docs(revamp): write P-RC-10 charter for runtime/ hygiene flattening (v2.1.0 prep) | +272 (new ``P-RC-10-CHARTER.md``) + STATUS.md pointer + ledger | 0 | --- (planning; previews ADR-0014) |
