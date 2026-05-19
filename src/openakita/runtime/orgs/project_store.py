@@ -22,8 +22,8 @@ Commit split (≤380 LOC per step):
 * P9.2b -- tree / query half: ``all_tasks``,
   ``find_task_by_chain``, ``get_task``, ``get_subtasks``,
   ``get_task_tree``, ``get_ancestors``, ``recalc_progress``.
-* P9.2c (this commit) -- :class:`SqliteProjectStore`.
-* P9.2c2 -- ``get_default_project_store`` /
+* P9.2c -- :class:`SqliteProjectStore`.
+* P9.2c2 (this commit) -- ``get_default_project_store`` /
   ``reset_default_project_stores`` factory + per-org cache.
 
 ADR refs: ADR-0011 (Protocol-typed subsystem decomposition),
@@ -46,6 +46,8 @@ __all__ = [
     "JsonProjectStore",
     "ProjectStoreProtocol",
     "SqliteProjectStore",
+    "get_default_project_store",
+    "reset_default_project_stores",
 ]
 
 logger = logging.getLogger(__name__)
@@ -805,3 +807,69 @@ class SqliteProjectStore:
                 self._conn.close()
             except sqlite3.Error:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Factory + per-org cache (mirrors v1 ``get_project_store`` cadence)
+# ---------------------------------------------------------------------------
+
+
+_STORE_CACHE: dict[str, ProjectStoreProtocol] = {}
+_STORE_CACHE_LOCK = threading.RLock()
+
+
+def get_default_project_store(
+    org_dir: Path | str, *, backend: str | None = None
+) -> ProjectStoreProtocol:
+    """Return (and cache) the per-org default store.
+
+    Dispatches via :data:`settings.orgs_v2_backend` (``"json"``
+    by default; ``"sqlite"`` opt-in). The cache is keyed by
+    string ``org_dir`` so two callers for the same org reuse
+    one process-local store instance (mirrors v1 cadence -- v1
+    OrgRuntime held a single :class:`ProjectStore` per org for
+    the lifetime of the runtime). Tests can call
+    :func:`reset_default_project_stores` between cases to wipe
+    the cache and close every open SQLite handle.
+    """
+    key = str(Path(org_dir))
+    with _STORE_CACHE_LOCK:
+        if key in _STORE_CACHE:
+            return _STORE_CACHE[key]
+        if backend is None:
+            try:
+                from openakita.config import settings
+
+                backend = getattr(settings, "orgs_v2_backend", "json")
+            except ImportError:
+                backend = "json"
+        store: ProjectStoreProtocol
+        if backend == "sqlite":
+            try:
+                from openakita.config import settings
+
+                base = getattr(settings, "data_dir", None) or "data"
+                db_path = Path(base) / "orgs_v2_projects.sqlite"
+            except ImportError:
+                db_path = Path(org_dir) / "orgs_v2_projects.sqlite"
+            store = SqliteProjectStore(db_path)
+        else:
+            store = JsonProjectStore(org_dir)
+        _STORE_CACHE[key] = store
+        return store
+
+
+def reset_default_project_stores() -> None:
+    """Wipe the per-process store cache (test helper).
+
+    Calls ``close()`` on every cached store first so SQLite
+    handles are released cleanly. Mirrors P-RC-3
+    ``reset_default_store`` semantics.
+    """
+    with _STORE_CACHE_LOCK:
+        for store in list(_STORE_CACHE.values()):
+            try:
+                store.close()
+            except Exception:  # noqa: BLE001 -- best-effort cleanup
+                pass
+        _STORE_CACHE.clear()
