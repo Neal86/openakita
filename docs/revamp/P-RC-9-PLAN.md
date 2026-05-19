@@ -357,4 +357,329 @@ Then write a 1-line ``# still-aligned check at commit N`` note
 to the ledger. P-RC-5 found this was the single most effective
 drift-prevention tool.
 
-<!-- P9.0c ends here. P9.0d appends sections 4 + 5. -->
+## 4. Phase decomposition (P9.0..P9.10)
+
+Each phase has: id + title, estimated commits, LOC budget,
+deliverables (precise paths + function signatures where pinnable),
+gate criteria (specific test names + count targets), rework-risk
+score. Every phase ends with its own ``G-RC-9.x.md`` mini-gate
+that must be written before the next phase opens.
+
+### P9.0 -- Baseline (THIS RUN)
+
+* Commits: 10 (P9.0a/b/b2/c/d/e/f/g/h/i/z, ~110 LOC each).
+* Budget: branch + ledger + recon + plan + 3 ADRs + parity
+  skeleton + mini-gate. NO orgs/ source touched.
+* Deliverables: ``PROGRESS_LEDGER_P9.md``, ``P-RC-9-RECON.md``,
+  ``P-RC-9-PLAN.md``, ``ADR-0011/0012/0013``,
+  ``tests/parity/orgs/`` skeleton, ``G-RC-9.0.md``.
+* Gate criteria: pytest baseline unchanged at 1123/1/5 (plus N
+  new xfail placeholders from the parity skeleton); LOC audit
+  exit 0; ruff clean over ``tests/parity/orgs``.
+* Rework risk: LOW. Documents only; can be edited in P9.1
+  without invalidating any code.
+
+### P9.1 -- OrgBlackboard
+
+* Commits: 4-5. ``feat(runtime/orgs): scaffold OrgBlackboard
+  module`` -> ``feat: implement 8 public methods on
+  OrgBlackboard`` -> ``test(runtime/orgs): contract suite (12
+  cases)`` -> ``test(parity/orgs): activate blackboard parity (8
+  fixtures)`` -> ``docs: G-RC-9.1 mini-gate``.
+* LOC budget: 350 in ``src/openakita/runtime/orgs/blackboard.py``
+  + 200 in tests.
+* Deliverables: ``runtime/orgs/blackboard.py`` exporting
+  ``OrgBlackboard`` (constructor: ``(org_dir: Path, org_id: str)``;
+  methods ``read_org``, ``read_department``, ``read_node``,
+  ``write_org``, ``write_department``, ``write_node``,
+  ``get_org_summary``, ``get_dept_summary``,
+  ``get_node_summary``, ``query``, ``delete_entry``,
+  ``clear``). ``tests/runtime/orgs/test_blackboard.py``
+  (12 cases). ``tests/parity/orgs/test_blackboard_parity.py``
+  (8 fixtures activated, was xfail in P9.0i).
+* Gate criteria: tests/runtime grows by +12; tests/parity by +8
+  (-8 xfail); ``tests/orgs/test_blackboard.py`` still green
+  (legacy path untouched).
+* Rework risk: LOW. No back-references; the only risk is
+  storage-shape divergence which the parity suite catches.
+
+### P9.2 -- ProjectStore
+
+* Commits: 5-6. Same shape as P9.1 + the parent-child task tree
+  invariants (``get_task_tree``, ``recalc_progress``,
+  ``get_ancestors``).
+* LOC budget: 300 + 250 tests.
+* Deliverables: ``runtime/orgs/project_store.py`` (21 methods +
+  factory ``get_project_store(org_dir) -> ProjectStore`` +
+  ``reset_project_stores()``). 18 contract test cases (mirror
+  ``tests/runtime/orgs/test_store_contract.py`` pattern).
+* Gate criteria: tests/runtime +18, tests/parity +6 (-6 xfail);
+  the 12 v1 REST project endpoints still green; storage
+  round-trip test against 50 sample blobs.
+* Rework risk: LOW-MEDIUM. The mtime-watch reload requires
+  filesystem-level testing; CI must run on a real filesystem,
+  not tmpfs.
+
+### P9.3 -- NodeScheduler
+
+* Commits: 4-5.
+* LOC budget: 250 + 200 tests.
+* Deliverables: ``runtime/orgs/node_scheduler.py`` (10 methods
+  including ``start_for_org``, ``stop_for_org``, ``stop_all``,
+  ``reload_node_schedules``, ``trigger_once``;
+  ``CommandDispatcher`` Protocol injected at construction).
+  ``tests/runtime/orgs/test_node_scheduler.py`` (10 cases
+  covering CRON, INTERVAL, ONCE schedule kinds + cancel
+  semantics + reload).
+* Gate criteria: tests/runtime +10, tests/parity +4 (-4 xfail);
+  5 v1 REST schedule endpoints still green.
+* Rework risk: MEDIUM. Croniter expressions and the
+  next-fire-time math must round-trip identically.
+
+### P9.4 -- OrgCommandService
+
+* Commits: 6-8.
+* LOC budget: 700 + 400 tests + 100 wall-clock budget tests
+  (closes ACCEPTANCE.md #2 caveat).
+* Deliverables: ``runtime/orgs/command_service.py`` (12 public
+  methods + dataclasses ``OrgCommandRequest``, ``ForwardTarget``,
+  ``OrgOutputScope``; module singleton ``get_command_service()``).
+  ``runtime/orgs/command_tracker.py`` (folded UserCommandTracker).
+  ``runtime/orgs/event_router.py`` (folded).
+  ``tests/runtime/orgs/test_command_service.py`` (20 cases).
+  ``tests/runtime/orgs/test_cancel_wall_clock_budget.py``
+  (asserts < 2 s on IM-cancel -> checkpoint pipeline; closes
+  ADR-0013 SLA).
+* Gate criteria: tests/runtime +20 + wall-clock test green;
+  tests/parity +10 (-10 xfail); 3 v1 REST command endpoints
+  still green; ``test_v2_im_cancel.py`` gains a perf_counter
+  assertion (no fixture change).
+* Rework risk: MEDIUM-HIGH. Verb dispatch + IM gateway
+  integration touch the most caller code; the 5 import sites in
+  ``channels/gateway.py`` must keep working through the v2
+  module path during P9.4.
+
+### P9.5 -- OrgManager
+
+* Commits: 6-8.
+* LOC budget: 600 + 400 tests.
+* Deliverables: ``runtime/orgs/manager.py`` (12 public methods +
+  ``OrgNameConflictError``; constructor
+  ``(data_dir: Path)``; factory ``get_org_manager() -> OrgManager``).
+  ``runtime/orgs/identity.py`` (preserved). 
+  ``runtime/orgs/plugin_workbench_templates.py`` (preserved).
+  ``tests/runtime/orgs/test_manager.py`` (24 cases) +
+  ``test_identity.py`` (8 cases) + ``test_plugin_workbench.py`` (4).
+* Gate criteria: tests/runtime +36, tests/parity +12 (-12 xfail);
+  the ~25 v1 REST manager endpoints still green; JSON round-trip
+  test against 100 sample blobs (closes R8).
+* Rework risk: MEDIUM. Dir-layout mismatches between legacy and
+  v2 will surface as test failures; the migration script must
+  be dry-run-default + idempotent (R4 mitigation).
+
+### P9.6 -- OrgRuntime (the big one)
+
+* Commits: 10-15.
+* LOC budget: 1 200 + 600 tests + the folded subsystems
+  (``tool_handler.py`` 3 183, ``messenger.py`` 552,
+  ``event_store.py`` 361, ``heartbeat.py`` 394, ``inbox.py``
+  265, ``notifier.py`` 164, ``scaler.py`` 351, ``reporter.py``
+  189, ``failure_diagnoser.py`` 462, ``plugin_assets.py`` 137 =
+  6 058 LOC moved + slimmed).
+* Deliverables: ``runtime/orgs/runtime.py`` (30 public methods +
+  thin delegate to handler/messenger/scheduler).
+  ``runtime/orgs/tool_handler.py`` (66 methods preserved).
+  9 other folded modules under ``runtime/orgs/``.
+  ``tests/runtime/orgs/test_runtime.py`` (40 cases).
+  ``tests/runtime/orgs/test_tool_handler.py`` (preserved from
+  legacy ``tests/orgs/test_tool_handler.py``, re-pointed).
+* Gate criteria: tests/runtime +40 minimum; tests/parity +20
+  (-20 xfail); the ~30 v1 REST runtime endpoints still green
+  through legacy path (P9.7 flips them to v2); the cancel
+  wall-clock test from P9.4 still under 2 s; LOC audit
+  baselines for the 10 absorbed legacy files drop to 0 (since
+  the rewritten v2 paths get fresh budgets).
+* Rework risk: HIGH. This is the phase most likely to slip
+  calendar. Mitigation: every sub-commit lands one absorbed
+  legacy module at a time and runs the full pytest suite.
+
+### P9.7 -- REST v2 full (the 80 missing endpoints) + UI port flip
+
+* Commits: 8-12.
+* LOC budget: ~1 800 (the 80 endpoints + dependent helpers).
+* Deliverables: ``api/routes/orgs_v2_full.py`` (or split across
+  several route files keyed to the 12 functional groups from
+  recon ?1d). Each endpoint has a v1 golden JSON capture under
+  ``tests/api/golden/orgs_v1/<endpoint>.json``. Frontend
+  ``apps/setup-center/src/config.ts`` default-port flip to v2.
+  Build artifact test ``tests/integration/test_frontend_v2_default.py``.
+* Gate criteria: tests/api +80 (one per endpoint, contract
+  test against golden JSON); ``BUILD_INFO.api_default ==
+  '/api/v2'`` in dist-web; ACCEPTANCE.md criterion 5 flipped
+  Partial -> Pass.
+* Rework risk: MEDIUM. Golden-file contract tests catch the
+  shape regressions but won't catch behavioural divergence
+  (e.g. v2 endpoint runs a different code path that happens to
+  produce the same response for the recorded inputs but
+  diverges for unrecorded ones). Parity suite must cover the
+  behaviour delta.
+
+### P9.8 -- Caller migration (86 src + 216 tests)
+
+* Commits: 8-12. One commit per logical batch, never more than
+  20 import sites at once.
+* LOC budget: ~400 per batch (each import rewrite + the test
+  green check). Migration is mechanical sed-style.
+* Deliverables: every ``from openakita.orgs.X`` in src/ and
+  tests/ becomes ``from openakita.runtime.orgs.X``. Order:
+  event_router (1) -> plugin_workbench_templates (1) ->
+  runtime (2) -> blackboard (2) -> tool_categories (3) ->
+  manager (5) -> command_service (8) -> project_store (26) ->
+  models (32). Test file migrations track src migration order.
+* Gate criteria: after each batch, full pytest still green;
+  ``git grep -nE 'from openakita\.orgs' -- src/openakita/``
+  monotonically decreasing.
+* Rework risk: LOW. Mechanical; test suite catches any miss.
+
+### P9.9 -- Legacy delete (the ``git rm`` phase)
+
+* Commits: 3-4. ``refactor: git rm -r src/openakita/orgs/``;
+  ``refactor: git rm src/openakita/api/routes/orgs.py`` (or
+  shim per Q-B); ``refactor: git rm -r tests/orgs/`` (with a
+  per-file audit listing each deletion);
+  ``docs: drop orgs/* baselines from LOC audit``.
+* LOC budget: large negative (deletions don't count against
+  commit_guard; the LOC audit script ignores deletions).
+* Deliverables: clean tree. ``git ls-files src/openakita/orgs/``
+  -> empty. ``git ls-files tests/orgs/`` -> empty.
+  ``LOC_BASELINE.json`` ``orgs/*`` rows removed.
+* Gate criteria: full pytest still green; no import errors;
+  the 80 v2 REST endpoints still respond (or the v1 shims
+  still respond, per Q-B).
+* Rework risk: HIGH if any caller was missed in P9.8. The
+  rework cost is "add the migration back, re-run pytest"; not
+  fatal but expensive in time.
+
+### P9.10 -- G-RC-9 final gate + v2.0.0-rc3 + ACCEPTANCE upgrades
+
+* Commits: 4-5. ``docs(revamp): write G-RC-9.md final gate``;
+  ``docs(revamp): upgrade ACCEPTANCE #2 to Pass``;
+  ``docs(revamp): upgrade ACCEPTANCE #5 to Pass``;
+  ``docs(revamp): write RELEASE_v2.md v2.0.0-rc3 section``;
+  ``chore(release): tag v2.0.0-rc3`` (annotated).
+* LOC budget: ~300 across all commits.
+* Deliverables: ``docs/revamp/gates/G-RC-9.md`` final review;
+  ACCEPTANCE.md updated; RELEASE_v2.md updated;
+  ``v2.0.0-rc3`` annotated tag (local; not pushed).
+* Gate criteria: full pytest green; every mini-gate G-RC-9.x
+  reviewed; ledger complete; user-signoff on G-RC-9 before
+  tag is cut.
+* Rework risk: LOW. Documents only.
+
+### Per-phase mini-gate template
+
+Each ``G-RC-9.x.md`` mini-gate is ~100 LOC and contains:
+
+1. Status banner (written / signed).
+2. Commit list with hashes.
+3. Test count delta (before vs after).
+4. LOC audit table excerpt.
+5. Audit nits to carry forward (if any).
+6. Entry conditions for the next phase.
+
+The full ``G-RC-9.md`` at P9.10 is the canonical 300+ LOC
+review that signs off the whole phase, in the format
+``G-RC-0.md .. G-RC-8.md`` established.
+
+## 5. Parity harness design
+
+The harness is the safety net that proves "v2 behaves like v1".
+P9.0i ships the skeleton (placeholders); each subsequent phase
+activates the fixtures for its subsystem.
+
+### 5.1 Layout
+
+```
+tests/parity/orgs/
+  __init__.py              -- package marker
+  conftest.py              -- shared fixtures (tmp_org_dir, sample blobs)
+  README.md                -- parity contract per subsystem
+  test_blackboard_parity.py    -- 8 fixtures (P9.1)
+  test_project_store_parity.py -- 6 fixtures (P9.2)
+  test_node_scheduler_parity.py -- 4 fixtures (P9.3)
+  test_command_service_parity.py -- 10 fixtures (P9.4)
+  test_manager_parity.py       -- 12 fixtures (P9.5)
+  test_runtime_parity.py       -- 20 fixtures (P9.6)
+```
+
+Each test file follows the ``tests/parity/runners.py`` /
+``tests/parity/harness.py`` pattern from P-RC-0..P-RC-7: a
+fixture is a ``ParityCase`` (id + kind + inputs + ignore set),
+the runner pair (``_blackboard_v1``, ``_blackboard_v2``)
+produces a ``ParityResult``, and ``assert_parity`` asserts
+equality modulo the ignore set.
+
+### 5.2 Subsystem-specific contract notes
+
+* **OrgBlackboard:** assert read/write round-trip against the
+  same backing dir (use ``tmp_path`` to ensure isolation);
+  ignore ``created_at`` (deterministic-via-freezegun in v2).
+* **ProjectStore:** assert task-tree integrity after a
+  multi-task insert + recalc_progress; ignore in-memory IDs
+  (ULID prefix differs across runs; assert structural
+  equality).
+* **NodeScheduler:** assert next-fire-time computed by both
+  paths is within 1 ms of each other (croniter is shared so
+  this should be exact, but the assertion is the safety net).
+* **OrgCommandService:** assert verb dispatch produces the
+  same ``OrgCommandRequest.to_dict()`` on both paths; assert
+  the wall-clock budget test in P9.4 gate criteria.
+* **OrgManager:** assert ``create() -> dict ->
+  Organization.to_dict()`` round-trip; assert dir layout is
+  identical for ``data/orgs/<id>/``.
+* **OrgRuntime:** the hardest. Use recorded fixtures from
+  ``tests/orgs/test_runtime.py`` + ``test_org_orchestration_fix.py``
+  + ``test_runtime_deadlock_watchdog.py``; assert state graph
+  + checkpoint sequence equality.
+
+### 5.3 Wall-clock budget tests (closes ACCEPTANCE.md #2 caveat)
+
+P9.4 adds ``tests/runtime/test_cancel_wall_clock_budget.py``
+with three cases:
+
+1. ``test_im_cancel_to_checkpoint_under_2s``: simulated IM
+   cancel verb on a running supervisor; assert
+   ``perf_counter()`` delta < 2.0 s.
+2. ``test_resume_after_cancel_under_3s``: after cancel + new
+   IM message, assert resume picks up from checkpoint within
+   3 s.
+3. ``test_cancel_under_high_message_burst``: 10 concurrent
+   commands in-flight, cancel one; assert that one cancels
+   within 2 s and the other 9 remain unaffected.
+
+ADR-0013 codifies these SLAs as the v2 cancel contract.
+
+### 5.4 Cross-subsystem integration tests
+
+P9.6 ships ``tests/runtime/orgs/test_integration_happy_path.py``
+that wires OrgManager + OrgRuntime + OrgBlackboard +
+OrgCommandService and runs a 3-node org through a simulated
+IM command (no real LLM; ``MockBrain`` from existing
+``tests/runtime/test_supervisor.py``). 5 cases covering
+start/dispatch/cancel/resume/stop.
+
+### 5.5 Migration smoke
+
+P9.9 ships ``tests/integration/test_orgs_migration_smoke.py``:
+
+1. Start with a JsonOrgStore at ``data/orgs_v2.json`` populated
+   from a captured legacy state.
+2. Run the migration script ``scripts/migrate_orgs_p9.py``
+   (P9.5 deliverable).
+3. Assert the 18 contract tests
+   (``tests/runtime/orgs/test_store_contract.py``) still pass
+   against the migrated SQLite backend.
+4. Assert the 80 P9.7 v2 REST endpoints all respond with the
+   expected golden JSON shape.
+
+<!-- P9.0d ends here. P9.0e appends sections 6 + 7 + 8. -->
