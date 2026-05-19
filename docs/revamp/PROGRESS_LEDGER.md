@@ -268,7 +268,7 @@ that requires writing 6 new v2 subsystems (~4-6 weeks).
 | `df4e1bf1` | P-RC-8 P8.5 | docs(revamp): update RELEASE_v2.md to v2.0.0-rc2 + acceptance summary | +113 / -3 (new rc2 section prepended + rc1 H1 demoted + STATUS.md P-RC-8 row bump + ledger row) | 0 | ADR-0001 (overall) |
 | _this commit_ | P-RC-8 P8.6 | docs(revamp): G-RC-8 final gate review (continuation plan endgame) | +281 (new gates/G-RC-8.md) +1 (STATUS.md P-RC-8 row -> Complete) +ledger | 0 | ADR-0001 (overall close-out) |
 | `c676b759` | P-RC-8 P8.7-fix | fix(entrypoints): repair core.agent -> agent.core in main.py + mcp_server.py (P8.7-fix release blocker) |
-| _this commit_ | P-RC-8 P8.7-doc-fix | docs(revamp): correct G-RC-8 misreporting + ACCEPTANCE/charter nits (P8.7-doc-fix) | +90 / -12 (G-RC-8.md §4 correction + Post-gate hotfix section; ACCEPTANCE.md criterion 2 -> Pass-with-caveat; P-RC-9-CHARTER.md 2533/2300 LOC reconciled to verified 2145 + footnote; ledger row) | 0 | --- (process discipline; no architecture change) |
+| `8ecff79f` | P-RC-8 P8.7-doc-fix | docs(revamp): correct G-RC-8 misreporting + ACCEPTANCE/charter nits (P8.7-doc-fix) | +90 / -12 (G-RC-8.md §4 correction + Post-gate hotfix section; ACCEPTANCE.md criterion 2 -> Pass-with-caveat; P-RC-9-CHARTER.md 2533/2300 LOC reconciled to verified 2145 + footnote; ledger row) | 0 | --- (process discipline; no architecture change) |
 
 ## Discipline reminders (auto-collected by audits)
 
