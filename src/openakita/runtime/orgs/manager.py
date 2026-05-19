@@ -51,8 +51,9 @@ import threading
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from openakita.orgs.models import Organization, _new_id
+from openakita.orgs.models import Organization, OrgStatus, _new_id, _now_iso
 
+from ._org_layout import normalize_org_name
 from .command_service import OrgLookupProtocol
 
 __all__ = [
@@ -333,6 +334,213 @@ class OrgManager:
         if raw is None:
             return None
         return Organization.from_dict(raw)
+
+    # ------------------------------------------------------------------
+    # CRUD core (P9.5b -- 12 methods)
+    # ------------------------------------------------------------------
+
+    def list_orgs(self, include_archived: bool = False) -> list[dict[str, Any]]:
+        """Return summary dicts for every org on disk (sorted by id).
+
+        Each dict carries the same shape v1 returns
+        (``id`` / ``name`` / ``description`` / ``icon`` /
+        ``status`` / ``node_count`` / ``edge_count`` /
+        ``tags`` / ``created_at`` / ``updated_at``). Archived
+        orgs are skipped by default; pass
+        ``include_archived=True`` to include them. Failures
+        on individual orgs (corrupt JSON, etc.) are logged at
+        WARNING level and skipped rather than aborting the
+        whole listing.
+        """
+        result: list[dict[str, Any]] = []
+
+        for org_id in self._persistence.list_org_ids():
+            try:
+                org = self._load(org_id)
+            except FileNotFoundError:
+                continue
+            except Exception as exc:
+                logger.warning("Failed to load org %s: %s", org_id, exc)
+                continue
+            if not include_archived and org.status == OrgStatus.ARCHIVED:
+                continue
+            result.append(
+                {
+                    "id": org.id,
+                    "name": org.name,
+                    "description": org.description,
+                    "icon": org.icon,
+                    "status": org.status.value,
+                    "node_count": len(org.nodes),
+                    "edge_count": len(org.edges),
+                    "tags": org.tags,
+                    "created_at": org.created_at,
+                    "updated_at": org.updated_at,
+                }
+            )
+        return result
+
+    def get(self, org_id: str) -> Organization | None:
+        """Cached read; missing orgs return ``None`` (matches v1)."""
+        try:
+            return self._load(org_id)
+        except FileNotFoundError:
+            return None
+
+    def find_by_name(
+        self,
+        name: str,
+        *,
+        exclude_org_id: str | None = None,
+        include_archived: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Case- and whitespace-insensitive name lookup (matches v1).
+
+        Returns the same summary dict shape as :meth:`list_orgs`.
+        Empty / blank ``name`` short-circuits to an empty list.
+        ``exclude_org_id`` lets ``update`` callers skip the org
+        being renamed.
+        """
+        norm = normalize_org_name(name)
+        if not norm:
+            return []
+        result: list[dict[str, Any]] = []
+        for item in self.list_orgs(include_archived=include_archived):
+            if exclude_org_id and item.get("id") == exclude_org_id:
+                continue
+            if normalize_org_name(item.get("name", "")) == norm:
+                result.append(item)
+        return result
+
+    def resolve_id_by_name_or_id(self, query: str) -> tuple[str | None, list[dict[str, Any]]]:
+        """Resolve ``query`` to an org id, falling back to name match.
+
+        Returns ``(org_id, candidates)`` where:
+
+        * exact id hit -> ``(id, [])``;
+        * unique name hit -> ``(id, [])``;
+        * multiple name hits -> ``(None, [summary, ...])``;
+        * no hit -> ``(None, [])``.
+
+        Used by CLI / IM call paths so a single user-typed
+        string can resolve to an org without an extra
+        round-trip.
+        """
+        q = (query or "").strip()
+        if not q:
+            return None, []
+        if self.get(q) is not None:
+            return q, []
+        matches = self.find_by_name(q)
+        if len(matches) == 1:
+            return str(matches[0].get("id") or ""), []
+        if len(matches) > 1:
+            return None, matches
+        return None, []
+
+    def _ensure_name_unique(self, name: str, *, exclude_org_id: str | None = None) -> None:
+        """Raise :class:`OrgNameConflictError` if ``name`` is already in use.
+
+        Used by ``create`` / ``update`` / ``duplicate`` to
+        give the user a single uniform error message no matter
+        how the conflict was reached.
+        """
+        clean = (name or "").strip()
+        if not clean:
+            raise ValueError("Organization name is required")
+        conflicts = self.find_by_name(clean, exclude_org_id=exclude_org_id)
+        if conflicts:
+            raise OrgNameConflictError(clean, str(conflicts[0].get("id") or ""))
+
+    def create(self, data: dict[str, Any]) -> Organization:
+        """Mint a new org and persist it.
+
+        Raises :class:`OrgNameConflictError` if the name
+        collides. Emits ``OrgLifecycleEmitterProtocol.emit_org_created``
+        (no-op by default).
+        """
+        self._ensure_name_unique(data.get("name", ""))
+        org = Organization.from_dict(data)
+        if not org.id:
+            org.id = self._factory.new_org_id()
+        org.created_at = _now_iso()
+        org.updated_at = org.created_at
+        self._init_dirs(org)
+        self._save(org)
+        logger.info("[OrgManager] Created org: %s (%s)", org.id, org.name)
+        self._lifecycle.emit_org_created(org.id, org.name)
+        return org
+
+    def delete(self, org_id: str) -> bool:
+        """Permanently remove ``org_id``'s data; idempotent (returns False if absent)."""
+        deleted = self._persistence.delete_org_dir(org_id)
+        if deleted:
+            self._cache.pop(org_id, None)
+            logger.info("[OrgManager] Deleted org: %s", org_id)
+            self._lifecycle.emit_org_deleted(org_id)
+        return deleted
+
+    def invalidate_cache(self, org_id: str | None = None) -> None:
+        """Drop a single org or the entire in-memory cache."""
+        with self._write_lock:
+            if org_id:
+                self._cache.pop(org_id, None)
+            else:
+                self._cache.clear()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _load(self, org_id: str) -> Organization:
+        """Cache-aware load; raises FileNotFoundError on miss (matches v1)."""
+        cached = self._cache.get(org_id)
+        if cached is not None:
+            return cached
+        raw = self._persistence.load_org_dict(org_id)
+        if raw is None:
+            raise FileNotFoundError(f"Organization not found: {org_id}")
+        org = Organization.from_dict(raw)
+        with self._write_lock:
+            self._cache[org_id] = org
+        return org
+
+    def _save(self, org: Organization) -> None:
+        """Persist + cache. The persistence backend handles atomic write."""
+        self._persistence.save_org_dict(org.id, org.to_dict())
+        with self._write_lock:
+            self._cache[org.id] = org
+
+    def _init_dirs(self, org: Organization) -> None:
+        """Materialise the full org directory tree.
+
+        Delegates the org-level subdirs to
+        ``OrgFactoryProtocol.initialize_directory_layout``
+        and then materialises per-node dirs via
+        ``_ensure_node_dirs``. Order matches v1's
+        ``_init_dirs`` byte-for-byte (the dir-layout parity
+        gate in P-RC-9-PLAN section 5.2 asserts this).
+        """
+        base = self._org_dir(org.id)
+        self._factory.initialize_directory_layout(base, org)
+        self._ensure_node_dirs(org)
+
+    def _ensure_node_dirs(self, org: Organization) -> None:
+        """Create per-node ``identity/`` + ``mcp_config.json`` + ``schedules.json``."""
+        for node in org.nodes:
+            nd = self._node_dir(org.id, node.id)
+            (nd / "identity").mkdir(parents=True, exist_ok=True)
+            mcp_cfg = nd / "mcp_config.json"
+            if not mcp_cfg.exists():
+                mcp_cfg.write_text(
+                    json.dumps({"mode": "inherit"}, indent=2),
+                    encoding="utf-8",
+                )
+            sched = nd / "schedules.json"
+            if not sched.exists():
+                sched.write_text("[]", encoding="utf-8")
+        for dept in org.get_departments():
+            (self._org_dir(org.id) / "departments" / dept).mkdir(parents=True, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
