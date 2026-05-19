@@ -1,4 +1,113 @@
-# OpenAkita v2.0.0-rc1 — Release notes
+# OpenAkita v2.0.0-rc2 -- Release notes
+
+**Tag:** ``v2.0.0-rc2`` (local-only; not pushed)
+**Branch:** ``revamp/v2``
+**Cut at:** end of P-RC-8 (G-RC-8 signed 2026-05-19)
+
+## What v2.0.0-rc2 ships beyond v2.0.0-rc1
+
+The post-RC **continuation plan**
+(`openakita_revamp_continuation_plan_d6192647.plan.md`) ran from
+P-RC-0 through P-RC-8 -- **all eight phases complete** -- and
+landed roughly **85 commits** on ``revamp/v2``. This is the
+endgame release of that plan.
+
+* **All five facade sentinels closed.** ``agent/brain.py``,
+  ``agent/tools.py``, ``agent/context.py``, ``agent/reasoning.py``,
+  ``agent/core.py`` no longer carry the
+  ``REVAMP-FACADE-ALLOWED-UNTIL`` sentinel comment; each is a real
+  v2 implementation composing extracted helpers from
+  ``runtime/llm``, ``runtime/io``, ``runtime/context``,
+  ``runtime/state_graph``, ``runtime/desktop``, and
+  ``agent/safety``.
+
+* **Five giants slimmed (shims deleted entirely by P-RC-7).** The
+  legacy lazy shims ``core/agent.py``, ``core/brain.py``,
+  ``core/context_manager.py``, ``core/reasoning_engine.py``, and
+  ``core/tool_executor.py`` were deleted at commit ``a21cdd4b``
+  after every production caller (~107 imports across 64 files)
+  and every test (~132 imports across 69 files) was migrated to
+  ``openakita.agent.*`` / ``openakita.runtime.*``. The
+  ``_*_legacy.py`` private files stay -- the v2 classes inherit
+  from them byte-faithfully -- and ``core/supervisor.py`` was
+  renamed to ``core/_supervisor_legacy.py`` at P-RC-8 P8.0
+  (``caf5d7f3``) to mirror the same legacy-private convention.
+
+* **Runtime packages all shipped.** ``runtime/llm`` (4 helpers),
+  ``runtime/io`` (2 helpers + retry policy), ``runtime/context``
+  (3 helpers), ``runtime/desktop`` (attachments), ``runtime/state_graph``
+  (full Pregel router with conditional + delegation routing),
+  ``runtime/orgs`` (JSON + SQLite stores + 18-case cross-backend
+  contract suite), plus ``agent/safety`` (destructive-intent
+  classifier).
+
+* **All 10 ADRs Accepted.** ADR-0001..ADR-0010 flipped from
+  ``Status: Proposed`` to ``Status: Accepted`` at P-RC-8 P8.2
+  (``b1fb4cd7``). Each ADR has an ``Accepted: 2026-05-19`` line
+  pointing at the G-RC-8 sign-off after eight phases of shipped
+  implementation against the spec.
+
+* **Acceptance criteria documented.**
+  ``docs/revamp/ACCEPTANCE.md`` (P-RC-8 P8.3 ``709767b3``)
+  records 4-Pass + 1-Partial against the original plan section 9
+  criteria. The 1-Partial is criterion 5 ("one-click create from
+  any template UI default") which depends on the
+  ``src/openakita/orgs/`` deletion that ``docs/revamp/P-RC-9-CHARTER.md``
+  (P-RC-8 P8.4 ``483b8b13``) defers to a future P-RC-9 plan.
+
+## Test snapshot (P-RC-8 final, end of P8.6)
+
+* **Main gate** (``tests/runtime tests/agent tests/api
+  tests/parity tests/unit/test_plugins``): **1123 passed / 1
+  skipped / 5 xfailed** (vs P-RC-7's 1122 / 1 / 5 -- one new
+  smoke test ``test_brain_get_current_endpoint_info_smoke``
+  landed in P8.0).
+* **Canary integration**
+  (``tests/integration/test_v2_im_canary_e2e.py`` +
+  ``tests/integration/test_v2_im_cancel.py``):
+  **5/5 passed.**
+* **Storage contract suite**
+  (``tests/runtime/orgs/test_store_contract.py``):
+  **18/18 passed** (9 cases x JSON + SQLite backends).
+* **Ruff over the v2 surface** (``src/openakita/runtime``,
+  ``src/openakita/agent``, ``src/openakita/plugins/manager.py``,
+  ``tests/runtime``, ``tests/agent``, ``tests/api``,
+  ``tests/parity``): clean.
+* **LOC audit** (``python scripts/revamp_loc_audit.py``):
+  exit 0; every tracked file within cap (5 legacy renames + 1
+  supervisor rename visible as informational-only at their
+  current sizes; the four agent giants at 336..369 LOC vs the
+  pre-P-RC-4 ~2000 LOC each).
+
+## Deferred to P-RC-9
+
+The wholesale ``src/openakita/orgs/`` integral migration is **not**
+executed in the continuation plan. See
+``docs/revamp/P-RC-9-CHARTER.md`` for the deferred-work charter:
+
+* ~880 KB / 26 files / 86 production import sites unchanged.
+* Six v2 subsystems must be written first: OrgManager,
+  OrgRuntime, OrgCommandService, OrgBlackboard, ProjectStore,
+  NodeScheduler.
+* Estimated 4-6 weeks, ~30-50 commits, separate parity harness.
+* Awaits its own G-RC-9 gate review.
+
+Operators running v2 in production today should keep the legacy
+``src/openakita/orgs/`` surface live. The v2 ``runtime/`` +
+``agent/`` surfaces co-exist with ``orgs/`` cleanly (only the
+five lazy ``core/*.py`` shims were deleted in P-RC-7).
+
+## Tag
+
+```
+git tag -a v2.0.0-rc2 -m "OpenAkita v2.0.0-rc2: continuation plan complete (P-RC-0..8); orgs/ migration deferred to P-RC-9"
+```
+
+Local only; not pushed (mirrors the rc1 tagging policy).
+
+---
+
+## v2.0.0-rc1 -- Release notes (historical)
 
 **Tag:** ``v2.0.0-rc1`` (local-only; not pushed)
 **Branch:** ``revamp/v2``
