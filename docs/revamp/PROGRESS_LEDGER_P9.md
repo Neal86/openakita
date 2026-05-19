@@ -1,4 +1,6 @@
-# Revamp Progress Ledger -- P-RC-9 (orgs/ integral migration)
+﻿# Revamp Progress Ledger -- P-RC-9 (orgs/ integral migration)
+
+**PAUSED 2026-05-19** — user resume tomorrow; see PAUSE_CHECKPOINT_P9.md
 
 <!-- machine-readable phase marker; do NOT remove.
      Parsed by tests/revamp/_ledger.py + tests/parity/test_no_facade.py. -->
