@@ -123,6 +123,29 @@ def test_agent_parity_probe(fixture: dict) -> None:
         agent = V2Agent.__new__(V2Agent)
         agent._lifecycle_graph = build_agent_lifecycle_graph()
         actual = agent.supports_lifecycle_node(fixture["node"])
+    elif probe == "classify_inbound_risk_end_to_end":
+        # N-G6-1 closure: exercise classify_inbound_risk + should_skip_risk_gate
+        # end-to-end on a bare-init Agent (dodge heavy legacy __init__).
+        # The fixture pins both the classifier output (risk_level + target_kind +
+        # requires_confirmation) and the gate decision (label + reason); a
+        # behavioural drift in either layer surfaces here.
+        agent = V2Agent.__new__(V2Agent)
+        agent._lifecycle_graph = build_agent_lifecycle_graph()
+        message = fixture["message"]
+        classification = agent.classify_inbound_risk(message)
+        decision = agent.should_skip_risk_gate(None, message, classification)
+        target_kind_value = (
+            classification.target_kind.value
+            if classification.target_kind is not None
+            else None
+        )
+        actual = {
+            "risk_level": classification.risk_level.value,
+            "target_kind": target_kind_value,
+            "requires_confirmation": classification.requires_confirmation,
+            "skip_gate_label": decision.label,
+            "skip_gate_reason": decision.reason,
+        }
     else:
         raise AssertionError(f"unknown probe {probe!r}")
 
