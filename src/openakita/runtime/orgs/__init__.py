@@ -21,6 +21,8 @@ from .blackboard import (
     BlackboardBackendProtocol,
     JsonFileBlackboardBackend,
     OrgBlackboard,
+    SqliteBlackboardBackend,
+    get_default_blackboard_backend,
 )
 from .memory_models import MemoryScope, MemoryType, OrgMemoryEntry
 from .sqlite_store import SqliteOrgStore
@@ -38,7 +40,9 @@ __all__ = [
     "OrgBlackboard",
     "OrgMemoryEntry",
     "OrgNotFound",
+    "SqliteBlackboardBackend",
     "SqliteOrgStore",
+    "get_default_blackboard_backend",
     "get_default_store",
     "reset_default_store",
 ]

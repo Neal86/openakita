@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -34,6 +36,8 @@ __all__ = [
     "MAX_NODE_MEMORIES",
     "MAX_ORG_MEMORIES",
     "OrgBlackboard",
+    "SqliteBlackboardBackend",
+    "get_default_blackboard_backend",
 ]
 
 logger = logging.getLogger(__name__)
@@ -478,3 +482,229 @@ class OrgBlackboard:
         if not entries:
             return "(??????)"
         return "\n".join(f"- {e.content}" for e in entries)
+
+
+# ---------------------------------------------------------------------------
+# SQLite backend (cross-process safe via WAL + BEGIN IMMEDIATE)
+# ---------------------------------------------------------------------------
+
+
+_SQLITE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS memory_entries (
+    id            TEXT PRIMARY KEY,
+    org_id        TEXT NOT NULL,
+    scope         TEXT NOT NULL,
+    scope_owner   TEXT NOT NULL,
+    importance    REAL NOT NULL DEFAULT 0.5,
+    created_at    TEXT NOT NULL,
+    payload       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mem_scope_owner
+    ON memory_entries (scope, scope_owner, importance DESC);
+"""
+
+
+class SqliteBlackboardBackend:
+    """SQLite-backed three-tier memory; mirrors SqliteOrgStore concurrency."""
+
+    def __init__(self, db_path: Path, org_id: str) -> None:
+        self._org_id = org_id
+        self._db_path = Path(db_path)
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(
+            self._db_path, check_same_thread=False, isolation_level=None
+        )
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn.executescript(_SQLITE_SCHEMA)
+        self._closed = False
+
+    @contextmanager
+    def _write_txn(self):
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield self._conn
+            except Exception:
+                try:
+                    self._conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+            else:
+                self._conn.execute("COMMIT")
+
+    def append(
+        self,
+        scope: MemoryScope,
+        owner: str,
+        entry: OrgMemoryEntry,
+        *,
+        max_entries: int,
+    ) -> None:
+        payload = json.dumps(entry.to_dict(), ensure_ascii=False)
+        with self._write_txn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO memory_entries"
+                " (id, org_id, scope, scope_owner, importance, created_at, payload)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    entry.id,
+                    self._org_id,
+                    scope.value,
+                    owner,
+                    float(entry.importance),
+                    entry.created_at,
+                    payload,
+                ),
+            )
+            kept = conn.execute(
+                "SELECT id FROM memory_entries"
+                " WHERE org_id=? AND scope=? AND scope_owner=?"
+                " ORDER BY importance DESC, created_at DESC LIMIT ?",
+                (self._org_id, scope.value, owner, max_entries),
+            ).fetchall()
+            kept_ids = {row[0] for row in kept}
+            cur = conn.execute(
+                "SELECT id FROM memory_entries"
+                " WHERE org_id=? AND scope=? AND scope_owner=?",
+                (self._org_id, scope.value, owner),
+            ).fetchall()
+            for (mid,) in cur:
+                if mid not in kept_ids:
+                    conn.execute("DELETE FROM memory_entries WHERE id=?", (mid,))
+
+    def read(
+        self,
+        scope: MemoryScope,
+        owner: str,
+        *,
+        limit: int = 20,
+        tag: str | None = None,
+    ) -> list[OrgMemoryEntry]:
+        limit = _safe_int(limit, 20)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT payload FROM memory_entries"
+                " WHERE org_id=? AND scope=? AND scope_owner=?"
+                " ORDER BY importance DESC",
+                (self._org_id, scope.value, owner),
+            ).fetchall()
+        out: list[OrgMemoryEntry] = []
+        for (payload,) in rows:
+            try:
+                entry = OrgMemoryEntry.from_dict(json.loads(payload))
+            except (json.JSONDecodeError, ValueError, TypeError):
+                continue
+            if JsonFileBlackboardBackend._is_expired(entry):
+                continue
+            if tag and tag not in entry.tags:
+                continue
+            out.append(entry)
+            if len(out) >= limit:
+                break
+        return out
+
+    def all_for_scope(
+        self, scope: MemoryScope, *, owner: str | None = None
+    ) -> list[OrgMemoryEntry]:
+        with self._lock:
+            if owner is None:
+                rows = self._conn.execute(
+                    "SELECT payload FROM memory_entries WHERE org_id=? AND scope=?",
+                    (self._org_id, scope.value),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT payload FROM memory_entries"
+                    " WHERE org_id=? AND scope=? AND scope_owner=?",
+                    (self._org_id, scope.value, owner),
+                ).fetchall()
+        out: list[OrgMemoryEntry] = []
+        for (payload,) in rows:
+            try:
+                entry = OrgMemoryEntry.from_dict(json.loads(payload))
+            except (json.JSONDecodeError, ValueError, TypeError):
+                continue
+            if JsonFileBlackboardBackend._is_expired(entry):
+                continue
+            out.append(entry)
+        return out
+
+    def is_duplicate(
+        self,
+        scope: MemoryScope,
+        owner: str,
+        content: str,
+        *,
+        prefix_len: int = 100,
+    ) -> bool:
+        prefix = content[:prefix_len].strip()
+        if not prefix:
+            return False
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT payload FROM memory_entries"
+                " WHERE org_id=? AND scope=? AND scope_owner=?",
+                (self._org_id, scope.value, owner),
+            ).fetchall()
+        for (payload,) in rows:
+            try:
+                existing = json.loads(payload).get("content", "")
+            except (json.JSONDecodeError, AttributeError):
+                continue
+            if isinstance(existing, str) and existing[:prefix_len].strip() == prefix:
+                return True
+        return False
+
+    def delete_by_id(self, memory_id: str) -> bool:
+        with self._write_txn() as conn:
+            cur = conn.execute(
+                "DELETE FROM memory_entries WHERE id=? AND org_id=?",
+                (memory_id, self._org_id),
+            )
+            return (cur.rowcount or 0) > 0
+
+    def clear(self) -> None:
+        with self._write_txn() as conn:
+            conn.execute("DELETE FROM memory_entries WHERE org_id=?", (self._org_id,))
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                self._conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def get_default_blackboard_backend(
+    org_dir: Path, org_id: str, *, backend: str | None = None
+) -> BlackboardBackendProtocol:
+    """Factory dispatching by ``settings.orgs_v2_backend`` (default ``json``).
+
+    SQLite blackboards share the per-deployment
+    ``<data_dir>/orgs_v2.sqlite`` file with the entity store
+    (different table, same file -- WAL serialises both).
+    """
+    if backend is None:
+        try:
+            from openakita.config import settings
+
+            backend = getattr(settings, "orgs_v2_backend", "json")
+        except ImportError:
+            backend = "json"
+    if backend == "sqlite":
+        try:
+            from openakita.config import settings
+
+            base = getattr(settings, "data_dir", None) or "data"
+            db_path = Path(base) / "orgs_v2.sqlite"
+        except ImportError:
+            db_path = org_dir / "orgs_v2.sqlite"
+        return SqliteBlackboardBackend(db_path, org_id)
+    return JsonFileBlackboardBackend(org_dir, org_id)
