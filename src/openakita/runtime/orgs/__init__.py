@@ -30,6 +30,18 @@
     section 5.2 1-ms parity gate), and the
     :class:`OrgNodeScheduler` skeleton (this commit, P9.3a;
     P9.3b lands the method bodies).
+  - P9.6 ships v2 :class:`OrgRuntime` (charter subsystem #6;
+    largest of ADR-0011's six). P9.6a (this commit) lands
+    the skeleton + three NEW Protocols
+    (:class:`RuntimeStateProtocol`,
+    :class:`NodeLifecycleProtocol`, :class:`EventBusProtocol`)
+    + default in-memory backends + ``__init__`` accepting
+    six reused Protocols (composition from P9.1 / P9.3 /
+    P9.4 / P9.5) + the three new ones. OrgRuntime
+    **implements** :class:`CommandRuntimeProtocol` (the P9.4
+    contract; six methods stubbed -- bodies ride P9.6beta).
+    See ADR-0014 for the budget revision driving the
+    seven-sibling decomposition.
 """
 
 from __future__ import annotations
@@ -107,6 +119,11 @@ from .project_store import (
     get_default_project_store,
     reset_default_project_stores,
 )
+from .runtime import (
+    EventBusProtocol,
+    NodeLifecycleProtocol,
+    RuntimeStateProtocol,
+)
 from .scheduler_models import NodeSchedule, ScheduleType, new_schedule_id
 from .sqlite_store import SqliteOrgStore
 from .store import JsonOrgStore, OrgNotFound, get_default_store, reset_default_store
@@ -181,4 +198,7 @@ __all__ = [
     "reset_default_project_stores",
     "reset_default_store",
     "set_command_service",
+    "EventBusProtocol",
+    "NodeLifecycleProtocol",
+    "RuntimeStateProtocol",
 ]

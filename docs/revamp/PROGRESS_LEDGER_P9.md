@@ -212,4 +212,18 @@ current_phase: P-RC-9
 
 | commit hash | phase | title | LOC delta | tests delta | ADR refs |
 |---|---|---|---|---|---|
-| _this commit_ | P-RC-9 P9.6.plan | docs(revamp): revise P9.6 budget 1200 -> 3000 LOC + add ADR-0014 (empirical recon outcome) | +PLACEHOLDER (P-RC-9-PLAN.md ~55 net + ADR-0014 NEW ~160 + ledger ~25 = ~240) | 0 (paperwork) | ADR-0014 (NEW; records option-C decision); ADR-0011 (subsystem decomposition; OrgRuntime sibling list anchored here); ADR-0012 (no-shim invariant cited in alternatives-rejected); cites P-RC-9-PLAN section 4 P9.6 revision + section 5.2 parity gate |
+| ``f36f7f19`` | P-RC-9 P9.6.plan | docs(revamp): revise P9.6 budget 1200 -> 3000 LOC + add ADR-0014 (empirical recon outcome) | +PLACEHOLDER (P-RC-9-PLAN.md ~55 net + ADR-0014 NEW ~160 + ledger ~25 = ~240) | 0 (paperwork) | ADR-0014 (NEW; records option-C decision); ADR-0011 (subsystem decomposition; OrgRuntime sibling list anchored here); ADR-0012 (no-shim invariant cited in alternatives-rejected); cites P-RC-9-PLAN section 4 P9.6 revision + section 5.2 parity gate |
+
+## P9.6alpha -- skeleton + Protocols + 3 small siblings (this turn)
+
+> ADR-0014 option-C execution, alpha sub-turn. Lands the
+> OrgRuntime skeleton + 3 NEW Protocols + 3 of the 4 small /
+> isolated sibling modules (``_runtime_event_bus.py``,
+> ``_runtime_watchdog.py``, ``_runtime_lifecycle.py``). The
+> 4 heavy siblings (dispatch / agent_pipeline / node_lifecycle
+> / plugin_assets) + parity 20 + contract ~25 + G-RC-9.6
+> mini-gate ride to P9.6beta / P9.6gamma turns.
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-9 P9.6a0 | feat(runtime/orgs): runtime.py P9.6a0 -- 3 new Protocols (RuntimeStateProtocol 4m + NodeLifecycleProtocol 5m + EventBusProtocol 4m) + 3 default in-memory backends (_InMemoryRuntimeState + _InMemoryNodeLifecycle + _InMemoryEventBus) | +PLACEHOLDER (runtime.py NEW ~210 LOC + __init__.py +12 + ledger +3 backfill / row) | 0 (smoke: pytest tests/runtime/orgs/ + tests/parity/orgs/ -> 176 passed / 1 xfailed unchanged; isinstance check on default backends satisfies all 3 Protocols) | ADR-0014 (budget revision; alpha kickoff); ADR-0011 (3 new Protocols each <= 5 methods per granularity ceiling); ADR-0012 (no-shim under v1) |
