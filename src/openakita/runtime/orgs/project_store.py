@@ -277,29 +277,149 @@ class JsonProjectStore:
             return False
 
     # ------------------------------------------------------------------
-    # Queries / tree -- land in P9.2b
+    # Queries / tree navigation (P9.2b)
     # ------------------------------------------------------------------
 
-    def all_tasks(self, **_kwargs: object) -> list[dict]:
-        raise NotImplementedError("JsonProjectStore.all_tasks lands in P9.2b")
+    def all_tasks(
+        self,
+        status: str | None = None,
+        assignee: str | None = None,
+        chain_id: str | None = None,
+        parent_task_id: str | None = None,
+        root_only: bool = False,
+        delegated_by: str | None = None,
+        project_id: str | None = None,
+    ) -> list[dict]:
+        """Flat list of tasks across all projects with optional filters.
+
+        Each result row is the task ``to_dict()`` payload plus
+        ``project_name`` and ``project_type`` keys (mirrors v1).
+        ``parent_task_id=None`` does NOT mean "any parent"; it
+        means the caller did not pass the filter at all. Use
+        ``root_only=True`` to ask for roots only.
+        """
+        with self._lock:
+            self._reload_if_changed()
+            result: list[dict] = []
+            for proj in self._projects.values():
+                if project_id and proj.id != project_id:
+                    continue
+                for t in proj.tasks:
+                    if status and t.status.value != status:
+                        continue
+                    if assignee and t.assignee_node_id != assignee:
+                        continue
+                    if chain_id and t.chain_id != chain_id:
+                        continue
+                    if parent_task_id is not None and t.parent_task_id != parent_task_id:
+                        continue
+                    if root_only and t.parent_task_id is not None:
+                        continue
+                    if delegated_by is not None and t.delegated_by != delegated_by:
+                        continue
+                    d = t.to_dict()
+                    d["project_name"] = proj.name
+                    d["project_type"] = proj.project_type.value
+                    result.append(d)
+            return result
 
     def find_task_by_chain(self, chain_id: str) -> ProjectTask | None:
-        raise NotImplementedError("JsonProjectStore.find_task_by_chain lands in P9.2b")
+        """Find a task by its ``chain_id`` across all projects."""
+        with self._lock:
+            self._reload_if_changed()
+            for proj in self._projects.values():
+                for t in proj.tasks:
+                    if t.chain_id == chain_id:
+                        return t
+        return None
 
     def get_task(self, task_id: str) -> tuple[ProjectTask | None, OrgProject | None]:
-        raise NotImplementedError("JsonProjectStore.get_task lands in P9.2b")
+        """Resolve a task across all projects; returns ``(task, project)``."""
+        with self._lock:
+            self._reload_if_changed()
+            for proj in self._projects.values():
+                for t in proj.tasks:
+                    if t.id == task_id:
+                        return t, proj
+        return None, None
 
     def get_subtasks(self, parent_task_id: str) -> list[ProjectTask]:
-        raise NotImplementedError("JsonProjectStore.get_subtasks lands in P9.2b")
+        """Direct children of ``parent_task_id`` across all projects."""
+        with self._lock:
+            self._reload_if_changed()
+            result: list[ProjectTask] = []
+            for proj in self._projects.values():
+                for t in proj.tasks:
+                    if t.parent_task_id == parent_task_id:
+                        result.append(t)
+            return result
 
     def get_task_tree(self, task_id: str) -> dict:
-        raise NotImplementedError("JsonProjectStore.get_task_tree lands in P9.2b")
+        """Return ``task.to_dict()`` plus a nested ``children`` list.
+
+        Empty dict if the task is unknown. Each child node has
+        the same shape recursively. ``project_name`` is inlined
+        into every node so the caller can render breadcrumbs
+        without re-querying.
+        """
+        with self._lock:
+            self._reload_if_changed()
+            task, proj = self.get_task(task_id)
+            if not task:
+                return {}
+            node: dict = task.to_dict()
+            node["project_name"] = proj.name if proj else ""
+            node["children"] = [
+                self.get_task_tree(child.id) for child in self.get_subtasks(task_id)
+            ]
+            return node
 
     def get_ancestors(self, task_id: str) -> list[ProjectTask]:
-        raise NotImplementedError("JsonProjectStore.get_ancestors lands in P9.2b")
+        """Ancestors from nearest parent to root (empty if task is root)."""
+        with self._lock:
+            self._reload_if_changed()
+            result: list[ProjectTask] = []
+            task, _ = self.get_task(task_id)
+            seen: set[str] = set()
+            while task and task.parent_task_id:
+                if task.parent_task_id in seen:
+                    break  # cycle guard (defensive; v1 would loop forever)
+                seen.add(task.parent_task_id)
+                parent, _ = self.get_task(task.parent_task_id)
+                if not parent:
+                    break
+                result.append(parent)
+                task = parent
+            return result
 
     def recalc_progress(self, task_id: str) -> int | None:
-        raise NotImplementedError("JsonProjectStore.recalc_progress lands in P9.2b")
+        """Recompute ``progress_pct`` from children.
+
+        Children with ``status == ACCEPTED`` count as 100; others
+        contribute their current ``progress_pct``. Returns the new
+        value (also persisted on the task) or ``None`` if the
+        task is unknown. Leaf tasks return their current pct
+        unchanged.
+        """
+        with self._lock:
+            self._reload_if_changed()
+            task, proj = self.get_task(task_id)
+            if not task or not proj:
+                return None
+            children = self.get_subtasks(task_id)
+            if not children:
+                return task.progress_pct
+            total = sum(
+                100 if c.status == TaskStatus.ACCEPTED else c.progress_pct for c in children
+            )
+            new_pct = total // len(children)
+            for t in proj.tasks:
+                if t.id == task_id:
+                    t.progress_pct = new_pct
+                    break
+            proj.updated_at = now_iso()
+            self._save()
+            return new_pct
 
     # ------------------------------------------------------------------
     # Lifecycle
