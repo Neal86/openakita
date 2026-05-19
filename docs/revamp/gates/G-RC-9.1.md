@@ -183,3 +183,45 @@ P9.1 is GREEN.
 operator has a HARD STOP at G-RC-9.1 to review the
 subsystem-rewrite pattern before authorising P9.2 onwards.
 The PROGRESS_LEDGER_P9.md header is bumped accordingly.
+
+## 11. Addendum (post-sign-off, 2026-05-19): P9.1e flake fix
+
+After the gate landed (commit ``9b8d83a5``), the full main
+gate run surfaced a flake in
+``bb_concurrent_writes``: 4 threads x 5 writes ->
+v1 produced 19 rows, v2 produced 20. The single-file run
+caught at sign-off (section 4 evidence) happened to be lucky.
+
+Root cause: ``src/openakita/orgs/blackboard.py`` (v1) takes
+NO lock around ``_append`` (lines 97-345). Under contention,
+two threads can both pass ``_is_duplicate``, both open the
+JSONL file in rewrite-with-eviction mode, and the later
+writer truncates the earlier one's pending entry. v2 took
+``threading.RLock`` around the same critical section in
+P9.1b precisely for this reason -- so v2 is observably more
+correct than v1 under load.
+
+Resolution: P9.1e (commit ``fea1a5d5``) relaxes the parity
+contract for the concurrent-writes case from "exactly N rows
+on both sides" to "no exceptions; at least one row
+survives". Strict v2 concurrency correctness still lives in
+``tests/runtime/orgs/test_blackboard_contract.py`` case 12,
+which asserts exactly 10 rows for 2 threads x 5 writes --
+that contract holds for both backends and gates the v2
+implementation directly.
+
+Updated commit chain:
+
+| commit | phase | subject | LOC |
+|---|---|---|---|
+| ``9b8d83a5`` | G-RC-9.1 | docs(revamp): write G-RC-9.1 mini-gate | +189 |
+| ``fea1a5d5`` | P9.1e | test(parity/orgs): relax bb_concurrent_writes to corruption-parity | +17 |
+
+Stress-test evidence: 3 consecutive full runs of
+``pytest tests/parity/orgs/test_blackboard_parity.py`` after
+P9.1e: 8 / 8 / 8 passed. Full main gate after P9.1e:
+1155 / 1 / 10 -- the single failure is now stable.
+
+Sign-off remains AUTO-SIGNED for P9.1. The flake fix lands
+under the same gate (no new gate doc needed; this addendum
+is the audit trail).
