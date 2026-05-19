@@ -92,6 +92,17 @@ flip + final ``ProgressLedger`` checkpoint.
 
 **Verification method.**
 
+* **Wall-clock SLA tests** (ADR-0013, P9.4e) —
+  `tests/runtime/test_cancel_wall_clock_budget.py` asserts the three
+  budgets directly via ``time.perf_counter()``:
+  * ``test_im_cancel_to_checkpoint_under_2s`` (3 repeats per ADR-0013) —
+    IM cancel verb on a running ``OrgCommandService`` writes the
+    ``cancelled`` checkpoint in < 2.0 s wall-clock.
+  * ``test_resume_after_cancel_under_3s`` — a new IM message
+    after cancel resumes from checkpoint in < 3.0 s.
+  * ``test_cancel_under_high_message_burst`` — with 10
+    concurrent commands in flight, cancelling one closes that one
+    in < 2.0 s and the other 9 remain unaffected (isolation).
 * **Unit/contract test** —
   `tests/runtime/test_supervisor.py::test_cancel_writes_final_checkpoint`
   (and siblings) — supervisor receives cancel, writes a
@@ -99,33 +110,26 @@ flip + final ``ProgressLedger`` checkpoint.
 * **Integration test** —
   `tests/integration/test_v2_im_cancel.py` — 5 cases covering
   cancel-no-op (no token), cancel-with-token-raise, supervisor
-  writes final cancelled checkpoint. All assertions are
-  wall-clock-bounded under 2 s by the asyncio test fixture (the
-  pytest-asyncio default loop fast-resolves the timer).
+  writes final cancelled checkpoint.
 * **Wiring proof** — `src/openakita/channels/gateway.py` per-org
   cancel verb plumbs ``Messenger.cancel(org_id)`` ->
   ``CancellationToken.cancel()`` (P1.5 `a97fa73b`).
 
-**Status: Pass-with-caveat.** The 5 integration cases are green and
-the cancel verb is wired. The < 2 s wall-clock bound, however, is
-not asserted by an explicit wall-clock assertion in any test today;
-current evidence is structural (cooperative cancel verb wired
-through ``Messenger.cancel(org_id)`` -> ``CancellationToken.cancel()``
-+ checkpoint-save call ordering inside ``Supervisor.run()``) and the
-asyncio test loop happens to fast-resolve the timer well under 2 s.
-**Caveat (P8.7-doc-fix).** A wall-clock budget assertion (e.g.
-``perf_counter()`` start/stop around the IM cancel ->
-``cancelled`` checkpoint write) is **deferred to P-RC-9** alongside
-the new ``orgs/`` subsystem tests; until then the < 2 s figure is
-documentary (the asyncio fixture default), not measured.
+**Status: Pass.** The three new wall-clock SLA tests (P9.4e,
+ADR-0013) directly assert the < 2 s budget, the < 3 s resume
+budget, and burst-isolation; combined with the P1.7-era structural
+tests + cancel-verb wiring, the criterion is fully closed. The
+P8.7-doc-fix caveat ("deferred to P-RC-9") has been removed.
 
 **Evidence.**
 
+* `tests/runtime/test_cancel_wall_clock_budget.py`
+  (3 SLA tests + 3 repeats of SLA #1; P9.4e).
 * `tests/integration/test_v2_im_cancel.py` (5/5 passed; P1.7 era).
 * `tests/runtime/test_supervisor.py::test_cancel_writes_final_checkpoint`.
 * `src/openakita/channels/gateway.py` (cancel verb wiring).
 * `src/openakita/runtime/cancel_token.py` (`CancellationToken`).
-* ADR-0005 (checkpoint contract).
+* ADR-0005 (checkpoint contract); ADR-0013 (wall-clock SLA design).
 
 ---
 
