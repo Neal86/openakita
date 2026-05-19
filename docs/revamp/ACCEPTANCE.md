@@ -108,7 +108,7 @@ flip + final ``ProgressLedger`` checkpoint.
   (and siblings) — supervisor receives cancel, writes a
   ``cancelled`` checkpoint, returns within the asyncio loop tick.
 * **Integration test** —
-  `tests/integration/test_v2_im_cancel.py` — 5 cases covering
+  `tests/integration/test_v2_im_cancel.py` — 4 cases covering
   cancel-no-op (no token), cancel-with-token-raise, supervisor
   writes final cancelled checkpoint.
 * **Wiring proof** — `src/openakita/channels/gateway.py` per-org
@@ -125,7 +125,7 @@ P8.7-doc-fix caveat ("deferred to P-RC-9") has been removed.
 
 * `tests/runtime/test_cancel_wall_clock_budget.py`
   (3 SLA tests + 3 repeats of SLA #1; P9.4e).
-* `tests/integration/test_v2_im_cancel.py` (5/5 passed; P1.7 era).
+* `tests/integration/test_v2_im_cancel.py` (4/4 passed; P1.7 era).
 * `tests/runtime/test_supervisor.py::test_cancel_writes_final_checkpoint`.
 * `src/openakita/channels/gateway.py` (cancel verb wiring).
 * `src/openakita/runtime/cancel_token.py` (`CancellationToken`).

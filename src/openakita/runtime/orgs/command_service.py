@@ -221,16 +221,17 @@ class BrainProtocol(Protocol):
 class OrgCommandService:
     """Submit, track, cancel, and observe commands for any org.
 
-    Construct with the six injected Protocols; only
+    Construct with the five injected Protocols; only
     ``runtime`` + ``lookup`` are required for ``dispatch``.
     The four optional ones (session_manager / gateway /
     emitter) make those side effects no-ops when None, matching
     v1's degraded-mode behaviour.
 
     Concurrency: ``asyncio.Lock`` (G-RC-9.2 Nit-4 lock-type
-    ruling). All coroutine mutators acquire ``self._lock``
-    before touching ``self._commands`` /
-    ``self._running_by_root``.
+    ruling). ``submit`` acquires ``self._lock`` before
+    mutating ``self._commands`` / ``self._running_by_root``;
+    ``cancel`` performs atomic single-key dict ops without
+    the lock (safe under asyncio's single-thread invariant).
     """
 
     def __init__(

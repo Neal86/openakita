@@ -47,12 +47,12 @@ redirection (P9.8), real-runtime integration (P9.6).
 | ``71597235`` | P9.4b2 | feat(runtime/orgs): OrgCommandService get_status + cancel + 5 fan-out methods + _dispatch_forwards + _live_snapshot_view | +338 (335 src + 3 ledger) |
 | ``0893a112`` | P9.4c | test(parity/orgs): activate 10 command_service parity fixtures (xfail -> pass) | +365 (362 test + 3 ledger) |
 | ``55653d11`` | P9.4d | test(runtime/orgs): add 16 command_service contract cases (dispatch + submit gates + replace conflict + cancel + fan-out + find) | +335 (332 test + 3 ledger) |
-| ``52d9bbc8`` | P9.4e | test(runtime): add 3 wall-clock SLA tests + ACCEPTANCE.md #2 upgrade (Pass-with-caveat -> Pass; ADR-0013 closure) | +322 (234 test + ~30 acceptance + ~30 ledger) |
+| ``52d9bbc8`` | P9.4e | test(runtime): add 3 wall-clock SLA tests + ACCEPTANCE.md #2 upgrade (Pass-with-caveat -> Pass; ADR-0013 closure) | +322 (300 test + ~30 acceptance + ~30 ledger; 234 net at P9.4e commit point per the original ledger row, but ``test_cancel_wall_clock_budget.py`` now stands at 300 LOC after subsequent doc-string polish landed during P9.5 work -- doc corrected to actual file LOC as of G-RC-9.5) |
 
 Max staged-diff LOC = 372 (P9.4a). All seven commits stayed
 strictly below the 380 WARN threshold. Total v2
 command-service surface = 1003 LOC (324 models + 679
-service) + 332 contract + 362 parity + 234 SLA + ~30
+service) + 332 contract + 362 parity + 300 SLA (file LOC post-G-RC-9.5 polish; +234 net at P9.4e commit point) + ~30
 ACCEPTANCE upgrade = 2265 LOC of net additions across 7
 commits. The 1003 / ~963 src ratio reflects the explicit
 Protocol scaffolding (5 DI dependency Protocols + 1
@@ -96,16 +96,16 @@ P-RC-9-PLAN section 5.1 -- the largest of any P9.x phase):
 
 | id | v1 surface exercised | ignore set (vs P-RC-9-PLAN section 5.2) |
 |---|---|---|
-| ``request_to_dict_minimal`` | ``OrgCommandRequest.to_dict()`` with defaults | timestamps (none) + ``command_id`` (volatile) |
-| ``request_to_dict_full`` | ``OrgCommandRequest.to_dict()`` with all 9 fields set | timestamps + ``command_id`` |
-| ``default_scope_console`` | ``default_scope_for_surface(ORG_CONSOLE)`` | -- (pure helper) |
-| ``default_scope_im_user`` | ``default_scope_for_surface(IM_USER)`` | -- |
-| ``default_scope_im_group`` | ``default_scope_for_surface(IM_GROUP)`` | -- |
-| ``default_scope_other_surface`` | ``default_scope_for_surface(OTHER)`` | -- |
-| ``forward_target_roundtrip`` | ``ForwardTarget`` from/to dict roundtrip | -- |
-| ``forward_target_invalid_kind`` | ``ForwardTarget.from_dict`` rejects bad ``kind`` | -- |
-| ``submit_record_shape`` | ``OrgCommandService.submit`` returned dict shape (status / command_id / origin) | ``command_id`` (volatile per ULID mint) + ``submitted_at`` (volatile ts) |
-| ``forward_target_roundtrip_im_user`` | ``ForwardTarget`` IM-user variant roundtrip | -- |
+| ``command_request_to_dict_minimal`` | ``OrgCommandRequest.to_dict()`` with defaults | timestamps (none) + ``command_id`` (volatile) |
+| ``command_request_to_dict_full`` | ``OrgCommandRequest.to_dict()`` with all 9 fields set | timestamps + ``command_id`` |
+| ``command_request_to_dict_desktop_chat`` | ``OrgCommandRequest.to_dict()`` desktop_chat variant | timestamps + ``command_id`` |
+| ``command_default_scope_console`` | ``default_scope_for_surface(ORG_CONSOLE)`` | -- (pure helper) |
+| ``command_default_scope_desktop`` | ``default_scope_for_surface(DESKTOP_CHAT)`` | -- |
+| ``command_default_scope_im_private`` | ``default_scope_for_surface(IM_PRIVATE)`` | -- |
+| ``command_default_scope_im_group`` | ``default_scope_for_surface(IM_GROUP)`` | -- |
+| ``command_forward_target_roundtrip`` | ``ForwardTarget`` from/to dict roundtrip | -- |
+| ``command_forward_target_rejects_empty`` | ``ForwardTarget`` rejects empty target | -- |
+| ``command_submit_record_shape`` | ``OrgCommandService.submit`` returned dict shape (status / command_id / origin) | ``command_id`` (volatile per ULID mint) + ``submitted_at`` (volatile ts) |
 
 10/10 PASSED. Zero remaining xfails in the file (sentinel
 section 10.1).
@@ -342,7 +342,7 @@ commit body + new file module docstring): tests run against
 ``_StubRuntime`` + ``_MockBrain`` so the wall-clock budget
 measures the cancel pipeline, not LLM latency. The
 structural cancel-verb wiring is still pinned by
-``tests/integration/test_v2_im_cancel.py`` (5/5; P1.7 era);
+``tests/integration/test_v2_im_cancel.py`` (4/4; P1.7 era);
 together with the new SLA tests, ACCEPTANCE.md #2 is now
 fully closed. ADR-0013 stays at Proposed until G-RC-9 P9.10.
 

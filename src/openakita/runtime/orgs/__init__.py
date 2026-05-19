@@ -4,8 +4,11 @@
   :class:`SqliteOrgStore` -- duck-typed contract list / get /
   create / patch / delete + close. Default JSON; opt into SQLite
   via ``ORGS_V2_BACKEND=sqlite``.
-* **Org subsystems** (P-RC-9): ADR-0011''s six Protocol-typed
-  subsystems.
+* **Org subsystems** (P-RC-9): ADR-0011''s six subsystems,
+  each Protocol-typed (1-5 Protocols per subsystem; ~15
+  Protocol surfaces total once P9.6 lands; 5 of 6 subsystems
+  shipped through P9.5 -- Blackboard / ProjectStore /
+  NodeScheduler / OrgCommandService / OrgManager).
 
   - P9.1 ships :class:`OrgBlackboard` -- three-tier shared
     memory -- plus the :class:`BlackboardBackendProtocol`
