@@ -240,7 +240,8 @@ the residual-risk note.
 | `7d595b2d` | P-RC-7 P7.8 | refactor(tests): mechanical mass-migrate 119 shim imports across 59 test files (prep for shim deletion) | +122 / -150 (59 files; public->agent.*, private->core._<x>_legacy) | 0 | ADR-0001, ADR-0003 |
 | `d3535673` | P-RC-7 P7.9 | refactor(tests): retarget last 13 shim-path references to `_*_legacy` + fix MINIMAL_PROMPT_TOOLS regression | +25 / -19 (10 test files; 6 module-level imports, 3 monkeypatch strings, 3 patch() targets, 4 KIND_MODULES entries) | 0 (test_intent_prompt_contract.py back to collectable) | ADR-0001, ADR-0003 |
 | `2f97c2aa` | P-RC-7 P7.10 | refactor(core): retarget all 32 internal `from .X` shim references in legacy modules to `from ._X_legacy` (decouples legacy bodies from shim files in prep for P7.11 shim deletion) | +108 / -96 (8 files; 34 import retargets + ruff I001 cleanup on _reasoning_engine_legacy.py introduced by my new sibling import lines) | 0 | ADR-0001, ADR-0003 |
-| _this commit_ | P-RC-7 P7.11 | refactor(tests): delete obsolete `test_brain_parity.py` (shim-resolution checks tautological post-shim) | -265 (1 file deleted, 9 tests removed) | -9 (v1-vs-v2-via-shim assertions; v2 inheritance of `_brain_legacy.Brain` enforces same invariant structurally) | ADR-0001, ADR-0003 |
+| `c41b518a` | P-RC-7 P7.11 | refactor(tests): delete obsolete `test_brain_parity.py` (shim-resolution checks tautological post-shim) | -265 (1 file deleted, 9 tests removed) | -9 (v1-vs-v2-via-shim assertions; v2 inheritance of `_brain_legacy.Brain` enforces same invariant structurally) | ADR-0001, ADR-0003 |
+| _this commit_ | P-RC-7 P7.12 | refactor(tests): delete `test_context_parity.py` + `test_tools_parity.py` (same shim-resolution-tautology rationale as P7.11) | -236 (2 files deleted, ~13 tests removed) | -13 | ADR-0001, ADR-0003 |
 
 ## P-RC-8 — Endgame (renames, docs, acceptance, release)
 
