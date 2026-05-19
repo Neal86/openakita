@@ -119,8 +119,16 @@ def _drive(bb, MemoryType, MemoryScope, case: ParityCase) -> ParityResult:  # no
             },
         )
     if op == "concurrent_writes":
-        # 4 threads x 5 writes each -- exercises the in-process lock
-        # serialisation contract both v1 and v2 backends satisfy.
+        # 4 threads x 5 writes each -- both backends must accept writes
+        # from multiple threads without raising. v1 has no in-process
+        # lock (src/openakita/orgs/blackboard.py L97-L345), so under
+        # contention some writes are lost to the read-modify-write
+        # eviction loop racing itself. v2 takes threading.RLock around
+        # the same critical section and is loss-free. The parity
+        # contract therefore only asserts 'no exceptions; at least one
+        # row survives' -- corruption parity, not row-count parity.
+        # See tests/runtime/orgs/test_blackboard_contract.py case 12
+        # for the strict v2 contract (exactly 10 rows for 2 x 5 writes).
         errors: list[BaseException] = []
 
         def worker(prefix: str) -> None:
@@ -136,17 +144,17 @@ def _drive(bb, MemoryType, MemoryScope, case: ParityCase) -> ParityResult:  # no
             threading.Thread(target=worker, args=(chr(ord("a") + i),))
             for i in range(4)
         ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=10.0)
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=10.0)
         rows = bb.read_org(limit=999)
         return ParityResult(
             final_message="conc",
             success=not errors,
             extras={
                 "errors": [type(e).__name__ for e in errors],
-                "row_count": len(rows),
+                "any_rows_survived": len(rows) > 0,
             },
         )
     raise KeyError(f"unknown op: {op}")
