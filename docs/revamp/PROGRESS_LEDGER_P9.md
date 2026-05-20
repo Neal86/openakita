@@ -830,3 +830,50 @@ sentinel held off-limits), so it needs its own planning round.
 > started -- HARD STOP per charter sec 3 + sec 13. delta phase
 > is the final gate-prep phase and needs its own scoped
 > delegation.
+
+| _this commit_ | P-RC-9 P9.8delta-1 | test(parity/orgs): P9.8delta-1 8th sentinel -- frontend stale v1 path scan | +PLACEHOLDER LOC (tests/parity/orgs/test_frontend_stale_paths_sentinel.py NEW ~209 LOC + ledger this row + body ~24 LOC) | +3 tests (active assertions, no xfail; 8th P-RC-9 sentinel slot now ACTIVE alongside the 6 parity sentinels + REST contract sentinel; 3/3 passing locally with stability across 4 reruns) | ADR-0011 (no new Protocol; sentinel is a collection-time regex grep, same pattern as the 7th REST contract sentinel; not architecturally novel); ADR-0012 (sentinel's Group C allowlist explicitly references the 3 deprecated debug-only v1 paths slated for P9.9 deletion alongside the v1 router); charter sec 7 (8th sentinel decision: ADOPT in P9.8delta-1); charter sec 9 gate criterion 1 (zero v1 literal count outside allowlist); inventory sec 1.2 (Group C source) + sec 4.3 (TS-module-import discriminator list) |
+
+> P9.8delta-1 first ``tests/`` source touch of the delta phase landed.
+> Added ``tests/parity/orgs/test_frontend_stale_paths_sentinel.py``
+> (209 LOC after ruff format) -- the 8th P-RC-9 sentinel. Active
+> (non-xfail) collection-time grep over ``apps/setup-center/src/``
+> ``*.ts`` + ``*.tsx`` files asserting that the P9.8 caller migration
+> has fully rewired the frontend off ``/api/orgs/...`` HTTP literals
+> and onto ``/api/v2/orgs/...`` (P9.7 mint) or
+> ``/api/v2/orgs-spec/...`` (P9.7a-2a Group A relocation) surfaces.
+>
+> Three test functions, all active assertions (no ``@pytest.mark.xfail``):
+> (1) ``test_no_stale_v1_http_paths_outside_allowlist`` -- scans
+> the frontend tree with negative-lookbehind regex
+> ``(?<!\.)/api/orgs`` (excludes TS module specifiers like
+> ``../api/orgs`` which are preceded by ``.``); subtracts the 3
+> Group C allowlist entries; asserts the remaining set is empty.
+> (2) ``test_group_c_allowlist_paths_still_present`` -- verifies the
+> 3 allowlisted v1 paths still exist in OrgEditorView.tsx at (or
+> near) their recorded lines; fails loud when P9.9 deletes the v1
+> router so the maintainer also strips the allowlist.
+> (3) ``test_module_imports_use_relative_path`` -- discriminator
+> self-test: confirms the 4 known TS module imports
+> (``from "../api/orgs"`` / ``from "../../api/orgs"`` /
+> ``vi.mock("../../api/orgs", ...)`` / ``import * as orgsApi from "../../api/orgs"``)
+> stay in relative-path form AND do NOT match the sentinel regex.
+>
+> ``GROUP_C_ALLOWLIST`` verbatim: (1) line 1148
+> ``/api/orgs/${currentOrg.id}/reset`` -- OrgManager.reset_org (deprecated);
+> (2) line 5343 ``/api/orgs/${currentOrg.id}/heartbeat/trigger`` (debug-only);
+> (3) line 5346 ``/api/orgs/${currentOrg.id}/standup/trigger`` (debug-only).
+> All 3 ride to P9.9 deletion alongside ``src/openakita/api/routes/orgs.py``.
+>
+> Verification: ``pytest tests/parity/orgs/test_frontend_stale_paths_sentinel.py
+> -q`` -> 3 passed in 1.91 s, repeated 4x for stability (3/3 each
+> run); ``pytest tests/parity/orgs/ -q`` -> 66 passed in 6.03 s
+> (= 63 baseline at HEAD ``fbed86ac`` + 3 new from 8th sentinel; 7
+> pre-existing sentinels still green; zero xfail across the whole
+> parity/orgs/ package). ``ruff check`` + ``ruff format --check``
+> clean. Strict additive verified: ``git diff fbed86ac..HEAD --
+> src/openakita/ apps/setup-center/src/`` returns empty bytes; only
+> ``tests/`` and ``docs/revamp/PROGRESS_LEDGER_P9.md`` moved this
+> commit. **8 / 8 P-RC-9 sentinels now ACTIVE**.
+>
+> P9.8delta-2 (G-RC-9.8 mini-gate + P9.8 ledger close section)
+> follows next in this same delta phase per charter sec 3.
