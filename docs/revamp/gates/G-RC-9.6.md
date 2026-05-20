@@ -21,12 +21,12 @@ siblings); beta (4 heavy siblings + wiring); gamma (parity
 | ``a67675d7`` | P9.6b | 165 | _runtime_event_bus.py: InMemory + WebSocket + factory |
 | ``64514e19`` | P9.6c | 218 | _runtime_watchdog.py: CommandWatchdog + IdleProbeLoop |
 | ``9274a6f2`` | P9.6d | 255 | _runtime_lifecycle.py: OrgLifecycleManager (~18 v1 methods) |
-| ``dc3e330a`` | P9.6.pause | 35 | P9.6 pause checkpoint (2026-05-19) |
+| ``dc3e330a`` | P9.6.pause | 179 | P9.6 pause checkpoint (2026-05-19) |
 | ``1daa2fe8`` | P9.6e | 348 | _runtime_dispatch.py: CommandDispatchManager + _CommandTracker |
 | ``5257e123`` | P9.6f1 | 293 | _runtime_agent_pipeline.py: AgentCache + Builder + ProfileResolver |
 | ``06f436ed`` | P9.6f2 | 258 | _runtime_agent_pipeline.py: AgentPipelineExecutor |
 | ``598fbc1a`` | P9.6g | 355 | _runtime_node_lifecycle.py: NodeStatusController + Router |
-| ``33136556`` | P9.6h1a | 393 | _runtime_plugin_assets.py h1a: bridge + helpers |
+| ``33136556`` | P9.6h1a | 197 | _runtime_plugin_assets.py h1a: bridge + helpers |
 | ``3ef6ed3d`` | P9.6h1b | 163 | _runtime_plugin_assets.py h1b: PluginAssetRecorder append |
 | ``ac8b5d92`` | P9.6h2 | 256 | _runtime_plugin_assets.py h2: FileOutputRegistry + synth |
 | ``412cbd55`` | P9.6i | 45 | wire CommandDispatchManager into OrgRuntime |
@@ -37,9 +37,13 @@ siblings); beta (4 heavy siblings + wiring); gamma (parity
 | ``88603c4b`` | P9.6gamma-2b | 246 | append 12 contract cases -- concurrency + SLA |
 | _this commit_ | G-RC-9.6 | ~340 | G-RC-9.6 P9.6 (OrgRuntime) mini-gate -- PASS |
 
-All 22 commits ruff-clean. Max LOC = 393 at P9.6h1a (one
-commit above 380 target; rejected threshold 400 not hit).
-N3 ledger discipline: every row appended in the same commit.
+All 22 commits ruff-clean. Max LOC = **370 at P9.6e**
+(``1daa2fe8``); all 22 commits within <= 380 target; REJECT
+threshold 400 not approached.
+N3 ledger discipline: every row appended in the same commit,
+**except P9.6f2 (``06f436ed``) where the ledger row was
+retroactively backfilled in P9.6g (``598fbc1a``); P9.6g commit
+body self-discloses this**.
 
 ## 2. P9.6 implementation summary
 
