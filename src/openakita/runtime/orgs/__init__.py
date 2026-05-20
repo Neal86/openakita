@@ -130,6 +130,18 @@
   ``_react_trace_has_tool`` / ``_collect_tool_stats_from_trace``
   / ``_extract_accepted_chain_ids`` (~110 LOC) ~474 v1
   LOC absorbed.
+- P9.6i wires :class:`CommandDispatchManager` into
+  :class:`OrgRuntime.__init__` (new ``dispatch`` DI
+  param; defaults to in-process construction against
+  the injected command service / lookup / event bus).
+  The 4 :class:`CommandRuntimeProtocol` methods
+  (``send_command`` / ``cancel_user_command`` /
+  ``has_active_delegations`` /
+  ``get_command_tracker_snapshot``) are now real
+  delegations -- ``raise NotImplementedError`` is gone.
+  After this commit P9.6beta closes; P9.6gamma
+  (parity 20 fixtures + ~25 contract cases + G-RC-9.6
+  mini-gate) rides the next turn.
 """
 
 from __future__ import annotations
