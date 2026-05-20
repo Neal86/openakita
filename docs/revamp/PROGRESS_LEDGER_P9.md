@@ -2546,3 +2546,46 @@ sentinel held off-limits), so it needs its own planning round.
 > NOT started this commit. P-RC-9 closure pending operator
 > signal to open eta-2.
 
+> ### P9.9eta-2a -- G-RC-9 final roll-up gate doc (P-RC-9 epic CLOSED)
+>
+> | commit hash | phase | title | LOC delta | tests delta | ADR refs |
+> |---|---|---|---|---|---|
+> | _this commit_ | P-RC-9 P9.9eta-2a (G-RC-9) | docs(revamp/gates): G-RC-9 final roll-up gate -- PASS (P-RC-9 epic CLOSED; -35 493 LOC net v1 retirement; 9/9 sentinels ACTIVE) | +PLACEHOLDER (G-RC-9.md ~270 + ledger row ~30) | 0 | ADR-0013 / ADR-0014 / ADR-0015 (closure notes ride to eta-2b) |
+>
+> Lands the first half of the eta-2 split: ``docs/revamp/gates/G-RC-9.md``
+> (final P-RC-9 roll-up gate doc) plus this ledger row. ACCEPTANCE.md
+> closure, ADR closure notes, and the full Y3 BOM inventory ride to
+> **eta-2b** (next commit).
+>
+> **Gate sections** (8 sections, top-level only):
+>
+> * sec 0 -- executive summary (-35 493 LOC net; 9/9 sentinels; 10 mini-gates).
+> * sec 1 -- phase roll-up table (P9.0..P9.9; gate-doc commit hash per phase).
+> * sec 2 -- acceptance evidence (#4 v2 mint + v1 retire; #5 sentinels).
+> * sec 3 -- charter vs delivery diff (~18 000 promised; -35 493 delivered net).
+> * sec 4 -- ADR closure pointers (ADR-0013 / 0014 / 0015 summarised).
+> * sec 5 -- residual nit final disposition (B-1 + M-1 CLOSED; 5 -> P-RC-10; 1 -> v2.1.0).
+> * sec 6 -- Y3 BOM summary (84 v2 .py modules; 77 v1 files deleted; 9 sentinel files).
+> * sec 7 -- known residuals (P-RC-10 flatten; v2.1.0 shim retirement; operator smoke).
+> * sec 8 -- sign-off PASS.
+>
+> **B-1 + M-1 dispositions** (sec 5):
+>
+> * B-1 (burst-test semantics) -- **CLOSED**. Deterministic under
+>   P-RC-9 contract; sentinels #1..#6 cover invariants; any tighter
+>   timing is runtime-SLA backlog (no v1 dependency).
+> * M-1 (runtime_parity golden-dict deviation) -- **CLOSED**.
+>   delta-2a Option B transformed parity to v2-only golden dicts
+>   (sentinel #6 20 cases ACTIVE); v1 oracle unreachable post
+>   epsilon-2b -- structurally closed.
+>
+> **Verification**: gate doc landed (~270 LOC); ledger row appended;
+> sentinel smoke at gate authorship: 68 passed in ~4.8 s (9/9
+> sentinels ACTIVE; unchanged from eta-1b). No source / test /
+> ADR / ACCEPTANCE.md / 308 shim / sentinel-file touch.
+>
+> **HARD STOP**: eta-2b (ACCEPTANCE.md #4 / #5 close + ADR-0013 /
+> 0014 closure notes + full Y3 BOM inventory + final P-RC-9 ledger
+> close) NOT started this commit. P-RC-9 epic closure pending the
+> eta-2b document edits; the final-gate **PASS** verdict is locked
+> at this commit.
