@@ -425,3 +425,26 @@ current_phase: P-RC-9
 | commit hash | phase | title | LOC delta | tests delta | ADR refs |
 |---|---|---|---|---|---|
 | _this commit_ | P-RC-9 P9.7beta-6 | feat(api/routes): mint cluster 3.6 Projects + tasks (16 endpoints: B68-B83) in orgs_v2_runtime_projects.py + side-effect import + 22 smoke tests -- closes P9.7beta (83/83 endpoints) | +PLACEHOLDER LOC (orgs_v2_runtime_projects.py NEW 359 + orgs_v2_runtime.py +1 multi-line import addition; test_p97_beta_smoke.py +241 cluster 3.6 smokes; ledger +PLACEHOLDER) | +22 smoke (B68-B83 wiring smokes + 404 branches x4 + 422 Pydantic + dispatch/cancel cross-subsystem flows); gate slice tests/api/ + tests/runtime/orgs/ + tests/parity/orgs/ 372 -> 394 passed (52.46s) | ADR-0011 (D-3 layer separation -- ``ProjectCreate`` / ``ProjectPatch`` Pydantic shapes consumed; ``OrgProject`` / ``ProjectTask`` / ``ProjectStatus`` / ``ProjectType`` / ``TaskStatus`` imported from ``openakita.runtime.orgs``; D-4 R4 granularity ceiling preserved); ADR-0012 (no shim under v1; dispatch + cancel cross-subsystem calls reach only v2 subsystems -- never v1 OrgRuntime) |
+
+## P9.7gamma-1a -- contract test scaffold + cluster orgs (B1-B17) + nodes (B18-B33) (this turn)
+
+> First gamma-1 commit: lands the
+> ``tests/api/contracts/`` package -- empty ``__init__.py`` marker
+> + shared ``conftest.py`` (mint_app / mint_client / fake_org /
+> fake_project / fake_task / org_with_node helpers) + per-cluster
+> contract files for the OrgManager (B1-B17) and node-lifecycle
+> (B18-B33) clusters. Reuses the duck-typed ``MagicMock`` subsystem
+> pattern from ``tests/api/test_p97_beta_smoke.py`` so the assertions
+> stay focused on response envelopes + status codes; 503 is exercised
+> by the alpha-2 smoke suite, auth reuses the v1 pattern (D-4
+> LOCKED) so neither family is asserted again. Sized: ``__init__``
+> 12 LOC + conftest 89 LOC + orgs 283 LOC (41 cases) + nodes 247
+> LOC (28 cases). All four files at or under the ADR-0014 ~350 LOC
+> sub-cap. Per-endpoint coverage: 2-4 cases each across happy /
+> 404 / 422 (Pydantic ``extra="forbid"`` + ``min_length=1`` on
+> ``OrgCreate.name``) / 409 (``OrgNameConflictError`` envelope on
+> create + update + from-template).
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-9 P9.7gamma-1a | test(api/contracts): scaffold contracts/ + cluster 3.1 orgs (41 cases) + cluster 3.2 nodes (28 cases) | +PLACEHOLDER LOC (contracts/__init__.py NEW 12 + conftest.py NEW 89 + test_orgs_v2_contracts_orgs.py NEW 283 + test_orgs_v2_contracts_nodes.py NEW 247; ledger +PLACEHOLDER) | +69 contract (B1-B17 41 cases + B18-B33 28 cases); gate slice tests/api/ + tests/runtime/orgs/ + tests/parity/orgs/ 394 -> 463 passed (62.60s) | ADR-0011 (D-3 layer separation -- shared fixtures factor out duck-typed mock wiring; charter section 6 contract matrix); ADR-0012 (no shim under v1; assertions reach only v2 schemas + runtime.orgs subsystems); cites P-RC-9-P9.7-CHARTER.md section 6 (contract test matrix) + section 3 P9.7gamma-1 brief |
