@@ -46,8 +46,11 @@ def _make_org(store, org_id: str = "org_sse_test") -> OrgV2:
         description="for the test",
         nodes=[
             NodeV2(
-                id="root", org_id=org_id, type=NodeType.LLM,
-                role="root", label="root",
+                id="root",
+                org_id=org_id,
+                type=NodeType.LLM,
+                role="root",
+                label="root",
             ),
         ],
         edges=[],
@@ -71,14 +74,14 @@ def _client(monkeypatch, tmp_path, *, enabled: bool, with_org: bool = True) -> T
 
 def test_returns_404_when_v2_disabled(monkeypatch, tmp_path) -> None:
     with _client(monkeypatch, tmp_path, enabled=False, with_org=False) as c:
-        resp = c.get("/api/v2/orgs/anything/stream")
+        resp = c.get("/api/v2/orgs-spec/anything/stream")
     assert resp.status_code == 404
     assert "v2 is disabled" in resp.json()["detail"]
 
 
 def test_returns_404_when_org_unknown(monkeypatch, tmp_path) -> None:
     with _client(monkeypatch, tmp_path, enabled=True, with_org=False) as c:
-        resp = c.get("/api/v2/orgs/org_does_not_exist/stream")
+        resp = c.get("/api/v2/orgs-spec/org_does_not_exist/stream")
     assert resp.status_code == 404
     assert "not found" in resp.json()["detail"]
 
@@ -112,9 +115,9 @@ async def _collect(gen, n: int, *, timeout: float = 3.0) -> list[dict]:
                     continue
                 saw_real_line = True
                 if line.startswith("event:"):
-                    event_name = line[len("event:"):].strip()
+                    event_name = line[len("event:") :].strip()
                 elif line.startswith("data:"):
-                    data.append(line[len("data:"):].strip())
+                    data.append(line[len("data:") :].strip())
             if not saw_real_line or not data:
                 continue
             try:

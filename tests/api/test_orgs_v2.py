@@ -57,19 +57,19 @@ def disabled_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
 
 
 def test_list_returns_404_when_v2_disabled(disabled_client: TestClient) -> None:
-    resp = disabled_client.get("/api/v2/orgs/templates")
+    resp = disabled_client.get("/api/v2/orgs-spec/templates")
     assert resp.status_code == 404
     assert "runtime v2 is disabled" in resp.json()["detail"]
 
 
 def test_get_returns_404_when_v2_disabled(disabled_client: TestClient) -> None:
-    resp = disabled_client.get("/api/v2/orgs/templates/aigc_video_studio")
+    resp = disabled_client.get("/api/v2/orgs-spec/templates/aigc_video_studio")
     assert resp.status_code == 404
 
 
 def test_instantiate_returns_404_when_v2_disabled(disabled_client: TestClient) -> None:
     resp = disabled_client.post(
-        "/api/v2/orgs/templates/aigc_video_studio/instantiate",
+        "/api/v2/orgs-spec/templates/aigc_video_studio/instantiate",
         json={"name": "Acme"},
     )
     assert resp.status_code == 404
@@ -83,7 +83,7 @@ def test_instantiate_returns_404_when_v2_disabled(disabled_client: TestClient) -
 def test_list_returns_envelope_with_count_and_known_templates(
     client: TestClient,
 ) -> None:
-    resp = client.get("/api/v2/orgs/templates")
+    resp = client.get("/api/v2/orgs-spec/templates")
     assert resp.status_code == 200
     body = resp.json()
     assert "templates" in body
@@ -97,7 +97,7 @@ def test_list_returns_envelope_with_count_and_known_templates(
 
 
 def test_list_returns_jsonable_node_and_edge_records(client: TestClient) -> None:
-    body = client.get("/api/v2/orgs/templates").json()
+    body = client.get("/api/v2/orgs-spec/templates").json()
     aigc = next(t for t in body["templates"] if t["id"] == "aigc_video_studio")
     assert "nodes" in aigc and isinstance(aigc["nodes"], list)
     assert "edges" in aigc and isinstance(aigc["edges"], list)
@@ -114,7 +114,7 @@ def test_list_returns_jsonable_node_and_edge_records(client: TestClient) -> None
 
 
 def test_get_returns_single_template(client: TestClient) -> None:
-    resp = client.get("/api/v2/orgs/templates/software_team")
+    resp = client.get("/api/v2/orgs-spec/templates/software_team")
     assert resp.status_code == 200
     body = resp.json()
     assert body["id"] == "software_team"
@@ -133,7 +133,7 @@ def test_get_returns_single_template(client: TestClient) -> None:
 
 
 def test_get_unknown_template_returns_404(client: TestClient) -> None:
-    resp = client.get("/api/v2/orgs/templates/no_such_template")
+    resp = client.get("/api/v2/orgs-spec/templates/no_such_template")
     assert resp.status_code == 404
     assert "no_such_template" in resp.json()["detail"]
 
@@ -147,7 +147,7 @@ def test_instantiate_returns_jsonable_orgv2_with_fresh_ids(
     client: TestClient,
 ) -> None:
     resp = client.post(
-        "/api/v2/orgs/templates/content_ops/instantiate",
+        "/api/v2/orgs-spec/templates/content_ops/instantiate",
         json={"name": "Acme Editorial"},
     )
     assert resp.status_code == 200
@@ -165,11 +165,11 @@ def test_instantiate_returns_jsonable_orgv2_with_fresh_ids(
 
 def test_instantiate_two_calls_yield_disjoint_orgs(client: TestClient) -> None:
     a = client.post(
-        "/api/v2/orgs/templates/software_team/instantiate",
+        "/api/v2/orgs-spec/templates/software_team/instantiate",
         json={"name": "Alpha"},
     ).json()
     b = client.post(
-        "/api/v2/orgs/templates/software_team/instantiate",
+        "/api/v2/orgs-spec/templates/software_team/instantiate",
         json={"name": "Beta"},
     ).json()
     assert a["id"] != b["id"]
@@ -180,7 +180,7 @@ def test_instantiate_two_calls_yield_disjoint_orgs(client: TestClient) -> None:
 
 def test_instantiate_applies_persona_override(client: TestClient) -> None:
     resp = client.post(
-        "/api/v2/orgs/templates/aigc_video_studio/instantiate",
+        "/api/v2/orgs-spec/templates/aigc_video_studio/instantiate",
         json={
             "name": "Demo",
             "node_persona_prompts": {"art_director": "你是新美术指导。"},
@@ -194,7 +194,7 @@ def test_instantiate_applies_persona_override(client: TestClient) -> None:
 
 def test_instantiate_applies_defaults_override(client: TestClient) -> None:
     resp = client.post(
-        "/api/v2/orgs/templates/software_team/instantiate",
+        "/api/v2/orgs-spec/templates/software_team/instantiate",
         json={"name": "x", "defaults": {"max_turns": 99}},
     )
     assert resp.status_code == 200
@@ -203,7 +203,7 @@ def test_instantiate_applies_defaults_override(client: TestClient) -> None:
 
 def test_instantiate_unknown_template_returns_404(client: TestClient) -> None:
     resp = client.post(
-        "/api/v2/orgs/templates/no_such_template/instantiate",
+        "/api/v2/orgs-spec/templates/no_such_template/instantiate",
         json={"name": "Demo"},
     )
     assert resp.status_code == 404
@@ -211,7 +211,7 @@ def test_instantiate_unknown_template_returns_404(client: TestClient) -> None:
 
 def test_instantiate_unknown_override_key_returns_400(client: TestClient) -> None:
     resp = client.post(
-        "/api/v2/orgs/templates/software_team/instantiate",
+        "/api/v2/orgs-spec/templates/software_team/instantiate",
         json={"name": "x", "defaults": {"max_task_seconds": 60}},
     )
     assert resp.status_code == 400
@@ -221,7 +221,7 @@ def test_instantiate_unknown_override_key_returns_400(client: TestClient) -> Non
 
 def test_instantiate_unknown_node_id_returns_400(client: TestClient) -> None:
     resp = client.post(
-        "/api/v2/orgs/templates/software_team/instantiate",
+        "/api/v2/orgs-spec/templates/software_team/instantiate",
         json={
             "name": "x",
             "node_persona_prompts": {"no_such_node": "..."},
@@ -233,7 +233,7 @@ def test_instantiate_unknown_node_id_returns_400(client: TestClient) -> None:
 
 def test_instantiate_missing_name_returns_422(client: TestClient) -> None:
     resp = client.post(
-        "/api/v2/orgs/templates/software_team/instantiate",
+        "/api/v2/orgs-spec/templates/software_team/instantiate",
         json={},
     )
     assert resp.status_code == 422
@@ -247,47 +247,47 @@ def test_instantiate_missing_name_returns_422(client: TestClient) -> None:
 def _instantiate(client: TestClient, template_id: str = "content_ops", **kw) -> dict:
     payload = {"name": kw.pop("name", "Test Org")}
     payload.update(kw)
-    resp = client.post(f"/api/v2/orgs/templates/{template_id}/instantiate", json=payload)
+    resp = client.post(f"/api/v2/orgs-spec/templates/{template_id}/instantiate", json=payload)
     assert resp.status_code == 200
     return resp.json()
 
 
 def test_create_then_list_returns_persisted_org(client: TestClient) -> None:
     org = _instantiate(client, name="Acme Editorial")
-    resp = client.post("/api/v2/orgs", json={"org": org})
+    resp = client.post("/api/v2/orgs-spec", json={"org": org})
     assert resp.status_code == 201
     saved = resp.json()
     assert saved["id"] == org["id"]
-    listing = client.get("/api/v2/orgs").json()
+    listing = client.get("/api/v2/orgs-spec").json()
     assert listing["count"] == 1
     assert listing["orgs"][0]["id"] == org["id"]
 
 
 def test_create_duplicate_returns_409(client: TestClient) -> None:
     org = _instantiate(client, name="Once")
-    client.post("/api/v2/orgs", json={"org": org})
-    resp = client.post("/api/v2/orgs", json={"org": org})
+    client.post("/api/v2/orgs-spec", json={"org": org})
+    resp = client.post("/api/v2/orgs-spec", json={"org": org})
     assert resp.status_code == 409
 
 
 def test_get_unknown_org_returns_404(client: TestClient) -> None:
-    resp = client.get("/api/v2/orgs/org_does_not_exist")
+    resp = client.get("/api/v2/orgs-spec/org_does_not_exist")
     assert resp.status_code == 404
 
 
 def test_get_persisted_org_round_trips(client: TestClient) -> None:
     org = _instantiate(client, name="Round Trip")
-    client.post("/api/v2/orgs", json={"org": org})
-    got = client.get(f"/api/v2/orgs/{org['id']}").json()
+    client.post("/api/v2/orgs-spec", json={"org": org})
+    got = client.get(f"/api/v2/orgs-spec/{org['id']}").json()
     assert got["id"] == org["id"]
     assert got["name"] == "Round Trip"
 
 
 def test_patch_updates_name_and_description(client: TestClient) -> None:
     org = _instantiate(client, name="Old")
-    client.post("/api/v2/orgs", json={"org": org})
+    client.post("/api/v2/orgs-spec", json={"org": org})
     resp = client.patch(
-        f"/api/v2/orgs/{org['id']}",
+        f"/api/v2/orgs-spec/{org['id']}",
         json={"name": "New", "description": "now editorial"},
     )
     assert resp.status_code == 200
@@ -297,31 +297,31 @@ def test_patch_updates_name_and_description(client: TestClient) -> None:
 
 
 def test_patch_unknown_org_returns_404(client: TestClient) -> None:
-    resp = client.patch("/api/v2/orgs/org_does_not_exist", json={"name": "x"})
+    resp = client.patch("/api/v2/orgs-spec/org_does_not_exist", json={"name": "x"})
     assert resp.status_code == 404
 
 
 def test_delete_removes_org(client: TestClient) -> None:
     org = _instantiate(client, name="Will Delete")
-    client.post("/api/v2/orgs", json={"org": org})
-    del_resp = client.delete(f"/api/v2/orgs/{org['id']}")
+    client.post("/api/v2/orgs-spec", json={"org": org})
+    del_resp = client.delete(f"/api/v2/orgs-spec/{org['id']}")
     assert del_resp.status_code == 204
-    assert client.get(f"/api/v2/orgs/{org['id']}").status_code == 404
+    assert client.get(f"/api/v2/orgs-spec/{org['id']}").status_code == 404
 
 
 def test_delete_unknown_org_returns_404(client: TestClient) -> None:
-    resp = client.delete("/api/v2/orgs/org_does_not_exist")
+    resp = client.delete("/api/v2/orgs-spec/org_does_not_exist")
     assert resp.status_code == 404
 
 
 def test_create_returns_400_on_malformed_payload(client: TestClient) -> None:
-    resp = client.post("/api/v2/orgs", json={"org": {"id": "x"}})
+    resp = client.post("/api/v2/orgs-spec", json={"org": {"id": "x"}})
     assert resp.status_code == 400
 
 
 def test_crud_returns_404_when_v2_disabled(disabled_client: TestClient) -> None:
-    assert disabled_client.get("/api/v2/orgs").status_code == 404
-    assert disabled_client.post("/api/v2/orgs", json={"org": {}}).status_code == 404
-    assert disabled_client.get("/api/v2/orgs/x").status_code == 404
-    assert disabled_client.patch("/api/v2/orgs/x", json={}).status_code == 404
-    assert disabled_client.delete("/api/v2/orgs/x").status_code == 404
+    assert disabled_client.get("/api/v2/orgs-spec").status_code == 404
+    assert disabled_client.post("/api/v2/orgs-spec", json={"org": {}}).status_code == 404
+    assert disabled_client.get("/api/v2/orgs-spec/x").status_code == 404
+    assert disabled_client.patch("/api/v2/orgs-spec/x", json={}).status_code == 404
+    assert disabled_client.delete("/api/v2/orgs-spec/x").status_code == 404

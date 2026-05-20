@@ -1,6 +1,6 @@
 """V2 organisation SSE stream endpoint.
 
-``GET /api/v2/orgs/{id}/stream`` is a Server-Sent Events channel
+``GET /api/v2/orgs-spec/{id}/stream`` is a Server-Sent Events channel
 backed by the org's long-lived
 :class:`~openakita.runtime.stream.StreamBus` (built lazily by
 :mod:`openakita.runtime.stream_registry`). Each event is one
@@ -36,7 +36,7 @@ __all__ = ["router"]
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v2/orgs", tags=["v2:组织流"])
+router = APIRouter(prefix="/api/v2/orgs-spec", tags=["v2:组织流"])
 
 
 #: Channels exposed by default. Noisy telemetry (``values`` /

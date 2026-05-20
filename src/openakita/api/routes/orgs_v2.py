@@ -6,7 +6,7 @@ This route module exposes the new :mod:`openakita.runtime` stack
 HTTP. It is a *parallel* surface to ``api/routes/orgs.py``; the
 legacy v1 routes keep running. A request only ever reaches v2 when
 ``settings.runtime_v2_enabled`` is true — otherwise the router
-returns ``404 /api/v2/...``.
+returns ``404 /api/v2/orgs-spec/...``.
 
 Why a separate module instead of adding endpoints to ``orgs.py``:
 
@@ -23,14 +23,20 @@ Why a separate module instead of adding endpoints to ``orgs.py``:
 
 Endpoints (all gated by ``runtime_v2_enabled``):
 
-``GET    /api/v2/orgs/templates``                   list TemplateSpec records
-``GET    /api/v2/orgs/templates/{id}``               one TemplateSpec
-``POST   /api/v2/orgs/templates/{id}/instantiate``   -> fresh OrgV2 (not persisted)
-``POST   /api/v2/orgs``                              persist an instantiated org
-``GET    /api/v2/orgs``                              list persisted orgs
-``GET    /api/v2/orgs/{id}``                         get one persisted org
-``PATCH  /api/v2/orgs/{id}``                         patch name / description
-``DELETE /api/v2/orgs/{id}``                         delete one persisted org
+``GET    /api/v2/orgs-spec/templates``                   list TemplateSpec records
+``GET    /api/v2/orgs-spec/templates/{id}``               one TemplateSpec
+``POST   /api/v2/orgs-spec/templates/{id}/instantiate``   -> fresh OrgV2 (not persisted)
+``POST   /api/v2/orgs-spec``                              persist an instantiated org
+``GET    /api/v2/orgs-spec``                              list persisted orgs
+``GET    /api/v2/orgs-spec/{id}``                         get one persisted org
+``PATCH  /api/v2/orgs-spec/{id}``                         patch name / description
+``DELETE /api/v2/orgs-spec/{id}``                         delete one persisted org
+
+P-RC-9 P9.7a-2 (Group A R3 LOCKED, see ``docs/revamp/P-RC-9-P9.7-DECISIONS.md`` D-1): this router moved
+from ``/api/v2/orgs[/...]`` to ``/api/v2/orgs-spec[/...]`` so the
+P9.7 mint can claim the original ``/api/v2/orgs`` namespace.
+308 Permanent Redirect shims at the old paths ride v2.0.x via
+``_orgs_v2_legacy_redirects.router``.
 
 Persistence layer: :mod:`openakita.runtime.orgs` (JSON file under
 ``data/orgs_v2.json``). Phase 7 upgrades this to the SQLite-backed
@@ -57,7 +63,7 @@ __all__ = ["router"]
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v2/orgs", tags=["v2:组织编排"])
+router = APIRouter(prefix="/api/v2/orgs-spec", tags=["v2:组织编排"])
 
 
 # ---------------------------------------------------------------------------
@@ -99,8 +105,7 @@ def _ensure_registry_bootstrapped() -> None:
         registered += 1
     _BOOTSTRAPPED = True
     logger.info(
-        "[orgs_v2] registry bootstrapped: %d template(s) registered "
-        "(%d total in registry)",
+        "[orgs_v2] registry bootstrapped: %d template(s) registered (%d total in registry)",
         registered,
         len(GLOBAL_REGISTRY),
     )
@@ -309,9 +314,7 @@ def get_org(org_id: str) -> dict[str, Any]:
 def patch_org(org_id: str, body: _PatchOrgBody) -> dict[str, Any]:
     _require_v2_enabled()
     try:
-        org = get_default_store().patch(
-            org_id, name=body.name, description=body.description
-        )
+        org = get_default_store().patch(org_id, name=body.name, description=body.description)
     except OrgNotFound as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

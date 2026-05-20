@@ -30,6 +30,7 @@ import openakita._ensure_utf8  # noqa: F401  # Windows UTF-8 编码保护
 
 from .auth import WebAccessConfig, create_auth_middleware
 from .routes import (
+    _orgs_v2_legacy_redirects,
     agents,
     bug_report,
     chat,
@@ -48,7 +49,6 @@ from .routes import (
     orgs,
     orgs_v2,
     orgs_v2_stream,
-    build_info as build_info_routes,
     pending_approvals,
     qqbot_onboard,
     scheduler,
@@ -57,11 +57,16 @@ from .routes import (
     skills,
     token_stats,
     upload,
-    web_search as web_search_routes,
     wechat_onboard,
     wecom_onboard,
     workspace_io,
     workspaces,
+)
+from .routes import (
+    build_info as build_info_routes,
+)
+from .routes import (
+    web_search as web_search_routes,
 )
 
 try:
@@ -412,6 +417,13 @@ def create_app(
     # ``orgs_v2.router`` -- always-mount, refuse-to-serve when
     # ``runtime_v2_enabled`` is False.
     app.include_router(orgs_v2_stream.router)
+    # P-RC-9 P9.7a-2a: 308 Permanent Redirect shim for the
+    # original P-RC-3 Group A paths under ``/api/v2/orgs[/...]``
+    # (frontend rewiring lands in P9.8). See DECISIONS.md D-1
+    # (R3 LOCKED). Registered LAST so future P9.7 mint endpoints
+    # at the same ``/api/v2/orgs`` prefix take precedence over
+    # the redirect for routes the mint actually claims.
+    app.include_router(_orgs_v2_legacy_redirects.router)
     # P-RC-2 commit P2.8: GET /api/build-info for the frontend
     # stale-bundle banner. Always-mounted, unauthenticated.
     app.include_router(build_info_routes.router)
@@ -483,6 +495,7 @@ def create_app(
         """Import any feedback records staged by Tauri while the backend was down."""
         try:
             from openakita.config import settings
+
             home = settings.openakita_home
         except Exception:
             home = Path.home() / ".openakita"
@@ -491,11 +504,13 @@ def create_app(
             return
         try:
             import json as _json
+
             records = _json.loads(pending.read_text("utf-8"))
             if not isinstance(records, list):
                 pending.unlink(missing_ok=True)
                 return
             from .routes import feedback_store
+
             imported = 0
             for rec in records:
                 try:
@@ -577,8 +592,7 @@ def create_app(
                 logger.info("[Startup] PolicyHotReloader started")
             else:
                 logger.debug(
-                    "[Startup] PolicyHotReloader not started "
-                    "(disabled or no POLICIES.yaml)"
+                    "[Startup] PolicyHotReloader not started (disabled or no POLICIES.yaml)"
                 )
         except Exception as e:
             logger.warning("[Startup] PolicyHotReloader wire failed: %s", e)
@@ -730,8 +744,7 @@ def create_app(
             logger.info("[Startup] AsyncBatchAuditWriter started for %s", path)
         except Exception as e:
             logger.warning(
-                "[Startup] AsyncBatchAuditWriter not started; sync fallback "
-                "remains active: %s",
+                "[Startup] AsyncBatchAuditWriter not started; sync fallback remains active: %s",
                 e,
             )
 
@@ -771,9 +784,7 @@ def create_app(
             )
             logger.info("[Startup] StreamRegistry cleanup task started")
         except Exception as e:  # noqa: BLE001 -- never block startup
-            logger.warning(
-                "[Startup] StreamRegistry cleanup not started: %s", e
-            )
+            logger.warning("[Startup] StreamRegistry cleanup not started: %s", e)
 
     @app.on_event("shutdown")
     async def _stop_stream_cleanup() -> None:
@@ -786,9 +797,7 @@ def create_app(
         except (asyncio.CancelledError, TimeoutError):
             pass
         except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "[Shutdown] StreamRegistry cleanup stop error: %s", e
-            )
+            logger.warning("[Shutdown] StreamRegistry cleanup stop error: %s", e)
 
     return app
 

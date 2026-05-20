@@ -301,3 +301,20 @@ current_phase: P-RC-9
 | commit hash | phase | title | LOC delta | tests delta | ADR refs |
 |---|---|---|---|---|---|
 | _this commit_ | P-RC-9 P9.7a-1 | docs(revamp): P9.7a-1 endpoint inventory + decisions (R1=R3 locked, R2 recon) | +482 LOC (P-RC-9-P9.7-ENDPOINT-INVENTORY.md NEW 254 + P-RC-9-P9.7-DECISIONS.md NEW 220 + ledger +8) | 0 (docs-only; ``git diff 096a5571..HEAD -- src/openakita/ tests/ apps/`` empty) | ADR-0011 (D-3 layer separation: schemas/orgs_v2/* decoupled from router; D-4 flat helpers per R4 granularity ceiling); ADR-0012 (D-1 R3 308 redirect shim is the only relaxation; physical v1 delete still waits for P9.9); cites P-RC-9-P9.7-CHARTER.md sec 1 + 4 + 8 |
+
+## P9.7a-2 -- Group A rename + 308 shim + Pydantic + router skeleton (this turn)
+
+> Code kickoff. D-1 R3 LOCKED lands physically: Group A
+> routers (`orgs_v2.router` + `orgs_v2_stream.router`)
+> relocate from ``/api/v2/orgs`` to ``/api/v2/orgs-spec``;
+> a new ``_orgs_v2_legacy_redirects.router`` issues 308
+> Permanent Redirects at the old paths so existing
+> frontend call sites keep working through v2.0.x (rewire
+> ships in P9.8). Split into 3 sub-commits per the
+> instructions: a-2a Group A rename + 308 shim + smoke,
+> a-2b Pydantic schemas namespace, a-2c v2 runtime router
+> skeleton + registration + health stub.
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-9 P9.7a-2a | feat(api/routes): Group A rename to ``/api/v2/orgs-spec`` + 308 Permanent Redirect shim at the original ``/api/v2/orgs`` paths (9 routes) + register shim router after spec routers in server.py + smoke tests for redirects | +311 src/test LOC (orgs_v2.py +18/-15 prefix+docstring; orgs_v2_stream.py +2/-2 prefix; server.py +21/-12 import + register block; _orgs_v2_legacy_redirects.py NEW 101; test_orgs_v2.py +37/-37 path swap; test_orgs_v2_stream.py +9/-6 path swap; test_p97_alpha2_smoke.py NEW 160; ledger +PLACEHOLDER) | +12 smoke (test_p97_alpha2_smoke.py: 9 308 shim checks + 1 query-string preservation + 2 spec-path Group A logic smoke); gate slice tests/api/ + tests/runtime/orgs/ + tests/parity/orgs/ 265 -> 277 passed (44.67s) | ADR-0011 (no new Protocol; shim is a thin APIRouter; spec router rename is one-line prefix flip); ADR-0012 (one-window relaxation for 308 redirect window through v2.0.x; physical v1 delete still waits for P9.9); cites P-RC-9-P9.7-DECISIONS.md D-1 R3 LOCKED |
