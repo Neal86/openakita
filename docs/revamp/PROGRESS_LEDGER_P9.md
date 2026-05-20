@@ -1872,3 +1872,28 @@ sentinel held off-limits), so it needs its own planning round.
 > **HARD STOP per brief**: δ-4 (atomic ``git rm -r tests/orgs/``
 > → 47 files / 195 v1 import sites + ``__init__`` + ``conftest``)
 > NOT started this turn; next operator signal opens δ-4.
+
+## P9.9δ-4-pre -- README v1→v2 import example sweep (δ-2a leftover)
+
+| _this commit_ | P-RC-9 P9.9δ-4-pre | docs(tests/parity/orgs): P9.9δ-4-pre README v1→v2 import example sweep (δ-2a leftover) [P-RC-9 P9.9δ-4-pre] | 1 .md line rewritten (+1 / -1 = net 0 LOC) + ledger this section | post-edit ``git grep -n "openakita\.orgs\." -- tests/parity/orgs/`` = 0 hits; full-tree ``git grep -ln "openakita\.orgs\." -- tests/`` = 47 files, **all 47 inside ``tests/orgs/``** (0 outside leakage) -- pre-condition #3 for the upcoming atomic ``git rm -r tests/orgs/`` now PASSES | ADR-0012 (v1 deletion at P9.9 per Q-B ACCEPTED (b)) |
+
+> P9.9δ-4-pre is a single-file documentation sweep absorbing the
+> one residual ``openakita.orgs.`` textual hit that δ-2a's Option-B
+> parity rewrite did not catch: ``tests/parity/orgs/README.md`` line 58,
+> a stale ``How to add a fixture`` template example that imported the
+> v1 ``openakita.orgs.blackboard.OrgBlackboard``. Swapped 1:1 to
+> ``openakita.runtime.orgs.blackboard.OrgBlackboard`` so the δ-4
+> atomic deletion's post-condition ``grep "openakita\.orgs\."
+> tests/`` = 0 is structurally reachable. Split out as its own
+> commit (not folded into δ-4) to preserve δ-4's
+> deletion-only atomic semantics. No code / behavior change; README
+> remains BOM-free UTF-8 with CRLF line endings preserved.
+>
+> 8 / 8 P-RC-9 sentinels still ACTIVE (this commit touches no
+> sentinel file). Strict additive on v1: ``git diff a3a5fde6..HEAD
+> -- src/openakita/orgs/`` returns empty bytes (only
+> ``tests/parity/orgs/README.md`` + this ledger section touched).
+>
+> **HARD STOP per brief**: δ-4 (atomic ``git rm -r tests/orgs/``
+> -- 48 files / ~12 238 LOC) NOT started this turn; next step is the
+> δ-4 pre-sanity re-run with #3 now green.
