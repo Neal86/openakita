@@ -120,8 +120,16 @@
   the bridge adapts the legacy ``handle_org_tool``
   callable. P9.6h1b appended :class:`PluginAssetRecorder` (v1
   ``_record_plugin_asset_output`` 349 LOC -> ~120 v2
-  LOC). P9.6h2 next will append file output registry
-  + react-trace analysis + task-delivery synth.
+  LOC). P9.6h2 appended :class:`FileOutputRegistry` +
+  :class:`TaskDeliverySynthesizer` + react-trace helpers
+  (``react_trace_has_tool`` / ``collect_tool_stats_from_trace``
+  / ``extract_accepted_chain_ids``) -- v1
+  ``_register_file_output`` (156 LOC) +
+  ``_record_file_output`` (101 LOC) +
+  ``_synthesize_task_delivered_to_parent`` (107 LOC) +
+  ``_react_trace_has_tool`` / ``_collect_tool_stats_from_trace``
+  / ``_extract_accepted_chain_ids`` (~110 LOC) ~474 v1
+  LOC absorbed.
 """
 
 from __future__ import annotations
@@ -167,12 +175,19 @@ from ._runtime_node_lifecycle import (
     is_stop_intent,
 )
 from ._runtime_plugin_assets import (
+    FileOutput,
+    FileOutputRegistry,
     PluginAsset,
     PluginAssetRecorder,
+    SynthesizedDelivery,
+    TaskDeliverySynthesizer,
     ToolHandlerBridge,
+    collect_tool_stats_from_trace,
     ext_for_url,
+    extract_accepted_chain_ids,
     is_plugin_tool,
     plugin_id_for_tool,
+    react_trace_has_tool,
     safe_asset_filename,
 )
 from ._runtime_watchdog import CommandWatchdog, IdleProbeLoop
@@ -327,6 +342,7 @@ __all__ = [
     "STATUS_ERROR",
     "STATUS_IDLE",
     "STATUS_STOPPED",
+    "SynthesizedDelivery",
     "ScheduleStore",
     "ScheduleType",
     "SchedulerRuntimeProbe",
@@ -339,11 +355,14 @@ __all__ = [
     "TRACKER_FINALIZED",
     "TRACKER_RUNNING",
     "ToolHandlerBridge",
+    "TaskDeliverySynthesizer",
     "TaskStatus",
     "build_schedule_prompt",
     "compute_next_fire_time",
     "default_scope_for_surface",
+    "collect_tool_stats_from_trace",
     "ext_for_url",
+    "extract_accepted_chain_ids",
     "format_incoming_message",
     "get_command_service",
     "get_default_blackboard_backend",
@@ -356,6 +375,7 @@ __all__ = [
     "is_stop_intent",
     "new_command_id",
     "plugin_id_for_tool",
+    "react_trace_has_tool",
     "safe_asset_filename",
     "new_project_id",
     "new_schedule_id",
@@ -365,6 +385,8 @@ __all__ = [
     "reset_default_store",
     "set_command_service",
     "EventBusProtocol",
+    "FileOutput",
+    "FileOutputRegistry",
     "InMemoryEventBus",
     "NodeLifecycleProtocol",
     "NodeMessageRouter",
