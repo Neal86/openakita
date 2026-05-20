@@ -49,8 +49,8 @@ from .command_service import OrgCommandServiceProtocol, OrgLookupProtocol
 from .manager import OrgLifecycleEmitterProtocol, OrgPersistenceProtocol
 from .node_scheduler import NodeSchedulerProtocol
 
-if TYPE_CHECKING:  # pragma: no cover
-    pass
+if TYPE_CHECKING:  # pragma: no cover -- forward ref only
+    from ._runtime_dispatch import CommandDispatchManager
 
 
 # =====================================================================
@@ -239,9 +239,13 @@ class OrgRuntime:
 
     **Composes** (DI via ``__init__``) the 6 reused Protocols
     + 3 new Protocols listed in the module docstring. The
-    skeleton + ``__init__`` land in P9.6a; method bodies are
-    filled across P9.6alpha-d (this turn) + P9.6beta (next
-    turn).
+    skeleton + ``__init__`` land in P9.6a; the 4 sibling
+    managers land in P9.6alpha-d (event-bus / watchdog /
+    lifecycle) and P9.6beta-e/f/g/h (dispatch / agent
+    pipeline / node lifecycle / plugin assets). P9.6i wires
+    :class:`CommandDispatchManager` into ``__init__`` so the
+    4 :class:`CommandRuntimeProtocol` methods are real
+    delegations (no more ``NotImplementedError``).
     """
 
     def __init__(
@@ -258,6 +262,10 @@ class OrgRuntime:
         state: RuntimeStateProtocol | None = None,
         node_lifecycle: NodeLifecycleProtocol | None = None,
         event_bus: EventBusProtocol | None = None,
+        # P9.6beta -- the dispatch manager that backs the 4
+        # CommandRuntimeProtocol methods. Defaults to a
+        # locally-constructed in-process dispatch sibling.
+        dispatch: CommandDispatchManager | None = None,
     ) -> None:
         self._lookup = lookup
         self._persistence = persistence
@@ -271,6 +279,25 @@ class OrgRuntime:
         )
         self._event_bus: EventBusProtocol = (
             event_bus if event_bus is not None else _InMemoryEventBus()
+        )
+        # P9.6beta -- compose the dispatch sibling so the
+        # 4 CommandRuntimeProtocol methods below have a
+        # real backing manager (no more NotImplementedError).
+        # The agent-pipeline / node-lifecycle / plugin-asset
+        # managers are reachable via ``openakita.runtime.orgs``
+        # exports and get wired into the runtime by the
+        # composition root (P9.6gamma will exercise this via
+        # parity fixtures + contract tests).
+        from ._runtime_dispatch import CommandDispatchManager  # local import: avoid cycle
+
+        self._dispatch: CommandDispatchManager = (
+            dispatch
+            if dispatch is not None
+            else CommandDispatchManager(
+                command_service=self._command_service,
+                lookup=self._lookup,
+                event_bus=self._event_bus,
+            )
         )
         # Per-org accessors backing the OrgLookupProtocol +
         # CommandRuntimeProtocol surfaces. Populated lazily by
@@ -292,21 +319,24 @@ class OrgRuntime:
     # ------------------------------------------------------------------
 
     async def send_command(self, org_id: str, target_node_id: str, content: str) -> dict[str, Any]:
-        """Send a user command to an org node (P9.4 contract).
+        """v1 ``OrgRuntime.send_command`` parity (delegates to dispatch sibling P9.6e)."""
 
-        Body lands in ``_runtime_dispatch.py`` (P9.6beta).
-        """
-        raise NotImplementedError("P9.6beta: _runtime_dispatch.py")
+        return await self._dispatch.send_command(org_id, target_node_id, content)
 
     async def cancel_user_command(self, org_id: str, command_id: str) -> dict[str, Any] | None:
-        """Cancel an in-flight user command (P9.4 contract)."""
-        raise NotImplementedError("P9.6beta: _runtime_dispatch.py")
+        """v1 ``OrgRuntime.cancel_user_command`` parity (delegates to dispatch sibling P9.6e)."""
+
+        return await self._dispatch.cancel_user_command(org_id, command_id)
 
     def has_active_delegations(self, org_id: str, root_node_id: str) -> bool:
-        raise NotImplementedError("P9.6beta: _runtime_dispatch.py")
+        """v1 ``OrgRuntime._has_active_delegations`` parity (delegates to dispatch sibling P9.6e)."""
+
+        return self._dispatch.has_active_delegations(org_id, root_node_id)
 
     def get_command_tracker_snapshot(self, org_id: str, command_id: str) -> dict[str, Any] | None:
-        raise NotImplementedError("P9.6beta: _runtime_dispatch.py")
+        """v1 ``OrgRuntime.get_command_tracker_snapshot`` parity (delegates to dispatch sibling P9.6e)."""
+
+        return self._dispatch.get_command_tracker_snapshot(org_id, command_id)
 
     def get_event_store(self, org_id: str) -> Any:
         return self._event_stores.get(org_id)
