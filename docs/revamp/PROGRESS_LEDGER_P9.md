@@ -635,3 +635,19 @@ test import sites per the charter section 10 estimate.
 Different blast radius from P9.7 (touches ``apps/`` +
 ``src/openakita/channels/``, which P9.7's strict-additive
 sentinel held off-limits), so it needs its own planning round.
+
+## P9.8 -- Caller migration (planning round)
+
+> Planning charter for P9.8 -- the eighth phase of P-RC-9.
+> P9.8 scope **redefined** to HTTP callers only (frontend
+> ``apps/setup-center/src/`` 60 v1 + 17 v2 path hits;
+> ``src/openakita/channels/`` 0 HTTP callers confirmed);
+> Python ``from openakita.orgs`` import sweep (90 src + 228
+> test sites) deferred to P9.9 alongside v1 source deletion.
+> See ``docs/revamp/P-RC-9-P9.8-CHARTER.md`` section 1.2.
+> ADR-0015 NOT filed; 8th sentinel (frontend stale-path
+> grep) recommended for P9.8delta-1.
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-9 P9.8.charter | docs(revamp): P9.8 caller migration charter (planning round) | +PLACEHOLDER LOC (P-RC-9-P9.8-CHARTER.md NEW ~483 + ledger this section ~15) | 0 (planning only; no source/test edits) | ADR-0011 (no new Protocol; section 7 8th sentinel is a grep, not an abstraction); ADR-0012 (v1 deletion deferred to P9.9; 308 shim retirement per charter section 8); cites ADR-0014 LOC discipline (~750 LOC budget vs P9.7's 2 845, well inside tolerance) |
