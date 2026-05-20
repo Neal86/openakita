@@ -52,18 +52,17 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from openakita.memory.types import normalize_tags
-from openakita.orgs.models import (
-    NodeSchedule,
+from openakita.runtime.orgs.org_models import (
     Organization,
     OrgEdge,
     OrgNode,
     OrgStatus,
-    ScheduleType,
     UserPersona,
     _new_id,
     _now_iso,
     infer_agent_profile_id_for_node,
 )
+from openakita.runtime.orgs.scheduler_models import NodeSchedule, ScheduleType
 
 from ._org_layout import apply_initial_tree_layout, normalize_org_name
 from .command_service import OrgLookupProtocol

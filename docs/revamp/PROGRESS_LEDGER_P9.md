@@ -1268,3 +1268,122 @@ sentinel held off-limits), so it needs its own planning round.
 > **HARD STOP per brief**: δ-1
 > (``tests/runtime/orgs/coverage_audit.md`` planning task)
 > NOT started this turn.
+## P9.9γ-2b -- absorb 8 v1 org-graph symbols into new org_models shard (~590 v1 LOC absorbed)
+
+| _this commit_ | P-RC-9 P9.9γ-2b | feat(runtime/orgs): P9.9γ-2b absorb 8 v1 org-graph symbols into new ``org_models`` shard [P-RC-9 P9.9γ-2b] | +665 LOC new shard / +22 net ``__init__.py`` ins / -1 net ``manager.py`` line (12-line v1 import block -> 11-line v2 dual import; v2 ``scheduler_models.NodeSchedule`` / ``scheduler_models.ScheduleType`` split out per α-1 §3 per-symbol map; ledger +~85 LOC; total ~+770 LOC NEW under absorption-budget allowance) | 0 (v2-only source touch; ``git diff ebd8153d..HEAD -- src/openakita/orgs/`` returns empty bytes; 8 / 8 P-RC-9 sentinels unchanged) | ADR-0011 (org-graph shard sibling to ``command_models`` / ``memory_models`` / ``project_models`` / ``scheduler_models``); ADR-0012 (no shim under v1; the new shard is the v2-native home, not a re-export); canary 3/3 PASS |
+
+> P9.9γ-2b absorbs the 8 ``openakita.orgs.models`` symbols
+> deferred at P9.9γ-2 (parent ledger row
+> ``runtime/orgs/manager.py:55`` absorption debt) into a
+> NEW ``runtime/orgs/org_models`` shard, sibling of the
+> four existing typed shards. The α-1 §3 per-symbol map
+> had projected this absorption against ``command_models``,
+> but G-RC-9.9γ-2 STRICT verification revealed the
+> org-graph dataclasses had no v2 home -- the per-symbol
+> map row was aspirational. A dedicated shard keeps the
+> 10 graph-only symbols (+1 alias pair) cohesive and
+> avoids polluting ``command_models`` (which is
+> command-pipeline-typed, not org-graph-typed).
+>
+> Absorbed (10 symbols + 1 alias pair / ~590 v1 LOC):
+>
+> * 8 inventoried: ``Organization``, ``OrgNode``,
+>   ``OrgEdge``, ``OrgStatus``, ``UserPersona``,
+>   ``_new_id``, ``_now_iso``,
+>   ``infer_agent_profile_id_for_node``.
+> * 2 HIDDEN dependencies absorbed alongside (would
+>   otherwise crash the dataclasses at runtime):
+>   ``NodeStatus`` enum (``OrgNode.status`` field type)
+>   and ``EdgeType`` enum (``OrgEdge.edge_type`` field
+>   type + ``Organization.get_children`` /
+>   ``get_parent`` hierarchy traversal sentinel).
+>
+> Renames per existing v2 shard convention
+> (``new_command_id`` / ``new_schedule_id`` /
+> ``new_project_id`` / ``new_task_id`` for ids;
+> ``now_iso`` for timestamps across all four shards):
+>
+> * ``_now_iso`` -> ``now_iso`` (canonical export).
+> * ``_new_id`` -> ``new_org_id`` (canonical export;
+>   polymorphic ``prefix`` argument preserved so the same
+>   factory serves ``org_`` / ``node_`` / ``edge_`` id
+>   namespaces -- v1 used a single private helper across
+>   all three).
+> * Underscore aliases ``_now_iso = now_iso`` and
+>   ``_new_id = new_org_id`` re-exported from the new
+>   shard so the v2 ``runtime/orgs/manager.py`` caller
+>   keeps its ~6 internal use sites byte-equal (renaming
+>   those was out of scope for the absorption commit).
+>
+> Caller update (``runtime/orgs/manager.py:55``):
+> BEFORE: 12-line ``from openakita.orgs.models import
+> (NodeSchedule, Organization, OrgEdge, OrgNode,
+> OrgStatus, ScheduleType, UserPersona, _new_id,
+> _now_iso, infer_agent_profile_id_for_node)``.
+> AFTER: 10-line ``from openakita.runtime.orgs.org_models
+> import (Organization, OrgEdge, OrgNode, OrgStatus,
+> UserPersona, _new_id, _now_iso,
+> infer_agent_profile_id_for_node)`` + 1-line
+> ``from openakita.runtime.orgs.scheduler_models import
+> NodeSchedule, ScheduleType`` (per α-1 §3 per-symbol
+> split; ``NodeSchedule`` + ``ScheduleType`` were the
+> two v1 ``models.py`` symbols that DO have a v2 home).
+>
+> Public re-exports added to ``runtime/orgs/__init__.py``
+> (alphabetical placement between ``node_scheduler`` and
+> ``project_models``): 10 names
+> (``EdgeType`` / ``NodeStatus`` / ``OrgEdge`` /
+> ``OrgNode`` / ``OrgStatus`` / ``Organization`` /
+> ``UserPersona`` / ``infer_agent_profile_id_for_node``
+> / ``new_org_id`` / ``now_iso``) + ``__all__`` extended
+> from 120 to 130 entries (ruff I001 auto-sort applied
+> to keep the imports block alphabetical; net __init__
+> diff +45 ins / -23 del).
+>
+> Verification: (1) canary 3/3 PASS --
+> ``tests/integration/test_v2_im_canary_e2e.py`` green at
+> 1.56s / 1.56s / 1.56s (canary path now exercises
+> channels β-1 + api/server γ-1 + core/ γ-2 + new
+> v2-internal org_models shard end-to-end). (2) Narrow
+> slice **584 / 584 PASS** in 65.45s; identical to
+> baseline at parent γ-2 HEAD ``ebd8153d``; zero test
+> delta. (3) Stricter ``tests/runtime/orgs/`` slice
+> **161 / 161 PASS** in 34.70s -- ``manager`` contract
+> + parity now exercises the new shard ``org_models``
+> imports through manager.py:55. (4) v1<->v2 byte-equal
+> smoke (``tmp_p10/_smoke_parity.py``): enum value
+> equivalence + ``infer_agent_profile_id_for_node``
+> parity across 5 role samples + ``OrgNode`` /
+> ``OrgEdge`` / ``UserPersona`` / ``Organization``
+> ``to_dict`` / ``from_dict`` round-trip parity +
+> ``resolve_reference`` status parity across 3 query
+> forms -- all PASS. (5) Module-import smoke green:
+> ``python -c "import openakita.api.server; import
+> openakita.api.routes.orgs_v2_runtime_orgs; import
+> openakita.runtime.orgs.manager; import
+> openakita.runtime.orgs.org_models"`` returns clean.
+> (6) Ruff lint clean on edited files (``ruff check
+> src/openakita/runtime/orgs/org_models.py /
+> manager.py / __init__.py`` all checks passed!).
+>
+> Strict-additive boundary: ``git diff ebd8153d..HEAD
+> -- src/openakita/orgs/`` returns empty bytes -- only
+> three v2 files touched (1 NEW: ``org_models.py``;
+> 2 modified: ``manager.py`` import block,
+> ``__init__.py`` re-exports). 8 / 8 P-RC-9 sentinels
+> ACTIVE.
+>
+> Lesson captured: α-1 inventory §3 per-symbol map row
+> for ``openakita.orgs.models`` was aspirational on
+> 8 / 10 entries -- treat the §3 table as a SCOPE
+> HINT, not a destination guarantee, and verify v2
+> presence with STRICT regex before relying on the
+> mapping. Two additional hidden symbols (``NodeStatus``,
+> ``EdgeType``) were absorbed beyond the inventoried 8
+> because the absorbed dataclasses reference them in
+> field types; the inventory under-counted by 2.
+>
+> **HARD STOP per brief**: γ-1b (3 plugin / template
+> helpers) rides next; δ-1 (test coverage audit doc)
+> NOT started this turn.
+
