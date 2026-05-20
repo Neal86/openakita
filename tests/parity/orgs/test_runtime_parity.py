@@ -31,7 +31,7 @@ Case axes per the P9.6gamma brief:
   digest / file_output_registered event / react_trace stats
   / TaskDeliverySynthesizer default summary)
 
-P9.0i shipped a single ``@pytest.mark.xfail(strict=True)``
+P9.0i shipped a single strict xfail placeholder
 placeholder; this commit removes the placeholder and lands
 the 20 active cases -- closing the **last** of P-RC-9's six
 sentinel activations (5/6 -> 6/6).
@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -289,3 +288,294 @@ def test_parity_agent_pipeline_other_error() -> None:
     r = asyncio.run(exe.activate_and_run(org_id="o1", node_id="n1", content="x", command_id="c3"))
     assert r["status"] == "error"
     assert r["reason"] == "agent_run_raised"
+
+
+# ---------------------------------------------------------------------------
+# 5 node_lifecycle fixtures (v1 OrgRuntime._on_node_message / _on_inbound_for_node
+# / _format_incoming_message / _drain_node_pending semantics)
+# ---------------------------------------------------------------------------
+
+
+def _make_router(
+    *,
+    deliver_result: dict[str, Any] | None = None,
+    deliver_raises: BaseException | None = None,
+) -> tuple[NodeMessageRouter, NodeStatusController, list[tuple[str, str, str, str | None]]]:
+    """Build a NodeMessageRouter wired against a stub deliver_to_agent."""
+
+    calls: list[tuple[str, str, str, str | None]] = []
+
+    async def _deliver(org_id: str, node_id: str, content: str, command_id: str | None):
+        calls.append((org_id, node_id, content, command_id))
+        if deliver_raises is not None:
+            raise deliver_raises
+        return deliver_result or {"status": "ok", "output": f"echo:{content}"}
+
+    status = NodeStatusController(lookup=_Lookup())
+    router = NodeMessageRouter(status=status, deliver_to_agent=_deliver)
+    return router, status, calls
+
+
+def test_parity_node_on_inbound_delivered() -> None:
+    """fixture id: node.on_inbound.delivered"""
+    router, status, calls = _make_router()
+    out = asyncio.run(
+        router.on_inbound(
+            org_id="o1",
+            node_id="n1",
+            source="im",
+            content="hello",
+            sender="alice",
+        )
+    )
+    # v1 parity shape: status / node_id / depth / result keys.
+    assert set(out.keys()) == {"status", "node_id", "depth", "result"}
+    assert out["status"] == "delivered"
+    assert out["node_id"] == "n1"
+    assert out["depth"] == 0
+    assert out["result"] == {"status": "ok", "output": "echo:[im]<alice> hello"}
+    # After delivery the node returns to IDLE (v1 parity).
+    assert status.get_status("o1", "n1") == STATUS_IDLE
+    assert len(calls) == 1
+
+
+def test_parity_node_on_inbound_queued_when_busy() -> None:
+    """fixture id: node.on_inbound.queued_when_busy"""
+    router, status, _calls = _make_router()
+    # Force the node into BUSY before the inbound message.
+    status.set_status("o1", "n1", STATUS_BUSY)
+    out = asyncio.run(router.on_inbound(org_id="o1", node_id="n1", source="im", content="pls do x"))
+    assert out["status"] == "queued"
+    assert out["depth"] == 1
+    assert out["result"] is None
+    # The status stays BUSY -- queueing does not flip it (v1 parity).
+    assert status.get_status("o1", "n1") == STATUS_BUSY
+    assert status.pending_depth("o1", "n1") == 1
+
+
+def test_parity_node_stop_intent_short_circuits() -> None:
+    """fixture id: node.on_inbound.stop_intent"""
+    router, status, calls = _make_router()
+    out = asyncio.run(router.on_inbound(org_id="o1", node_id="n1", source="im", content="/stop"))
+    assert out == {"status": "stop_intent", "node_id": "n1", "depth": 0, "result": None}
+    # v1 parity: stop intent transitions the node to STOPPED, no delivery.
+    assert status.get_status("o1", "n1") == STATUS_STOPPED
+    assert calls == []
+    # CN parity: ``停止`` (zh: stop) also short-circuits.
+    out2 = asyncio.run(router.on_inbound(org_id="o1", node_id="n2", source="im", content="请停止"))
+    assert out2["status"] == "stop_intent"
+
+
+def test_parity_node_format_incoming_message_shape() -> None:
+    """fixture id: node.format_incoming_message.shape"""
+    # v1 ``_format_incoming_message`` produces "[src]<sender> body (k=v...)".
+    s1 = format_incoming_message(source="im", sender="alice", content="hi")
+    assert s1 == "[im]<alice> hi"
+    s2 = format_incoming_message(
+        source="dingtalk",
+        sender=None,
+        content="run job",
+        metadata={"channel": "ops", "priority": "high"},
+    )
+    # Metadata is sorted alphabetically (v2 parity guarantee).
+    assert s2 == "[dingtalk]run job (channel=ops, priority=high)"
+    s3 = format_incoming_message(source="", sender="bob", content="solo")
+    assert s3 == "<bob> solo"
+
+
+def test_parity_node_drain_replay_after_resume() -> None:
+    """fixture id: node.drain.replay_after_resume"""
+    router, status, calls = _make_router()
+    # Queue two messages while BUSY.
+    status.set_status("o1", "n1", STATUS_BUSY)
+    asyncio.run(router.on_inbound(org_id="o1", node_id="n1", source="im", content="m1"))
+    asyncio.run(router.on_inbound(org_id="o1", node_id="n1", source="im", content="m2"))
+    assert status.pending_depth("o1", "n1") == 2
+    # Resume: drain should replay both, in order.
+    results = asyncio.run(router.drain(org_id="o1", node_id="n1"))
+    assert len(results) == 2
+    assert results[0]["status"] == "ok"
+    assert results[1]["status"] == "ok"
+    # After drain the pending queue is empty.
+    assert status.pending_depth("o1", "n1") == 0
+    # Two deliver calls observed for the replay.
+    assert len([c for c in calls if c[1] == "n1"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# 5 plugin_assets fixtures (v1 OrgRuntime._record_plugin_asset_output /
+# _register_file_output / _collect_tool_stats_from_trace /
+# _synthesize_task_delivered_to_parent semantics)
+# ---------------------------------------------------------------------------
+
+
+def test_parity_assets_record_url_plugin(tmp_path: Path) -> None:
+    """fixture id: assets.record_url.plugin"""
+    bus = _InMemoryEventBus()
+    events: list[tuple[str, dict[str, Any]]] = []
+    bus.subscribe(
+        "plugin_asset_recorded", lambda payload: events.append(("plugin_asset_recorded", payload))
+    )
+    recorder = PluginAssetRecorder(
+        workspace_resolver=lambda oid: tmp_path / oid,
+        event_bus=bus,
+    )
+    # Non-plugin tool: ignored (v1 parity).
+    none = asyncio.run(
+        recorder.record_url(
+            org_id="o1",
+            tool_name="shell",
+            url="https://example.com/img.png",
+        )
+    )
+    assert none is None
+    # Plugin tool: recorded.
+    asset = asyncio.run(
+        recorder.record_url(
+            org_id="o1",
+            tool_name="plugin_image_gen",
+            url="https://example.com/img.png",
+        )
+    )
+    assert asset is not None
+    assert asset.plugin_id == "image"
+    assert asset.tool_name == "plugin_image_gen"
+    assert asset.path.endswith("img.png")
+    assert recorder.list_for_org("o1") == [asset]
+    # Event fired once.
+    assert len(events) == 1
+    payload = events[0][1]
+    assert payload["org_id"] == "o1"
+    assert payload["plugin_id"] == "image"
+
+
+def test_parity_assets_record_file_digest(tmp_path: Path) -> None:
+    """fixture id: assets.record_file.digest"""
+    bus = _InMemoryEventBus()
+    recorder = PluginAssetRecorder(
+        workspace_resolver=lambda oid: tmp_path / oid,
+        event_bus=bus,
+    )
+    target = tmp_path / "scratch.bin"
+    blob = b"openakita parity bytes"
+    target.write_bytes(blob)
+    expected_digest = hashlib.sha256(blob).hexdigest()
+    asset = asyncio.run(
+        recorder.record_file(
+            org_id="o1",
+            tool_name="plugin_pdf_export",
+            path=target,
+        )
+    )
+    assert asset is not None
+    assert asset.size_bytes == len(blob)
+    assert asset.digest == expected_digest
+    # Non-plugin tool short-circuits to None (v1 parity).
+    none = asyncio.run(recorder.record_file(org_id="o1", tool_name="shell", path=target))
+    assert none is None
+
+
+def test_parity_assets_file_output_registered_event(tmp_path: Path) -> None:
+    """fixture id: assets.file_output_registered.event"""
+    bus = _InMemoryEventBus()
+    events: list[dict[str, Any]] = []
+    bus.subscribe("file_output_registered", lambda p: events.append(p))
+    persisted: list[Any] = []
+
+    async def _persist(fo) -> None:
+        persisted.append(fo)
+
+    registry = FileOutputRegistry(event_bus=bus, persist=_persist)
+    fpath = tmp_path / "out.txt"
+    fpath.write_text("hello", encoding="utf-8")
+    out = asyncio.run(
+        registry.register(
+            org_id="o1",
+            node_id="n1",
+            tool_name="write_file",
+            path=fpath,
+            metadata={"who": "agent"},
+        )
+    )
+    assert out is not None
+    assert out.size_bytes == 5
+    assert out.metadata == {"who": "agent"}
+    # v1 parity: event emitted + persist callback fired.
+    assert len(events) == 1
+    assert events[0]["org_id"] == "o1"
+    assert events[0]["node_id"] == "n1"
+    assert events[0]["path"] == str(fpath)
+    assert len(persisted) == 1
+    # list helpers stable.
+    assert registry.list_for_org("o1") == [out]
+    assert registry.list_for_node("o1", "n1") == [out]
+    # Missing path -> None (v1 parity: never crash on absent file).
+    missing = asyncio.run(
+        registry.register(
+            org_id="o1",
+            node_id="n1",
+            tool_name="write_file",
+            path=tmp_path / "nope",
+        )
+    )
+    assert missing is None
+
+
+def test_parity_assets_react_trace_stats() -> None:
+    """fixture id: assets.react_trace_stats"""
+    trace = {
+        "steps": [
+            {"tool": "shell", "status": "accepted"},
+            {"tool": "shell", "status": "rejected"},
+            {"tool": "web_fetch", "chain_id": "ch_a", "status": "accepted"},
+            {"tool": "plugin_image_gen", "chain_id": "ch_b", "accepted": True},
+            {"tool": None},  # ignored
+        ]
+    }
+    stats = collect_tool_stats_from_trace(trace)
+    assert stats == {"shell": 2, "web_fetch": 1, "plugin_image_gen": 1}
+    chains = extract_accepted_chain_ids(trace)
+    # Order preserved; deduped.
+    assert chains == ["ch_a", "ch_b"]
+    # Empty trace -> {}/[].
+    assert collect_tool_stats_from_trace(None) == {}
+    assert extract_accepted_chain_ids({}) == []
+
+
+def test_parity_assets_task_delivery_synthesizer_default(tmp_path: Path) -> None:
+    """fixture id: assets.task_delivery_synthesizer.default_summary"""
+    bus = _InMemoryEventBus()
+    recorder = PluginAssetRecorder(
+        workspace_resolver=lambda oid: tmp_path / oid,
+        event_bus=bus,
+    )
+    # Pre-load 1 asset so the synthesizer can list it.
+    asset = asyncio.run(
+        recorder.record_url(
+            org_id="o1",
+            tool_name="plugin_pdf_export",
+            url="https://example.com/r.pdf",
+        )
+    )
+    assert asset is not None
+    synth = TaskDeliverySynthesizer(asset_lister=recorder.list_for_org)
+    trace = {
+        "steps": [
+            {"chain_id": "ch_a", "status": "accepted"},
+            {"chain_id": "ch_b", "accepted": True},
+        ]
+    }
+    out = synth.synthesize(
+        org_id="o1",
+        parent_node_id="p1",
+        child_node_id="c1",
+        trace=trace,
+    )
+    assert out.org_id == "o1"
+    assert out.parent_node_id == "p1"
+    assert out.child_node_id == "c1"
+    assert out.chain_ids == ("ch_a", "ch_b")
+    # Default summary mentions chain count + asset count.
+    assert "2 chain" in out.summary
+    assert "1 asset" in out.summary
+    assert asset.path in out.assets
