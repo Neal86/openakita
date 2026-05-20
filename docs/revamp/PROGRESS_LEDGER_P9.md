@@ -1940,3 +1940,33 @@ sentinel held off-limits), so it needs its own planning round.
 > ~26 files / ~18 000 LOC) NOT started; MUST be chartered / audited
 > before execution.
 
+## P9.9ε-1a -- ε phase charter (v1 src deletion planning; HARD STOP)
+
+| _this commit_ | P-RC-9 P9.9ε-1a | docs(revamp): P9.9ε-1a ε phase charter (v1 src deletion planning) [P-RC-9 P9.9ε-1a] | 1 new doc (``docs/revamp/P-RC-9-P9.9-ε-CHARTER.md``; 248 LOC) + ledger this section; docs-only commit | strict-additive on v1 src holds: ``git diff a3a5fde6..HEAD -- src/openakita/orgs/`` = empty bytes; 8 / 8 sentinels untouched (ε-1a touches no sentinel file); narrow slice 585 / 585 baseline at HEAD ``4b5499a6``; canary 1 / 1 ×3 at 1.61 / 1.62 / 1.63 s avg 1.62 s; pytest collect-only 6160 / 6166 baseline | ADR-0012 (v1 deletion at P9.9 per Q-B ACCEPTED (b)); ADR-0015 (308 shim retirement v2.1.0 → ε byte-untouched for shim) |
+
+> P9.9ε-1a ships the ε phase charter
+> (``docs/revamp/P-RC-9-P9.9-ε-CHARTER.md``, 248 LOC) covering
+> mission + exit criteria, scope (26 files / 20 237 LOC under
+> ``src/openakita/orgs/``), sub-phase breakdown (scheme C 4
+> commits: ε-1a charter + ε-1b audit + ε-2a v1 router /
+> dev-script retire + ε-2b atomic subsystem ``git rm``), risk
+> register (R-ε-1 HIGH / R-ε-2 MED / R-ε-3 MED / R-ε-4 LOW
+> with mitigation gates), pre-deletion sanity checklist, commit
+> specs for ε-2a + ε-2b, post-deletion verification matrix,
+> hard rules, and ε → G-RC-9.9 η-1 → G-RC-9 final η-2
+> sequence. Scheme C trigger conditions T1 + T2 fired at HEAD
+> ``4b5499a6`` (24 v1 router sites + 6 script sites); audit
+> ε-1b will record per-trigger evidence and the YELLOW
+> readiness verdict.
+>
+> 308 shim ``api/routes/_orgs_v2_legacy_redirects.py`` byte-
+> untouched per ADR-0015; 9 routes / 101 LOC ride to v2.1.0
+> milestone task list per main P9.9 charter §8.2. v2 runtime
+> flattening (``runtime/orgs`` rename + ``_runtime_*`` shard
+> consolidation) deferred to P-RC-10 epic.
+>
+> **HARD STOP**: ε-1b (audit doc + R-ε verdicts + readiness
+> color) NOT started this turn; next operator signal opens
+> ε-1b. ε-2a / ε-2b NOT started; await further explicit
+> signals after ε-1b audit closes.
+
