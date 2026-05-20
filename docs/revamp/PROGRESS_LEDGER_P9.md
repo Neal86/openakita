@@ -1970,3 +1970,51 @@ sentinel held off-limits), so it needs its own planning round.
 > ε-1b. ε-2a / ε-2b NOT started; await further explicit
 > signals after ε-1b audit closes.
 
+## P9.9ε-1b -- ε deletion-readiness audit (YELLOW / scheme C; HARD STOP)
+
+| _this commit_ | P-RC-9 P9.9ε-1b | docs(revamp): P9.9ε-1b ε deletion-readiness audit (YELLOW scheme C) [P-RC-9 P9.9ε-1b] | 1 new doc (``docs/revamp/P-RC-9-P9.9-ε-AUDIT.md``; 257 LOC) + ledger this section; docs-only commit | strict-additive on v1 src holds: ``git diff a3a5fde6..HEAD -- src/openakita/orgs/`` = empty bytes; 8 / 8 sentinels untouched; narrow slice 585 / 585 unchanged from ε-1a; canary 1 / 1 ×3 within ±5 % of 1.62 s; collect-only 6160 / 6166 unchanged | ADR-0012 (v1 deletion at P9.9 per Q-B ACCEPTED (b)); ADR-0015 (308 shim retirement v2.1.0 → ε byte-untouched; R-ε-2 RETIRED at audit close) |
+
+> P9.9ε-1b records the ε deletion-readiness audit
+> (``docs/revamp/P-RC-9-P9.9-ε-AUDIT.md``, 257 LOC). All four
+> recon families captured as evidence:
+>
+> * **§1 v1 inventory** -- 26 files / **20 237 LOC** (top-5
+>   ``runtime`` 6 355 + ``tool_handler`` 3 474 + ``templates``
+>   1 266 + ``models`` 1 018 + ``command_service`` 963 = 65 %).
+> * **§2 production caller scan** -- loose-grep 22 files (19 are
+>   ``runtime/orgs/`` docstring back-refs, not imports); STRICT
+>   grep ``^(\s+)?(from|import)\s+openakita\.orgs(\.|$|\s)``
+>   returns **3 files / 30 sites**: ``api/routes/orgs.py`` (24
+>   sites; v1 router itself), ``scripts/run_org_live_test.py`` (3
+>   sites; dev probe), ``scripts/test_org_full_task.py`` (3 sites;
+>   dev probe). All retire in ε-2a.
+> * **§3 26-row absorption matrix** -- 21 COMPLETE + 5 ABSORBED-
+>   TRANSITIVELY + **0 ABSENT** (``notifier`` / ``policies`` /
+>   ``reporter`` / ``scaler`` / ``tools`` have no live v1 caller
+>   so the parent module deletes by construction).
+> * **§4 308 shim cleanness** -- 101 LOC / **0 ``openakita.orgs``
+>   imports** (shim imports only fastapi); ADR-0015 NO-OP
+>   structurally preserved by construction.
+>
+> **R-ε verdicts**: R-ε-1 HIGH **CONDITIONAL on ε-2a** (retires
+> at ε-2a close once 30 sites vanish); R-ε-2 MED **RETIRED**;
+> R-ε-3 MED **MITIGATED** (per-commit ``--collect-only`` gate);
+> R-ε-4 LOW **RETIRED**.
+>
+> **ε-2 readiness**: **YELLOW (scheme C 3-phase)**. Trigger T1
+> (v1 router 24 sites) + T2 (2 dev scripts 6 sites) fire; T3 (other
+> ``src/openakita/`` callers) clean. Scheme C path: ε-1a charter
+> ✓ (``0765b3e0``) → ε-1b audit ✓ _this_ → ε-2a v1 router
+> + dev-script retire (estimated ~80 ins / -3 100 del) → ε-2b
+> atomic ``git rm -r src/openakita/orgs/`` (estimated ~30 ins /
+> -20 237 del). GREEN-fallback (single-commit collapse) documented
+> in charter §2 but not preferred.
+>
+> Predicted post-ε-2b deltas: collect-only 6160 / 6166 ±0;
+> narrow slice 585 / 585; canary 1.62 s ±5 %; sentinels 8 / 8
+> ACTIVE (9th @ G-RC-9.9 η-1).
+>
+> **HARD STOP**: ε-2a (v1 router + 2 dev scripts retire) NOT
+> started this turn; awaits explicit operator signal after this
+> ε-1b audit closes with the YELLOW verdict confirmed.
+
