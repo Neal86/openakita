@@ -5,7 +5,6 @@
 <!-- machine-readable phase marker; do NOT remove.
      Parsed by tests/revamp/_ledger.py + tests/parity/test_no_facade.py. -->
 current_phase: P-RC-9
-
 > **Sub-phase status (2026-05-20, P9.6 CLOSED -- P-RC-9 phase architecturally complete except wiring/deletion; P9.7 v2 REST endpoint mint is next)**: P9.0 closed, P9.1 closed (Nit-3 of 5 cleared; 4 ride to G-RC-9), P9.2 closed (parity 6/6, contract 36/36), P9.3 NodeScheduler closed (parity 4/4, contract 12/12, all 4 G-RC-9.2 nits folded in). P9.4 OrgCommandService closed (parity 10/10, contract 16/16, 3 ADR-0013 wall-clock SLA tests green; ACCEPTANCE.md #2 upgraded Pass-with-caveat -> Pass). **P9.5 OrgManager closed** (parity 12/12, contract 16/16, 4 Protocols all <= 5 methods, _org_layout.py byte-for-byte lift). G-RC-9.5 mini-gate signed off (closes 2 of 6 G-RC-9.4 NITs via P9.5.nit; 4 G-RC-9.4 NITs ride to G-RC-9 final). **P9.6.nit pre-flight** folds the new NIT-D-1 (P9.5 docstring count) + 4 G-RC-9.4 doc-only NITs (K-1 fixture-id drift / K-2 v2_im_cancel 5/5 -> 4/4 / L-1 SLA file LOC 234 -> 300 / G-2 lock-claim wording); only G-RC-9.4 NIT-B-1 (burst-test semantics) still rides to G-RC-9 final. **P9.6 OrgRuntime CLOSED** (v1 6,355 LOC -> v2 2,708 LOC across 8 modules; parity 20/20 + contract 25/25; ADR-0014 budget revision held at 2,708 of 3,000 LOC; G-RC-9.6 mini-gate signed off; last P-RC-9 parity sentinel ``test_runtime_parity.py`` ACTIVE so all 6 orgs/ sentinels are now green). **P-RC-9 phase architecturally complete except wiring + physical deletion; P9.7 REST endpoint mint is next**.
 
 > Source of truth for every commit landed on ``revamp/v3-orgs``
@@ -511,3 +510,31 @@ current_phase: P-RC-9
 | commit hash | phase | title | LOC delta | tests delta | ADR refs |
 |---|---|---|---|---|---|
 | _this commit_ | P-RC-9 P9.7gamma-2 | test(parity/orgs): activate 7th sentinel -- REST contract (3 cases: route count + coverage + OpenAPI snapshot) | +PLACEHOLDER LOC (test_rest_contract_sentinel.py NEW 162 + _openapi_snapshot.json NEW ~190 lines / 76 paths; ledger +PLACEHOLDER) | +3 sentinel cases (route counts / coverage matrix / OpenAPI snapshot); 6 parity sentinels still 0 active xfail; gate slice 578 -> 581 passed | ADR-0011 (no NEW Protocol; sentinel asserts the FastAPI / OpenAPI surface contract -- not a Protocol contract); ADR-0012 (snapshot includes Group A relocated paths under /api/v2/orgs-spec; the 9 308 shims under /api/v2/orgs are intentionally excluded from openapi() -- their contract is "redirect, no body"); cites P-RC-9-P9.7-CHARTER.md section 7 ("REST contract sentinel"; charter chose ``app.openapi()`` route iteration; gamma-1 brief upgraded to snapshot diff per simpler+no-new-deps lesson) |
+
+
+
+## P9.7gamma-3a -- NIT-A fold-in: schemas.py shadow regression fix (this turn)
+
+> Pre-gate-doc fold-in landing the NIT-A fix surfaced by the
+> P9.7gamma-3 main-gate full measured run. The P9.7a-2b commit
+> ``0735501e`` created the ``src/openakita/api/schemas/`` package
+> to host ``schemas/orgs_v2/`` but did NOT move the legacy
+> ``src/openakita/api/schemas.py`` contents into the new package
+> init. Python's package-shadows-module rule silently broke 19
+> main-gate test collections (every test importing ``ChatRequest``
+> / ``ChatAnswerRequest`` / ``ChatControlRequest`` /
+> ``HealthCheckRequest`` / ``HealthResult`` / ``ModelInfo`` /
+> ``AttachmentInfo`` / ``SkillInfoResponse`` from
+> ``openakita.api.schemas``).
+>
+> Fold-in this commit: (1) merge the legacy ``schemas.py`` body
+> byte-for-byte into ``schemas/__init__.py`` -- 8 Pydantic
+> classes preserved with original docstrings + Chinese comments
+> intact; the package docstring carries a NIT-A banner with the
+> regression context. (2) delete the orphan ``schemas.py``.
+> 8 v1 wire shape imports restored; 19 collection errors cleared.
+> The ``schemas/orgs_v2/`` subpackage is untouched.
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-9 P9.7gamma-3a | fix(api/schemas): merge legacy schemas.py into schemas/__init__.py -- NIT-A fold-in | +PLACEHOLDER LOC (schemas/__init__.py +178 [merge of 8 v1 wire shapes + NIT banner] - schemas.py -159 [orphan removal]; ledger +PLACEHOLDER) | 0 net new test cases this commit; restores 19 main-gate collection slots (pre-existing import path); contracts + sentinel + alpha2/beta smoke all stay green (316 passed in 30.62s targeted run) | ADR-0011 (no new Protocol -- module/package layout fix, not Protocol contract); ADR-0012 (no shim under v1; merge is forward-only into the package init); cites P-RC-9-P9.7-CHARTER.md section 9 (gate criterion 6 -- main gate stays green) + DECISIONS.md D-3 (schemas/orgs_v2 namespace, now coexisting with the v1 surface at the package root) |
