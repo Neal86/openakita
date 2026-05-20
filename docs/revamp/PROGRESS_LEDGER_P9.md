@@ -579,6 +579,24 @@ current_phase: P-RC-9
 |---|---|---|---|---|---|
 | _this commit_ | P-RC-9 P9.7.nit-a | fix(tests/integration): P9.7.nit-a restore v2_im_canary_e2e by mounting legacy redirects router | +PLACEHOLDER LOC (fixture +9 / ledger this section) | +1 narrow-slice green (canary regression closed) | ADR-0011 (no new Protocol); ADR-0012 (the 308 shim exercised exactly as intended for v2.0.x); cites G-RC-9.7 audit NIT-G4 |
 
+
+## P9.7.nit-b -- G-RC-9.7 audit cleanup (NIT-G1/G2/G3/G4-followup/G6)
+
+> Post-gate doc cleanup. Closes 5 G-RC-9.7 auditor NITs in
+> ``docs/revamp/gates/G-RC-9.7.md`` directly: G1 (§1 commit count
+> 18 -> 17), G2 (§2 LOC table missing ``schemas/__init__.py``
+> +174 row; TOTAL corrected 2 871 -> 2 845), G3 (§11 NIT roster
+> expanded to 12 rows incl. M-1..M-4 + the four audit findings),
+> G4-followup (§3.1 / 3.2 retraction of the ``known flaky / none
+> reference v2 orgs / folded into G-RC-9.6`` claims, with the
+> deterministic-regression disclosure pointing at P9.7.nit-a
+> ``652c8a71``), and G6 (disclose ``test_agent_calls_web_search``
+> self-recovery between G-RC-9.6 and G-RC-9.7).
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-9 P9.7.nit-b | docs(revamp): P9.7.nit-b clean up G-RC-9.7 audit NIT-G1/G2/G3/G4-followup/G6 | +PLACEHOLDER LOC (gate doc edits + ledger this section) | 0 (docs only) | ADR-0011 (no new Protocol; gate doc edit only); ADR-0012 (the 308 shim closure of NIT-G4 in P9.7.nit-a is the only one-window exercise) |
+
 ## P9.7 CLOSED -- phase summary
 
 P9.7 v2 REST endpoint mint **CLOSED** after 17 implementation

@@ -5,9 +5,9 @@ to G-RC-9 final once P9.8 + P9.9 land).
 **Branch**: ``revamp/v3-orgs``.
 **HEAD pre-P9.7**: ``89703a28`` (G-RC-9.6 + P9.6.nit2 closed).
 **HEAD post-P9.7**: _this commit_ (G-RC-9.7).
-**Scope**: 17 P9.7 implementation / doc commits + this gate (G-RC-9.7 = P9.7gamma-3b).
+**Scope**: 16 P9.7 implementation / doc commits + this gate (G-RC-9.7 = P9.7gamma-3b); 17 commits total since ``89703a28``.
 
-## 1. P9.7 commits (18 since ``89703a28``)
+## 1. P9.7 commits (17 since ``89703a28`` = 16 implementation / doc + 1 gate doc)
 
 P9.7 spans three sub-turns: alpha (charter + decisions + scaffolds;
 5 commits); beta (6 cluster mints = 83 endpoints B1-B83; 6 commits);
@@ -62,10 +62,11 @@ router:
 | ``api/routes/orgs_v2_runtime_ops.py`` (B54-B67) | 281 | 14 |
 | ``api/routes/orgs_v2_runtime_projects.py`` (B68-B83) | 339 | 16 |
 | ``api/schemas/orgs_v2/*`` (5 files; 16 wire shapes) | 343 | -- |
-| **TOTAL v2 src LOC** | **2 871** | **83 mint + 9 spec + 9 shim** |
+| ``api/schemas/__init__.py`` (8 v1 wire shapes; NIT-A γ-3a merge) | 174 | -- |
+| **TOTAL v2 src LOC** | **2 845** | **83 mint + 9 spec + 9 shim** |
 
 **Charter budget (P-RC-9-P9.7-CHARTER.md section 2)**: ~1 910 LOC
-target; ~2 100 LOC at the 10 % tolerance. **Actual: 2 871 LOC**.
+target; ~2 100 LOC at the 10 % tolerance. **Actual: 2 845 LOC**.
 Overshoot ~50 % vs charter is entirely in shim + Pydantic + Group
 A relocation layers (343 LOC schemas + 101 LOC 308 shim + 365 LOC
 Group A relocation diff). Pure endpoint-body LOC across the 6
@@ -87,14 +88,33 @@ FULLY with ``pytest -q --tb=no``.
   2783 warnings in 1104.05 s (0:18:24)
 ```
 
-The **14 failures are all pre-existing**: 12 match G-RC-9.6 §3.1
-verbatim; 2 are known flaky on this branch and were folded into
-the audit log at G-RC-9.6 §3.1 first-run drift (intermittent
-``test_v2_im_canary_e2e`` + multi-process audit chain interleave).
-**None reference v2 orgs.** Section 10 piece 3 proves the
-strict-additive boundary held: ``git diff 8510ade6..HEAD --
-src/openakita/orgs/ core/ channels/ orgs.py apps/`` returns empty
-bytes across all 4 P9.7gamma commits.
+**Audit correction (G-RC-9.7 auditor NIT-G4, closed in P9.7.nit-b)**:
+of the 14 failures, **12** match G-RC-9.6 §3.1 verbatim. The 2
+remaining are: (a) ``test_c17_audit_chain_hardening::TestMultiProcessAppend::test_two_subprocesses_interleave``
+-- genuine multi-process intermittency (3x isolated reruns 3 / 3
+pass; not P9.7-introduced); and (b)
+``test_v2_im_canary_e2e::test_canary_org_runs_through_supervisor_then_cancel_then_resume``
+-- **G-RC-1's acceptance gate canary**, root-caused to P9.7α-2a
+(``31332276``) renaming Group A prefix from ``/api/v2/orgs`` to
+``/api/v2/orgs-spec`` without updating this fixture's direct mount
+(3 / 3 deterministic 404s; **not** flaky). **Fixed in P9.7.nit-a
+(``652c8a71``)** by mounting ``_orgs_v2_legacy_redirects.router``
+next to ``orgs_v2.router`` in ``v2_client``; narrow slice 581 + 1 =
+**582 passed** after the fix.
+
+The pre-audit draft's claims ``None reference v2 orgs`` / ``folded
+into G-RC-9.6 §3.1 first-run drift`` / ``known flaky on this
+branch`` are hereby **withdrawn**. NIT-G4 was caught by the G-RC-9.7
+independent auditor, not by the executor's self-checks.
+
+**NIT-G6 self-recovery**: ``tests/orgs/test_external_tools_e2e.py::test_agent_calls_web_search``
+failed in G-RC-9.6 (external network outage); passes in G-RC-9.7
+(network restored). Disclosed for G-RC-9 final accounting.
+
+Section 10 piece 3 proves the strict-additive boundary held:
+``git diff 8510ade6..HEAD -- src/openakita/orgs/ core/ channels/
+orgs.py apps/`` returns empty bytes across all 4 P9.7gamma commits
+and across the two post-gate P9.7.nit-a / -b commits (tests + docs only).
 
 ### 3.2 Narrowed slice (G-RC-9.4 / G-RC-9.5 / G-RC-9.6 format)
 
@@ -104,8 +124,12 @@ bytes across all 4 P9.7gamma commits.
   1772 passed, 12 skipped, 5 xfailed, 1 failed in 174.11 s (0:02:54)
 ```
 
-The 1 failure is the same flaky ``test_v2_im_canary_e2e`` from
-the main gate; not P9.7-introduced.
+The 1 failure is the ``test_v2_im_canary_e2e`` regression
+discussed in §3.1 above; **fixed in P9.7.nit-a (``652c8a71``)**.
+Re-running this slice plus the canary after the fix:
+``pytest tests/api/ tests/runtime/orgs/ tests/parity/orgs/
+tests/integration/test_v2_im_canary_e2e.py -q --tb=no`` -> **582
+passed in 74.51 s** (= 581 narrow-slice baseline + 1 canary now green).
 
 | scope | baseline | after G-RC-9.7 | delta |
 |---|---|---|---|
@@ -216,7 +240,7 @@ superior. NIT-E-1 satisfied with all 12 items explicitly rejected.
   ``TestClient`` round-trip latency is httpx-dominated). The
   5-case wall-clock SLA block planned in charter section 6 was
   banked for a future P-RC-10 hygiene phase.
-* **ADR-0014** (LOC budget): v2 totals 2 871 src LOC vs ~1 910
+* **ADR-0014** (LOC budget): v2 totals 2 845 src LOC vs ~1 910
   target. Overshoot is in shim + Pydantic + Group A relocation
   layers (section 2); pure endpoint-body LOC is 19.2 / endpoint,
   under the 25 LOC REJECT line. **No ADR-0015 filed** -- the
@@ -302,11 +326,24 @@ package: **0**.
 | nit | from | folded? | commit | rationale |
 |---|---|---|---|---|
 | B-1 | G-RC-9.4 | NO | -- | burst-test semantics; rides to G-RC-9 final |
+| M-1 | G-RC-9.6 | NO | -- | runtime_parity golden-dict deviation; rides to G-RC-9 final |
+| M-2 | G-RC-9.6 | NO | -- | ADR-0014 sub-cap breach (agent_pipeline 521 + plugin_assets 564); rides to G-RC-9 final |
+| M-3 | G-RC-9.6 | NO | -- | v1 method residue (``_recover_orphan_tasks`` et al.); rides to G-RC-9 final |
+| M-4 | G-RC-9.6 | NO (no-op) | -- | P9.6.pause commit subject lacks ``[P-RC-9 ...]`` suffix; cosmetic, no rewrite |
 | P9.7-A | G-RC-9.7 | YES | ``b9b74df7`` (γ-3a) | schemas.py / schemas/ shadow regression |
 | P9.7-B | G-RC-9.7 | NO | -- | 2 contract files 30-45 LOC over 350 soft cap; defer split |
+| P9.7-G4 | G-RC-9.7 (audit) | YES | ``652c8a71`` (P9.7.nit-a) | canary fixture missed P9.7α-2a prefix rename; deterministic 404, not flaky |
+| P9.7-G1 | G-RC-9.7 (audit) | YES | _this commit_ (P9.7.nit-b) | §1 commit count 18 -> 17 (16 impl/doc + 1 gate) |
+| P9.7-G2 | G-RC-9.7 (audit) | YES | _this commit_ (P9.7.nit-b) | §2 LOC table missing ``schemas/__init__.py`` (+174); TOTAL 2 871 -> 2 845 |
+| P9.7-G3 | G-RC-9.7 (audit) | YES | _this commit_ (P9.7.nit-b) | §11 NIT roster was missing M-1..M-4 + audit rows |
+| P9.7-G6 | G-RC-9.7 (audit) | YES | _this commit_ (P9.7.nit-b) | §3.1 disclose self-recovery of ``test_agent_calls_web_search`` between G-RC-9.6 and G-RC-9.7 |
 
-**2 of 3 NITs CLOSED; B-1 (G-RC-9.4) + P9.7-B (G-RC-9.7) ride
-to G-RC-9 final.** P9.7-A is closed in-flight by sibling commit ``b9b74df7`` (γ-3a).
+**6 of 12 NITs CLOSED in the P-RC-9 P9.7 closure window**:
+P9.7-A in ``b9b74df7`` (γ-3a), P9.7-G4 in ``652c8a71``
+(P9.7.nit-a), and P9.7-G1 / G2 / G3 / G6 in _this commit_
+(P9.7.nit-b). **6 ride to G-RC-9 final**: B-1 (G-RC-9.4),
+M-1 / M-2 / M-3 (G-RC-9.6), M-4 (G-RC-9.6, no-op cosmetic),
+and P9.7-B (G-RC-9.7, defer split).
 
 ## 12. HARD STOP
 
@@ -319,7 +356,7 @@ radius from P9.7 (touches ``apps/`` + ``src/openakita/channels/``,
 which P9.7's strict-additive sentinel held off-limits), so it
 needs its own planning round.
 
-**G-RC-9.7 status: PASS.** P9.7 closed; 18 commits clean (17 landed pre-gate + this gate); 184 / 184 contract + 3 / 3 sentinel
+**G-RC-9.7 status: PASS.** P9.7 closed; 17 commits clean (16 landed pre-gate + this gate); 184 / 184 contract + 3 / 3 sentinel
 green; sentinel total **7 / 7 ACTIVE**; main gate +315 passed
 vs G-RC-9.6 baseline with zero P9.7-introduced failures;
 ACCEPTANCE.md NOT modified (#5 closes in G-RC-9 final).
@@ -337,7 +374,7 @@ parity sentinels, AND the REST surface that wires them is minted:
 | 4 | OrgCommandService | 1 142 | 1 800 | 10 / 10 active (P9.4c) | B38-B41 + dispatch (5) |
 | 5 | OrgManager | 683 | 1 058 | 12 / 12 active (P9.5c) | B1-B17 + identity/MCP/policies/scaling/reports (~40) |
 | 6 | OrgRuntime | 6 355 | 2 708 | 20 / 20 active (P9.6gamma) | B26-B41 lifecycle + B45-B57 events/inbox (~25) |
-| -- | **v2 REST mint** | 2 533 (v1 orgs.py) | **2 871** (orgs_v2*.py + schemas) | **7 / 7 sentinels** (6 parity + 1 REST) | **83 / 83 (B1-B83) + 9 spec + 9 shim** |
+| -- | **v2 REST mint** | 2 533 (v1 orgs.py) | **2 845** (orgs_v2*.py + schemas) | **7 / 7 sentinels** (6 parity + 1 REST) | **83 / 83 (B1-B83) + 9 spec + 9 shim** |
 
 **P-RC-9 phase status: all 6 charter subsystems implemented +
 parity-validated; v2 REST surface complete (83 / 83 mint endpoints
