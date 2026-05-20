@@ -46,7 +46,6 @@ from .routes import (
     mcp,
     memory,
     memory_repair,
-    orgs,
     orgs_v2,
     orgs_v2_runtime,
     orgs_v2_stream,
@@ -406,8 +405,6 @@ def create_app(
     app.include_router(ws_routes.router, tags=["WebSocket"])
     app.include_router(hub.router, tags=["Hub"])
     app.include_router(identity.router, tags=["身份"])
-    app.include_router(orgs.router, tags=["组织编排"])
-    app.include_router(orgs.inbox_router, tags=["组织消息中心"])
     # v2 organisation facade — gated at request time by
     # ``settings.runtime_v2_enabled`` (returns 404 when off). Safe to
     # always-mount because the route bodies refuse to serve when the
