@@ -1538,3 +1538,31 @@ sentinel held off-limits), so it needs its own planning round.
 > 11 v1 symbols (8 org-graph + 3 plugin/template) that ε
 > needs cleared before v1 deletion.
 
+
+## P9.9δ-1 -- docs-only coverage audit retiring R2 risk (R2 RETIRED at HEAD ``459323d7``)
+
+| _this commit_ | P-RC-9 P9.9δ-1 | docs(revamp): P9.9δ-1 coverage audit (R2 retire; v1 tests/orgs/ ↔ v2 equivalents) [P-RC-9 P9.9δ-1] | +PLACEHOLDER LOC (``docs/revamp/P-RC-9-P9.9-COVERAGE-AUDIT.md`` NEW ~256 + ledger this section ~22) | 0 (docs-only; pytest unchanged) | ADR-0011 (Protocol-typed subsystem decomposition; v2 contracts pin public surface); ADR-0015 (308 shim retirement independent of v1 test deletion) |
+
+> P9.9δ-1 retires R2 (HIGH) before any ``git rm`` in
+> δ-4. Authority: charter §2.2 + §4 R2 (this audit is
+> the charter-mandated deliverable). The new
+> ``P-RC-9-P9.9-COVERAGE-AUDIT.md`` (~256 LOC) clusters
+> the **48 files / 12 238 LOC** of v1 ``tests/orgs/`` into
+> 10 subsystem groupings (C1 manager / C2 runtime / C3
+> command_service / C4 blackboard / C5 scheduler+store /
+> C6 models / C7 plugin / C8 HTTP / C9 events / C10 tools)
+> and matches each to v2-side coverage in
+> ``tests/runtime/orgs/`` (10 / 2 761 / 161) +
+> ``tests/api/contracts/`` (8 / 2 052 / 184) +
+> ``tests/parity/orgs/`` (10 / 2 535 / 66) -- **28 files
+> / 7 348 LOC / 411 collected** v2 sub-total. Verdict:
+> **R2 RETIRED** (0 BLOCKER + 0 IMPORTANT + 2 OPTIONAL
+> follow-ups; charter §2.2 numbers reproduced from
+> measurement). δ-2 (parity Option B + tests/unit/ sweep)
+> + δ-3 (tests/api + tests/e2e + tests/integration sweep)
+> + δ-4 (atomic ``git rm -r tests/orgs/``) are all
+> ready in charter order. Strict-additive boundary: ``git
+> diff 459323d7..HEAD -- src/openakita/ tests/ apps/``
+> empty. 9 / 9 P-RC-9 sentinels stay ACTIVE (docs-only
+> commit). **HARD STOP per brief**: δ-2 NOT started this
+> turn.
