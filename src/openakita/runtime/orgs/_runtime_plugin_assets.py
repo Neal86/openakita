@@ -160,8 +160,165 @@ class ToolHandlerBridge:
             }
 
 
+# =====================================================================
+# PluginAssetRecorder -- v1 _record_plugin_asset_output (349 LOC) v2
+# =====================================================================
+
+
+import hashlib
+from pathlib import Path
+
+
+class PluginAssetRecorder:
+    """v2 plugin-asset recorder (replaces v1 ``_record_plugin_asset_output``).
+
+    v1 method is 349 LOC of plugin-aware workspace
+    arrangement + sha256 + manifest update + emit; v2
+    collapses to ~120 LOC by treating workspace-arrangement
+    as the composition root''s problem (the runtime wires a
+    ``workspace_resolver`` callable).
+
+    DI:
+
+    * ``workspace_resolver`` -- callable ``(org_id) -> Path``
+      returning the org''s workspace root.
+    * ``event_bus`` -- :class:`EventBusProtocol` for
+      ``plugin_asset_recorded`` events.
+    * ``download`` -- optional async callable
+      ``(url, dest_path) -> int`` returning byte-count
+      written. Default is no-op.
+    """
+
+    def __init__(
+        self,
+        *,
+        workspace_resolver: Callable[[str], Path],
+        event_bus: Any,
+        download: Callable[[str, Path], Awaitable[int]] | None = None,
+    ) -> None:
+        self._ws = workspace_resolver
+        self._bus = event_bus
+        self._download = download
+        self._recorded: dict[str, list[PluginAsset]] = {}
+
+    async def record_url(
+        self,
+        *,
+        org_id: str,
+        tool_name: str,
+        url: str,
+        suggested_name: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> PluginAsset | None:
+        """Record an asset addressed by URL."""
+
+        plugin_id = plugin_id_for_tool(tool_name)
+        if plugin_id is None:
+            return None
+        ws_root = self._safe_ws(org_id)
+        if ws_root is None:
+            return None
+        ext = ext_for_url(url)
+        base = suggested_name or url.rsplit("/", 1)[-1] or "asset"
+        if ext and not base.lower().endswith(f".{ext}"):
+            base = f"{base}.{ext}"
+        dest = ws_root / "plugin_assets" / plugin_id / safe_asset_filename(base)
+        size = 0
+        if self._download is not None:
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                size = await self._download(url, dest)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception(
+                    "download failed (org=%s plugin=%s url=%s)",
+                    org_id,
+                    plugin_id,
+                    url,
+                )
+        asset = PluginAsset(
+            org_id=org_id,
+            plugin_id=plugin_id,
+            tool_name=tool_name,
+            path=str(dest),
+            size_bytes=size,
+            digest=self._digest_if_exists(dest),
+            metadata=dict(metadata or {}),
+        )
+        return await self._publish(asset)
+
+    async def record_file(
+        self,
+        *,
+        org_id: str,
+        tool_name: str,
+        path: Path,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> PluginAsset | None:
+        """Record an asset already on disk."""
+
+        plugin_id = plugin_id_for_tool(tool_name)
+        if plugin_id is None:
+            return None
+        if not path.exists() or not path.is_file():
+            return None
+        asset = PluginAsset(
+            org_id=org_id,
+            plugin_id=plugin_id,
+            tool_name=tool_name,
+            path=str(path),
+            size_bytes=path.stat().st_size,
+            digest=self._digest_if_exists(path),
+            metadata=dict(metadata or {}),
+        )
+        return await self._publish(asset)
+
+    def list_for_org(self, org_id: str) -> list[PluginAsset]:
+        return list(self._recorded.get(org_id, []))
+
+    # ---- internals -----------------------------------------------------
+
+    def _safe_ws(self, org_id: str) -> Path | None:
+        try:
+            return Path(self._ws(org_id))
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("workspace_resolver raised (org=%s)", org_id)
+            return None
+
+    @staticmethod
+    def _digest_if_exists(path: Path) -> str | None:
+        if not path.exists() or not path.is_file():
+            return None
+        try:
+            h = hashlib.sha256()
+            with path.open("rb") as fh:
+                for chunk in iter(lambda: fh.read(65536), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+        except Exception:  # noqa: BLE001
+            return None
+
+    async def _publish(self, asset: PluginAsset) -> PluginAsset:
+        self._recorded.setdefault(asset.org_id, []).append(asset)
+        try:
+            await self._bus.emit(
+                "plugin_asset_recorded",
+                {
+                    "org_id": asset.org_id,
+                    "plugin_id": asset.plugin_id,
+                    "tool_name": asset.tool_name,
+                    "path": asset.path,
+                    "size_bytes": asset.size_bytes,
+                    "digest": asset.digest,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("plugin_asset event emit failed")
+        return asset
+
+
 __all__ = [
     "PluginAsset",
+    "PluginAssetRecorder",
     "ToolHandlerBridge",
     "ext_for_url",
     "is_plugin_tool",

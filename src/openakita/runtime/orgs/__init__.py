@@ -118,7 +118,9 @@
   helpers (~570 v1 LOC) into ~375 v2 LOC. The recorder
   emits ``plugin_asset_recorded`` events through the bus;
   the bridge adapts the legacy ``handle_org_tool``
-  callable. P9.6h2 next will append file output registry
+  callable. P9.6h1b appended :class:`PluginAssetRecorder` (v1
+  ``_record_plugin_asset_output`` 349 LOC -> ~120 v2
+  LOC). P9.6h2 next will append file output registry
   + react-trace analysis + task-delivery synth.
 """
 
@@ -166,6 +168,7 @@ from ._runtime_node_lifecycle import (
 )
 from ._runtime_plugin_assets import (
     PluginAsset,
+    PluginAssetRecorder,
     ToolHandlerBridge,
     ext_for_url,
     is_plugin_tool,
@@ -309,6 +312,7 @@ __all__ = [
     "OrgProject",
     "ProjectStatus",
     "PluginAsset",
+    "PluginAssetRecorder",
     "ProfileResolver",
     "ProjectStoreProtocol",
     "ProjectTask",
