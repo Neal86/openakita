@@ -1743,3 +1743,132 @@ sentinel held off-limits), so it needs its own planning round.
 > **HARD STOP per brief**: δ-3 (tests/e2e/ + tests/integration/
 > sweep — 2 files / 7 sites) NOT started this turn; next
 > operator signal opens δ-3.
+
+## P9.9δ-3 -- tests/e2e/ + tests/integration/ + tests/api/ sweep (inventory δ-3 closed; loose-grep delta absorbed)
+
+| _this commit_ | P-RC-9 P9.9δ-3 | refactor(tests): P9.9δ-3 sweep e2e + integration + api v1→v2 runtime imports [P-RC-9 P9.9δ-3] | 3 .py rewritten (+23 / -9 = net +14 LOC) + ledger this section | 14 pass + 1 skip + 1 pre-existing stale failure (unrelated; ``src/openakita/core/reasoning_engine.py`` path) on test_p0_regression.py; 32 / 32 green on test_gateway_org_control.py (+3 fixed: the 3 ``get_command_service`` patches that were red against the v1 module since β-1 routed the gateway through v2); 114 / 114 green on test_p97_beta_smoke.py (docstring-only swap); 585 / 585 narrow slice (tests/parity/orgs/ + tests/runtime/orgs/ + tests/api/ + tests/integration/test_v2_im_canary_e2e.py) green; 1 / 1 v2 IM canary green x3 (1.83s / 1.83s / 1.83s) | ADR-0011 (Protocol-typed subsystem decomposition; v2 contracts pin public surface); ADR-0012 (v1 deletion at P9.9 per Q-B ACCEPTED (b)); ADR-0014 (v2 captures v1 observable surface → OrgToolHandler absorption-pending site guarded by lazy try/skip so the absorption commit lights it up automatically) |
+
+> P9.9δ-3 executes inventory §2.1 (e2e) + §2.2 (integration)
+> across the 2 inventoried external callers (7 v1 import sites) and
+> additionally absorbs the 1 narrative-docstring delta in
+> ``tests/api/test_p97_beta_smoke.py`` that the loose ``grep
+> "openakita\.orgs\."`` verification catches but the inventory
+> STRICT regex (filtered to ``^(from|import)``) did not list under
+> §2.3. Net 3 files / 9 loose-grep hits closed (inventory
+> projected 2 files / 7 sites; +1 file / +2 sites is the docstring
+> narrative delta; only the actual remaining sites at HEAD are
+> committed per brief).
+>
+> Per-symbol routing per inventory §3 absorption table:
+>
+> * **1:1 swap** (v2 surface absorbed + exported at this commit) →
+>   ``OrgCommandService`` → ``runtime.orgs.command_service``
+>   (test_p0_regression.py:180); ``command_service`` submodule x5
+>   → ``runtime.orgs`` (test_gateway_org_control.py:113 / 139 /
+>   147 / 174 / 198 ``from openakita.orgs import command_service as
+>   cs_module``); ``project_store.ProjectStore`` ``mock.patch``
+>   target string → ``openakita.runtime.orgs.project_store.ProjectStore``
+>   (test_p0_regression.py:261; v1→v2 module path swap only — the
+>   surrounding test body is itself skipped under the lazy guard below
+>   because v2 ships no concrete ``ProjectStore`` class yet, only
+>   ``ProjectStoreProtocol`` + ``JsonProjectStore`` + ``SqliteProjectStore``).
+> * **Lazy try-import + skip** (v2 surface NOT yet absorbed; tracked
+>   by P-RC-10 with explicit inline comment) → ``OrgToolHandler``
+>   (test_p0_regression.py:241; ``test_p1_7_org_list_delegated_tasks_backoff``).
+>   Inventory §2.1#2 projected ``runtime.orgs._runtime_agent_pipeline.OrgToolHandler``
+>   as the absorption target; at HEAD ``af1e115e`` that shard ships
+>   ``AgentPipelineExecutor`` + ``AgentCache`` + ``ProfileResolver``
+>   but no ``OrgToolHandler`` class — the entire 3 474 LOC v1
+>   ``openakita.orgs.tool_handler`` is still pending decomposition per
+>   inventory §3 (tool_handler split into ``_runtime_agent_pipeline``
+>   + ``runtime/dispatch`` + ``runtime/tools``). The single test
+>   currently exercising this surface (the P1-7 3-second backoff
+>   regression for ``org_list_delegated_tasks``) skips cleanly today
+>   and will light up automatically once the absorption commit
+>   re-exports ``OrgToolHandler`` (no further test edits).
+> * **Docstring narrative swap** → test_p97_beta_smoke.py:122 —
+>   ``"v2 reaches the free function in ``openakita.orgs.tool_categories``."``
+>   → ``"v2 reaches the free function in
+>   ``openakita.runtime.orgs._runtime_templates`` (was v1
+>   ``tool_categories``)."`` per inventory §3 absorption row
+>   ``tool_categories.* → _runtime_plugin_assets / _runtime_templates``;
+>   no import / behavior change, only narrative alignment so the loose
+>   ``grep "openakita\.orgs\."`` returns zero across tests/api/.
+>
+> Per-file before/after (3 files / 9 loose-grep hits + 1 ``mock.patch``
+> string target):
+>
+> * ``tests/e2e/test_p0_regression.py`` (+17 / -3; 3 hits): line 180
+>   ``OrgCommandService`` 1:1 swap; lines 241-262
+>   ``OrgToolHandler`` import + ``ProjectStore`` patch target →
+>   lazy try-import + ``pytest.skip`` with explicit P-RC-10 inventory
+>   pointer (5-line tracker comment block + 7-line try/except
+>   wrapper), monkeypatch target string swapped to v2 path and
+>   ``raising=True → False`` since v2 lacks the concrete class
+>   (defensive only — the skip fires before monkeypatch executes).
+> * ``tests/integration/test_gateway_org_control.py`` (+5 / -5; 5 hits):
+>   all 5 deferred ``from openakita.orgs import command_service as
+>   cs_module`` imports at lines 113 / 139 / 147 / 174 / 198 →
+>   ``from openakita.runtime.orgs import command_service as cs_module``;
+>   pure 1:1 swap. **Side effect**: the 3 previously-failing
+>   ``TestOrgCancelCommand`` / ``TestOrgRunningCommand`` cases
+>   (``test_cancel_calls_service_and_replies`` /
+>   ``test_cancel_handles_already_done`` / ``test_running_shows_live_status``)
+>   that were red against the v1 module since β-1 swapped
+>   ``channels/gateway.py`` to v2 now go green (the
+>   ``patch.object(cs_module, "get_command_service", ...)`` finally
+>   targets the same module the gateway actually imports).
+> * ``tests/api/test_p97_beta_smoke.py`` (+1 / -1; 1 docstring hit):
+>   ``test_b3_avatar_presets_returns_bundled_list`` docstring at
+>   line 122 swapped from v1 ``tool_categories`` reference to v2
+>   ``_runtime_templates`` reference. No import / behavior change;
+>   114 / 114 cases unchanged.
+>
+> Verification: ``pytest tests/e2e/test_p0_regression.py -q --tb=no``
+> reports 14 pass / 1 skip / 1 fail (the ``test_p0_2_phase0_no_hard_exit_reason``
+> failure is **pre-existing baseline**; it reads
+> ``Path("src/openakita/core/reasoning_engine.py")`` which became
+> ``_reasoning_engine_legacy.py`` in an earlier rename — unrelated
+> to δ-3 and within the brief's ±1 skip variance allowance:
+> baseline was 15 pass / 1 fail, now 14 pass / 1 skip / 1 fail,
+> case-count preserved at 16). ``pytest
+> tests/integration/test_gateway_org_control.py -q --tb=no`` reports
+> 32 / 32 green (was 29 pass / 3 fail before δ-3 — a +3 PASS
+> improvement, since β-1 left the gateway and tests on opposite
+> sides of the v1→v2 boundary). ``pytest
+> tests/api/test_p97_beta_smoke.py -q --tb=no`` reports 114 / 114
+> green (unchanged — docstring-only). ``pytest tests/parity/orgs/
+> tests/runtime/orgs/ tests/api/ tests/integration/test_v2_im_canary_e2e.py
+> -q --tb=no`` reports **585 / 585 PASS** (matches δ-2b narrow-slice
+> baseline 585 exactly; within charter +/- 2). v2 IM canary 1 / 1
+> PASS x3 (1.83s / 1.83s / 1.83s sequential reruns; target ~1.85s,
+> was 1.85 / 1.85 / 1.84 at δ-2b).
+>
+> Strict additive on v1: ``git diff a3a5fde6..HEAD --
+> src/openakita/orgs/`` returns empty bytes — only
+> ``tests/e2e/`` (1 file) + ``tests/integration/`` (1 file) +
+> ``tests/api/`` (1 file) + ``docs/revamp/PROGRESS_LEDGER_P9.md``
+> touched in this commit. ``grep -rn "openakita\.orgs\." tests/e2e/
+> tests/integration/ tests/api/`` = **0 hits** combined (was 3 + 5
+> + 1 = 9 loose-grep hits at HEAD ``af1e115e`` per pre-edit scan).
+> ``grep -rln "openakita\.orgs\." tests/`` returns 47 files —
+> **all 47 inside ``tests/orgs/``** (223 hits total; the δ-4
+> atomic ``git rm -r tests/orgs/`` target). Cumulative effect: with
+> δ-2a (parity) + δ-2b (unit) + δ-3 (e2e + integration + api)
+> closed, every v1 ``openakita.orgs.*`` reference outside
+> ``tests/orgs/`` itself is gone from the test tree.
+>
+> Ruff clean on the 3 rewritten files (``ruff check`` All checks
+> passed!). Encoding preserved per file (test_p0_regression.py +
+> test_gateway_org_control.py CRLF; test_p97_beta_smoke.py LF);
+> BOM-free in / out.
+>
+> 8 / 8 P-RC-9 sentinels ACTIVE — per-sentinel case counts
+> preserved: #1 (8) / #2 (6) / #3 (4) / #4 (10) / #5 (12) /
+> #6 (20) / #7 (1 OpenAPI snapshot) / #8 (1 frontend stale v1
+> path scan). δ-3 touches no parity / runtime / contract sentinel
+> file. 9th sentinel (η-phase) not yet added.
+>
+> **HARD STOP per brief**: δ-4 (atomic ``git rm -r tests/orgs/``
+> → 47 files / 195 v1 import sites + ``__init__`` + ``conftest``)
+> NOT started this turn; next operator signal opens δ-4.

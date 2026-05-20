@@ -119,7 +119,7 @@ def test_b2_create_org_rejects_missing_name(mint_client: TestClient) -> None:
 
 
 def test_b3_avatar_presets_returns_bundled_list(mint_client: TestClient) -> None:
-    """v2 reaches the free function in ``openakita.orgs.tool_categories``."""
+    """v2 reaches the free function in ``openakita.runtime.orgs._runtime_templates`` (was v1 ``tool_categories``)."""
     resp = mint_client.get("/api/v2/orgs/avatar-presets")
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)
