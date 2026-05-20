@@ -5,7 +5,7 @@
 <!-- machine-readable phase marker; do NOT remove.
      Parsed by tests/revamp/_ledger.py + tests/parity/test_no_facade.py. -->
 current_phase: P-RC-9
-> **Sub-phase status (2026-05-20, P9.6 CLOSED -- P-RC-9 phase architecturally complete except wiring/deletion; P9.7 v2 REST endpoint mint is next)**: P9.0 closed, P9.1 closed (Nit-3 of 5 cleared; 4 ride to G-RC-9), P9.2 closed (parity 6/6, contract 36/36), P9.3 NodeScheduler closed (parity 4/4, contract 12/12, all 4 G-RC-9.2 nits folded in). P9.4 OrgCommandService closed (parity 10/10, contract 16/16, 3 ADR-0013 wall-clock SLA tests green; ACCEPTANCE.md #2 upgraded Pass-with-caveat -> Pass). **P9.5 OrgManager closed** (parity 12/12, contract 16/16, 4 Protocols all <= 5 methods, _org_layout.py byte-for-byte lift). G-RC-9.5 mini-gate signed off (closes 2 of 6 G-RC-9.4 NITs via P9.5.nit; 4 G-RC-9.4 NITs ride to G-RC-9 final). **P9.6.nit pre-flight** folds the new NIT-D-1 (P9.5 docstring count) + 4 G-RC-9.4 doc-only NITs (K-1 fixture-id drift / K-2 v2_im_cancel 5/5 -> 4/4 / L-1 SLA file LOC 234 -> 300 / G-2 lock-claim wording); only G-RC-9.4 NIT-B-1 (burst-test semantics) still rides to G-RC-9 final. **P9.6 OrgRuntime CLOSED** (v1 6,355 LOC -> v2 2,708 LOC across 8 modules; parity 20/20 + contract 25/25; ADR-0014 budget revision held at 2,708 of 3,000 LOC; G-RC-9.6 mini-gate signed off; last P-RC-9 parity sentinel ``test_runtime_parity.py`` ACTIVE so all 6 orgs/ sentinels are now green). **P-RC-9 phase architecturally complete except wiring + physical deletion; P9.7 REST endpoint mint is next**.
+> **Sub-phase status (2026-05-20, P9.7 CLOSED -- P-RC-9 phase v2 REST mint complete; P9.8 caller migration is next (apps/setup-center/src/api/{orgs,v2Stream}.ts + IM gateway adapter swap))**: P9.0-P9.6 closed (6/6 ADR-0011 subsystems v2 with 60/60 parity green and 6/6 parity sentinels active). **P9.7 v2 REST endpoint mint CLOSED** -- 83 / 83 mint endpoints under /api/v2/orgs/* (B1-B83 across 6 cluster siblings: orgs B1-B17 + nodes B18-B33 + dispatch B34-B41 + state B42-B53 + ops B54-B67 + projects B68-B83) + 1 health stub + Group A (9 endpoints) relocated to /api/v2/orgs-spec/* with 9 308 shim redirects (D-1 R3 LOCKED). 184 / 184 contract cases across 6 cluster files + 3 / 3 REST contract sentinel cases (route counts + B-marker coverage + OpenAPI snapshot). **7 P-RC-9 sentinels ACTIVE** (6 parity P9.1c-P9.6gamma + 1 REST contract P9.7gamma-2). G-RC-9.7 mini-gate signed off; NIT-A (schemas/__init__.py shadow regression introduced by P9.7a-2b) folded in by sibling commit ``b9b74df7`` (P9.7gamma-3a). **P-RC-9 wiring + deletion remain**: P9.8 frontend + channels caller migration, then P9.9 physical deletion of src/openakita/orgs/ + 410 shim under api/routes/orgs.py.
 
 > Source of truth for every commit landed on ``revamp/v3-orgs``
 > during the P-RC-9 ``src/openakita/orgs/`` integral migration.
@@ -538,3 +538,66 @@ current_phase: P-RC-9
 | commit hash | phase | title | LOC delta | tests delta | ADR refs |
 |---|---|---|---|---|---|
 | _this commit_ | P-RC-9 P9.7gamma-3a | fix(api/schemas): merge legacy schemas.py into schemas/__init__.py -- NIT-A fold-in | +PLACEHOLDER LOC (schemas/__init__.py +178 [merge of 8 v1 wire shapes + NIT banner] - schemas.py -159 [orphan removal]; ledger +PLACEHOLDER) | 0 net new test cases this commit; restores 19 main-gate collection slots (pre-existing import path); contracts + sentinel + alpha2/beta smoke all stay green (316 passed in 30.62s targeted run) | ADR-0011 (no new Protocol -- module/package layout fix, not Protocol contract); ADR-0012 (no shim under v1; merge is forward-only into the package init); cites P-RC-9-P9.7-CHARTER.md section 9 (gate criterion 6 -- main gate stays green) + DECISIONS.md D-3 (schemas/orgs_v2 namespace, now coexisting with the v1 surface at the package root) |
+
+## P9.7gamma-3b -- G-RC-9.7 mini-gate + ledger close (this turn)
+
+> Final P9.7 commit. Lands ``docs/revamp/gates/G-RC-9.7.md``
+> (~356 LOC mirroring the G-RC-9.6 13-section template) and
+> bumps the ledger header to P9.7 closed + adds the P9.7 CLOSED
+> phase summary below. The NIT-A schemas merge that the §3.1
+> main-gate full measured run surfaced landed in sibling commit
+> ``b9b74df7`` (P9.7gamma-3a) ahead of this gate so this commit
+> stays narrowly scoped (docs only).
+>
+> Measured anchors (substituted into G-RC-9.7 §3): main gate
+> 6 853 passed / 14 failed [pre-existing] / 116 skipped / 5
+> xfailed in 1 104.05 s; narrowed slice 1 772 passed / 1 failed
+> [flaky v2_im_canary, also in main] / 12 skipped / 5 xfailed
+> in 174.11 s; targeted (contracts + sentinel + alpha2/beta
+> smoke) 316 passed in 30.62 s. Deltas vs G-RC-9.6 baseline:
+> main +315 passed, narrowed +315 passed (matches main); gate
+> slice (api + runtime/orgs + parity/orgs) 394 -> 581 (+187 =
+> 184 contract + 3 sentinel exactly).
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-9 P9.7gamma-3b (G-RC-9.7) | docs(revamp/gates): G-RC-9.7 P9.7 (v2 REST endpoint mint) mini-gate -- PASS + ledger close summary | +PLACEHOLDER LOC (G-RC-9.7.md NEW 356 + ledger this section + header bump ~62 LOC) | 0 net new test cases this commit (gate doc + ledger close only); main-gate measurement performed in this commit's preparation, not in the diff | ADR-0011 (no new Protocol -- gate doc cites zero net Protocol delta from P9.7); ADR-0012 (no shim under v1 -- 308 redirect shims live under api/routes/_orgs_v2_legacy_redirects); ADR-0013 (perf_counter SLA NOT exercised in P9.7; banked for P-RC-10); ADR-0014 (v2 src LOC 2 871 over ~1 910 target; surplus in shim+schema+Group A layers; per-endpoint 19.2 LOC under 25 LOC REJECT; no ADR-0015 filed); cites P-RC-9-P9.7-CHARTER.md sections 9 (gate criteria) + 12 (HARD STOP) |
+
+## P9.7 CLOSED -- phase summary
+
+P9.7 v2 REST endpoint mint **CLOSED** after 17 implementation
+commits + this gate commit (G-RC-9.7 = P9.7gamma-3b; 18 commits
+total since charter HEAD ``89703a28``).
+
+| metric | value |
+|---|--:|
+| commits (P9.7 charter -> G-RC-9.7) | 18 |
+| v2 endpoints minted (B1-B83) | 83 |
+| Group A endpoints relocated (/orgs-spec/*) | 9 |
+| 308 redirect shims (legacy /orgs paths) | 9 |
+| Pydantic shapes added (schemas/orgs_v2/) | 16 |
+| contract cases added (tests/api/contracts/) | 184 |
+| REST contract sentinel cases | 3 |
+| Total NEW test cases (contracts + sentinel) | 187 |
+| v2 src LOC (orgs_v2*.py + schemas/orgs_v2/) | ~2 871 |
+| narrowed slice delta (api+runtime/orgs+parity/orgs) | 394 -> 581 (+187) |
+| narrowed wider slice (G-RC-9.6 format) | 1 457 -> 1 772 (+315) |
+| full main gate | 6 538 -> 6 853 (+315; pre-existing failures unchanged) |
+| P-RC-9 sentinels (6 parity + 1 REST contract) | 7 / 7 ACTIVE |
+| Strict additive (orgs/+core/+channels/+orgs.py+apps/) | empty bytes ✓ |
+| NITs folded in at gate window | 1 (NIT-A schemas merge in γ-3a) |
+| NITs riding to G-RC-9 final | 2 (NIT B-1 burst-test from G-RC-9.4; NIT P9.7-B contract file <= 350 soft cap) |
+| ACCEPTANCE.md | unchanged (#5 closes in G-RC-9 final after P9.8 + P9.9) |
+
+**P-RC-9 phase status after P9.7 close**: 6 / 6 ADR-0011
+subsystems implemented + parity-validated; v2 REST mint
+complete; 7 / 7 sentinels active. Wiring (P9.8) + deletion
+(P9.9) remain; P9.10 ships G-RC-9 final + ACCEPTANCE.md
+upgrades + ``v2.0.0-rc3`` tag.
+
+**Next**: P9.8 caller migration (frontend + IM gateway adapter
+swap from ``/api/orgs/`` -> ``/api/v2/orgs/``); ~86 src + ~216
+test import sites per the charter section 10 estimate.
+Different blast radius from P9.7 (touches ``apps/`` +
+``src/openakita/channels/``, which P9.7's strict-additive
+sentinel held off-limits), so it needs its own planning round.
