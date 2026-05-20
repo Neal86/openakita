@@ -1116,3 +1116,77 @@ sentinel held off-limits), so it needs its own planning round.
 > **HARD STOP per brief**: γ-1 (backend src sweep — 3 api/
 > files / 7 sites) NOT started this turn; next operator signal
 > opens γ-1.
+
+## P9.9γ-1 -- backend api/ import sweep (4 of 7 sites; 3 deferred on absorption debt)
+
+| _this commit_ | P-RC-9 P9.9γ-1 | refactor(api): P9.9γ-1 swap api/ imports v1→v2 runtime (4 of 7 sites; 3 deferred on absorption debt) [P-RC-9 P9.9γ-1] | +~4 net source LOC (``api/routes/chat.py`` 1 ins / 1 del at L1511 5-name multi-line block re-routed to ``runtime.orgs.command_models`` per β-1 §3 precedent + ``api/server.py`` 3 ins / 3 del at L363 / L364 / L372 1-to-1 to ``runtime.orgs.{manager,runtime,command_service}``; ruff I001 re-sort folded; ledger +~67 LOC; total ~71 well under charter §6 80-LOC γ-1 cap) | 0 (api/-only source touch; ``git diff 112bc62b..HEAD -- src/openakita/orgs/ src/openakita/channels/ src/openakita/runtime/ src/openakita/core/ apps/ tests/`` returns empty bytes; 8 / 8 P-RC-9 sentinels unchanged) | ADR-0011 (mechanical re-route to v2 ``runtime.orgs.command_models`` + ``{manager,runtime,command_service}``); ADR-0012 (γ-before-ε: api/ must resolve to v2 BEFORE ε-1 ``git rm`` per R3); canary 3/3 PASS (``tests/integration/test_v2_im_canary_e2e.py``) |
+
+> P9.9γ-1 swaps 4 of the 7 α-1-inventoried backend api/
+> import sites and documents an **absorption-debt finding**
+> for the other 3 sites that α-1 §3 listed as
+> ready-to-swap but STRICT verification (``rg`` v2 tree at
+> HEAD ``112bc62b``) shows are blocked on absorption work
+> that never landed in v2.
+>
+> Swapped (2 files / 4 sites):
+>
+> * ``api/routes/chat.py`` L1511 — 5-name multi-line
+>   ``OrgCommandError`` / ``OrgCommandRequest`` /
+>   ``OrgCommandSource`` / ``OrgCommandSurface`` /
+>   ``default_scope_for_surface`` re-routed to
+>   ``runtime.orgs.command_models`` (all 5 names live there
+>   per β-1 precedent: data-classes group in the typed
+>   shard, service module exports only ``OrgCommandService``
+>   / ``set_command_service`` / ``get_command_service`` /
+>   protocol surfaces).
+> * ``api/server.py`` L363 / L364 / L372 — ``OrgManager``
+>   / ``OrgRuntime`` / (``OrgCommandService`` +
+>   ``set_command_service``) 1-to-1 to v2 ``runtime.orgs.*``
+>   (all 4 names in v2 ``__all__``; verified pre-write).
+>
+> Deferred (3 sites — v2 absorption never landed; tracked
+> for a future γ-1b / ε-1 pre-deletion sweep):
+>
+> * ``api/server.py`` L365 ``ensure_builtin_templates`` and
+>   ``api/routes/orgs_v2_runtime_orgs.py`` L99
+>   ``list_avatar_presets`` + L134
+>   ``build_workbench_templates`` — α-1 §3 claims
+>   absorption into ``runtime.orgs._runtime_plugin_assets``
+>   (P9.2c) but ``rg`` v2 tree shows zero definitions for
+>   any of the 3 names. Per user-task hard rule "verify v2
+>   module actually exports the symbol" + "if non-1:1
+>   absorption is unclear, document the finding and choose
+>   the safest path", leaving these 3 v1 imports in place
+>   keeps the runtime working today and defers the ~400-LOC
+>   absorption work to its own focused commit (well beyond
+>   γ-1's 80-LOC cap).
+>
+> Verification: (1) canary 3/3 PASS — ``tests/integration/test_v2_im_canary_e2e.py`` green at 1.51s / 1.55s / 1.55s
+> (the IM→gateway→runtime canary exercising both the
+> channels surface β-1 swapped and the api/server OrgRuntime
+> + OrgCommandService surfaces we just rewrote). (2) Narrow
+> slice **585 / 585 PASS** in 64.72s (``tests/api/`` +
+> ``tests/runtime/orgs/`` + ``tests/parity/orgs/`` + canary;
+> identical to baseline 585 at parent HEAD; zero test delta).
+> (3) Module-import smoke green: ``python -c "import openakita.api.routes.chat; import openakita.api.routes.orgs_v2_runtime_orgs; import openakita.api.server"``
+> resolves cleanly. (4) Ruff lint clean on edited files
+> (``ruff check`` All checks passed!; ruff I001 auto-resort
+> applied to server.py L363-365 since the in-place v1
+> ``templates`` import now sorts before the v2 swaps);
+> ``ruff format --check src/openakita/api/server.py`` clean;
+> ``ruff format --check src/openakita/api/routes/chat.py``
+> reports cosmetic drift **pre-existing at parent HEAD** (drift
+> at L147-148 / L241-250 / L478 / L515 — nowhere near our
+> L1511 edit), deferred per "don't fix pre-existing ruff
+> format drift outside scope" hard rule (mirror β-1 gateway
+> handling).
+>
+> Strict-additive boundary: ``git diff 112bc62b..HEAD --
+> src/openakita/orgs/ src/openakita/channels/ src/openakita/runtime/
+> src/openakita/core/ apps/ tests/`` returns empty bytes — only
+> ``src/openakita/api/routes/chat.py`` + ``src/openakita/api/server.py``
+> (2 source files) + this ledger touched. 8 / 8 P-RC-9 sentinels
+> ACTIVE.
+>
+> **HARD STOP per brief**: γ-2 (cross-tree swap) rides next;
+> δ-1 (test coverage audit doc) NOT started this turn.

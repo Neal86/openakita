@@ -360,16 +360,16 @@ def create_app(
                     logger.warning("Failed to mount pending UI for plugin '%s': %s", plugin_id, e)
 
     # Initialize OrgManager & OrgRuntime
-    from openakita.orgs.manager import OrgManager
-    from openakita.orgs.runtime import OrgRuntime
     from openakita.orgs.templates import ensure_builtin_templates
+    from openakita.runtime.orgs.manager import OrgManager
+    from openakita.runtime.orgs.runtime import OrgRuntime
 
     org_manager = OrgManager(data_dir)
     ensure_builtin_templates(data_dir / "org_templates")
     app.state.org_manager = org_manager
     org_runtime = OrgRuntime(org_manager)
     app.state.org_runtime = org_runtime
-    from openakita.orgs.command_service import OrgCommandService, set_command_service
+    from openakita.runtime.orgs.command_service import OrgCommandService, set_command_service
 
     org_command_service = OrgCommandService(org_runtime, session_manager)
     set_command_service(org_command_service)
