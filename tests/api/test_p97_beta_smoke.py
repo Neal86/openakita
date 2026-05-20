@@ -1036,3 +1036,244 @@ def test_b67_generate_report(mint_app: FastAPI, mint_client: TestClient, tmp_pat
     resp = mint_client.post("/api/v2/orgs/org_x/reports/generate", json={"days": 3})
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
+
+
+# ===========================================================================
+# Cluster 3.6 -- Projects + tasks (B68-B83).
+# ===========================================================================
+
+
+def _fake_project(pid: str = "p1", org_id: str = "org_x") -> Any:
+    proj = MagicMock(spec=["to_dict"])
+    proj.to_dict.return_value = {"id": pid, "org_id": org_id, "name": "P"}
+    return proj
+
+
+def _fake_task(tid: str = "t1", project_id: str = "p1", status: str = "todo") -> Any:
+    task = MagicMock(spec=["to_dict", "project_id", "id", "status", "chain_id", "assignee_node_id"])
+    task.id = tid
+    task.project_id = project_id
+    task.status = MagicMock(value=status)
+    task.chain_id = None
+    task.assignee_node_id = None
+    task.to_dict.return_value = {
+        "id": tid,
+        "project_id": project_id,
+        "status": status,
+        "title": "X",
+    }
+    return task
+
+
+# ---------------------------------------------------------------------------
+# B68-B72: project CRUD
+# ---------------------------------------------------------------------------
+
+
+def test_b68_list_projects(mint_app: FastAPI, mint_client: TestClient) -> None:
+    mint_app.state.project_store.list_projects.return_value = [_fake_project("p1")]
+    resp = mint_client.get("/api/v2/orgs/org_x/projects")
+    assert resp.status_code == 200
+    assert resp.json()[0]["id"] == "p1"
+
+
+def test_b69_create_project(mint_app: FastAPI, mint_client: TestClient) -> None:
+    mint_app.state.project_store.create_project.return_value = _fake_project("p2")
+    resp = mint_client.post(
+        "/api/v2/orgs/org_x/projects",
+        json={"name": "Project A"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "p2"
+
+
+def test_b69_create_project_422_missing_name(mint_client: TestClient) -> None:
+    resp = mint_client.post("/api/v2/orgs/org_x/projects", json={})
+    assert resp.status_code == 422
+
+
+def test_b70_get_project(mint_app: FastAPI, mint_client: TestClient) -> None:
+    mint_app.state.project_store.get_project.return_value = _fake_project("p1")
+    resp = mint_client.get("/api/v2/orgs/org_x/projects/p1")
+    assert resp.status_code == 200
+
+
+def test_b70_get_project_404(mint_app: FastAPI, mint_client: TestClient) -> None:
+    mint_app.state.project_store.get_project.return_value = None
+    resp = mint_client.get("/api/v2/orgs/org_x/projects/missing")
+    assert resp.status_code == 404
+
+
+def test_b71_update_project(mint_app: FastAPI, mint_client: TestClient) -> None:
+    mint_app.state.project_store.update_project.return_value = _fake_project("p1")
+    resp = mint_client.put("/api/v2/orgs/org_x/projects/p1", json={"description": "new"})
+    assert resp.status_code == 200
+
+
+def test_b72_delete_project(mint_app: FastAPI, mint_client: TestClient) -> None:
+    mint_app.state.project_store.delete_project.return_value = True
+    resp = mint_client.delete("/api/v2/orgs/org_x/projects/p1")
+    assert resp.status_code == 200
+
+
+def test_b72_delete_project_404(mint_app: FastAPI, mint_client: TestClient) -> None:
+    mint_app.state.project_store.delete_project.return_value = False
+    resp = mint_client.delete("/api/v2/orgs/org_x/projects/missing")
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# B73-B77: tasks CRUD + dispatch + cancel
+# ---------------------------------------------------------------------------
+
+
+def test_b73_create_task(mint_app: FastAPI, mint_client: TestClient) -> None:
+    mint_app.state.project_store.add_task.return_value = _fake_task("t1", "p1")
+    resp = mint_client.post(
+        "/api/v2/orgs/org_x/projects/p1/tasks",
+        json={"title": "Task 1"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "t1"
+
+
+def test_b74_update_task(mint_app: FastAPI, mint_client: TestClient) -> None:
+    mint_app.state.project_store.update_task.return_value = _fake_task("t1")
+    resp = mint_client.put("/api/v2/orgs/org_x/projects/p1/tasks/t1", json={"title": "X2"})
+    assert resp.status_code == 200
+
+
+def test_b75_delete_task(mint_app: FastAPI, mint_client: TestClient) -> None:
+    mint_app.state.project_store.delete_task.return_value = True
+    resp = mint_client.delete("/api/v2/orgs/org_x/projects/p1/tasks/t1")
+    assert resp.status_code == 200
+
+
+def test_b76_dispatch_task(mint_app: FastAPI, mint_client: TestClient) -> None:
+    task = _fake_task("t1", "p1")
+    mint_app.state.project_store.get_task.return_value = (task, _fake_project("p1"))
+    resp = mint_client.post("/api/v2/orgs/org_x/projects/p1/tasks/t1/dispatch")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["dispatched"] is True
+    assert "chain_id" in body
+
+
+def test_b76_dispatch_task_404(mint_app: FastAPI, mint_client: TestClient) -> None:
+    mint_app.state.project_store.get_task.return_value = (None, None)
+    resp = mint_client.post("/api/v2/orgs/org_x/projects/p1/tasks/missing/dispatch")
+    assert resp.status_code == 404
+
+
+def test_b77_cancel_task(mint_app: FastAPI, mint_client: TestClient) -> None:
+    from openakita.runtime.orgs import TaskStatus
+
+    task = MagicMock(
+        id="t1",
+        project_id="p1",
+        status=TaskStatus.IN_PROGRESS,
+        chain_id="c1",
+        assignee_node_id="n1",
+    )
+    mint_app.state.project_store.get_task.return_value = (task, _fake_project("p1"))
+    resp = mint_client.post(
+        "/api/v2/orgs/org_x/projects/p1/tasks/t1/cancel",
+        json={"reason": "user"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "cancelled"
+
+
+# ---------------------------------------------------------------------------
+# B78-B81: cross-project aggregation + detail + tree + timeline
+# ---------------------------------------------------------------------------
+
+
+def test_b78_list_all_tasks(mint_app: FastAPI, mint_client: TestClient) -> None:
+    mint_app.state.project_store.all_tasks.return_value = [{"id": "t1", "status": "in_progress"}]
+    resp = mint_client.get("/api/v2/orgs/org_x/tasks?status=in_progress")
+    assert resp.status_code == 200
+    assert resp.json()[0]["id"] == "t1"
+
+
+def test_b79_get_task_detail(mint_app: FastAPI, mint_client: TestClient) -> None:
+    task = _fake_task("t1")
+    mint_app.state.project_store.get_task.return_value = (task, None)
+    mint_app.state.project_store.get_subtasks.return_value = []
+    mint_app.state.project_store.get_ancestors.return_value = []
+    resp = mint_client.get("/api/v2/orgs/org_x/tasks/t1")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == "t1"
+    assert body["subtasks"] == []
+
+
+def test_b80_get_task_tree(mint_app: FastAPI, mint_client: TestClient) -> None:
+    mint_app.state.project_store.get_task_tree.return_value = {
+        "id": "t1",
+        "children": [],
+    }
+    resp = mint_client.get("/api/v2/orgs/org_x/tasks/t1/tree")
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "t1"
+
+
+def test_b80_get_task_tree_404(mint_app: FastAPI, mint_client: TestClient) -> None:
+    mint_app.state.project_store.get_task_tree.return_value = None
+    resp = mint_client.get("/api/v2/orgs/org_x/tasks/missing/tree")
+    assert resp.status_code == 404
+
+
+def test_b81_get_task_timeline(mint_app: FastAPI, mint_client: TestClient) -> None:
+    task = MagicMock(
+        execution_log=[{"at": "2026-01-01", "event": "started"}],
+        chain_id=None,
+    )
+    mint_app.state.project_store.get_task.return_value = (task, None)
+    mint_app.state.org_runtime.get_event_store.return_value = None
+    resp = mint_client.get("/api/v2/orgs/org_x/tasks/t1/timeline")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["task_id"] == "t1"
+    assert len(body["timeline"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# B82-B83: per-node task / active-plan queries
+# ---------------------------------------------------------------------------
+
+
+def test_b82_get_node_tasks(mint_app: FastAPI, mint_client: TestClient) -> None:
+    mint_app.state.project_store.all_tasks.side_effect = lambda **kwargs: (
+        [{"id": "t1"}] if kwargs.get("assignee") == "n1" else []
+    )
+    resp = mint_client.get("/api/v2/orgs/org_x/nodes/n1/tasks")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["assigned"][0]["id"] == "t1"
+    assert body["delegated"] == []
+
+
+def test_b83_get_node_active_plan_empty(mint_app: FastAPI, mint_client: TestClient) -> None:
+    mint_app.state.project_store.all_tasks.return_value = []
+    resp = mint_client.get("/api/v2/orgs/org_x/nodes/n1/active-plan")
+    assert resp.status_code == 200
+    assert resp.json() == {"plan": None}
+
+
+def test_b83_get_node_active_plan(mint_app: FastAPI, mint_client: TestClient) -> None:
+    mint_app.state.project_store.all_tasks.return_value = [
+        {
+            "id": "t1",
+            "title": "Big Task",
+            "status": "in_progress",
+            "plan_steps": [{"id": "s1", "status": "todo"}],
+            "progress_pct": 25,
+        },
+    ]
+    resp = mint_client.get("/api/v2/orgs/org_x/nodes/n1/active-plan")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["task_id"] == "t1"
+    assert body["progress_pct"] == 25

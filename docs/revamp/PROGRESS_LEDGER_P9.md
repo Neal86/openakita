@@ -409,3 +409,19 @@ current_phase: P-RC-9
 | commit hash | phase | title | LOC delta | tests delta | ADR refs |
 |---|---|---|---|---|---|
 | _this commit_ | P-RC-9 P9.7beta-5 | feat(api/routes): mint cluster 3.5 Inbox + Scaling + Reports + Stats + Status (14 endpoints: B54-B67) in orgs_v2_runtime_ops.py + side-effect import + 19 smoke tests | +PLACEHOLDER LOC (orgs_v2_runtime_ops.py NEW 292 + orgs_v2_runtime.py +1 multi-line import addition; test_p97_beta_smoke.py +213 cluster 3.5 smokes; ledger +PLACEHOLDER) | +19 smoke (B54-B67 wiring smokes + inbox 404 branch + bad-decision 400 + scaling 400 branches x2 + status 404 branch); gate slice tests/api/ + tests/runtime/orgs/ + tests/parity/orgs/ 353 -> 372 passed (53.04s) | ADR-0011 (D-3 layer separation; D-4 R4 granularity ceiling preserved); ADR-0012 (no shim under v1; status endpoint diverges from v1 SSE to JSON snapshot -- charter R5 documented); cites P-RC-9-P9.7-CHARTER.md section 3 beta-7 (SSE riding optional commit) |
+
+## P9.7beta-6 -- mint cluster 3.6 Projects + tasks (16 endpoints) -- closes beta phase (this turn)
+
+> Sixth (and final) beta mint commit. 16 endpoints (B68-B83 per
+> ``P-RC-9-P9.7-ENDPOINT-INVENTORY.md`` section 3.6) land in a
+> new sub-module ``orgs_v2_runtime_projects.py``. Cluster covers
+> project CRUD (5 -> ProjectStore), task CRUD inside projects
+> (3), task dispatch (cross-subsystem: ProjectStore + OrgCommandService),
+> task cancel (cross-subsystem: ProjectStore + OrgRuntime.cancel_node_task),
+> cross-project task aggregation (4), and per-node task /
+> active-plan queries (2). Beta phase closes: 83 endpoints minted
+> across 6 commits (B1-B83 charter target met exactly).
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-9 P9.7beta-6 | feat(api/routes): mint cluster 3.6 Projects + tasks (16 endpoints: B68-B83) in orgs_v2_runtime_projects.py + side-effect import + 22 smoke tests -- closes P9.7beta (83/83 endpoints) | +PLACEHOLDER LOC (orgs_v2_runtime_projects.py NEW 359 + orgs_v2_runtime.py +1 multi-line import addition; test_p97_beta_smoke.py +241 cluster 3.6 smokes; ledger +PLACEHOLDER) | +22 smoke (B68-B83 wiring smokes + 404 branches x4 + 422 Pydantic + dispatch/cancel cross-subsystem flows); gate slice tests/api/ + tests/runtime/orgs/ + tests/parity/orgs/ 372 -> 394 passed (52.46s) | ADR-0011 (D-3 layer separation -- ``ProjectCreate`` / ``ProjectPatch`` Pydantic shapes consumed; ``OrgProject`` / ``ProjectTask`` / ``ProjectStatus`` / ``ProjectType`` / ``TaskStatus`` imported from ``openakita.runtime.orgs``; D-4 R4 granularity ceiling preserved); ADR-0012 (no shim under v1; dispatch + cancel cross-subsystem calls reach only v2 subsystems -- never v1 OrgRuntime) |

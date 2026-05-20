@@ -150,5 +150,6 @@ from . import (
     orgs_v2_runtime_nodes,  # noqa: E402, F401 -- side-effect import (B18-B33)
     orgs_v2_runtime_ops,  # noqa: E402, F401 -- side-effect import (B54-B67)
     orgs_v2_runtime_orgs,  # noqa: E402, F401 -- side-effect import (B1-B17)
+    orgs_v2_runtime_projects,  # noqa: E402, F401 -- side-effect import (B68-B83)
     orgs_v2_runtime_state,  # noqa: E402, F401 -- side-effect import (B42-B53)
 )
