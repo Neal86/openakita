@@ -651,3 +651,29 @@ sentinel held off-limits), so it needs its own planning round.
 | commit hash | phase | title | LOC delta | tests delta | ADR refs |
 |---|---|---|---|---|---|
 | _this commit_ | P-RC-9 P9.8.charter | docs(revamp): P9.8 caller migration charter (planning round) | +PLACEHOLDER LOC (P-RC-9-P9.8-CHARTER.md NEW ~483 + ledger this section ~15) | 0 (planning only; no source/test edits) | ADR-0011 (no new Protocol; section 7 8th sentinel is a grep, not an abstraction); ADR-0012 (v1 deletion deferred to P9.9; 308 shim retirement per charter section 8); cites ADR-0014 LOC discipline (~750 LOC budget vs P9.7's 2 845, well inside tolerance) |
+| _this commit_ | P-RC-9 P9.8alpha-1 | docs(revamp): P9.8alpha-1 caller inventory (60 v1 + 17 v2 + 5 channels) | +PLACEHOLDER LOC (P-RC-9-P9.8-CALLER-INVENTORY.md NEW ~327 + ledger this row) | 0 (docs only; no source/test edits) | ADR-0011 (no new Protocol; inventory is a docs artefact, not an abstraction); ADR-0012 (no shim semantics changed; 308 retirement still scheduled for v2.1.0 per charter sec 8) |
+
+> P9.8alpha-1 caller inventory landed. Measured frontend
+> ``apps/setup-center/src/``: **62** ``/api/orgs/`` hits
+> across 12 files (54 HTTP + 4 TS module imports + 4
+> comments; **+2** vs charter sec R5 "60" anchor from CJK
+> pipe noise -- functional content matches); **17**
+> ``/api/v2/orgs/`` hits across 6 files (9 functional Group
+> A constructions + 8 docstrings / test mocks).
+> ``src/openakita/channels/`` confirmed **0** HTTP callers
+> (5 in-process ``from openakita.orgs.command_service``
+> imports remain P9.9 scope). Tests: 56 v1 hits in
+> ``tests/orgs/*`` (delete-with-v1 in P9.9; no P9.8 action);
+> 463 v2 hits across ``tests/api/``, ``tests/parity/``,
+> ``tests/integration/`` (no action). ``docs/`` 115 hits
+> (out of scope). ``scripts/`` 0 hits. Proposed gamma
+> boundary: gamma-1 ~80 LOC (api/orgs.ts + api/v2Stream.ts
+> + test mock; Group A ``orgs`` -> ``orgs-spec`` retarget),
+> gamma-2 ~120 LOC (OrgEditorView.tsx; 17 B swaps + 3 C
+> leftovers + 1 PUT->PATCH), gamma-3 ~110 LOC
+> (OrgProjectBoard + OrgChatPanel cluster), gamma-4 ~90 LOC
+> (7 remaining files). gamma total ~400 LOC (+14% vs
+> charter sec 6 250-350 reserve; inside ADR-0014 tolerance).
+> Strict additive verified: ``git diff 95b9f9b6..HEAD --
+> src/openakita/ tests/ apps/`` returns empty bytes.
+> P9.8gamma-1 NOT started -- HARD STOP per charter sec 13.
