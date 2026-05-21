@@ -22,9 +22,9 @@ from __future__ import annotations
 import pytest
 
 from openakita.api.server import create_app
-from openakita.runtime.orgs.command_service import OrgCommandService
-from openakita.runtime.orgs.manager import OrgManager
-from openakita.runtime.orgs.runtime import OrgRuntime
+from openakita.orgs.command_service import OrgCommandService
+from openakita.orgs.manager import OrgManager
+from openakita.orgs.runtime import OrgRuntime
 
 
 @pytest.fixture()

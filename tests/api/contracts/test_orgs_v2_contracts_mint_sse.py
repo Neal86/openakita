@@ -17,7 +17,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from openakita.api.routes import orgs_v2_runtime, orgs_v2_stream
-from openakita.runtime.orgs.runtime import OrgRuntime
+from openakita.orgs.runtime import OrgRuntime
 
 
 def test_org_runtime_lazy_mints_event_store_for_known_org(tmp_path) -> None:

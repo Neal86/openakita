@@ -75,7 +75,7 @@ def test_b2_create_org_422_pydantic_violations(
 
 
 def test_b2_create_org_409_on_name_conflict(mint_app: FastAPI, mint_client: TestClient) -> None:
-    from openakita.runtime.orgs import OrgNameConflictError
+    from openakita.orgs import OrgNameConflictError
 
     mint_app.state.org_manager.create.side_effect = OrgNameConflictError(
         name="Eng", conflict_org_id="org_a"
@@ -195,7 +195,7 @@ def test_b8_from_template_404_when_template_not_found(
 
 
 def test_b8_from_template_409_on_name_conflict(mint_app: FastAPI, mint_client: TestClient) -> None:
-    from openakita.runtime.orgs import OrgNameConflictError
+    from openakita.orgs import OrgNameConflictError
 
     mint_app.state.org_manager.create_from_template.side_effect = OrgNameConflictError(
         name="Dup", conflict_org_id="org_a"
@@ -289,7 +289,7 @@ def test_b11_update_org_422_on_extra_field(mint_client: TestClient) -> None:
 
 
 def test_b11_update_org_409_on_conflict(mint_app: FastAPI, mint_client: TestClient) -> None:
-    from openakita.runtime.orgs import OrgNameConflictError
+    from openakita.orgs import OrgNameConflictError
 
     mint_app.state.org_manager.get.return_value = fake_org("org_u", "old")
     mint_app.state.org_manager.update.side_effect = OrgNameConflictError(

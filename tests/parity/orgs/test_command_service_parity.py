@@ -2,7 +2,7 @@
 
 Each :class:`ParityCase` builds an :class:`OrgCommandRequest` (and
 related v2 dataclasses) from the v2
-``openakita.runtime.orgs.command_models`` shard and asserts the
+``openakita.orgs.command_models`` shard and asserts the
 resulting :class:`ParityResult` equals the captured golden dict
 in ``_golden_command_service.json``.
 
@@ -36,7 +36,7 @@ _GOLDEN: dict[str, dict] = json.loads(
 
 
 def _v2_classes() -> dict[str, Any]:
-    from openakita.runtime.orgs.command_models import (
+    from openakita.orgs.command_models import (
         ForwardTarget,
         OrgCommandRequest,
         OrgCommandSource,

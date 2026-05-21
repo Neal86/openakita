@@ -1,7 +1,7 @@
 """Parity fixtures for OrgBlackboard v2-baseline (P-RC-9 P9.9δ-2a; was P9.1c v1 oracle).
 
 Each :class:ParityCase runs a scripted sequence against the v2
-`openakita.runtime.orgs.blackboard.OrgBlackboard` and asserts
+`openakita.orgs.blackboard.OrgBlackboard` and asserts
 the normalised :class:ParityResult equals the captured
 golden dict in `_golden_blackboard.json`.
 
@@ -36,8 +36,8 @@ _GOLDEN: dict[str, dict] = json.loads(
 
 def _bb_v2(case: ParityCase, org_dir: Path) -> ParityResult:
     """Run the case against v2 OrgBlackboard."""
-    from openakita.runtime.orgs.blackboard import OrgBlackboard as V2Blackboard
-    from openakita.runtime.orgs.memory_models import MemoryScope, MemoryType
+    from openakita.orgs.blackboard import OrgBlackboard as V2Blackboard
+    from openakita.orgs.memory_models import MemoryScope, MemoryType
 
     bb = V2Blackboard(org_dir, case.inputs["org_id"])
     return _drive(bb, MemoryType, MemoryScope, case)

@@ -205,3 +205,45 @@ current_phase: P-RC-10
 | commit hash | phase | title | LOC delta | tests delta | ADR refs |
 |---|---|---|---|---|---|
 | _this commit_ | P-RC-10 P10.3b | refactor(tests/runtime): P10.3b sweep openakita.runtime.orgs imports to canonical openakita.orgs (30 sites / 18 files) [P-RC-10 P10.3b] | +37 / -37 (mechanical prefix swap: 30 import lines + 7 docstring strings) + ~35 ledger row | 262 parity+contracts (unchanged) / 192 runtime-orgs (unchanged) | ADR-0011 (subsystem decomposition; no Protocol change) |
+
+## P10.3c -- Sweep ``tests/api/`` + ``tests/parity/`` import sites to canonical ``openakita.orgs``
+
+> **Sub-phase status (2026-05-21, P10.3c LANDED)**: Mechanical
+> 1:1 prefix swap of every ``from|import openakita.runtime.orgs``
+> reference under ``tests/api/`` and ``tests/parity/`` to the
+> canonical ``openakita.orgs`` path. **43 sites across 18
+> files** (37 import-line rewrites + 6 docstring/Sphinx string
+> rewrites): ``tests/api/contracts/`` 5 files / 9 sites
+> (test_orgs_v2_contracts_dispatch 2, _mint_sse 1, _nodes 1,
+> _orgs 3, _projects 2), ``tests/api/`` (top-level) 6 files /
+> 11 sites (test_config_orgs_v2_backend 1, test_orgs_v2 1,
+> test_orgs_v2_stream 1, test_p97_alpha2_smoke 1,
+> test_p97_beta_smoke 3 incl. 1 docstring, test_server_app_wiring
+> 3 [BOM-bearing source preserved byte-for-byte]),
+> ``tests/parity/orgs/`` 7 files / 23 sites (README.md 2,
+> test_blackboard_parity 3, test_command_service_parity 2,
+> test_manager_parity 2, test_node_scheduler_parity 7,
+> test_project_store_parity 3, test_runtime_parity 5; 5 of
+> these 23 are docstring/Sphinx role strings on parity test
+> module docstrings). RECON section 2 projected ~37 sites /
+> ~18 files; observed 37 import sites / 18 files (exact
+> match). RECON section 3 N=2 ``README.md`` markdown code-
+> block reference resolved by rewrite (the block is a
+> ``How to add a fixture`` template prescribing current
+> canonical imports, not historical pre-flatten state).
+> The post-P10.4 sentinel file
+> ``tests/parity/orgs/test_v1_src_retired_sentinel.py`` is
+> byte-untouched per charter scope (legitimately retains
+> ``openakita.runtime.orgs`` as the banned-string needle for
+> the regex test). 1:1 byte-equivalent semantics; ``ruff``
+> not invoked (pure prefix shorten, no alpha-order shift).
+> Slice green: 262 parity+contracts (0 warnings -- previous
+> single DeprecationWarning from test_runtime_parity.py:48
+> now silent) / 192 runtime-orgs (1 warning remains, sourced
+> from ``scripts/migrate_orgs_v2_json_to_sqlite.py:116``
+> imported by ``test_migrate_json_to_sqlite``; cleared by
+> P10.3e).
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-10 P10.3c | refactor(tests/api,tests/parity): P10.3c sweep openakita.runtime.orgs imports to canonical openakita.orgs (37 sites / 18 files) [P-RC-10 P10.3c] | +43 / -43 (mechanical prefix swap: 37 import lines + 6 docstring strings; 1 BOM-bearing file preserved) + ~40 ledger row | 262 parity+contracts (unchanged; 0 warnings -- was 1) / 192 runtime-orgs (unchanged; 1 warning remains from scripts/ -- cleared by P10.3e) | ADR-0011 (subsystem decomposition; no Protocol change) |

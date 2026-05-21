@@ -1,7 +1,7 @@
 """Parity fixtures for OrgManager v2-baseline (P-RC-9 P9.9δ-2a; was P9.5c v1 oracle).
 
 Each :class:`ParityCase` exercises a scripted scenario against the
-v2 ``openakita.runtime.orgs.manager.OrgManager`` on a ``tmp_path``
+v2 ``openakita.orgs.manager.OrgManager`` on a ``tmp_path``
 subtree and asserts the normalised :class:`ParityResult` equals
 the captured golden dict in ``_golden_manager.json``.
 
@@ -68,7 +68,7 @@ def _walk_org_dir(org_dir: Path) -> list[str]:
 
 
 def _v2_manager(data_dir: Path) -> Any:
-    from openakita.runtime.orgs.manager import OrgManager
+    from openakita.orgs.manager import OrgManager
 
     return OrgManager(data_dir)
 

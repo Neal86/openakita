@@ -24,7 +24,7 @@ from openakita.api.routes.orgs_v2_stream import (
 )
 from openakita.config import settings
 from openakita.runtime.models import NodeType, NodeV2, OrgV2
-from openakita.runtime.orgs import reset_default_store
+from openakita.orgs import reset_default_store
 from openakita.runtime.stream_registry import (
     get_or_create_org_stream_bus,
     list_org_stream_buses,

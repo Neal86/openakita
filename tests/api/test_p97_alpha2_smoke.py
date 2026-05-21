@@ -27,7 +27,7 @@ from openakita.api.routes import (
     orgs_v2_stream,
 )
 from openakita.config import settings
-from openakita.runtime.orgs import reset_default_store
+from openakita.orgs import reset_default_store
 
 
 @pytest.fixture

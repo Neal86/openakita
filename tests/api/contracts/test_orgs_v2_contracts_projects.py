@@ -202,7 +202,7 @@ def test_b76_dispatch_task_404_when_project_mismatch(
 
 
 def test_b77_cancel_task_happy(mint_app: FastAPI, mint_client: TestClient) -> None:
-    from openakita.runtime.orgs import TaskStatus
+    from openakita.orgs import TaskStatus
 
     task = MagicMock(
         project_id="p1",
@@ -226,7 +226,7 @@ def test_b77_cancel_task_404_when_missing(mint_app: FastAPI, mint_client: TestCl
 def test_b77_cancel_task_returns_false_when_not_in_progress(
     mint_app: FastAPI, mint_client: TestClient
 ) -> None:
-    from openakita.runtime.orgs import TaskStatus
+    from openakita.orgs import TaskStatus
 
     task = MagicMock(project_id="p1", status=TaskStatus.TODO)
     mint_app.state.project_store.get_task.return_value = (task, None)

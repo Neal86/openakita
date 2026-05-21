@@ -1,7 +1,7 @@
 """Parity fixtures for OrgNodeScheduler v2-baseline (P-RC-9 P9.9δ-2a; was P9.3c v1 oracle).
 
 Each :class:`ParityCase` exercises a scripted scenario against
-the v2 ``openakita.runtime.orgs.node_scheduler.OrgNodeScheduler``
+the v2 ``openakita.orgs.node_scheduler.OrgNodeScheduler``
 and asserts the normalised :class:`ParityResult` equals the
 captured golden dict in ``_golden_node_scheduler.json``.
 
@@ -44,9 +44,9 @@ def _strip_timestamp_line(prompt: str) -> str:
 
 def _next_fire_v2(case: ParityCase, now: datetime) -> ParityResult:
     """v2 next-fire via :func:`compute_next_fire_time` pure helper."""
-    from openakita.runtime.orgs.node_scheduler import compute_next_fire_time
-    from openakita.runtime.orgs.scheduler_models import NodeSchedule as V2NS
-    from openakita.runtime.orgs.scheduler_models import ScheduleType as V2ST
+    from openakita.orgs.node_scheduler import compute_next_fire_time
+    from openakita.orgs.scheduler_models import NodeSchedule as V2NS
+    from openakita.orgs.scheduler_models import ScheduleType as V2ST
 
     sched = V2NS(
         name=case.inputs["name"],
@@ -68,9 +68,9 @@ def _v2_capture_prompt(case: ParityCase) -> str:
     """Run v2 ``OrgNodeScheduler.trigger_once`` end-to-end and capture the prompt."""
     import asyncio
 
-    from openakita.runtime.orgs.node_scheduler import OrgNodeScheduler as V2Sched
-    from openakita.runtime.orgs.scheduler_models import NodeSchedule as V2NS
-    from openakita.runtime.orgs.scheduler_models import ScheduleType as V2ST
+    from openakita.orgs.node_scheduler import OrgNodeScheduler as V2Sched
+    from openakita.orgs.scheduler_models import NodeSchedule as V2NS
+    from openakita.orgs.scheduler_models import ScheduleType as V2ST
 
     captured: dict[str, str] = {}
 

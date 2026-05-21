@@ -119,7 +119,7 @@ def test_b2_create_org_rejects_missing_name(mint_client: TestClient) -> None:
 
 
 def test_b3_avatar_presets_returns_bundled_list(mint_client: TestClient) -> None:
-    """v2 reaches the free function in ``openakita.runtime.orgs._runtime_templates`` (was v1 ``tool_categories``)."""
+    """v2 reaches the free function in ``openakita.orgs._runtime_templates`` (was v1 ``tool_categories``)."""
     resp = mint_client.get("/api/v2/orgs/avatar-presets")
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)
@@ -350,7 +350,7 @@ def test_b19_create_node_schedule(
     fake = MagicMock(spec=["to_dict"])
     fake.to_dict.return_value = {"id": "s1", "type": "interval"}
     # ``NodeSchedule.from_dict`` is exercised inside the route; stub it.
-    from openakita.runtime.orgs import NodeSchedule
+    from openakita.orgs import NodeSchedule
 
     monkeypatch.setattr(NodeSchedule, "from_dict", staticmethod(lambda d: d), raising=False)
     mint_app.state.org_manager.add_node_schedule.return_value = fake
@@ -1167,7 +1167,7 @@ def test_b76_dispatch_task_404(mint_app: FastAPI, mint_client: TestClient) -> No
 
 
 def test_b77_cancel_task(mint_app: FastAPI, mint_client: TestClient) -> None:
-    from openakita.runtime.orgs import TaskStatus
+    from openakita.orgs import TaskStatus
 
     task = MagicMock(
         id="t1",

@@ -102,7 +102,7 @@ def test_b38_submit_command_422_when_extra_field(mint_client: TestClient) -> Non
 
 
 def test_b38_submit_command_409_on_conflict(mint_app: FastAPI, mint_client: TestClient) -> None:
-    from openakita.runtime.orgs import OrgCommandConflict
+    from openakita.orgs import OrgCommandConflict
 
     err = OrgCommandConflict("already running", command_id="cmd_old")
     mint_app.state.org_command_service.submit = _async_raise(err)
@@ -117,7 +117,7 @@ def test_b38_submit_command_409_on_conflict(mint_app: FastAPI, mint_client: Test
 def test_b38_submit_command_400_on_command_error(
     mint_app: FastAPI, mint_client: TestClient
 ) -> None:
-    from openakita.runtime.orgs import OrgCommandError
+    from openakita.orgs import OrgCommandError
 
     err = OrgCommandError("not allowed")
     err.status_code = 400  # type: ignore[attr-defined]

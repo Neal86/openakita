@@ -45,17 +45,17 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from openakita.runtime.orgs._runtime_agent_pipeline import (
+from openakita.orgs._runtime_agent_pipeline import (
     AgentCache,
     AgentPipelineExecutor,
     AgentSpec,
     ProfileResolver,
 )
-from openakita.runtime.orgs._runtime_dispatch import (
+from openakita.orgs._runtime_dispatch import (
     TRACKER_CANCELLED,
     TRACKER_RUNNING,
 )
-from openakita.runtime.orgs._runtime_node_lifecycle import (
+from openakita.orgs._runtime_node_lifecycle import (
     STATUS_BUSY,
     STATUS_IDLE,
     STATUS_STOPPED,
@@ -63,14 +63,14 @@ from openakita.runtime.orgs._runtime_node_lifecycle import (
     NodeStatusController,
     format_incoming_message,
 )
-from openakita.runtime.orgs._runtime_plugin_assets import (
+from openakita.orgs._runtime_plugin_assets import (
     FileOutputRegistry,
     PluginAssetRecorder,
     TaskDeliverySynthesizer,
     collect_tool_stats_from_trace,
     extract_accepted_chain_ids,
 )
-from openakita.runtime.orgs.runtime import OrgRuntime, _InMemoryEventBus
+from openakita.orgs.runtime import OrgRuntime, _InMemoryEventBus
 
 # ---------------------------------------------------------------------------
 # Shared test doubles -- intentionally tiny + duck-typed (per ADR-0012:

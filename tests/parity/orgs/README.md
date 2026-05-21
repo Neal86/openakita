@@ -55,12 +55,12 @@ contract directly rather than asserting v1==v2.
 from tests.parity.harness import ParityCase, ParityResult, assert_parity
 
 def _blackboard_v1(case: ParityCase) -> ParityResult:
-    from openakita.runtime.orgs.blackboard import OrgBlackboard
+    from openakita.orgs.blackboard import OrgBlackboard
     # ... call v1 path ...
     return ParityResult(...)
 
 def _blackboard_v2(case: ParityCase) -> ParityResult:
-    from openakita.runtime.orgs.blackboard import OrgBlackboard
+    from openakita.orgs.blackboard import OrgBlackboard
     # ... call v2 path ...
     return ParityResult(...)
 

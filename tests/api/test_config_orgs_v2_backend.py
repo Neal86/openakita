@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from openakita.config import Settings, settings
-from openakita.runtime.orgs import (
+from openakita.orgs import (
     JsonOrgStore,
     SqliteOrgStore,
     get_default_store,

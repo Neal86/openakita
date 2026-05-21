@@ -76,7 +76,7 @@ def test_b19_create_schedule_returns_201(
     fake.to_dict.return_value = {"id": "s1", "type": "cron"}
     mint_app.state.org_manager.add_node_schedule.return_value = fake
     # Bypass NodeSchedule.from_dict by patching it to return the input dict.
-    import openakita.runtime.orgs as runtime_pkg
+    import openakita.orgs as runtime_pkg
 
     monkeypatch.setattr(
         runtime_pkg.NodeSchedule, "from_dict", staticmethod(lambda b: b), raising=False

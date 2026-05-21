@@ -1,7 +1,7 @@
 """Parity fixtures for ProjectStore v2-baseline (P-RC-9 P9.9δ-2a; was P9.2d v1 oracle).
 
 Each :class:`ParityCase` runs a scripted sequence against the v2
-``openakita.runtime.orgs.project_store.JsonProjectStore`` (the
+``openakita.orgs.project_store.JsonProjectStore`` (the
 SQLite backend is contract-tested directly in
 ``tests/runtime/orgs/test_project_store_contract.py``) and
 asserts the normalised :class:`ParityResult` equals the captured
@@ -76,12 +76,12 @@ def _list_projects_dict(store) -> list[dict]:
 
 
 def _ps_v2(case: ParityCase, org_dir: Path) -> ParityResult:
-    from openakita.runtime.orgs.project_models import (
+    from openakita.orgs.project_models import (
         OrgProject,
         ProjectTask,
         TaskStatus,
     )
-    from openakita.runtime.orgs.project_store import JsonProjectStore
+    from openakita.orgs.project_store import JsonProjectStore
 
     store = JsonProjectStore(org_dir)
     return _drive(store, OrgProject, ProjectTask, TaskStatus, case)
