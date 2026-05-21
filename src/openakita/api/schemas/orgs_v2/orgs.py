@@ -57,10 +57,27 @@ class OrgCreate(BaseModel):
 
 
 class OrgPatch(BaseModel):
-    """Body for ``PUT /api/v2/orgs/{id}`` (``None`` means "leave alone")."""
+    """Body for ``PUT /api/v2/orgs/{id}`` (``None`` means "leave alone").
+
+    smoke-B3: the v2 frontend ``OrgEditorView`` posts a full org
+    snapshot on every save (see ``apps/setup-center/src/views/
+    OrgEditorView.tsx`` ``buildSavePayload``), so this schema must
+    accept the wire-stable subset of every editable Organization
+    field, not just the 7 read-back metadata fields the original
+    P9.7a-2b skeleton shipped.  Keeping ``extra="forbid"`` preserves
+    the existing "typo guard" invariant exercised by
+    ``test_b11_update_org_422_on_extra_field``.
+
+    ``user_persona`` / ``nodes`` / ``edges`` ride as opaque
+    ``dict[str, Any]`` / ``list[dict[str, Any]]`` containers --
+    ``OrgManager.update`` already coerces them via
+    ``UserPersona.from_dict`` / ``OrgNode.from_dict`` / ``OrgEdge
+    .from_dict`` and validates the workbench-leaf invariant.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
+    # Original 7 metadata fields (kept exactly as before).
     name: str | None = None
     description: str | None = None
     icon: str | None = None
@@ -68,3 +85,26 @@ class OrgPatch(BaseModel):
     core_business: str | None = None
     workspace_dir: str | None = None
     tags: list[str] | None = None
+
+    # smoke-B3 -- editable org-level configuration the frontend sends
+    # on every save.  All fields are optional; ``None`` means the
+    # caller wants to leave the existing value alone.
+    user_persona: dict[str, Any] | None = None
+    operation_mode: str | None = None
+    layout_locked: bool | None = None
+    auto_persist_final_answer: bool | None = None
+    watchdog_enabled: bool | None = None
+    watchdog_interval_s: int | None = None
+    watchdog_stuck_threshold_s: int | None = None
+    watchdog_silence_threshold_s: int | None = None
+    heartbeat_enabled: bool | None = None
+    heartbeat_interval_s: int | None = None
+    standup_enabled: bool | None = None
+
+    # smoke-B3 -- nested graph (nodes + edges) full-replace shape.
+    # OrgManager.update merges these key-wise: existing node ids keep
+    # their identity, missing ids are inserted, dangling ids are
+    # dropped.  Edges go through OrgEdge.from_dict with a
+    # ``source != target`` guard.
+    nodes: list[dict[str, Any]] | None = None
+    edges: list[dict[str, Any]] | None = None

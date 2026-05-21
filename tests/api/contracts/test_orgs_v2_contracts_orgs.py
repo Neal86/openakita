@@ -319,17 +319,13 @@ def test_b84_patch_org_partial_name(mint_app: FastAPI, mint_client: TestClient) 
     assert payload == {"name": "renamed"}
 
 
-def test_b84_patch_org_partial_description(
-    mint_app: FastAPI, mint_client: TestClient
-) -> None:
+def test_b84_patch_org_partial_description(mint_app: FastAPI, mint_client: TestClient) -> None:
     """Smoke F-5: description-only PATCH must not nuke the existing name."""
     mint_app.state.org_manager.get.return_value = fake_org("org_p", "keepme")
     mint_app.state.org_manager.update.return_value = fake_org(
         "org_p", "keepme", description="brand new desc"
     )
-    resp = mint_client.patch(
-        "/api/v2/orgs/org_p", json={"description": "brand new desc"}
-    )
+    resp = mint_client.patch("/api/v2/orgs/org_p", json={"description": "brand new desc"})
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["name"] == "keepme"
@@ -339,9 +335,7 @@ def test_b84_patch_org_partial_description(
     assert payload == {"description": "brand new desc"}
 
 
-def test_b84_patch_org_404_when_missing(
-    mint_app: FastAPI, mint_client: TestClient
-) -> None:
+def test_b84_patch_org_404_when_missing(mint_app: FastAPI, mint_client: TestClient) -> None:
     """Smoke F-5: PATCH on an unknown id must 404 (not 308 -> spec store)."""
     mint_app.state.org_manager.get.return_value = None
     resp = mint_client.patch("/api/v2/orgs/nope", json={"name": "x"})
@@ -440,3 +434,50 @@ def test_b17_export_404(mint_app: FastAPI, mint_client: TestClient) -> None:
     mint_app.state.org_manager.get.return_value = None
     resp = mint_client.post("/api/v2/orgs/missing/export")
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# smoke-B3: PUT must accept the full v2-frontend save payload
+# (user_persona, operation_mode, layout_locked, auto_persist_final_answer,
+#  watchdog_*, heartbeat_*, standup_enabled, nodes, edges) -- 13 fields the
+# original OrgPatch skeleton rejected with 422.  See OrgEditorView.tsx
+# buildSavePayload for the exact shape.
+# ---------------------------------------------------------------------------
+
+
+def test_b3_update_org_accepts_full_frontend_snapshot(
+    mint_app: FastAPI, mint_client: TestClient
+) -> None:
+    """Regression for smoke-B3: 13 wire fields the frontend posts on every save."""
+    mint_app.state.org_manager.get.return_value = fake_org("org_full", "full")
+    mint_app.state.org_manager.update.return_value = fake_org("org_full", "full")
+    body = {
+        "name": "full",
+        "description": "d",
+        "user_persona": {"title": "User", "display_name": "U", "description": ""},
+        "operation_mode": "command",
+        "core_business": "",
+        "layout_locked": False,
+        "workspace_dir": "",
+        "auto_persist_final_answer": True,
+        "watchdog_enabled": True,
+        "watchdog_interval_s": 30,
+        "watchdog_stuck_threshold_s": 1800,
+        "watchdog_silence_threshold_s": 1800,
+        "heartbeat_enabled": False,
+        "heartbeat_interval_s": 600,
+        "standup_enabled": False,
+        "nodes": [{"id": "n1", "role_title": "Lead"}],
+        "edges": [{"id": "e1", "source": "n1", "target": "n2"}],
+    }
+    resp = mint_client.put("/api/v2/orgs/org_full", json=body)
+    assert resp.status_code == 200, resp.text
+
+
+def test_b3_update_org_still_rejects_unknown_field(mint_client: TestClient) -> None:
+    """smoke-B3: extra=forbid invariant preserved -- truly unknown keys still 422."""
+    resp = mint_client.put(
+        "/api/v2/orgs/org_u",
+        json={"name": "x", "completely_made_up_key": True},
+    )
+    assert resp.status_code == 422
