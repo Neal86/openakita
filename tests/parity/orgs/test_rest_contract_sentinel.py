@@ -51,7 +51,7 @@ from openakita.api.routes import (
 
 # Charter inventory anchors -- count any drift here as a sentinel break
 # even if the OpenAPI schema disagrees.
-_MINT_ENDPOINTS = 84  # B1-B84 per inventory section 3 (B84 = PATCH partial-update, smoke-F5)
+_MINT_ENDPOINTS = 85  # B1-B85 (B84 = PATCH partial-update [smoke-F5]; B85 = mint-runtime SSE stream [smoke-5-sse])
 _HEALTH_STUBS = 1  # GET /_p97/health
 _SPEC_ENDPOINTS = 9  # Group A relocated (8 CRUD + 1 SSE)
 _SHIM_ROUTES = 9  # 308 legacy redirects
@@ -113,7 +113,7 @@ def test_route_counts_match_inventory() -> None:
     counts = _route_counts(_build_app())
     expected_mint = _MINT_ENDPOINTS + _HEALTH_STUBS
     assert counts["mint"] == expected_mint, (
-        f"Expected {expected_mint} mint method-routes (84 mint + 1 health), "
+        f"Expected {expected_mint} mint method-routes (85 mint + 1 health), "
         f"got {counts['mint']}; spec={counts['spec']}, shim={counts['shim']}"
     )
     assert counts["spec"] == _SPEC_ENDPOINTS, (

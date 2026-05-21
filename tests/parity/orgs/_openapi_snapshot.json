@@ -230,6 +230,9 @@
   "/api/v2/orgs/{org_id}/stop": [
     "POST"
   ],
+  "/api/v2/orgs/{org_id}/stream": [
+    "GET"
+  ],
   "/api/v2/orgs/{org_id}/tasks": [
     "GET"
   ],

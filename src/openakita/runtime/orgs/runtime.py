@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from .blackboard import BlackboardBackendProtocol
@@ -400,8 +401,53 @@ class OrgRuntime:
             raise ValueError(str(exc)) from exc
         return {"ok": ok, "status": self._state.get_org_state(org_id) or "unknown"}
 
+    def register_event_store(self, org_id: str) -> Any:
+        """Eagerly mint an :class:`OrgEventStore` for ``org_id``.
+
+        Idempotent -- returns the existing store if one is already
+        wired.  Exposed so the create / import / from-template paths
+        (or tests) can pre-warm before any event is emitted; routine
+        callers can rely on :meth:`get_event_store` to lazy-mint on
+        first access (smoke-5-sse fix; see ``tmp_p10/_5_sse_triage.md``).
+        """
+        existing = self._event_stores.get(org_id)
+        if existing is not None:
+            return existing
+        from ._runtime_event_store import OrgEventStore  # local: avoid cycle
+
+        jsonl: Any = None
+        get_dir = getattr(self._lookup, "get_org_dir", None)
+        if callable(get_dir):
+            try:
+                jsonl = Path(get_dir(org_id)) / "logs" / "events.jsonl"
+            except Exception:  # noqa: BLE001 (parity with v1 swallow)
+                jsonl = None
+        store = OrgEventStore(org_id, jsonl_path=jsonl)
+        self._event_stores[org_id] = store
+        return store
+
     def get_event_store(self, org_id: str) -> Any:
-        return self._event_stores.get(org_id)
+        """Return the registered event store, or lazily mint one for known orgs.
+
+        Mint runtime orgs (created via ``POST /api/v2/orgs/from-template``)
+        used to land on disk under ``data/orgs/<id>/`` without ever
+        registering an event store on the singleton -- so every
+        downstream ``/events`` / ``/activity`` / ``/audit-log`` route
+        404'd.  We now lazy-mint on first access when the org is known
+        to the :class:`OrgLookupProtocol` backing this runtime; genuinely
+        missing org ids still return ``None`` so the route's 404 path is
+        preserved (see ``tests/api/contracts/test_orgs_v2_contracts_state.py::test_b45_events_404_when_no_store``).
+        """
+        cached = self._event_stores.get(org_id)
+        if cached is not None:
+            return cached
+        try:
+            known = self._lookup.get_org(org_id)
+        except Exception:  # noqa: BLE001 (lookup failure -> behave like miss)
+            known = None
+        if not known:
+            return None
+        return self.register_event_store(org_id)
 
     def get_inbox(self, org_id: str) -> Any:
         return self._inboxes.get(org_id)

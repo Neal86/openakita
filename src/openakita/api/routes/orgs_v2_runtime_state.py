@@ -120,6 +120,40 @@ def delete_memory(request: Request, org_id: str, memory_id: str) -> dict[str, An
 # ---------------------------------------------------------------------------
 
 
+@router.get(
+    "/{org_id}/stream",
+    summary="B85 SSE stream of supervisor progress (mint runtime)",
+)
+async def stream_org_events(request: Request, org_id: str):
+    """Mint-runtime SSE channel mirroring ``orgs_v2_stream.py``'s shape.
+
+    The legacy route at ``/api/v2/orgs-spec/{id}/stream`` validates the
+    org via the spec ``JsonOrgStore`` (``get_default_store``); mint-
+    created orgs land in :class:`OrgManager` under ``data/orgs/<id>/``
+    and are invisible to that store, so a parallel route lives here on
+    the mint prefix.  Validation goes through ``OrgManager.get(org_id)``
+    so any mint-managed org resolves, and the SSE generator
+    (``_event_stream``) is reused as-is so wire format + per-org bus
+    are byte-identical with the orgs-spec route (one bus per org via
+    ``stream_registry``).
+    """
+    from fastapi.responses import StreamingResponse
+
+    from .orgs_v2_stream import _event_stream
+
+    if _get_manager(request).get(org_id) is None:
+        raise HTTPException(404, f"Organization not found: {org_id}")
+    return StreamingResponse(
+        _event_stream(request, org_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
 @router.get("/{org_id}/events", summary="B45 query event store")
 def query_events(request: Request, org_id: str) -> list[dict[str, Any]]:
     es = _get_runtime(request).get_event_store(org_id)
