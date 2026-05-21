@@ -98,4 +98,32 @@ describe("StaleBundleBanner", () => {
     expect(screen.queryByTestId("stale-bundle-banner")).toBeNull();
     vi.useRealTimers();
   });
+
+  it("pushes app content down by setting body paddingTop when banner becomes stale", async () => {
+    vi.useFakeTimers();
+    const fetchImpl = makeFetchReturning("server-NEW");
+    document.body.style.paddingTop = "";
+    document.documentElement.style.removeProperty("--app-banner-height");
+    const { unmount } = render(
+      <StaleBundleBanner
+        bundleId="bundle-OLD"
+        apiBase="http://test"
+        pollMs={1000}
+        initialDelayMs={10}
+        fetchImpl={fetchImpl}
+      />,
+    );
+    await act(async () => {
+      vi.advanceTimersByTime(15);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // Body padding-top + CSS variable both populated to reserve banner space.
+    expect(document.body.style.paddingTop).toBe("44px");
+    expect(document.documentElement.style.getPropertyValue("--app-banner-height")).toBe("44px");
+    unmount();
+    expect(document.body.style.paddingTop).toBe("");
+    vi.useRealTimers();
+  });
 });

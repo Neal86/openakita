@@ -118,6 +118,33 @@ export function StaleBundleBanner({
     };
   }, [apiBase, myId, pollMs, initialDelayMs, fetchImpl]);
 
+  // When the banner becomes visible, push the rest of the app down
+  // so the fixed banner does not crop the underlying content. The
+  // banner is sticky once shown until the user reloads, so we set
+  // a CSS variable on :root that any layout can consume via
+  // padding-top: var(--app-banner-height, 0). We also set
+  // body.style.paddingTop directly as a belt-and-braces fallback
+  // for layouts that have not yet adopted the variable.
+  useEffect(() => {
+    if (!stale) return;
+    const root = document.documentElement;
+    const body = document.body;
+    const previousVar = root.style.getPropertyValue("--app-banner-height");
+    const previousPad = body.style.paddingTop;
+    root.style.setProperty("--app-banner-height", "44px");
+    body.style.paddingTop = "44px";
+    return () => {
+      // Only revert if we set them; a sibling banner could have its own
+      // value, but this codebase has only one StaleBundleBanner instance.
+      if (previousVar) {
+        root.style.setProperty("--app-banner-height", previousVar);
+      } else {
+        root.style.removeProperty("--app-banner-height");
+      }
+      body.style.paddingTop = previousPad;
+    };
+  }, [stale]);
+
   if (!stale) return null;
 
   return (
