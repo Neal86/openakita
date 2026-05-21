@@ -124,6 +124,76 @@ test("smoke-5bug full v2 orgs flow", async ({ page }) => {
   await page.request.delete(`${apiBase}/api/v2/orgs/${orgId}`);
 });
 
+test("smoke-5-sse mint-runtime org exposes /events and /stream", async ({ page }) => {
+  const apiBase = "http://127.0.0.1:18900";
+
+  // 1. Pick the first template + create a fresh mint org via the API.
+  const tplResp = await page.request.get(`${apiBase}/api/v2/orgs/templates`);
+  expect(tplResp.status(), "templates endpoint should respond 200").toBe(200);
+  const templates = (await tplResp.json()) as Array<{ id: string }>;
+  expect(templates.length, "at least one builtin template").toBeGreaterThan(0);
+  const orgName = `smoke-sse-${Date.now()}`;
+  const createResp = await page.request.post(
+    `${apiBase}/api/v2/orgs/from-template`,
+    {
+      data: { template_id: templates[0].id, name: orgName },
+      headers: { "Content-Type": "application/json" },
+    },
+  );
+  expect(createResp.status(), "from-template must mint the org").toBe(201);
+  const orgId = ((await createResp.json()) as { id: string }).id;
+  expect(orgId, "mint runtime returns an id").toMatch(/^org_/);
+
+  try {
+    // 2. /events must now resolve (pre-fix it 404'd "Event store not found").
+    const evResp = await page.request.get(`${apiBase}/api/v2/orgs/${orgId}/events?limit=5`);
+    expect(evResp.status(), "smoke-5-sse: /events must NOT 404 for mint orgs").toBe(200);
+    const evBody = await evResp.json();
+    expect(Array.isArray(evBody), "/events returns a JSON list").toBe(true);
+
+    // 3. /stream must open as SSE and deliver the initial sse_connected event.
+    //    We poke EventSource from the page context so the Playwright network
+    //    stack handles streaming correctly (page.request would read to EOF).
+    await page.goto("/#org-editor", { waitUntil: "domcontentloaded" });
+    const sseResult = await page.evaluate(
+      ({ url, timeoutMs }) =>
+        new Promise<{ ok: boolean; readyState: number; event?: unknown; error?: string }>((resolve) => {
+          const es = new EventSource(url);
+          const timer = window.setTimeout(() => {
+            es.close();
+            resolve({ ok: false, readyState: es.readyState, error: "timeout" });
+          }, timeoutMs);
+          es.addEventListener("lifecycle", (ev) => {
+            window.clearTimeout(timer);
+            const parsed = (() => {
+              try {
+                return JSON.parse((ev as MessageEvent).data);
+              } catch {
+                return null;
+              }
+            })();
+            es.close();
+            resolve({ ok: true, readyState: es.readyState, event: parsed });
+          });
+          es.addEventListener("error", () => {
+            // EventSource fires error on initial 404; bail fast.
+            if (es.readyState === 2) {
+              window.clearTimeout(timer);
+              resolve({ ok: false, readyState: es.readyState, error: "closed" });
+            }
+          });
+        }),
+      { url: `${apiBase}/api/v2/orgs/${orgId}/stream`, timeoutMs: 8000 },
+    );
+    expect(sseResult.ok, `smoke-5-sse: EventSource never received first event (${JSON.stringify(sseResult)})`).toBe(true);
+    expect(sseResult.event, "first SSE event payload must include org_id + type").toEqual(
+      expect.objectContaining({ org_id: orgId, type: "sse_connected" }),
+    );
+  } finally {
+    await page.request.delete(`${apiBase}/api/v2/orgs/${orgId}`);
+  }
+});
+
 test("smoke-5bug B2 sidebar toolbar wraps cleanly at 1024x768", async ({ page }) => {
   await page.setViewportSize({ width: 1024, height: 768 });
   await page.goto("/#org-editor", { waitUntil: "domcontentloaded" });
