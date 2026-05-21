@@ -138,3 +138,34 @@ current_phase: P-RC-10
 | commit hash | phase | title | LOC delta | tests delta | ADR refs |
 |---|---|---|---|---|---|
 | _this commit_ | P-RC-10 P10.3a | refactor(src/openakita): P10.3a sweep openakita.runtime.orgs imports to canonical openakita.orgs (31 sites / 12 files) [P-RC-10 P10.3a] | +31 / -31 (mechanical prefix swap) + ~5 ledger row | 261 parity+contracts (1 sentinel-#9 Test 2 break expected per inverted regex; P10.4 fix-forward) / 192 runtime-orgs (unchanged) | ADR-0011 (subsystem decomposition; no Protocol change) |
+
+## P10.4 -- Sentinel #9 Test 2 polarity reversed (ban legacy shim path)
+
+> **Sub-phase status (2026-05-21, P10.4 LANDED)**: Sentinel #9
+> Test 2 (``test_production_imports_v1_free``) rewritten in place
+> with the post-flatten inverse polarity. BANNED regex now matches
+> ``^\s*(?:from|import)\s+openakita\.runtime\.orgs(?:\.|$|\s)``
+> across ``src/openakita/`` (``*.py`` + ``*.pyi``); the prior v1
+> ban on ``openakita.orgs.*`` is dropped because P10.1 made that
+> path canonical v2. Single whitelist entry
+> ``src/openakita/runtime/orgs/__init__.py`` (the P10.2
+> deprecation shim file; drops to empty at P10.6 when the shim is
+> git-rm'd). Test name kept byte-stable so CI/sentinel tracking
+> identifiers carry across the polarity flip; the docstring is
+> the canonical record of the semantic change. Test 1
+> (``test_v1_src_directory_retired``) is byte-untouched -- the
+> P10.2 Option-Z structural-marker check survives unchanged
+> (verified via region-SHA256 ``0cd39a57c0ed45ff`` matching HEAD
+> ``5ac2c786``). Adversarial sanity: injected ``from
+> openakita.runtime.orgs import OrgManager`` into a throwaway
+> ``src/openakita/_p10_4_adversarial_probe.py`` -> sentinel
+> tripped with the probe filename surfaced in the failure
+> message; deleting the file restored PASS (script
+> ``tmp_p10/_p10_4_adversarial.py``; not committed). 262
+> parity+contracts baseline restored (was 261 after P10.3a, with
+> the inverted sentinel as the only failure); 192 runtime-orgs
+> unchanged.
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-10 P10.4 | test(sentinel-9): P10.4 reverse Test 2 polarity (ban openakita.runtime.orgs.* in src/; whitelist shim) [P-RC-10 P10.4] | +90 / -189 (Test 2 + helpers + module docstring rewrite; Test 1 byte-untouched per SHA-region check) + ~30 ledger | 262 parity+contracts (restored from 261) / 192 runtime-orgs (unchanged) | ADR-0011 (subsystem decomposition; no Protocol change); ADR-0015 (308 shim retirement -- OUT-OF-SCOPE; byte-untouched) |
