@@ -224,39 +224,59 @@ def _scan_v1_imports() -> list[tuple[str, int, str]]:
 # ---------------------------------------------------------------------------
 
 
+# P-RC-10 P10.2 Option-Z augment: structural markers that distinguish
+# the post-flatten v2 occupant from a v1 regrowth attempt. These private
+# subsystem files were introduced under runtime/orgs/ during P-RC-9 and
+# moved 1:1 into orgs/ at P10.1; the v1 layout (retired by epsilon-2b)
+# never contained them.
+_V2_FLATTEN_MARKERS: tuple[str, ...] = (
+    "_runtime_templates.py",
+    "_runtime_dispatch.py",
+    "_runtime_event_bus.py",
+    "_runtime_lifecycle.py",
+    "_runtime_node_lifecycle.py",
+)
+
+
 def test_v1_src_directory_retired() -> None:
-    """``src/openakita/orgs/`` MUST NOT exist (or be empty if it does).
+    """``src/openakita/orgs/`` is either gone or the post-P10.1 v2 surface.
 
-    P-RC-9 P9.9epsilon-2b atomically deleted the v1 subsystem
-    (-20 237 LOC; 26 files; commit ``90a7d77f``). Recreating
-    the directory -- even as an empty package or as an
-    ``__init__.py`` re-export shim onto ``openakita.runtime.orgs``
-    -- re-opens the door this phase closed.
+    P-RC-9 P9.9epsilon-2b (``90a7d77f``) atomically deleted the v1 subsystem
+    (-20 237 LOC; 26 files). P-RC-10 P10.1 re-occupies the same on-disk path
+    with the *flattened* v2 surface (atomic git mv from
+    ``src/openakita/runtime/orgs/``; 25 files; no semantic v1 regrowth).
 
+    Discriminator: post-flatten the directory MUST contain the v2-private
+    subsystem markers in ``_V2_FLATTEN_MARKERS`` -- those files were
+    introduced under ``runtime/orgs/`` during P-RC-9 (P9.4 / P9.5 / P9.6)
+    and the v1 layout never had them. A v1 regrowth attempt (recreating
+    the dir as an empty package, an ``__init__.py``-only stub, or a paste
+    of the deleted v1 file set) trips this assertion.
+
+    Test 2 (``test_production_imports_v1_free``) holds the strict
+    "no abs ``from openakita.orgs.X`` import" invariant. P-RC-10 P10.4
+    augments sentinel #9 with a complementary
+    ``openakita.runtime.orgs.*`` regex once the P10.3 sweep completes.
     The 308 shim under
     ``src/openakita/api/routes/_orgs_v2_legacy_redirects.py``
-    is the only v1-tagged surface that legitimately survives
-    P-RC-9 (per ADR-0015 option (b) LOCKED), and it lives under
-    ``api/routes/`` (NOT under ``orgs/``); see ADR-0015 for the
-    v2.1.0 retirement task list.
+    remains the only v1-tagged surface (ADR-0015 option (b); v2.1.0).
     """
     if not _V1_DIR.exists():
-        return
+        return  # original P-RC-9 P9.9epsilon-2b state -- still acceptable
 
-    children = sorted(p.relative_to(_REPO).as_posix() for p in _V1_DIR.iterdir())
-    assert not children, (
-        "v1 orgs source directory ``src/openakita/orgs/`` has been "
-        "recreated -- this is a regression of P-RC-9 P9.9epsilon-2b "
-        "(commit 90a7d77f, atomic ``git rm -r src/openakita/orgs/``).\n"
-        "Found children:\n  "
-        + "\n  ".join(children)
-        + "\n\nFix: delete the directory; if a v2 module mistakenly "
-        "imports ``openakita.orgs.X`` the correct fix is to rewrite "
-        "to ``openakita.runtime.orgs.X`` per the P9.9alpha-1 import "
-        "inventory + gamma-1/gamma-2/gamma-3 sweep matrices. The 308 "
-        "shim under ``api/routes/_orgs_v2_legacy_redirects.py`` is "
-        "the only v1-tagged surface that legitimately survives, and "
-        "it lives under ``api/routes/`` -- not under ``orgs/``."
+    missing = [m for m in _V2_FLATTEN_MARKERS if not (_V1_DIR / m).is_file()]
+    assert not missing, (
+        "``src/openakita/orgs/`` exists but lacks the P-RC-10 P10.1 v2 "
+        "flatten markers -- this looks like a v1 regrowth attempt rather "
+        "than the legitimate post-P10.1 v2 surface.\n"
+        f"Missing markers: {missing}\n\n"
+        "Fix: if you intended to flatten ``runtime/orgs/`` -> ``orgs/`` per "
+        "P-RC-10 P10.1, rerun the atomic ``git mv`` so all 25 v2 files "
+        "(13 public + 12 private incl. ``__init__.py``) land together. "
+        "If you intended to revert to a v1-style layout, that is forbidden "
+        "by P-RC-9 P9.9epsilon-2b (commit ``90a7d77f``); the 308 shim "
+        "under ``api/routes/_orgs_v2_legacy_redirects.py`` is the only "
+        "v1-tagged surface that legitimately survives (ADR-0015)."
     )
 
 

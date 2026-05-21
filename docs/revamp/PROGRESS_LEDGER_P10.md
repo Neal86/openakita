@@ -60,3 +60,46 @@ current_phase: P-RC-10
 | commit hash | phase | title | LOC delta | tests delta | ADR refs |
 |---|---|---|---|---|---|
 | _this commit_ | P-RC-10 P10.0b | docs(revamp): P10.0b RECON import-sweep inventory + flatten mapping [P-RC-10 P10.0b] | +~365 (``P-RC-10-RECON.md`` ~351 + ``PROGRESS_LEDGER_P10.md`` append ~15) | 0 | --- (recon; cites ADR-0011 / 0014 / 0015 as references; no new ADR) |
+## P10.1 -- Atomic flatten (runtime/orgs/* -> orgs/*)
+
+> **Sub-phase status (2026-05-21, P10.1 LANDED + P10.2 LANDED)**:
+> Atomic ``git mv`` of all 25 ``runtime/orgs/*.py`` files to
+> ``src/openakita/orgs/`` (commit ``37536a62``); 1:1 rename per
+> RECON section 1; 4 absolute self-import lines rewritten to
+> relative form (manager.py x3 / _runtime_templates.py x1 per
+> RECON section 3); 4 ins / 4 del net content delta (rename
+> volume = 0 LOC). New canonical path
+> ``openakita.orgs.X`` imports cleanly via the moved
+> ``__init__.py``''s 21 relative re-export blocks.
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| ``37536a62`` | P-RC-10 P10.1 | refactor(orgs): atomic flatten src/openakita/runtime/orgs/* -> src/openakita/orgs/* (25 files) [P-RC-10 P10.1] | +4 / -4 (relative-form swaps; 25-file rename = 0 LOC) | 0 (test slice deliberately skipped between P10.1 and P10.2; green again after P10.2) | ADR-0011 (subsystem decomposition; no Protocol change) |
+
+## P10.2 -- Backward-compat shim + sentinel #9 Option-Z relax
+
+> **Sub-phase status (2026-05-21, P10.2 LANDED)**: Single new
+> file ``src/openakita/runtime/orgs/__init__.py`` (~46 LOC)
+> re-exports ``openakita.orgs.*`` via ``from openakita.orgs
+> import *`` plus 24 ``sys.modules`` aliases (RECON section
+> 4) so the 122/124 strict submodule-form import sites keep
+> resolving. One-shot ``DeprecationWarning`` at first import
+> (``stacklevel=2``); pytest config carries no
+> ``filterwarnings=error`` so DeprecationWarnings surface in
+> stderr without failing tests. Sentinel #9 Test 1
+> (``test_v1_src_directory_retired``) augmented in place
+> (Option Z) -- replaces the "MUST NOT exist" assertion with
+> a structural marker check (post-flatten the dir MUST contain
+> ``_runtime_templates.py`` etc., which the v1 layout never
+> had) so the legitimate v2 occupancy is recognised while v1
+> regrowth is still blocked. Test 2
+> (``test_production_imports_v1_free``) untouched; the strict
+> ``openakita.runtime.orgs.*`` augment rides P10.4 per charter.
+> Narrow slice green: 262 parity+contracts / 192 runtime-orgs
+> (== baseline). Backend boot smoke deferred (no IM gateway
+> changes; HTTP routes already smoke-tested via the contracts
+> slice).
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-10 P10.2 | feat(orgs): add openakita.runtime.orgs deprecation shim re-exporting from new location [P-RC-10 P10.2] | +~46 (shim) / +~20 / -~22 (sentinel #9 Test 1 Option-Z relax) / +~50 (this ledger block) -- net ~+95 | 0 (slice still 262 / 192) | ADR-0011 (subsystem decomposition; no Protocol change); ADR-0015 (308 shim retirement -- explicitly OUT-OF-SCOPE; byte-untouched) |
