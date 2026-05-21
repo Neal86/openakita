@@ -1,7 +1,7 @@
 """Contract suite for v2 OrgNodeScheduler (P-RC-9 P9.3d).
 
 Twelve cases pin the public surface and internal invariants of
-``openakita.runtime.orgs.node_scheduler.OrgNodeScheduler``
+``openakita.orgs.node_scheduler.OrgNodeScheduler``
 against a single in-memory backend (NodeScheduler has no
 JSON/SQLite split -- persistence is delegated to the injected
 :class:`ScheduleStore` Protocol).
@@ -36,12 +36,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from openakita.runtime.orgs.node_scheduler import (
+from openakita.orgs.node_scheduler import (
     OrgNodeScheduler,
     build_schedule_prompt,
     compute_next_fire_time,
 )
-from openakita.runtime.orgs.scheduler_models import (
+from openakita.orgs.scheduler_models import (
     NodeSchedule,
     ScheduleType,
     new_schedule_id,

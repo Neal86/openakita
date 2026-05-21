@@ -23,7 +23,7 @@ from openakita.runtime.channel_routing import (
 )
 from openakita.runtime.checkpoint import MemoryCheckpointer
 from openakita.runtime.models import NodeType, NodeV2, OrgV2
-from openakita.runtime.orgs import get_default_store, reset_default_store
+from openakita.orgs import get_default_store, reset_default_store
 from openakita.runtime.supervisor import FinalOutcome, SupervisorBrain
 
 

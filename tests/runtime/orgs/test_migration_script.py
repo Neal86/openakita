@@ -89,7 +89,7 @@ def test_apply_idempotent_after_first_run(tmp_path: Path) -> None:
 
 def test_collision_skips_source_no_data_loss(tmp_path: Path) -> None:
     # Pre-plant the target slug so the rename collides.
-    from openakita.runtime.orgs._slug import slugify_template_id
+    from openakita.orgs._slug import slugify_template_id
 
     legacy = "内容运营团队"
     target_slug = slugify_template_id(legacy)

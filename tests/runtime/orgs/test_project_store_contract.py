@@ -41,12 +41,12 @@ from pathlib import Path
 
 import pytest
 
-from openakita.runtime.orgs.project_models import (
+from openakita.orgs.project_models import (
     OrgProject,
     ProjectTask,
     TaskStatus,
 )
-from openakita.runtime.orgs.project_store import (
+from openakita.orgs.project_store import (
     JsonProjectStore,
     ProjectStoreProtocol,
     SqliteProjectStore,

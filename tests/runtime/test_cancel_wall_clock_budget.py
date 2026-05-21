@@ -20,7 +20,7 @@ Determinism:
 * :class:`_MockBrain` returns within microseconds so the
   wall-clock budget is dominated by the cancel pipeline, not
   the LLM mock. The brain satisfies
-  :class:`openakita.runtime.orgs.command_service.BrainProtocol`
+  :class:`openakita.orgs.command_service.BrainProtocol`
   structurally.
 * :class:`_StubRuntime` is a hand-rolled
   :class:`CommandRuntimeProtocol` impl that tracks a
@@ -46,8 +46,8 @@ from typing import Any
 
 import pytest
 
-from openakita.runtime.orgs.command_models import OrgCommandRequest
-from openakita.runtime.orgs.command_service import OrgCommandService
+from openakita.orgs.command_models import OrgCommandRequest
+from openakita.orgs.command_service import OrgCommandService
 
 # ---------------------------------------------------------------------------
 # SLA budgets (ADR-0013)

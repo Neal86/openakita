@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`openakita.runtime.orgs.store`.
+"""Unit tests for :mod:`openakita.orgs.store`.
 
 Cover the persistence layer directly so the HTTP-level CRUD tests
 under ``tests/api/test_orgs_v2.py`` can focus on contract / status-
@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from openakita.runtime.models import OrgStatus, OrgV2, new_org_id
-from openakita.runtime.orgs.store import JsonOrgStore, OrgNotFound
+from openakita.orgs.store import JsonOrgStore, OrgNotFound
 
 
 def _mk_org(name: str = "Test", org_id: str | None = None) -> OrgV2:

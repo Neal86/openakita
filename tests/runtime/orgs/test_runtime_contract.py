@@ -1,7 +1,7 @@
 """Contract suite for v2 OrgRuntime (P-RC-9 P9.6gamma).
 
 Pins the public surface of
-:class:`openakita.runtime.orgs.runtime.OrgRuntime` and the
+:class:`openakita.orgs.runtime.OrgRuntime` and the
 ~10 Protocol contracts it composes against the seven
 sibling managers shipped in P9.6alpha-beta. Mirror the
 P9.5d :class:`OrgManager` contract suite layout (16
@@ -30,18 +30,18 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from openakita.runtime.orgs._runtime_agent_pipeline import (
+from openakita.orgs._runtime_agent_pipeline import (
     AgentBuilderProtocol,
     AgentCache,
     AgentSpec,
 )
-from openakita.runtime.orgs._runtime_dispatch import (
+from openakita.orgs._runtime_dispatch import (
     TRACKER_CANCELLED,
     TRACKER_RUNNING,
     CommandDispatchManager,
 )
-from openakita.runtime.orgs.command_service import CommandRuntimeProtocol
-from openakita.runtime.orgs.runtime import (
+from openakita.orgs.command_service import CommandRuntimeProtocol
+from openakita.orgs.runtime import (
     EventBusProtocol,
     NodeLifecycleProtocol,
     OrgRuntime,

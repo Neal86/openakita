@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from openakita.runtime.orgs.manager import OrgManager
+from openakita.orgs.manager import OrgManager
 
 
 @pytest.fixture
@@ -31,7 +31,7 @@ def test_save_as_template_with_cjk_name_yields_ascii_id(tmp_manager: OrgManager)
     # Determinism: the slug is a deterministic function of the org name.
     # We verify directly via the helper rather than create two orgs with
     # the same name (the manager enforces a name-uniqueness invariant).
-    from openakita.runtime.orgs._slug import slugify_template_id
+    from openakita.orgs._slug import slugify_template_id
 
     assert slugify_template_id("内容运营团队") == tid
 

@@ -34,14 +34,14 @@ from pathlib import Path
 
 import pytest
 
-from openakita.runtime.orgs.blackboard import (
+from openakita.orgs.blackboard import (
     MAX_ORG_MEMORIES,
     BlackboardBackendProtocol,
     JsonFileBlackboardBackend,
     OrgBlackboard,
     SqliteBlackboardBackend,
 )
-from openakita.runtime.orgs.memory_models import (
+from openakita.orgs.memory_models import (
     MemoryScope,
     MemoryType,
     OrgMemoryEntry,

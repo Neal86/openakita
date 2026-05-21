@@ -16,8 +16,8 @@ from pathlib import Path
 import pytest
 
 from openakita.runtime.models import OrgV2, new_org_id
-from openakita.runtime.orgs.sqlite_store import SqliteOrgStore
-from openakita.runtime.orgs.store import JsonOrgStore, OrgNotFound
+from openakita.orgs.sqlite_store import SqliteOrgStore
+from openakita.orgs.store import JsonOrgStore, OrgNotFound
 
 # Each "backend factory" returns a freshly opened store rooted under
 # `tmp_path`. The closer is called by the fixture so we exercise the

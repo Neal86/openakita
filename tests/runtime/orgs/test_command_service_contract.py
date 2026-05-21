@@ -1,7 +1,7 @@
 """Contract suite for v2 OrgCommandService (P-RC-9 P9.4d).
 
 The contract pins the public surface of
-``openakita.runtime.orgs.command_service.OrgCommandService``
+``openakita.orgs.command_service.OrgCommandService``
 against a single in-memory test-double backend
 (``OrgCommandService`` has no JSON/SQLite split -- the
 service is volatile orchestration on top of three injected
@@ -37,14 +37,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openakita.runtime.orgs.command_models import (
+from openakita.orgs.command_models import (
     OrgCommandConflict,
     OrgCommandError,
     OrgCommandRequest,
     OrgCommandSurface,
     OrgOutputScope,
 )
-from openakita.runtime.orgs.command_service import OrgCommandService
+from openakita.orgs.command_service import OrgCommandService
 
 # ---------------------------------------------------------------------------
 # Test doubles

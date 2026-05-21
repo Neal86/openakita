@@ -26,7 +26,7 @@ from openakita.runtime.models import (
     new_node_id,
     new_org_id,
 )
-from openakita.runtime.orgs import reset_default_store
+from openakita.orgs import reset_default_store
 
 
 @pytest.fixture(autouse=True)
@@ -91,7 +91,7 @@ def test_skipped_when_org_not_in_store() -> None:
 
 
 def test_routed_when_org_has_topology() -> None:
-    from openakita.runtime.orgs import get_default_store
+    from openakita.orgs import get_default_store
 
     org = _mk_org_with_topology()
     get_default_store().create(org)

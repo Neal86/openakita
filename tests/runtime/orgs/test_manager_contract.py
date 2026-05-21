@@ -1,7 +1,7 @@
 """Contract suite for v2 OrgManager (P-RC-9 P9.5d).
 
 The contract pins the public surface of
-``openakita.runtime.orgs.manager.OrgManager`` against the
+``openakita.orgs.manager.OrgManager`` against the
 single default ``_FilesystemOrgPersistence`` backend. The
 P9.2 ProjectStore / P9.1 Blackboard "two backends"
 parametrisation does not apply -- OrgManager has one
@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from openakita.runtime.orgs.manager import (
+from openakita.orgs.manager import (
     OrgManager,
     OrgNameConflictError,
 )

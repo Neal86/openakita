@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from openakita.runtime.orgs.manager import OrgManager
+from openakita.orgs.manager import OrgManager
 
 
 @pytest.fixture

@@ -1,4 +1,4 @@
-"""Tests for :class:openakita.runtime.orgs.sqlite_store.SqliteOrgStore.
+"""Tests for :class:openakita.orgs.sqlite_store.SqliteOrgStore.
 
 P-RC-3 commit P3.4. Independent of the shared contract suite
 (`test_store_contract.py`); these cases focus on SQLite-specific
@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from openakita.runtime.models import OrgV2, new_org_id
-from openakita.runtime.orgs.sqlite_store import OrgNotFound, SqliteOrgStore
+from openakita.orgs.sqlite_store import OrgNotFound, SqliteOrgStore
 
 
 def _mk_org(name: str = "Test", org_id: str | None = None) -> OrgV2:

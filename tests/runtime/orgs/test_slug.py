@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from openakita.runtime.orgs._slug import slugify_template_id
+from openakita.orgs._slug import slugify_template_id
 
 
 def test_ascii_passthrough_with_kebab_case():

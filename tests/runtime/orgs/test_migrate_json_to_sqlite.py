@@ -19,8 +19,8 @@ sys.modules["_migrate_json_sqlite"] = _module
 _spec.loader.exec_module(_module)
 
 from openakita.runtime.models import OrgV2, new_org_id  # noqa: E402
-from openakita.runtime.orgs.sqlite_store import SqliteOrgStore  # noqa: E402
-from openakita.runtime.orgs.store import JsonOrgStore  # noqa: E402
+from openakita.orgs.sqlite_store import SqliteOrgStore  # noqa: E402
+from openakita.orgs.store import JsonOrgStore  # noqa: E402
 
 
 def _seed_json(path: Path, n: int = 3) -> list[str]:

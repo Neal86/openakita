@@ -169,3 +169,39 @@ current_phase: P-RC-10
 | commit hash | phase | title | LOC delta | tests delta | ADR refs |
 |---|---|---|---|---|---|
 | _this commit_ | P-RC-10 P10.4 | test(sentinel-9): P10.4 reverse Test 2 polarity (ban openakita.runtime.orgs.* in src/; whitelist shim) [P-RC-10 P10.4] | +90 / -189 (Test 2 + helpers + module docstring rewrite; Test 1 byte-untouched per SHA-region check) + ~30 ledger | 262 parity+contracts (restored from 261) / 192 runtime-orgs (unchanged) | ADR-0011 (subsystem decomposition; no Protocol change); ADR-0015 (308 shim retirement -- OUT-OF-SCOPE; byte-untouched) |
+
+## P10.3b -- Sweep ``tests/runtime/`` import sites to canonical ``openakita.orgs``
+
+> **Sub-phase status (2026-05-21, P10.3b LANDED)**: Mechanical
+> 1:1 prefix swap of every ``from|import openakita.runtime.orgs``
+> import line under ``tests/runtime/`` to the canonical
+> ``openakita.orgs`` path, plus the 7 Sphinx/docstring string
+> references that name the canonical class/module location. 
+> **37 sites across 18 files** (30 import-line rewrites + 7
+> docstring string rewrites): ``tests/runtime/orgs/`` 13 files /
+> 28 sites (test_blackboard_contract 2, test_command_service_contract
+> 3, test_manager_contract 2, test_migrate_json_to_sqlite 2,
+> test_migration_script 1, test_node_scheduler_contract 3,
+> test_project_store_contract 2, test_runtime_contract 5,
+> test_slug 1, test_sqlite_store 2, test_store_contract 2,
+> test_template_alias 1, test_template_slug_integration 2),
+> ``tests/runtime/`` (top-level) 5 files / 9 sites
+> (test_cancel_wall_clock_budget 3, test_channel_routing 2,
+> test_channel_routing_dispatch 1, test_migrate_orgs_to_v2 1,
+> test_orgs_store 2). RECON section 2 projected ~30 sites /
+> ~22 files for this cluster; observed 30 import sites / 18
+> files (-4 files; RECON file-count drift only -- no missed
+> sites). 1:1 byte-equivalent semantics; ``ruff`` not invoked
+> (no import order or ordering change since the rewrite is a
+> pure prefix shorten that preserves alphabetic position).
+> DeprecationWarning emission from ``tests/runtime/`` paths
+> drops to 0 (was 1 from ``test_blackboard_contract.py:37``).
+> Slice green: 262 parity+contracts / 192 runtime-orgs (==
+> baseline). No source under ``src/openakita/`` touched; the
+> P10.2 shim ``src/openakita/runtime/orgs/__init__.py`` keeps
+> emitting its DeprecationWarning whenever future code imports
+> the legacy path -- 0 such callers remain in ``tests/runtime/``.
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-10 P10.3b | refactor(tests/runtime): P10.3b sweep openakita.runtime.orgs imports to canonical openakita.orgs (30 sites / 18 files) [P-RC-10 P10.3b] | +37 / -37 (mechanical prefix swap: 30 import lines + 7 docstring strings) + ~35 ledger row | 262 parity+contracts (unchanged) / 192 runtime-orgs (unchanged) | ADR-0011 (subsystem decomposition; no Protocol change) |

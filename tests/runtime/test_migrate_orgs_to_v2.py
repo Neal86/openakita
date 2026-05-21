@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from openakita.runtime.orgs import reset_default_store
+from openakita.orgs import reset_default_store
 from openakita.runtime.templates import GLOBAL_REGISTRY
 
 # Load the script as a module so we can call its helpers directly
