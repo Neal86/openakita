@@ -16,9 +16,6 @@ from typing import Any
 
 from anthropic.types import Message as AnthropicMessage
 from anthropic.types import MessageParam, ToolParam
-from anthropic.types import TextBlock as AnthropicTextBlock
-from anthropic.types import ToolUseBlock as AnthropicToolUseBlock
-from anthropic.types import Usage as AnthropicUsage
 
 from ..config import settings
 from ..llm.client import LLMClient
@@ -32,7 +29,6 @@ from ..llm.types import (
     ImageContent,
     LLMResponse,
     Message,
-    StopReason,
     TextBlock,
     ThinkingBlock,
     Tool,
@@ -41,6 +37,11 @@ from ..llm.types import (
     VideoBlock,
     VideoContent,
 )
+from ..runtime.llm import (
+    CompilerCircuitBreaker,
+    EndpointFailoverView,
+    response_to_anthropic_message,
+)
 from .token_tracking import (
     TokenTrackingContext,
     reset_tracking_context,
@@ -48,12 +49,6 @@ from .token_tracking import (
 )
 from .token_tracking import (
     record_usage as _record_token_usage,
-)
-
-from ..runtime.llm import (
-    CompilerCircuitBreaker,
-    EndpointFailoverView,
-    response_to_anthropic_message,
 )
 
 logger = logging.getLogger(__name__)

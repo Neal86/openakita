@@ -389,37 +389,10 @@ def _compact_cached_tool_content(tool_name: str, content: str) -> str:
 # internals patched in P-RC-5). See runtime/state_graph/guards/tool_filters.py
 # for the canonical implementations.
 from ..runtime.state_graph.guards.tool_filters import (
-    CHAT_INTENT_CORE_TOOLS as _CHAT_INTENT_CORE_TOOLS,
-)
-from ..runtime.state_graph.guards.tool_filters import (
-    SHELL_WRITE_PATTERNS as _SHELL_WRITE_PATTERNS,
-)
-from ..runtime.state_graph.guards.tool_filters import (
-    filter_tools_by_intent as _filter_tools_by_intent,
-)
-from ..runtime.state_graph.guards.tool_filters import (
     filter_tools_by_mode as _filter_tools_by_mode,
 )
 from ..runtime.state_graph.guards.tool_filters import (
-    get_mode_ruleset as _get_mode_ruleset,
-)
-from ..runtime.state_graph.guards.tool_filters import (
-    is_shell_write_command as _is_shell_write_command,
-)
-from ..runtime.state_graph.guards.tool_filters import (
     should_block_tool as _should_block_tool,
-)
-from .permission import (
-    ASK_MODE_RULESET,
-    COORDINATOR_MODE_RULESET,
-    DEFAULT_RULESET,
-    PLAN_MODE_RULESET,
-)
-from .permission import (
-    Ruleset as PermissionRuleset,
-)
-from .permission import (
-    disabled as permission_disabled,
 )
 
 
@@ -473,33 +446,10 @@ from openakita.runtime.state_graph.guards._text_patterns import (  # noqa: E402
 
 # Extracted to runtime/state_graph/guards/_text_patterns.py (P-RC-5 P5.2);
 # re-exported here under the legacy private name for backward compat.
-from openakita.runtime.state_graph.guards._text_patterns import (  # noqa: E402
-    source_tag_re as _get_source_tag_re,
-)
-
 # Extracted to runtime/state_graph/guards/_verb_tool_map.py (P-RC-5 P5.5);
 # re-exported here under the legacy private names for backward compat.
-from openakita.runtime.state_graph.guards._verb_tool_map import (  # noqa: E402
-    CLAIMED_TOOL_TO_FRAGMENTS as _CLAIMED_TOOL_TO_FRAGMENTS,
-)
-from openakita.runtime.state_graph.guards._verb_tool_map import (
-    VERB_TO_TOOL_FRAGMENTS as _VERB_TO_TOOL_FRAGMENTS,
-)
-
 # Extracted to runtime/state_graph/guards/conversation_state.py (P-RC-5 P5.7);
 # re-exported here under the legacy private names for backward compat.
-from openakita.runtime.state_graph.guards.conversation_state import (  # noqa: E402
-    HARD_USER_BLOCKER_TOOL_MARKERS as _HARD_USER_BLOCKER_TOOL_MARKERS,
-)
-from openakita.runtime.state_graph.guards.conversation_state import (
-    RECOVERABLE_TOOL_ERROR_MARKERS as _RECOVERABLE_TOOL_ERROR_MARKERS,
-)
-from openakita.runtime.state_graph.guards.conversation_state import (
-    USER_BLOCKED_ACTIONS as _USER_BLOCKED_ACTIONS,
-)
-from openakita.runtime.state_graph.guards.conversation_state import (
-    USER_BLOCKED_MARKERS as _USER_BLOCKED_MARKERS,
-)
 from openakita.runtime.state_graph.guards.conversation_state import (
     has_recoverable_tool_issue as _has_recoverable_tool_issue,
 )
@@ -509,13 +459,6 @@ from openakita.runtime.state_graph.guards.conversation_state import (
 
 # Extracted to runtime/state_graph/guards/recap_context.py (P-RC-5 P5.4);
 # re-exported here under the legacy private name for backward compat.
-from openakita.runtime.state_graph.guards.recap_context import (  # noqa: E402
-    RECAP_NEAR_RE as _RECAP_NEAR_RE,
-)
-from openakita.runtime.state_graph.guards.recap_context import (
-    is_recap_context as _is_recap_context,
-)
-
 # Extracted to runtime/state_graph/guards/source_tag.py (P-RC-5 P5.2);
 # re-exported here under the legacy private name for backward compat.
 from openakita.runtime.state_graph.guards.source_tag import (  # noqa: E402
@@ -524,10 +467,6 @@ from openakita.runtime.state_graph.guards.source_tag import (  # noqa: E402
 
 # Extracted to runtime/state_graph/guards/tool_failure_ack.py (P-RC-5 P5.3);
 # re-exported here under the legacy private name for backward compat.
-from openakita.runtime.state_graph.guards.tool_failure_ack import (  # noqa: E402
-    FAILURE_ACKNOWLEDGE_EN as _FAILURE_ACKNOWLEDGE_EN,
-)
-
 # 工具失败 vs 助手乐观措辞 一致性检测（参考 OpenClaw MUTATING_FAILURE_ACTION_PATTERN）。
 #
 # 设计动机：现有 _check_source_tag_consistency 只检"声明 [来源:工具] 但未调工具"；
@@ -544,10 +483,6 @@ from openakita.runtime.state_graph.guards.tool_failure_ack import (  # noqa: E40
 #
 # Extracted to runtime/state_graph/guards/tool_failure_ack.py (P-RC-5 P5.3);
 # re-exported here under the legacy private name for backward compat.
-from openakita.runtime.state_graph.guards.tool_failure_ack import (  # noqa: E402
-    FAILURE_ACKNOWLEDGE_ZH as _FAILURE_ACKNOWLEDGE_ZH,
-)
-
 # Extracted to runtime/state_graph/guards/tool_failure_ack.py (P-RC-5 P5.3);
 # re-exported here under the legacy private name for backward compat.
 from openakita.runtime.state_graph.guards.tool_failure_ack import (  # noqa: E402
@@ -556,14 +491,8 @@ from openakita.runtime.state_graph.guards.tool_failure_ack import (  # noqa: E40
 
 # Extracted to runtime/state_graph/guards/tool_failure_ack.py (P-RC-5 P5.3);
 # re-exported here under the legacy private name for backward compat.
-from openakita.runtime.state_graph.guards.tool_failure_ack import (  # noqa: E402
-    successful_tool_names as _successful_tool_names,
-)
 from openakita.runtime.state_graph.guards.unbacked_action import (  # noqa: E402
     action_claim_re as _get_action_claim_re,
-)
-from openakita.runtime.state_graph.guards.unbacked_action import (
-    extract_unbacked_verbs as _extract_unbacked_verbs,
 )
 from openakita.runtime.state_graph.guards.unbacked_action import (
     guard_unbacked_action_claim as _guard_unbacked_action_claim,
@@ -7953,7 +7882,6 @@ class ReasoningEngine:
         典型特征：响应很短，包含"正在生成"、"稍等"等进度描述，
         但没有任何实际的执行结果或完整内容。
         """
-        import re
 
         _text = (text or "").strip()
         if len(_text) > 500:
@@ -7976,7 +7904,6 @@ class ReasoningEngine:
         典型场景：语音识别后确认识别结果、复述执行计划等待确认。
         这类回复不应触发 ForceToolCall 重试——模型是有意征询用户意见。
         """
-        import re
 
         _text = text.strip()
         if len(_text) < 10:

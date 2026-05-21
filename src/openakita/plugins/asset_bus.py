@@ -26,7 +26,7 @@ import json
 import logging
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -55,11 +55,11 @@ CREATE INDEX IF NOT EXISTS idx_asset_bus_expires ON assets_bus(expires_at);
 
 
 def _iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _iso_at(epoch_seconds: float) -> str:
-    return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).isoformat(
+    return datetime.fromtimestamp(epoch_seconds, tz=UTC).isoformat(
         timespec="seconds"
     )
 
