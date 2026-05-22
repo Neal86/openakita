@@ -490,3 +490,48 @@ current_phase: P-RC-10
 | commit hash | phase | title | LOC delta | tests delta | ADR refs |
 |---|---|---|---|---|---|
 | _this commit_ | P-RC-10 P10.5b | test(api/contracts): P10.5b clear deferred nit P9.7-B -- hoist ``_async_return`` + ``_async_raise`` helpers to conftest [P-RC-10 P10.5b] | +33 / -39 across 5 files (net -6; conftest +27, dispatch -11, ops -11, nodes -4, projects -7) + ~36 ledger row | 262 parity+contracts (unchanged; 184 / 184 contract cases) / 192 runtime-orgs (unchanged; backend untouched) | ADR-0014 (per-shard soft-cap revision; this commit extracts shared fixtures per the soft-cap exceedance disposition, charter section 1.3 second bullet) |
+
+
+## P10.5c -- close deferred nit epsilon-O1 (5 strategic v2 contract cases)
+
+> **Sub-phase status (2026-05-22, P10.5c LANDED)**: five strategic
+> v2 contract cases added to
+> ``tests/api/contracts/test_orgs_v2_contracts_dispatch.py``. Nit
+> epsilon-O1 (from ``docs/revamp/P-RC-9-P9.9-COVERAGE-AUDIT.md``
+> section 3 row O1) covered the v1 ``test_plan_features.py``
+> (73 cases / 1 042 LOC) which exercised orchestration
+> plan-feature toggles end-to-end against ``orgs/runtime.py``.
+> Per charter section 1.3 third bullet, P10.5c does NOT
+> mechanically re-enumerate the 73 v1 toggles -- instead it
+> picks 5 strategic v2 contract cases targeting the two highest-
+> value scenario families the charter calls out:
+>
+> * **State-machine edges** (3 cases): illegal lifecycle
+>   transitions on B35 / B36 / B37 sharing the ValueError
+>   -> HTTP 400 pathway through ``_call_lifecycle``:
+>   ``test_b35_stop_org_400_on_illegal_transition``,
+>   ``test_b36_pause_org_400_on_illegal_transition``,
+>   ``test_b37_resume_org_400_on_illegal_transition``.
+>   B34 start already had its 400-on-ValueError pin
+>   (``test_b34_start_org_400_on_value_error``); this trio
+>   closes the symmetry across all four lifecycle verbs.
+> * **Cancel-during-plan body invariants** (2 cases):
+>   POST .../cancel CancelRequest validation:
+>   ``test_b40_cancel_with_reason_body_accepted`` (optional
+>   reason field reaches happy-path returning the cancelled
+>   envelope with the same reason) +
+>   ``test_b40_cancel_422_on_extra_body_field`` (Pydantic
+>   ``extra="forbid"`` rejects unexpected body keys).
+>
+> 5 / 5 new cases pass; narrow-slice contract collection bumps
+> from 184 -> 189 total and the parity+contracts slice grows
+> from 262 -> 267 passed. The runtime-orgs slice (192) is
+> unchanged. The 5 cases pin assertion *shapes* (not literal
+> v1 strings) per the audit row O1 "scenario coverage via
+> structural contract" stance; future v1-style end-to-end
+> regression vectors will be ported only on demand if a real
+> bug surfaces post-merge.
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-10 P10.5c | test(api/contracts): P10.5c clear deferred nit epsilon-O1 -- add 5 strategic v2 contract cases (state-machine edges + cancel-during-plan body invariants) [P-RC-10 P10.5c] | +71 / -0 (dispatch.py 192 -> 263; 5 new cases + 2 section header banners) + ~37 ledger row | 267 parity+contracts (262 -> 267; **+5 legitimate from new contract cases**) / 192 runtime-orgs (unchanged; backend untouched) | ADR-0011 (subsystem decomposition; v2 lifecycle + cancel exercise the OrgRuntime / OrgCommandService protocols that replaced v1 ``orgs/runtime.py`` toggles) |

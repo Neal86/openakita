@@ -64,6 +64,45 @@ def test_b37_resume_org_happy(mint_app: FastAPI, mint_client: TestClient) -> Non
 
 
 # ---------------------------------------------------------------------------
+# State-machine edges (P-RC-10 P10.5c epsilon-O1 strategic ports):
+# illegal lifecycle transitions on B35 / B36 / B37 share the same
+# ValueError -> HTTP 400 pathway through ``_call_lifecycle``, but each
+# verb's mock is wired separately and merits its own contract pin.
+# Mirrors a slice of v1 ``test_plan_features.py`` (73 cases) which
+# exercised these transitions end-to-end against ``orgs/runtime.py``.
+# ---------------------------------------------------------------------------
+
+
+def test_b35_stop_org_400_on_illegal_transition(
+    mint_app: FastAPI, mint_client: TestClient
+) -> None:
+    mint_app.state.org_runtime.stop_org = _async_raise(ValueError("Cannot stop dormant org"))
+    resp = mint_client.post("/api/v2/orgs/o1/stop")
+    assert resp.status_code == 400
+    assert "dormant" in resp.json()["detail"]
+
+
+def test_b36_pause_org_400_on_illegal_transition(
+    mint_app: FastAPI, mint_client: TestClient
+) -> None:
+    mint_app.state.org_runtime.pause_org = _async_raise(ValueError("Org already paused"))
+    resp = mint_client.post("/api/v2/orgs/o1/pause")
+    assert resp.status_code == 400
+    assert "already paused" in resp.json()["detail"]
+
+
+def test_b37_resume_org_400_on_illegal_transition(
+    mint_app: FastAPI, mint_client: TestClient
+) -> None:
+    mint_app.state.org_runtime.resume_org = _async_raise(
+        ValueError("Org not in paused state")
+    )
+    resp = mint_client.post("/api/v2/orgs/o1/resume")
+    assert resp.status_code == 400
+    assert "paused state" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
 # B38: submit command
 # ---------------------------------------------------------------------------
 
@@ -166,6 +205,38 @@ def test_b40_cancel_500_on_unhandled(mint_app: FastAPI, mint_client: TestClient)
     mint_app.state.org_command_service.cancel = _async_raise(RuntimeError("boom"))
     resp = mint_client.post("/api/v2/orgs/o1/commands/cmd_1/cancel")
     assert resp.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# Cancel-during-plan body invariants (P-RC-10 P10.5c epsilon-O1 strategic
+# ports): CancelRequest is ``extra="forbid"`` with an optional ``reason``
+# field. Two cases pin the body-validation envelope that v1 ``test_plan_
+# features.py`` covered end-to-end while a plan was in-flight.
+# ---------------------------------------------------------------------------
+
+
+def test_b40_cancel_with_reason_body_accepted(
+    mint_app: FastAPI, mint_client: TestClient
+) -> None:
+    mint_app.state.org_command_service.cancel = _async_return(
+        {"command_id": "cmd_1", "status": "cancelled", "reason": "timeout"}
+    )
+    resp = mint_client.post(
+        "/api/v2/orgs/o1/commands/cmd_1/cancel",
+        json={"reason": "timeout"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "cancelled"
+    assert body["reason"] == "timeout"
+
+
+def test_b40_cancel_422_on_extra_body_field(mint_client: TestClient) -> None:
+    resp = mint_client.post(
+        "/api/v2/orgs/o1/commands/cmd_1/cancel",
+        json={"reason": "timeout", "unexpected": True},
+    )
+    assert resp.status_code == 422
 
 
 # ---------------------------------------------------------------------------
