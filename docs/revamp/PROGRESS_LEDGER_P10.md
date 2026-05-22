@@ -757,3 +757,83 @@ current_phase: P-RC-10
 | commit hash | phase | title | LOC delta | tests delta | ADR refs |
 |---|---|---|---|---|---|
 | _this commit_ | P-RC-10 P10.6 | refactor(orgs): P10.6 remove openakita.runtime.orgs deprecation shim + tighten sentinel #9 whitelist [P-RC-10 P10.6] | -46 shim + net ~+30 sentinel (5-entry allowlist tuple + skip clause removed; dir-invariant assertion + new docstring blocks added) + ~+85 ledger row | 267 parity+contracts (unchanged) / 192 runtime-orgs (unchanged); sentinel #9 both tests pass post-tighten; adversarial inject FAIL-then-revert confirmed | ADR-0002 (v2 runtime architecture; shim was a transition aid only -- no architectural delta) |
+## P10.7a -- G-RC-10 final gate doc + epic closure (PROVISIONAL, pending merge-to-main)
+
+> **Sub-phase status (2026-05-22, P10.7a LANDED)**: Final
+> roll-up gate document for the P-RC-10 epic. Drafts
+> `docs/revamp/gates/G-RC-10.md` (8 numbered sections + a
+> sign-off footer; 276 LOC; under the 300-LOC charter
+> envelope) following the G-RC-9.md template. Rolls up
+> P10.0 .. P10.6 (17 in-phase commits + 1 charter
+> ratification = 18 P-RC-10 commits total; commit range
+> `52f8709a` .. `cea93777`).
+>
+> **Epic status snapshot at this commit's parent (`cea93777`)**:
+>
+> * **CHARTER section 0 goals (i)/(ii)/(iii)**: (i)
+>   namespace flatten **DELIVERED** (P10.1 atomic git mv +
+>   P10.3a..f sweeps + P10.6 shim removal); (ii) 5 deferred
+>   nits **DELIVERED** (P10.5a..e + roster sign-off P10.5f);
+>   (iii) merge-to-main planning **DEFERRED** to the
+>   upcoming P10.7b charter (out-of-scope here).
+> * **CHARTER section 5 acceptance (11 rows)**: 8 / 11
+>   SATISFIED at HEAD (rows 1-8); 3 / 11 DEFERRED to P10.7b
+>   (rows 9-11: Playwright e2e + final gate PASS + operator
+>   merge sign-off). Zero rows FAILED.
+> * **Sentinels (9 / 9 ACTIVE)**: 8 / 6 / 4 / 10 / 12 / 20 /
+>   3 / 3 / 2 = 68 collected parity cases; sentinel #9
+>   polarity reversed at P10.4 then whitelist emptied +
+>   dir-non-existence invariant added at P10.6.
+> * **Test evidence (this run)**: narrow slice
+>   `pytest tests/parity/orgs/ tests/api/contracts/
+>   tests/runtime/orgs/ -q` -> **459 passed in 57.06 s**
+>   (267 + 192; baseline byte-stable through every P-RC-10
+>   phase commit). Full suite (excl. `tests/e2e`):
+>   **6026 passed, 55 failed, 103 skipped, 5 xfailed,
+>   5 errors in 653.42 s** (10:53). Plus 2 collection-stage
+>   errors in `test_action_claim_*` ignored via `--ignore`
+>   (pre-existing `core`/`agent`/`llm` circular import; none
+>   of those files touched by P-RC-10).
+> * **Pre-existing failure carry-overs (NOT introduced by
+>   P-RC-10)**: 17 `test_org_setup_tool.py` (`tool_categories.py`
+>   deleted in P9.9eps-2b `90a7d77f`, never migrated --
+>   P-RC-11 candidate); 22 `state_graph/guards/*`
+>   (pre-existing core/agent/llm circular -- P-RC-11
+>   candidate); 3 `test_p97_alpha2_smoke` (308 redirect 503;
+>   shim hard-rule untouched -- v2.1.0 / ADR-0015); 4
+>   `test_policy_v2_*` (static-grep stale paths from an
+>   unrelated pre-P-RC-10 rename -- P-RC-11 candidate); 2
+>   `test_telegram_simple` (env / network `InvalidToken`); 5
+>   misc legacy unit failures; 3 errors `test_tool_filters` +
+>   2 collection errors `test_action_claim_*` (same
+>   circular family). **Total carry**: 65 cases /
+>   ~6 091 collected = 99.0% green; chain walk on each
+>   affected module confirms the touched files all have
+>   `git log -1 -- <path>` timestamps predating `52f8709a`
+>   (the charter expand). See G-RC-10.md section 5.2 for
+>   the full breakdown.
+> * **LOC tally (17 phase + 1 charter)**: ~+1 343 net
+>   (charter envelope ~+1 883; came in ~540 under).
+> * **What P10.7b (next worker, NOT this commit) will do**:
+>   mint `docs/revamp/MERGE_TO_MAIN_v2.md` (lift CHARTER
+>   section 4 skeleton); resolve v2.0.0 tag flow (option A
+>   move local tag vs option B cut fresh on main); document
+>   30-day rollback window with `git revert -m 1
+>   <merge-commit>` recipe; gate operator sign-off on a
+>   fresh 3x v2 IM canary + Playwright e2e pass on the
+>   pre-merge HEAD. P10.7b ratifies the plan only -- the
+>   actual `git merge` is a separate operator-driven step.
+>
+> Hard-rule compliance: only `docs/revamp/gates/G-RC-10.md`
+> (NEW; 276 LOC) + `docs/revamp/PROGRESS_LEDGER_P10.md`
+> (append; this block) modified. ZERO touch on source,
+> tests, sentinels, ADRs, CHARTER, RECON, the 308 redirect
+> shim, or any v2 production code. BOM-free tempfile via
+> .NET `System.Text.UTF8Encoding $false` API.
+>
+> Next: P10.7b (G-RC-10 verdict graduation +
+> `MERGE_TO_MAIN_v2.md` charter); separate worker / commit.
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-10 P10.7a | docs(revamp): P10.7a draft G-RC-10 final gate + close P-RC-10 ledger (PROVISIONAL pending merge) [P-RC-10 P10.7a] | +276 G-RC-10.md (NEW) + ~+76 ledger row = ~+352 docs-only | 459 narrow slice (267 + 192; unchanged) / 6026 full-suite passed + 65 pre-existing carry-over (zero P-RC-10 regressions) | ADR-0011 / ADR-0014 / ADR-0015 / ADR-0002 (informational; cross-referenced in G-RC-10 section 8 -- NO ADR file edits in this commit) |
