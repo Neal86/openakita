@@ -373,3 +373,27 @@ current_phase: P-RC-10
 | commit hash | phase | title | LOC delta | tests delta | ADR refs |
 |---|---|---|---|---|---|
 | _this commit_ | P-RC-10 P10.3f | docs(src/openakita): P10.3f sweep openakita.runtime.orgs docstring/comment refs in src/ to canonical openakita.orgs (12 sites / 11 files) [P-RC-10 P10.3f] | +12 / -12 (12 single-line prefix swaps incl. 1 semantic rewrite at orgs_v2_runtime_state.py:23) + ~20 ledger row | 262 parity+contracts (unchanged) / 192 runtime-orgs (unchanged; 0 runtime.orgs DeprecationWarning) | ADR-0011 (subsystem decomposition; no Protocol change); ADR-0015 (308 shim retirement -- OUT-OF-SCOPE; byte-untouched) |
+
+
+## P10.5d -- close deferred nit epsilon-O2 (monitor disposition)
+
+> **Sub-phase status (2026-05-22, P10.5d LANDED)**: docs-only
+> disposition entry. Nit epsilon-O2 (from
+> ``docs/revamp/P-RC-9-P9.9-COVERAGE-AUDIT.md`` section 3 row O2)
+> covered ``test_org_orchestration_fix.py`` (31 cases / 659 LOC)
+> and ``test_org_affinity_attach_fix.py`` (9 cases / 512 LOC),
+> regression-pin tests for specific v1 orchestration bug-fixes.
+> v1 src deletion at P9.9eta-2 closed the original regression
+> vectors; v2 ``OrgRuntime`` is a re-implementation that does
+> not share the bug-prone code paths the pins guarded. Per
+> P-RC-10 CHARTER section 1.3, P10.5d records the
+> charter-mandated "monitor and back-fill on regression"
+> disposition: NO test cases ported now; if a v2 orchestration
+> bug ships post-merge with a similar shape, port the assertion
+> shape (not text) into a fresh contract case in
+> ``tests/api/contracts/`` at that time. Ledger pointer is the
+> deliverable. No code edits; 262 / 192 baselines unchanged.
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-10 P10.5d | docs(revamp): P10.5d clear deferred nit epsilon-O2 -- record monitor + back-fill disposition for v1 regression-pin tests [P-RC-10 P10.5d] | +0 / -0 (ledger-only; ~28 lines of narrative + 1 table row) | 262 parity+contracts (unchanged) / 192 runtime-orgs (unchanged) | ADR-0011 (subsystem decomposition; v2 OrgRuntime re-implementation closes the v1 regression vectors structurally) |
