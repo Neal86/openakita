@@ -548,3 +548,66 @@ single-row summary table at the end.
 | commit hash | phase | title | LOC delta | tests delta | ADR refs |
 |---|---|---|---|---|---|
 | _this commit_ | P-RC-11 P11.2b | fix(core): P11.2b restore _is_recap_context + _get_mode_ruleset legacy re-exports in _reasoning_engine_legacy (clusters B + G; +25-27 passing tests) [P-RC-11 P11.2b] | +30 import lines + 4 comment + 1 blank in `src/openakita/core/_reasoning_engine_legacy.py` (single-name parenthesized `from X import Y as _Y` form mandated by ruff default isort; 10 aliases total: 2 data dicts + 5 callables from `tool_filters` + 1 from `recap_context` + 1 from `tool_failure_ack` + 1 from `unbacked_action`); ledger row not counted toward source LOC | +24 passed in cluster B narrow run (91 -> 115; 21 failed -> 0 failed, 3 errors -> 0 errors -- Cluster G subset cleared in the same run); narrow slice `459 / 459` unchanged; full-suite delta not measured this commit | ADR-0003 (ownership boundaries unchanged; pure backward-compat re-exports from `core.*_legacy` to `runtime.state_graph.guards.*`) -- informational, no ADR edits |
+
+
+## P11.6 ledger -- 2026-05-22
+
+> Cluster F (heterogeneous misc legacy debt) re-run post-P11.1 +
+> P11.2 + P11.2b + P11.3 + P11.4 + P11.5 shrank from the
+> recon-section-6 "5 candidates" roster down to `3` actual
+> failures in the post-clusters full-suite log:
+>
+> 1. `tests/component/test_memory_manager.py`
+>    `::TestMemoryManagerDelete::test_delete_nonexistent` --
+>    contract drift, NOT fixture drift. Post-v4.1 the SQLite
+>    store treats DELETE as idempotent: storage.delete_memory
+>    runs `DELETE FROM memories WHERE id = ?` then returns True
+>    regardless of rows-affected count (rows-affected is not
+>    surfaced through `unified_store.delete_semantic` ->
+>    `MemoryManager.delete_memory`). Test-only fix: assert the
+>    idempotent contract (returns True, row still absent after).
+>    Source contract intentional per the v4.1 docstring on
+>    `MemoryManager.delete_memory` (avoids "silently leaked
+>    rows for memories that lifecycle had written between the
+>    latest reload and now").
+> 2. `tests/unit/test_c23_security_confirm_decision_chain.py`
+>    `::TestPayloadIntegration::test_yield_points_include_decision_chain`
+>    -- same stale-path pattern as Cluster D: hard-coded
+>    `src/openakita/core/reasoning_engine.py` no longer exists
+>    post-flatten; repoint to `_reasoning_engine_legacy.py`.
+>    Verified both target strings (`"type": "security_confirm"`
+>    x2 and `"decision_chain": _pr.to_ui_chain()` x2) still
+>    live in the legacy shard.
+> 3. `tests/unit/test_c23_tool_intent_preview_ui_wiring.py`
+>    `::test_backend_still_emits_tool_intent_preview` -- same
+>    stale-path pattern: `src/openakita/core/tool_executor.py`
+>    -> `_tool_executor_legacy.py`. `_emit_tool_intent_previews`
+>    and `fire_event("tool_intent_preview", ...)` both still live
+>    in the legacy shard.
+>
+> `tests/unit/test_c17_audit_chain_hardening.py` (recon
+> section 6 candidate) was NOT in the post-clusters full-suite
+> failure list -- absorbed by P11.2 + P11.2b (the
+> reasoning-engine legacy aliases restore unblocked its
+> filelock+subprocess fork path); standalone re-run shows it
+> passing. The remaining `TestGetResources` cases were absorbed
+> by P11.1 (cluster A) as recon section 6 forecast.
+>
+> Verification: `pytest tests/component/test_memory_manager.py
+> tests/unit/test_c23_security_confirm_decision_chain.py
+> tests/unit/test_c23_tool_intent_preview_ui_wiring.py
+> tests/unit/test_c17_audit_chain_hardening.py -q --tb=line` ->
+> `46 passed` (was `43 passed / 3 failed` immediately after
+> P11.5; +3 passing). Narrow slice
+> `tests/parity/orgs/ + tests/api/contracts/ + tests/runtime/orgs/` =
+> `459 / 459 passed` unchanged.
+>
+> ZERO source / sentinel / ADR / gate / charter / recon edits;
+> only the 3 test files + this ledger row. No source touch was
+> needed outside `tests/` (the v4.1 idempotent contract for
+> `MemoryManager.delete_memory` is the prevailing source-side
+> truth; the test is what had drifted, not the source).
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-11 P11.6 | test(unit): P11.6 close cluster F residual legacy test failures (3 cases) [P-RC-11 P11.6] | +10 / -3 net +7 across 3 test files (memory_manager +8/-1 contract update + comment, c23_security_confirm +1/-1 path, c23_tool_intent_preview +1/-1 path); well under `<= 50` task-brief budget; ledger row not counted toward test LOC | +3 passed (43 -> 46 in the c17/c23/memory_manager quartet); narrow slice `459 / 459` unchanged | none (contract reaffirmation only; no ADR edits) |

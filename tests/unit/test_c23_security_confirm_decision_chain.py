@@ -157,7 +157,7 @@ class TestPayloadIntegration:
     def test_yield_points_include_decision_chain(self) -> None:
         from pathlib import Path
 
-        src = Path("src/openakita/core/reasoning_engine.py").read_text(encoding="utf-8")
+        src = Path("src/openakita/core/_reasoning_engine_legacy.py").read_text(encoding="utf-8")
         # 应该在两处 security_confirm yield 都有 decision_chain
         confirm_yields = src.count('"type": "security_confirm"')
         chain_emits = src.count('"decision_chain": _pr.to_ui_chain()')
