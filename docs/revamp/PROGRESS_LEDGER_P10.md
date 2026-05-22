@@ -618,3 +618,45 @@ current_phase: P-RC-10
 | commit hash | phase | title | LOC delta | tests delta | ADR refs |
 |---|---|---|---|---|---|
 | _this commit_ | P-RC-10 P10.5a | refactor(orgs): P10.5a clear deferred nit M-2 -- shard split _runtime_agent_pipeline + _runtime_plugin_assets to satisfy ADR-0014 per-shard cap [P-RC-10 P10.5a] | net +86 LOC across 2 modified shards + 2 new shards (agent_pipeline 521 -> 286; agent_pipeline_executor NEW 272; plugin_assets 564 -> 351; plugin_assets_outputs NEW 262) + ~80 ledger row | 267 parity+contracts (unchanged) / 192 runtime-orgs (unchanged) | ADR-0014 (per-shard 400-LOC soft cap; this commit closes the M-2 deferral by bringing both oversized siblings under the cap via cohesive sibling-shard splits) |
+
+## P10.5f -- P10.5 deferred-nits roster sign-off (5/5 CLOSED)
+
+> **Sub-phase status (2026-05-22, P10.5f LANDED)**: Roster
+> sign-off ledger close marking the P10.5 deferred-nits
+> roster from P-RC-10 CHARTER section 1.3 as fully resolved.
+> All 5 nits inherited from G-RC-9.9 section 3 now carry an
+> explicit closure commit; P10.5 is therefore complete and
+> P10.6 (shim removal) is unblocked.
+>
+> Roster (commit references; all on `revamp/v3-orgs`, none
+> pushed):
+>
+> | nit id | severity | source audit | closure commit | strategy |
+> |---|---|---|---|---|
+> | M-2 | MED | G-RC-9.6 | `3331ed4f` (P10.5a) | shard split 2 oversized siblings into 4 sub-shards (435+476 LOC -> 286/272 + 351/262); ADR-0014 per-shard cap restored; re-export trailer keeps import paths byte-stable |
+> | P9.7-B | LOW | G-RC-9.7 | `6d4d869a` (P10.5b) | hoist `_async_return` + `_async_raise` helpers to `tests/api/contracts/conftest.py`; per-file soft cap restored |
+> | epsilon-O1 | OPT | G-RC-9.9 delta-1 | `0012a2e5` (P10.5c) | +5 strategic v2 contract cases (state-machine edges + cancel-during-plan body invariants); v2-shaped coverage, not literal v1 scenario port; baseline 262 -> 267 |
+> | epsilon-O2 | OPT | G-RC-9.9 delta-1 | `e65902b7` (P10.5d) | WONTFIX-UNLESS-REGRESSION disposition for `test_org_*_fix` regression-pins; backed by 267/192 baseline + monitor-and-backfill protocol if a v2 regression surfaces |
+> | GroupC | LOW | G-RC-9.8 | `7a8534a0` (P10.5e) | delete 3 stale v1 `/api/orgs/*` HTTP literals from `OrgEditorView.tsx`; empty sentinel #8 allowlist; v1 dead-path UI references removed |
+>
+> Aggregate net LOC across P10.5a-e: +86 source (M-2 split
+> overhead) + ~+220 tests (epsilon-O1 contract additions) +
+> ~-30 frontend (GroupC dead-code removal); ledger rows for
+> a/b/c/d/e plus this f close = ~+260 lines in
+> `PROGRESS_LEDGER_P10.md`. Test baseline 267 parity+contracts
+> / 192 runtime-orgs (267 is the new floor after epsilon-O1's
+> +5 cases at P10.5c).
+>
+> Acceptance against CHARTER section 4 row 4 ("All 5
+> deferred nits CLOSED with commit references in
+> PROGRESS_LEDGER_P10.md"): SATISFIED.
+>
+> Next: P10.6 (remove the `src/openakita/runtime/orgs/__init__.py`
+> shim) is unblocked by (a) P10.3 cluster grep-clean baseline
+> (only shim + sentinel still mention `openakita.runtime.orgs`)
+> and (b) this P10.5 roster closure. P10.7 (G-RC-10 final
+> gate + merge-to-main charter) follows P10.6.
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-10 P10.5f | docs(revamp): P10.5f close P10.5 deferred-nits roster sign-off (5/5 nits closed) [P-RC-10 P10.5f] | ledger only (~+45 lines) | 267 parity+contracts (unchanged) / 192 runtime-orgs (unchanged) | ADR-0014 (M-2 via P10.5a closes the cap-breach deferral) |
