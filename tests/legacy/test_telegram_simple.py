@@ -10,12 +10,19 @@ from pathlib import Path
 
 import pytest
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# P-RC-11 P11.5 / Cluster E: this is an integration module that
+# talks to the real Telegram Bot API. Gate on the dedicated
+# OPENAKITA_TEST_TELEGRAM_TOKEN opt-in env var so CI / dev
+# environments with a stale or placeholder TELEGRAM_BOT_TOKEN
+# do not trip telegram.InvalidToken at fixture time.
+if not os.environ.get("OPENAKITA_TEST_TELEGRAM_TOKEN"):
+    pytest.skip(
+        "requires OPENAKITA_TEST_TELEGRAM_TOKEN env var (real Telegram bot token)",
+        allow_module_level=True,
+    )
 
-# 这是一个“需要真实外部凭据”的集成测试模块：默认跳过，避免 CI/本地无凭据时报错。
-if not BOT_TOKEN:
-    pytest.skip("skip telegram integration tests (missing TELEGRAM_BOT_TOKEN)", allow_module_level=True)
+BOT_TOKEN = os.environ["OPENAKITA_TEST_TELEGRAM_TOKEN"]
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 
 @pytest.fixture

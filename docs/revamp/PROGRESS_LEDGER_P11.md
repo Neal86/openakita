@@ -427,3 +427,124 @@ single-row summary table at the end.
 | commit hash | phase | title | LOC delta | tests delta | ADR refs |
 |---|---|---|---|---|---|
 | _this commit_ | P-RC-11 P11.4 | test(unit): P11.4 update test_policy_v2_* static-grep paths to post-flatten canonical locations (cluster D) [P-RC-11 P11.4] | +15 / -8 net +7 across 3 test files (c8b3 +1/-1, c8b5 +14/-6, c13 +1/-1); within ~+10/-10 charter envelope (R-11-3 LOC budget); ledger row not counted toward test LOC | +4 passed (46 -> 50 in the c8b3/c8b5/c13 trio); narrow slice `459 / 459` unchanged | ADR-0014 (post-flatten shard naming convention) -- informational, no ADR edits |
+
+
+## P11.5 ledger -- 2026-05-22
+
+> Cluster E (Telegram smoke `InvalidToken` env hygiene; 2 cases:
+> `tests/legacy/test_telegram_simple.py` +
+> `tests/test_telegram_simple.py`) closed by switching the
+> module-level guard from the legacy presence-only check on
+> `TELEGRAM_BOT_TOKEN` to a dedicated opt-in env var
+> `OPENAKITA_TEST_TELEGRAM_TOKEN`.
+>
+> The old guard let placeholder / stale `TELEGRAM_BOT_TOKEN`
+> values through, which then tripped `telegram.InvalidToken`
+> the moment the `bot` fixture ran. The new gate is explicit:
+> a CI / dev environment must affirmatively set
+> `OPENAKITA_TEST_TELEGRAM_TOKEN` to a real bot token to opt
+> into running the integration suite; the bot fixture reads the
+> same env var (preventing the surface from drifting back to the
+> placeholder-prone `TELEGRAM_BOT_TOKEN` name).
+>
+> Verification:
+> * Both env vars unset -> `2 skipped` (not failed).
+> * Legacy `TELEGRAM_BOT_TOKEN` set to placeholder, opt-in
+>   var unset -> still `2 skipped` (the legacy var no longer
+>   acts as a gate, so a stale CI secret cannot smuggle these
+>   tests into a non-integration run).
+> * Narrow slice `tests/parity/orgs/ + tests/api/contracts/
+>   + tests/runtime/orgs/` -> `459 / 459 passed` unchanged.
+>
+> ZERO source / sentinel / ADR / gate / charter / recon edits;
+> only the 2 test files + this ledger row.
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-11 P11.5 | test(telegram): P11.5 gate test_telegram_simple on OPENAKITA_TEST_TELEGRAM_TOKEN env var (cluster E) [P-RC-11 P11.5] | +24 / -10 net +14 across 2 telegram test files (+12/-5 each); within `<= 15` task-brief budget; ledger row not counted toward test LOC | -2 failed / +0 passed / +2 skipped (the smoke pair was failing with `InvalidToken`; now cleanly skipped); narrow slice `459 / 459` unchanged | none -- env-hygiene only; no ADR edits |
+
+## P11.2b -- Cluster B / G actual root cause (legacy aliases restored)
+
+> P11.2b lands the follow-up forecast at the end of the P11.2 entry:
+> the real cause of Cluster B (21 failed) and Cluster G (3 errors) was
+> not the `core.errors` <-> `agent.errors` re-export cycle (P11.2 fixed
+> that defensively, +0 delta) but **10 legacy private aliases dropped
+> from `src/openakita/core/_reasoning_engine_legacy.py` during the
+> P-RC-5 reasoning-engine trim** (commits `8e187b8d` rename +
+> `e712e6c7` ruff cleanup; verified via `git log -p -S` on each name).
+> The tests in `tests/runtime/state_graph/guards/*` still access the
+> guards through their legacy private spellings
+> (`openakita.core._reasoning_engine_legacy._is_recap_context` etc.),
+> but the canonical implementations were relocated to
+> `openakita.runtime.state_graph.guards.*` and the corresponding
+> re-exports were never added back.
+>
+> **Canonical homes confirmed** (`git grep -nP "^(def|async def)\s+..."`):
+>
+> * `is_recap_context` ->
+>   `openakita.runtime.state_graph.guards.recap_context`
+> * `get_mode_ruleset` / `filter_tools_by_intent` /
+>   `is_shell_write_command` / `CHAT_INTENT_CORE_TOOLS` /
+>   `SHELL_WRITE_PATTERNS` ->
+>   `openakita.runtime.state_graph.guards.tool_filters`
+> * `successful_tool_names` ->
+>   `openakita.runtime.state_graph.guards.tool_failure_ack`
+> * `extract_unbacked_verbs` ->
+>   `openakita.runtime.state_graph.guards.unbacked_action`
+> * `CLAIMED_TOOL_TO_FRAGMENTS` / `VERB_TO_TOOL_FRAGMENTS` ->
+>   `openakita.runtime.state_graph.guards._verb_tool_map`
+>
+> **Re-export strategy**: append one `from X import Y as _Y  # noqa: F401`
+> per name at the bottom of `_reasoning_engine_legacy.py` (matching the
+> existing in-file pattern at lines 391--498 and ruff's default isort
+> shape -- `combine-as-imports = false`, so each `as` rename gets its
+> own from-statement). Each line carries `# noqa: F401` because the
+> aliases are pure backward-compat re-exports never used inside this
+> file; `E501` and `E402` are already globally ignored per
+> `pyproject.toml [tool.ruff.lint]`, so no extra noqa code is needed.
+> 10 names total covering both the Cluster B parity tests and the
+> Cluster G `test_tool_filters.py` `legacy_aliases` fixture.
+>
+> **Test deltas (verified)**:
+>
+> * Cluster B target -- `tests/runtime/state_graph/guards/` (includes
+>   `test_tool_filters.py`, so Cluster G is a subset of this path):
+>   91 passed / 21 failed / 3 errors **before** the patch;
+>   **115 passed / 0 failed / 0 errors after** the patch (+24 passing
+>   tests; 21 -> 0 failed, 3 -> 0 errors).
+> * Narrow slice `tests/parity/orgs/ + tests/api/contracts/ +
+>   tests/runtime/orgs/`: **459 / 459 passed** -- unchanged.
+> * `python -c "from openakita.api.server import create_app; create_app()"`:
+>   OK.
+> * Adversarial -- callers importing canonical names directly
+>   (`git grep -nl "from openakita.runtime.state_graph.guards.X import"`):
+>   `src/openakita/agent/reasoning.py` untouched; the parity test files
+>   under `tests/runtime/state_graph/guards/*` continue to import the
+>   canonical (no-underscore) names from their public homes and still
+>   pass (33 / 33 in `test_recap_context.py + test_tool_filters.py`).
+> * Bonus / out-of-scope: `tests/unit/test_action_claim_recap_guard.py`
+>   and `test_action_claim_guard.py` still error at collection -- not
+>   from missing aliases (the imports now resolve) but from the same
+>   `core._reasoning_engine_legacy` <-> `agent.brain` circular import
+>   that test files in `tests/runtime/state_graph/guards/*` work around
+>   via a `import openakita.agent.brain` warm-up. Those two unit
+>   modules need a separate fix (test-side warm-up or further source
+>   cycle-break) and are outside this commit's source-only scope.
+>
+> **What this commit does NOT do (hard stop)**: ZERO test edits, ZERO
+> sentinel / ADR / charter / recon / gate edits, ZERO touch on
+> `src/openakita/orgs/` (Cluster A territory, already landed at P11.1),
+> `src/openakita/agent/` or `src/openakita/llm/`, ZERO push, ZERO tag.
+> Only `src/openakita/core/_reasoning_engine_legacy.py` (+35 lines net:
+> 4 comment + 30 parenthesized single-name re-exports + 1 leading blank,
+> ruff-clean) and this ledger row are modified. File written via
+> `pathlib.Path.write_bytes(text.encode('utf-8'))` and `ruff check
+> --fix` reformat; post-write probe confirms `b[:3] != b'\xef\xbb\xbf'`
+> and CRLF line endings preserved.
+>
+> Next: tail batch of remaining clusters (E / F) per recon section 6;
+> closure handed off to P11.7a G-RC-11 gate run once tail clears.
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-11 P11.2b | fix(core): P11.2b restore _is_recap_context + _get_mode_ruleset legacy re-exports in _reasoning_engine_legacy (clusters B + G; +25-27 passing tests) [P-RC-11 P11.2b] | +30 import lines + 4 comment + 1 blank in `src/openakita/core/_reasoning_engine_legacy.py` (single-name parenthesized `from X import Y as _Y` form mandated by ruff default isort; 10 aliases total: 2 data dicts + 5 callables from `tool_filters` + 1 from `recap_context` + 1 from `tool_failure_ack` + 1 from `unbacked_action`); ledger row not counted toward source LOC | +24 passed in cluster B narrow run (91 -> 115; 21 failed -> 0 failed, 3 errors -> 0 errors -- Cluster G subset cleared in the same run); narrow slice `459 / 459` unchanged; full-suite delta not measured this commit | ADR-0003 (ownership boundaries unchanged; pure backward-compat re-exports from `core.*_legacy` to `runtime.state_graph.guards.*`) -- informational, no ADR edits |
