@@ -837,3 +837,73 @@ current_phase: P-RC-10
 | commit hash | phase | title | LOC delta | tests delta | ADR refs |
 |---|---|---|---|---|---|
 | _this commit_ | P-RC-10 P10.7a | docs(revamp): P10.7a draft G-RC-10 final gate + close P-RC-10 ledger (PROVISIONAL pending merge) [P-RC-10 P10.7a] | +276 G-RC-10.md (NEW) + ~+76 ledger row = ~+352 docs-only | 459 narrow slice (267 + 192; unchanged) / 6026 full-suite passed + 65 pre-existing carry-over (zero P-RC-10 regressions) | ADR-0011 / ADR-0014 / ADR-0015 / ADR-0002 (informational; cross-referenced in G-RC-10 section 8 -- NO ADR file edits in this commit) |
+
+## P10.7b -- Merge-to-main charter drafted (operator-gated)
+
+> **Sub-phase status (2026-05-22, P10.7b LANDED)**: Lifts the
+> P-RC-10 charter §4 skeleton to a first-class operator
+> charter at `docs/revamp/MERGE_TO_MAIN_v2.md` (NEW; 9 numbered
+> sections; 158 LOC; well under the 350-LOC charter envelope).
+> Captures the branch state at HEAD `bdf635ff` (`main` ancestor
+> `d456128b`; `0    378` ahead/behind commit ledger; 722 files
+> / +94 222 / -43 717 LOC diff stat); presents tag-flow option
+> A (move local `v2.0.0` from `6905ecd4` to the merge commit;
+> default) vs B (mint fresh `v2.0.0` on main, keep dev tag as
+> `v2.0.0-dev`); pins `git merge --no-ff` mechanics with the
+> explicit no-squash + no-rebase rules (the per-phase commit
+> trail is the audit substrate every G-RC-N gate cites by
+> hash); enumerates a 6-row pre-merge checklist (narrow slice
+> 459 / v2 IM canary 3x ±5% of 1.92 s baseline / Playwright
+> e2e / import-time clean with zero `openakita.runtime.orgs`
+> DeprecationWarning / sentinels #1..#9 green / G-RC-10
+> sign-off); ships an 11-bullet CHANGELOG seed for v2.0.0
+> (incl. the explicit "308 shim still ACTIVE in v2.0.0;
+> retires in v2.1.0 per ADR-0015" reminder); a one-liner
+> `git revert -m 1 <merge-hash>` rollback recipe with a
+> 30-day branch-retention window and a 3-regression escalation
+> threshold; the v2.0.0 / v2.0.1 / v2.1.0 / P-RC-11 milestone
+> ladder; a 4-row operator decision matrix (tag strategy /
+> merge timing / release notes wording / G-RC-10 PROVISIONAL
+> -> PASS sign-off); and the explicit clearance map showing
+> how G-RC-10 §2 DEFERRED rows 6 / 9 / 10 / 11 each get
+> SATISFIED.
+>
+> **What this commit does NOT do (hard stop)**: ZERO
+> `git merge`, ZERO `git tag`, ZERO `git push`, ZERO branch
+> switch. P10.7b is a docs-only ratification; the actual merge
+> is reserved for an operator-driven session that runs the
+> §3 checklist, signs §7 row 4, then executes §3
+> mechanics by hand. G-RC-10 verdict remains PROVISIONAL until
+> that operator action lands.
+>
+> **Hard-rule compliance**: only
+> `docs/revamp/MERGE_TO_MAIN_v2.md` (NEW; 158 LOC) +
+> `docs/revamp/PROGRESS_LEDGER_P10.md` (append; this block)
+> modified. ZERO touch on source, tests, sentinels, ADRs,
+> CHARTER, RECON, `gates/G-RC-10.md` (just landed at P10.7a --
+> do not re-edit), the 308 redirect shim
+> (`api/routes/_orgs_v2_legacy_redirects.py`), or any v2
+> production code. BOM-free tempfile via Python
+> `open(..., encoding='utf-8')` (no BOM by default).
+>
+> **P-RC-10 epic status post-P10.7b**: charter section 0 goal
+> (iii) "merge-to-main planning" is now DELIVERED (the charter
+> exists). G-RC-10 acceptance row 11 ("merge-to-main plan
+> ratified by operator") is the only remaining DEFERRED row
+> that this commit *advances* (the document is written; the
+> operator ratification step is the §7 sign-off action).
+> Rows 6 / 9 / 10 stay DEFERRED until operator runs the §3
+> checklist. Epic state: "fully drafted, awaiting operator
+> action".
+>
+> Next: operator-driven session -- run §3 pre-merge
+> checklist (459 narrow slice + 3x v2 IM canary + Playwright
+> e2e + import-time clean + sentinels), sign §7 row 4
+> (G-RC-10 PROVISIONAL -> PASS), then execute §3 merge
+> mechanics (`git checkout main && git merge --no-ff
+> revamp/v3-orgs ...`) and §2 tag mint. P-RC-10 epic seals
+> on the v2.0.0 tag landing on `main`.
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-10 P10.7b | docs(revamp): P10.7b draft merge-to-main charter for revamp/v3-orgs -> main (operator-gated) [P-RC-10 P10.7b] | +158 MERGE_TO_MAIN_v2.md (NEW) + ~+70 ledger row = ~+228 docs-only | unchanged (zero source / test edits in this commit) | ADR-0015 (308 shim retirement; respected as LOCKED -- shim NOT touched) + cross-refs to ADR-0011 / ADR-0014 / ADR-0002 (informational only; no ADR file edits) |
