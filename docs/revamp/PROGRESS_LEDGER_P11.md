@@ -226,3 +226,118 @@ single-row summary table at the end.
 | commit hash | phase | title | LOC delta | tests delta | ADR refs |
 |---|---|---|---|---|---|
 | _this commit_ | P-RC-11 P11.1 | feat(orgs): P11.1 restore openakita.orgs._runtime_tool_categories private shard (cluster A; +17-18 passing tests) [P-RC-11 P11.1] | +188 _runtime_tool_categories.py (NEW) + +9 tool_categories.py public shim (NEW) + ~+85 ledger row = ~+282 (charter envelope ~+155; banner + ledger row drove the overrun, body itself restored verbatim 172 LOC) | +18 passed (17 ``test_org_setup_tool.py`` Cluster A + 1 ``TestGetResources::test_returns_tool_categories`` absorbed from F); narrow slice 459 / 459 unchanged; backend boot OK | ADR-0011 (6-subsystem layout; new shard slots in cleanly) + ADR-0014 (per-shard soft cap; 188 LOC well within budget) -- both informational, no ADR edits |
+
+## P11.2 -- Cluster B / G structural fix (core.errors re-export cycle broken)
+
+> P11.2 lands the structural fix recommended by recon section 2.4
+> for the `core.errors` <-> `agent.errors` re-export cycle.
+> The cycle was the original carry-over diagnosis for Cluster B (22
+> failing tests in `tests/runtime/state_graph/guards/`) and Cluster
+> G (3 errors in `tests/runtime/state_graph/guards/test_tool_filters.py`
+> + 2 collection errors in the `tests/unit/test_action_claim_*_guard.py`
+> family).
+>
+> **Cycle diagnosis (verified by adversarial probe)**: `python -c
+> "import openakita.core._brain_legacy" ` reproduces the failing
+> import chain `core._brain_legacy -> llm.client -> core.errors ->
+> agent.errors -> agent.__init__ -> agent.brain -> core._brain_legacy`
+> exactly as recon predicted, raising `ImportError: cannot import name
+> 'Brain' from partially initialized module
+> 'openakita.core._brain_legacy'`.  A parallel cycle re-enters
+> `core.errors` mid-load through `agent.__init__ -> .core ->
+> core._agent_legacy -> .errors`.
+>
+> **Strategy chosen**: function-local imports (per task brief
+> preference over `TYPE_CHECKING`), applied at two cycle-closers:
+>
+> 1. `src/openakita/core/_brain_legacy.py`: the module-level
+>    `from ..llm.client import LLMClient` (line 21) is the closer for
+>    the brain branch.  Moved to four method-local imports inside the
+>    methods that actually instantiate or reference `LLMClient` --
+>    `__init__`, `_init_compiler_client`, `reload_compiler_client`,
+>    `think_lightweight_stream` (alongside the existing function-local
+>    `from .stream_accumulator import StreamAccumulator`).  Net +3 LOC.
+> 2. `src/openakita/core/errors.py`: the module-level
+>    `from openakita.agent.errors import UserCancelledError` (line 15)
+>    is the closer for the agent branch.  Rewritten as a PEP 562
+>    `__getattr__` (still a function-local import, just hosted inside
+>    the module-level `__getattr__` hook).  `core.errors` now loads
+>    without dragging in the `agent` package; `UserCancelledError` is
+>    resolved on first attribute access (and cached in `globals()`),
+>    preserving `core.errors.UserCancelledError is
+>    agent.errors.UserCancelledError` class identity.
+>
+> Both edits keep the ADR-0003 ownership boundary intact (`agent.errors`
+> remains canonical; `core.errors` remains a shim).  No re-home; no
+> behaviour change for any runtime caller.
+>
+> **Cycle status -- after fix**: `python -c
+> "import openakita.core._brain_legacy, openakita.llm.client,",
+> `openakita.core.errors, openakita.agent, openakita.agent.brain,`
+> `openakita.core._agent_legacy, openakita.core._reasoning_engine_legacy`
+> succeeds, and `core.errors.UserCancelledError is
+> agent.errors.UserCancelledError` returns `True`.
+>
+> **Test deltas (honest report)**:
+>
+> * Cluster B target -- `tests/runtime/state_graph/guards/`:
+>   91 passed / 21 failed / 3 errors **before** the patch;
+>   91 passed / 21 failed / 3 errors **after** the patch (set-identical
+>   failure list; verified by `Compare-Object` on sorted FAILED/ERROR
+>   lines from the two full-suite logs).
+> * Cluster G target -- `test_tool_filters.py` errors + the
+>   `test_action_claim_*_guard.py` collection errors: ignored from the
+>   delta run per task brief; the 3 `test_tool_filters.py` errors are
+>   the same 3 `AttributeError: module
+>   'openakita.core._reasoning_engine_legacy' has no attribute
+>   '_get_mode_ruleset'` setup errors before and after.
+> * Full suite (`pytest tests/ --ignore=tests/e2e
+>   --ignore=tests/unit/test_action_claim_guard.py
+>   --ignore=tests/unit/test_action_claim_recap_guard.py`):
+>   **33 failed, 6048 passed, 103 skipped, 6 deselected, 5 xfailed, 3
+>   errors** -- byte-identical to baseline.  Net pass delta = **0**.
+> * Narrow slice `tests/parity/orgs/ + tests/api/contracts/ +
+>   tests/runtime/orgs/`: **459 / 459 passed** -- unchanged from the
+>   P11.1 baseline.
+>
+> **Why the +0 test delta despite the cycle being real**: the cycle is
+> order-dependent.  It only fires when `core._brain_legacy` (or another
+> sibling) is imported *before* `agent.brain`.  In the pytest suite,
+> conftest fixtures and earlier collection load `openakita.agent`
+> first, so the cycle never triggers during test execution.  Recon
+> section 2.1 cites this as a hypothesis ("exposed every time a test
+> fixture imports ... _reasoning_engine_legacy or any sibling that
+> pulls openakita.agent early") but the empirical test-collection order
+> on the current branch does not match that pattern.  The cluster B / G
+> test failures still have a real root cause -- the legacy aliases
+> `_is_recap_context` and `_get_mode_ruleset` that the parity tests
+> import from `openakita.core._reasoning_engine_legacy` no longer
+> exist (verified by `git log -p` showing they were removed as part of
+> an earlier reasoning-engine slim-down).  Restoring those
+> module-level re-exports is a separate, follow-up unit of work
+> (out-of-scope for P11.2; touches the same legacy file but is a
+> different fix and a different test surface).
+>
+> **What this commit does NOT do (hard stop)**: ZERO touch on
+> `src/openakita/orgs/` (concurrent Cluster A worker territory per
+> the parallel-safety brief), ZERO test edits, ZERO sentinel / ADR /
+> charter / recon / gate edits, ZERO push, ZERO tag.  Only
+> `src/openakita/core/_brain_legacy.py` (+3 LOC net) and
+> `src/openakita/core/errors.py` (-1 module-level import +
+> ~15 LOC PEP 562 hook / docstring update; net ~+14 LOC) and this
+> ledger row are modified.  Both source files written via
+> `pathlib.Path.write_bytes(text.encode('utf-8'))` (no BOM,
+> CRLF preserved for `_brain_legacy.py` matching its original
+> line-ending); post-write probe confirms `b[:3] != b'\xef\xbb\xbf'`
+> for both.
+>
+> Next: parallel Cluster A worker continues; a separate follow-up
+> commit can restore the missing `_is_recap_context` /
+> `_get_mode_ruleset` legacy aliases to `_reasoning_engine_legacy.py`
+> to actually clear the Cluster B / G test failures (the cycle fix here
+> unblocks that work by removing a latent foot-gun that would otherwise
+> trip any future caller importing `core._brain_legacy` first).
+
+| commit hash | phase | title | LOC delta | tests delta | ADR refs |
+|---|---|---|---|---|---|
+| _this commit_ | P-RC-11 P11.2 | fix(core,agent,llm): P11.2 break core/agent/llm circular import (clusters B + G; +0 passing tests, cycle exposes pre-existing missing legacy aliases) [P-RC-11 P11.2] | +3 _brain_legacy.py (4 function-local imports - 1 module-level) + ~+14 errors.py (PEP 562 hook + docstring update - 1 eager import); ~+90 ledger row = ~+107 (charter envelope ~+10 source LOC respected; ledger row drove the overrun) | +0 passed (full-suite 6048 / 6048 byte-identical; narrow slice 459 / 459 unchanged; cluster B / G failures unchanged because their real root cause is missing legacy aliases `_is_recap_context` / `_get_mode_ruleset`, not the cycle -- recon section 2.1 hypothesis re-examined empirically) | ADR-0003 (`UserCancelledError` ownership stays at `agent.errors`; PEP 562 hook is a structural fix, not a re-home) -- informational, no ADR edits
