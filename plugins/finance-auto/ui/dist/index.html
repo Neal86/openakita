@@ -933,9 +933,176 @@
         );
       }
 
-      // commit 5 占位 ↓
+      // ─────────────────────────────────────────────────────────────────
+      //  Tab C：增值税申报表
+      //
+      //  POST /orgs/{id}/vat-declarations  （file + declaration_period）
+      //  GET  /orgs/{id}/vat-declarations
+      //
+      //  申报期间格式：YYYY-MM（金税四期月度），如 "2025-01"
+      // ─────────────────────────────────────────────────────────────────
       function VatTab({ orgId, toast }) {
-        return <ScaffoldNotice />;
+        const decls = useFetch(`/orgs/${orgId}/vat-declarations`, [orgId]);
+        const items = (decls.data && decls.data.declarations) || [];
+
+        // 默认申报期间：上个月（财务上传一般是申报上月）
+        const defaultPeriod = useMemo(() => {
+          const d = new Date();
+          d.setMonth(d.getMonth() - 1);
+          return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+        }, []);
+        const [declPeriod, setDeclPeriod] = useState(defaultPeriod);
+        const [uploading, setUploading] = useState(false);
+        const [lastResult, setLastResult] = useState(null);
+        const fileInputRef = useRef(null);
+
+        const upload = async (file) => {
+          if (!file) return;
+          if (!/\.xlsx$/i.test(file.name)) {
+            toast(`增值税申报表只接受 .xlsx，收到：${file.name}`, "err");
+            return;
+          }
+          if (!/^\d{4}-\d{2}$/.test(declPeriod)) {
+            toast("申报期间格式错误，应为 YYYY-MM（如 2025-01）", "err");
+            return;
+          }
+          setUploading(true);
+          setLastResult(null);
+          try {
+            const fd = new FormData();
+            fd.append("file", file);
+            fd.append("declaration_period", declPeriod);
+            const result = await api("POST", `/orgs/${orgId}/vat-declarations`, fd);
+            setLastResult({ ok: true, ...result });
+            toast(`已识别 · ${result.dialect || "通用模板"}（置信度 ${Math.round((result.confidence || 0) * 100)}%）`);
+            decls.reload();
+          } catch (e) {
+            setLastResult({ ok: false, error: e.message });
+            toast(`上传失败：${e.message}`, "err");
+          } finally {
+            setUploading(false);
+          }
+        };
+
+        return (
+          <>
+            <div className="card">
+              <h3 className="card-title">上传增值税及附加税费申报表</h3>
+              <p className="card-sub">
+                支持金税四期通用模板 .xlsx · 上传后自动识别省份方言（≥ 7 省）。
+              </p>
+
+              <div className="row cols-2">
+                <div>
+                  <label className="lbl">申报期间</label>
+                  <input
+                    className="field mono"
+                    value={declPeriod}
+                    onChange={(e) => setDeclPeriod(e.target.value.trim())}
+                    placeholder="2025-01"
+                    style={{ maxWidth: 160 }}
+                  />
+                  <div className="helper">YYYY-MM 格式 · 默认填上月（{defaultPeriod}）</div>
+                </div>
+                <div style={{ display: "flex", alignItems: "flex-end" }}>
+                  <button
+                    className="btn primary"
+                    onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                    disabled={uploading}
+                  >
+                    {uploading && <Spinner />}
+                    {uploading ? "上传中…" : "选择 .xlsx 文件"}
+                  </button>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".xlsx"
+                    style={{ display: "none" }}
+                    onChange={(e) => {
+                      const f = e.target.files && e.target.files[0];
+                      if (f) upload(f);
+                      e.target.value = "";
+                    }}
+                  />
+                </div>
+              </div>
+
+              {lastResult && lastResult.ok && (
+                <div className="upload-result ok mt-3">
+                  <div style={{ marginBottom: 6 }}>
+                    <strong>{lastResult.declaration_period}</strong> · {lastResult.dialect || "通用模板"}
+                    {lastResult.province && <> · 省份：{lastResult.province}</>}
+                    {" · "}置信度 {Math.round((lastResult.confidence || 0) * 100)}%
+                  </div>
+                  <div className="row cols-4 text-xs">
+                    <div><div className="text-muted">销项税</div><strong>{fmtMoney(lastResult.output_vat)}</strong></div>
+                    <div><div className="text-muted">进项税</div><strong>{fmtMoney(lastResult.input_vat)}</strong></div>
+                    <div><div className="text-muted">应纳税额</div><strong>{fmtMoney(lastResult.tax_payable)}</strong></div>
+                    <div><div className="text-muted">附加税合计</div><strong>{fmtMoney(lastResult.surtax_total)}</strong></div>
+                  </div>
+                  {lastResult.warnings && lastResult.warnings.length > 0 && (
+                    <div className="text-xs text-muted mt-2">
+                      解析告警：{lastResult.warnings.join("；")}
+                    </div>
+                  )}
+                </div>
+              )}
+              {lastResult && !lastResult.ok && (
+                <div className="upload-result err mt-3">解析失败：{lastResult.error}</div>
+              )}
+            </div>
+
+            <div className="card">
+              <div className="flex items-center justify-between mb-2">
+                <div>
+                  <h3 className="card-title">历史申报记录</h3>
+                  <p className="card-sub">按上传时间倒序。</p>
+                </div>
+                <button className="btn sm" onClick={decls.reload} disabled={decls.loading}>
+                  {decls.loading ? <Spinner /> : "刷新"}
+                </button>
+              </div>
+              <table className="tbl">
+                <thead>
+                  <tr>
+                    <th>上传时间</th>
+                    <th>期间</th>
+                    <th>省份 / 方言</th>
+                    <th className="num">销项税</th>
+                    <th className="num">进项税</th>
+                    <th className="num">应纳税额</th>
+                    <th className="num">附加税</th>
+                    <th>置信度</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {decls.loading && Array.from({ length: 2 }).map((_, i) => (
+                    <tr key={i}><td colSpan={8}><span className="skeleton" /></td></tr>
+                  ))}
+                  {!decls.loading && items.length === 0 && (
+                    <tr><td colSpan={8}><EmptyState title="还没有申报记录" /></td></tr>
+                  )}
+                  {!decls.loading && items.map((d) => (
+                    <tr key={d.id}>
+                      <td className="text-muted">{fmtTs(d.uploaded_at)}</td>
+                      <td className="mono">{d.declaration_period}</td>
+                      <td>
+                        {d.province || <span className="text-muted">未知</span>}
+                        {" / "}
+                        <span className="text-xs">{d.dialect}</span>
+                      </td>
+                      <td className="num">{fmtMoney(d.output_vat)}</td>
+                      <td className="num">{fmtMoney(d.input_vat)}</td>
+                      <td className="num">{fmtMoney(d.tax_payable)}</td>
+                      <td className="num">{fmtMoney(d.surtax_total)}</td>
+                      <td>{Math.round((d.confidence || 0) * 100)}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        );
       }
 
       // ─────────────────────────────────────────────────────────────────
