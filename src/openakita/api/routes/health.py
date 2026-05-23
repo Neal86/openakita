@@ -507,6 +507,33 @@ async def last_link_diagnostic(request: Request):
     return getattr(request.app.state, "last_link_diagnostic", None) or {}
 
 
+@router.get("/api/diagnostics/legacy-shim-stats")
+async def legacy_shim_stats() -> dict[str, Any]:
+    """Read-only counter for legacy 308 shim hits.
+
+    Used to decide whether the
+    ``src/openakita/api/routes/_orgs_v2_legacy_redirects.py`` shim can
+    be removed in the 2.1.0 minor. See
+    ``docs/follow-ups/skipped-items-roadmap.md`` §A.3 for the full
+    exit criterion. RCA cross-ref: ``_skip_items_rca_v11.md`` §3.
+
+    The counter is in-process and resets on restart — pair this
+    endpoint with log scraping for long-window evidence.
+    """
+    from openakita.api.routes._orgs_v2_legacy_redirects import get_shim_hit_stats
+
+    return {
+        "hits": get_shim_hit_stats(),
+        "removal_target": "2.1.0",
+        "sunset_header": "2026-12-01",
+        "advice": (
+            "When hits stay 0 for >=30 days post the Sunset marker, the "
+            "shim is safe to remove. See docs/follow-ups/"
+            "skipped-items-roadmap.md §A.3."
+        ),
+    }
+
+
 @router.post("/api/diagnostics/clear-session-caches")
 async def clear_session_caches_endpoint(request: Request, conversation_id: str | None = None):
     """User-triggered, non-destructive cache clear for the active session.

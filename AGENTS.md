@@ -125,3 +125,17 @@ Forks may change product branding for their own distribution, but they must pres
 - The `prompt/compiler.py` must be re-run when identity files change; `builder.py` auto-detects staleness via `check_compiled_outdated()`.
 - Skill loading order: `__builtin__` → workspace → `.cursor/skills` → `.claude/skills` → `skills/` → global home dirs.
 - `multi_agent_enabled` defaults to `True` and is always on; the toggle has been removed.
+
+## Project evolution / open follow-ups
+
+Some work items uncovered by exploratory testing v10 / v11 are
+intentionally deferred. The single source of truth for their status,
+trigger conditions, and exit criteria is
+`docs/follow-ups/skipped-items-roadmap.md`. Cursor rules
+`plugin-tool-classes.mdc` and `skipped-items-guidance.mdc` route AI
+agents to the relevant section when they touch glob-matched code
+(plugin manifests, the legacy 308 shim, template endpoints, LLM tool
+budgets). Read the roadmap section AND the linked RCA section
+(`_skip_items_rca_v11.md`) BEFORE changing those code paths — many
+items carry an explicit "DO NOT do yet" note that explains the
+deferral.

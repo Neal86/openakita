@@ -1,3 +1,11 @@
+// NOTE: This file currently only talks to runtime endpoints
+// (`/api/v2/orgs/...`). The spec endpoints (`/api/v2/orgs-spec/...`)
+// still return a `{ "templates": [...] }` envelope and will be
+// unified to bare arrays in P9.7gamma. See
+// `docs/follow-ups/skipped-items-roadmap.md` §A.4 before touching
+// the template APIs here — the frontend should continue to assume
+// the runtime endpoint shape (bare array) as the canonical contract.
+
 /**
  * V2 organisation API client wrappers (P9.8gamma smoke-blocker fix).
  *

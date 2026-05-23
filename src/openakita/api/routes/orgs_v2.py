@@ -194,6 +194,16 @@ def list_templates() -> dict[str, Any]:
     Wrapped in a ``{templates: [...], count: N}`` envelope so future
     additions (pagination, filtering, server-time) do not break
     older clients.
+
+    ROADMAP — Response format unification (P9.7gamma):
+    This spec endpoint returns a ``{"templates": [...]}`` envelope,
+    but the runtime sibling at ``/api/v2/orgs/templates`` returns a
+    bare array. The plan is to change THIS endpoint to a bare array
+    to match runtime, since the frontend only consumes runtime today
+    (see ``apps/setup-center/src/api/orgs.ts``). Tracked in
+    ``docs/follow-ups/skipped-items-roadmap.md`` §A.4 and
+    ``_skip_items_rca_v11.md`` §4.3. DO NOT change the runtime
+    endpoint's shape.
     """
     _require_v2_enabled()
     _ensure_registry_bootstrapped()

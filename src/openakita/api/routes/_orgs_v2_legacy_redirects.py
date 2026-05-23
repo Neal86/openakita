@@ -32,12 +32,55 @@ ADR-0012 (one-window relaxation for redirect window only).
 
 from __future__ import annotations
 
+from collections import Counter
+from threading import Lock
+
 from fastapi import APIRouter, Request, Response
 
-__all__ = ["router"]
+__all__ = ["router", "get_shim_hit_stats"]
 
 
 _SPEC_PREFIX = "/api/v2/orgs-spec"
+
+
+# ---------------------------------------------------------------------------
+# Shim hit counter (observability for the 2.1.0 removal decision).
+#
+# Each shim handler records a hit before issuing the 308 so the
+# ``/api/diagnostics/legacy-shim-stats`` endpoint (in ``health.py``)
+# can return a per-path tally. The counter is intentionally:
+#
+#   * in-process and thread-safe (Counter + Lock, no extra deps)
+#   * NOT persisted across restarts — long-window evidence is the job
+#     of log scraping, not this primitive
+#   * keyed on the request path so we can spot whether a specific
+#     legacy route is still in use
+#
+# Roadmap rationale + exit criterion (hits stay 0 for >=30 days post
+# Sunset header) live in ``docs/follow-ups/skipped-items-roadmap.md``
+# §A.3. RCA cross-reference: ``_skip_items_rca_v11.md`` §3.
+# ---------------------------------------------------------------------------
+_SHIM_HIT_COUNTER: Counter[str] = Counter()
+_SHIM_HIT_LOCK = Lock()
+
+
+def _record_shim_hit(path: str) -> None:
+    """Increment the hit counter for ``path`` (no-op on falsy input)."""
+    if not path:
+        return
+    with _SHIM_HIT_LOCK:
+        _SHIM_HIT_COUNTER[path] += 1
+
+
+def get_shim_hit_stats() -> dict[str, int]:
+    """Expose shim hit counts so the diagnostics route can read them.
+
+    See ``docs/follow-ups/skipped-items-roadmap.md`` §A.3 — when this
+    counter stays at 0 for the full Sunset window (header on every
+    shim response), the shim file can be removed in the 2.1.0 minor.
+    """
+    with _SHIM_HIT_LOCK:
+        return dict(_SHIM_HIT_COUNTER)
 
 # RFC 8594 / IETF draft-ietf-httpapi-deprecation-header headers added to
 # every redirect response so HTTP clients and proxies can detect the
@@ -62,7 +105,16 @@ def _redirect(target_path: str, request: Request) -> Response:
 
     Deprecation/Sunset/Link headers are added so callers can detect
     the upcoming removal in OpenAkita 2.1.0 (RCA v11 §3).
+
+    Every redirect also bumps ``_SHIM_HIT_COUNTER`` so
+    ``/api/diagnostics/legacy-shim-stats`` can report which legacy
+    paths are still being hit; see
+    ``docs/follow-ups/skipped-items-roadmap.md`` §A.3.
     """
+    try:
+        _record_shim_hit(request.url.path)
+    except Exception:  # noqa: BLE001 — observability must never break the redirect
+        pass
     qs = request.url.query
     location = f"{target_path}?{qs}" if qs else target_path
     headers = {"Location": location, **_DEPRECATION_HEADERS}

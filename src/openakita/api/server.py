@@ -456,6 +456,12 @@ def create_app(
     # (R3 LOCKED). Registered LAST so future P9.7 mint endpoints
     # at the same ``/api/v2/orgs`` prefix take precedence over
     # the redirect for routes the mint actually claims.
+    #
+    # ROADMAP — Legacy shim removal target: OpenAkita 2.1.0 minor.
+    # Deprecation headers were applied in Fix-G5 (RCA v11 §3). The
+    # shim is tracked by ``docs/follow-ups/skipped-items-roadmap.md``
+    # §A.3; monitor ``GET /api/diagnostics/legacy-shim-stats`` to
+    # confirm the 30-day-zero-hits exit criterion before removal.
     app.include_router(_orgs_v2_legacy_redirects.router)
     # P-RC-2 commit P2.8: GET /api/build-info for the frontend
     # stale-bundle banner. Always-mounted, unauthenticated.
