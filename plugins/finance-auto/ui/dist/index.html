@@ -1153,6 +1153,18 @@
         const [detailLoading, setDetailLoading] = useState({});    // {cellId: bool}
         const [ctxMenu, setCtxMenu] = useState(null);              // {cell, x, y}
         const [exportMenuOpen, setExportMenuOpen] = useState(false);
+        // Stage 4 · 评论抽屉：null = 关闭，{} = 整张报表评论，{cellId} = 聚焦某 cell
+        const [commentsTarget, setCommentsTarget] = useState(null);
+
+        // 单元格右键菜单点了「添加评论」会派发自定义事件，监听并打开评论抽屉
+        useEffect(() => {
+          const h = (e) => {
+            const cellId = e.detail && e.detail.cellId;
+            if (cellId) setCommentsTarget({ cellId });
+          };
+          window.addEventListener("finance.cell.add_comment", h);
+          return () => window.removeEventListener("finance.cell.add_comment", h);
+        }, []);
 
         const report = data && data.report;
         const cells = (data && data.cells) || [];
@@ -1310,6 +1322,14 @@
               <div className="flex gap-2">
                 <button className="btn" onClick={onBack}>← 返回账套</button>
                 <button className="btn" onClick={reload}>{loading ? <Spinner /> : "刷新"}</button>
+                <button
+                  className="btn"
+                  onClick={() => setCommentsTarget({})}
+                  data-testid="open-comments-btn"
+                  title="查看 / 发布报表评论"
+                >
+                  💬 评论
+                </button>
                 <div style={{ position: "relative" }}>
                   <button
                     className="btn primary"
@@ -1359,6 +1379,10 @@
                   {report.warnings.map((w, i) => <li key={i}>{w}</li>)}
                 </ul>
               </div>
+            )}
+
+            {report && (
+              <ReviewWorkflowBar orgId={orgId} reportId={reportId} toast={toast} />
             )}
 
             <div className="card" style={{ padding: 0, overflow: "hidden" }}>
@@ -1494,6 +1518,16 @@
                 onSimplifyToggle={onSimplifyToggle}
               />
             )}
+
+            {commentsTarget !== null && (
+              <CommentsDrawer
+                orgId={orgId}
+                reportId={reportId}
+                focusCellId={commentsTarget.cellId || null}
+                onClose={() => setCommentsTarget(null)}
+                toast={toast}
+              />
+            )}
           </>
         );
       }
@@ -1534,7 +1568,7 @@
               onClick={() => { onClose(); window.dispatchEvent(new CustomEvent("finance.cell.add_comment", { detail: { cellId: cell.id } })); }}
               data-testid="ctx-add-comment"
             >
-              添加评论…（Stage 4 评论侧栏）
+              添加评论…
             </button>
           </div>
         );
@@ -2499,6 +2533,444 @@
         };
       }
 
+      // ═══════════════════════════════════════════════════════════════════
+      //  M2 STAGE 4 · 多审计师切换 + 复核工作流 UI
+      //
+      //  v0.3 Part Biz §1 4 角色（auditor / manager / partner / admin）
+      //
+      //  后端契约（biz sibling 已写代码、尚未 register_collab_endpoints）：
+      //    POST   /users    + GET /users
+      //    POST   /orgs/{id}/assignments    + GET /orgs/{id}/assignments
+      //    POST   /orgs/{id}/reports/{rid}/review/submit
+      //    POST   /orgs/{id}/reports/{rid}/review/approve
+      //    POST   /orgs/{id}/reports/{rid}/review/request-changes
+      //    POST   /orgs/{id}/reports/{rid}/review/sign-off
+      //    POST   /orgs/{id}/reports/{rid}/cells/{cid}/comments
+      //    GET    /orgs/{id}/reports/{rid}/comments
+      //    GET    /orgs/{id}/reports/{rid}/workflows
+      //
+      //  当 GET /users 返回 404 时，UI 退化到「占位用户列表」（v0.2 单本机模式
+      //  的占位切换器，本地 localStorage 存档）。后端就绪后零改动切换。
+      // ═══════════════════════════════════════════════════════════════════
+
+      const ROLE_META = {
+        auditor: { label: "审计师",  badge: "info",  hint: "起草报表 / 在指派范围内编辑" },
+        manager: { label: "经理",    badge: "warn",  hint: "复核报表 / 项目范围编辑 / 触发合并" },
+        partner: { label: "合伙人",  badge: "ok",    hint: "签字 / 全局可写 / 用户指派" },
+        admin:   { label: "管理员",  badge: "err",   hint: "用户 / 系统配置 · 不直接改报表" },
+      };
+      const ROLE_OPTS = Object.keys(ROLE_META).map((v) => ({ v, l: ROLE_META[v].label }));
+
+      const _LOCAL_USERS_FALLBACK = [
+        { user_id: "local",          display_name: "本机用户（admin）",   role: "admin",   active: true, mock: true },
+        { user_id: "demo_auditor",   display_name: "演示·审计师 张三",     role: "auditor", active: true, mock: true },
+        { user_id: "demo_manager",   display_name: "演示·经理 李四",       role: "manager", active: true, mock: true },
+        { user_id: "demo_partner",   display_name: "演示·合伙人 王五",     role: "partner", active: true, mock: true },
+      ];
+
+      function useUsersList() {
+        // 后端 /users 暂未注册路由 → 404 → 回退本地占位列表
+        const [users, setUsers] = useState(_LOCAL_USERS_FALLBACK);
+        const [backendOk, setBackendOk] = useState(null);
+        const reload = useCallback(async () => {
+          try {
+            const r = await api("GET", "/users", null, { timeoutMs: 4000 });
+            const list = (r && r.users) || [];
+            if (list.length) {
+              setUsers(list); setBackendOk(true);
+            } else {
+              setUsers(_LOCAL_USERS_FALLBACK); setBackendOk(true);
+            }
+          } catch (e) {
+            setUsers(_LOCAL_USERS_FALLBACK);
+            setBackendOk(false);
+          }
+        }, []);
+        useEffect(() => { reload(); }, [reload]);
+        return { users, backendOk, reload };
+      }
+
+      // 顶部用户切换器（嵌进 TopBar 的 right slot 旁）
+      function UserSwitcher({ toast }) {
+        const user = useUser();
+        const { users, backendOk, reload } = useUsersList();
+        const [open, setOpen] = useState(false);
+        const [registerOpen, setRegisterOpen] = useState(false);
+        const meta = ROLE_META[user.role] || ROLE_META.auditor;
+
+        return (
+          <>
+            <div style={{ position: "relative" }}>
+              <button
+                className="btn sm"
+                onClick={() => setOpen((x) => !x)}
+                data-testid="user-switcher-btn"
+                style={{ display: "flex", alignItems: "center", gap: 6 }}
+                title={meta.hint}
+              >
+                <span style={{ fontSize: 14 }}>👤</span>
+                <span style={{ maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{user.displayName}</span>
+                <span className={`badge ${meta.badge}`} style={{ fontSize: 10 }}>{meta.label}</span>
+                <span>▾</span>
+              </button>
+              {open && (
+                <div
+                  style={{
+                    position: "absolute", right: 0, top: "100%", marginTop: 4,
+                    background: "var(--bg-card)", border: "1px solid var(--border-strong)",
+                    borderRadius: "var(--radius)", boxShadow: "0 6px 22px rgba(15,23,42,0.18)",
+                    minWidth: 260, zIndex: 80, padding: 6,
+                  }}
+                  onMouseLeave={() => setOpen(false)}
+                  data-testid="user-switcher-menu"
+                >
+                  <div className="text-xs text-muted" style={{ padding: "4px 8px" }}>
+                    {backendOk === false
+                      ? "占位切换器（后端 /users 未注册 · 仅 localStorage）"
+                      : `用户列表（${users.length} 人）`}
+                  </div>
+                  {users.map((u) => (
+                    <button
+                      key={u.user_id}
+                      className="btn subtle sm"
+                      style={{ display: "block", width: "100%", textAlign: "left", borderRadius: 4, padding: "6px 8px" }}
+                      onClick={() => {
+                        user.setUser({ id: u.user_id, name: u.display_name, role: u.role });
+                        toast(`已切换到 ${u.display_name}`);
+                        setOpen(false);
+                      }}
+                    >
+                      <div>{u.display_name}</div>
+                      <div className="text-xs text-muted">
+                        <span className={`badge ${ROLE_META[u.role]?.badge || "info"}`} style={{ fontSize: 10 }}>{ROLE_META[u.role]?.label || u.role}</span>
+                        <span className="mono" style={{ marginLeft: 6 }}>{u.user_id}</span>
+                      </div>
+                    </button>
+                  ))}
+                  <div className="divider" />
+                  {(user.role === "admin") && (
+                    <button
+                      className="btn subtle sm"
+                      style={{ display: "block", width: "100%", textAlign: "left", padding: "6px 8px" }}
+                      onClick={() => { setOpen(false); setRegisterOpen(true); }}
+                      data-testid="register-user"
+                    >
+                      + 注册新用户…
+                    </button>
+                  )}
+                  <button
+                    className="btn subtle sm"
+                    style={{ display: "block", width: "100%", textAlign: "left", padding: "6px 8px" }}
+                    onClick={() => {
+                      user.setUser({ id: "local", name: "本机用户（admin）", role: "admin" });
+                      toast("已注销，回到本机用户");
+                      setOpen(false);
+                    }}
+                  >
+                    注销 / 回到 local
+                  </button>
+                </div>
+              )}
+            </div>
+            {registerOpen && (
+              <UserRegisterDialog
+                onClose={() => setRegisterOpen(false)}
+                onCreated={async (u) => {
+                  setRegisterOpen(false);
+                  toast(`用户「${u.display_name}」已创建`);
+                  await reload();
+                }}
+                toast={toast}
+              />
+            )}
+          </>
+        );
+      }
+
+      function UserRegisterDialog({ onClose, onCreated, toast }) {
+        const [userId, setUserId] = useState("user_" + Math.random().toString(36).slice(2, 10));
+        const [name, setName] = useState("");
+        const [email, setEmail] = useState("");
+        const [role, setRole] = useState("auditor");
+        const [submitting, setSubmitting] = useState(false);
+
+        const submit = async () => {
+          if (!name.trim()) { toast("请输入显示名称", "warn"); return; }
+          setSubmitting(true);
+          try {
+            const u = await api("POST", "/users", {
+              user_id: userId.trim(),
+              display_name: name.trim(),
+              role,
+              email: email.trim(),
+              active: true,
+            });
+            onCreated(u);
+          } catch (e) {
+            if (e.status === 404) {
+              // 后端未注册路由 → 写入 localStorage 占位列表
+              try {
+                const cur = JSON.parse(localStorage.getItem("finance.users.fallback") || "[]");
+                const item = { user_id: userId.trim(), display_name: name.trim(), role, email: email.trim(), active: true, mock: true };
+                localStorage.setItem("finance.users.fallback", JSON.stringify([...cur, item]));
+                onCreated(item);
+              } catch (ee) {
+                toast(`本地保存失败：${ee.message}`, "err");
+              }
+            } else {
+              toast(`创建失败：${e.message}`, "err");
+            }
+          } finally { setSubmitting(false); }
+        };
+
+        return (
+          <Modal
+            open
+            onClose={submitting ? undefined : onClose}
+            title="注册新用户"
+            sub="仅 admin 可见。M2 期间是单本机模式，多用户协作要等 v0.3。"
+            footer={
+              <>
+                <button className="btn" onClick={onClose} disabled={submitting}>取消</button>
+                <button className="btn primary" onClick={submit} disabled={submitting}>
+                  {submitting && <Spinner />}创建
+                </button>
+              </>
+            }
+          >
+            <div className="row cols-2">
+              <div>
+                <label className="lbl">用户 ID</label>
+                <input className="field mono" value={userId} onChange={(e) => setUserId(e.target.value.trim())} />
+              </div>
+              <div>
+                <label className="lbl">角色</label>
+                <select className="field" value={role} onChange={(e) => setRole(e.target.value)}>
+                  {ROLE_OPTS.map((o) => <option key={o.v} value={o.v}>{o.l}</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="row mt-3">
+              <div>
+                <label className="lbl">显示名<span className="required">*</span></label>
+                <input className="field" value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：张三（项目经理）" />
+              </div>
+              <div>
+                <label className="lbl">邮箱（可选）</label>
+                <input className="field" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="zhang3@example.com" />
+              </div>
+            </div>
+          </Modal>
+        );
+      }
+
+      // 复核状态条 + 操作按钮（嵌入到 ReportView 顶部）
+      const REVIEW_STATUS_META = {
+        draft:           { label: "草稿",     badge: "" },
+        pending_review:  { label: "待复核",   badge: "warn" },
+        reviewed:        { label: "已复核",   badge: "info" },
+        pending_signoff: { label: "待签字",   badge: "warn" },
+        signed_off:     { label: "已签字 ✅", badge: "ok" },
+        returned:        { label: "已打回",   badge: "err" },
+      };
+      const REVIEW_FLOW = ["draft", "pending_review", "reviewed", "pending_signoff", "signed_off"];
+
+      function ReviewWorkflowBar({ orgId, reportId, toast }) {
+        const user = useUser();
+        const { data, error, reload } = useFetch(
+          `/orgs/${orgId}/reports/${reportId}/workflows`,
+          [orgId, reportId],
+        );
+        const [busy, setBusy] = useState(false);
+
+        // 后端可能 404（路由未注册）→ 显示占位条
+        const isMissing = error && error.status === 404;
+        const wf = (data && data.workflows && data.workflows[0]) || null;
+        const status = wf ? wf.status : "draft";
+        const meta = REVIEW_STATUS_META[status] || REVIEW_STATUS_META.draft;
+
+        const wrap = (fn) => async (...a) => { setBusy(true); try { await fn(...a); } finally { setBusy(false); } };
+
+        const submit = wrap(async () => {
+          try {
+            await api("POST", `/orgs/${orgId}/reports/${reportId}/review/submit`, {
+              auditor_id: user.userId,
+              target_kind: "report_instance",
+            });
+            toast("已提交复核");
+            reload();
+          } catch (e) {
+            if (e.status === 404) toast("提交失败：后端 collab 路由未注册", "warn");
+            else toast(`提交失败：${e.message}`, "err");
+          }
+        });
+        const approve = wrap(async () => {
+          try {
+            await api("POST", `/orgs/${orgId}/reports/${reportId}/review/approve`, {
+              actor_id: user.userId, note: "",
+            });
+            toast("复核已通过");
+            reload();
+          } catch (e) { toast(`批准失败：${e.message}`, "err"); }
+        });
+        const requestChanges = wrap(async () => {
+          const reason = window.prompt("请输入打回原因（必填）：");
+          if (!reason) return;
+          try {
+            await api("POST", `/orgs/${orgId}/reports/${reportId}/review/request-changes`, {
+              actor_id: user.userId, reason,
+            });
+            toast("已要求修改");
+            reload();
+          } catch (e) { toast(`打回失败：${e.message}`, "err"); }
+        });
+        const signOff = wrap(async () => {
+          try {
+            await api("POST", `/orgs/${orgId}/reports/${reportId}/review/sign-off`, {
+              actor_id: user.userId, note: "",
+            });
+            toast("已签字 · 报表锁定");
+            reload();
+          } catch (e) { toast(`签字失败：${e.message}`, "err"); }
+        });
+
+        const canSubmit = (user.role === "auditor" || user.role === "manager") && status === "draft";
+        const canApprove = (user.role === "manager" || user.role === "partner") && (status === "pending_review");
+        const canRequestChanges = (user.role === "manager" || user.role === "partner") && (status === "pending_review" || status === "pending_signoff");
+        const canSignOff = user.role === "partner" && (status === "reviewed" || status === "pending_signoff");
+
+        return (
+          <div className="card" style={{ padding: 10, marginBottom: 12 }} data-testid="review-bar">
+            <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+              <strong style={{ fontSize: 12 }}>复核流程：</strong>
+              {REVIEW_FLOW.map((s, i) => (
+                <span
+                  key={s}
+                  style={{
+                    fontSize: 11, padding: "2px 8px", borderRadius: 999,
+                    background: s === status ? "var(--primary)" : "var(--bg-soft)",
+                    color: s === status ? "#fff" : "var(--text-muted)",
+                    border: "1px solid var(--border)",
+                  }}
+                >
+                  {i + 1}. {REVIEW_STATUS_META[s].label}
+                </span>
+              ))}
+              {status === "returned" && <span className="badge err">已打回</span>}
+              {wf && wf.return_reason && (
+                <span className="text-xs text-muted">原因：{wf.return_reason}</span>
+              )}
+              <span style={{ flex: 1 }} />
+              <span className={`badge ${meta.badge || "info"}`}>{meta.label}</span>
+            </div>
+            <div className="flex gap-2" style={{ marginTop: 8, flexWrap: "wrap" }}>
+              {canSubmit && (
+                <button className="btn primary sm" disabled={busy} onClick={submit} data-testid="review-submit">
+                  提交复核
+                </button>
+              )}
+              {canApprove && (
+                <button className="btn primary sm" disabled={busy} onClick={approve} data-testid="review-approve">
+                  批准
+                </button>
+              )}
+              {canRequestChanges && (
+                <button className="btn sm" disabled={busy} onClick={requestChanges}>要求修改</button>
+              )}
+              {canSignOff && (
+                <button className="btn primary sm" disabled={busy} onClick={signOff} data-testid="review-signoff">
+                  合伙人签字
+                </button>
+              )}
+              {!canSubmit && !canApprove && !canRequestChanges && !canSignOff && (
+                <span className="text-xs text-muted">
+                  当前用户角色（<strong>{ROLE_META[user.role]?.label || user.role}</strong>）在状态「{meta.label}」下没有可执行操作。
+                </span>
+              )}
+              {isMissing && (
+                <span className="badge warn" title="后端 collab 路由未注册（biz sibling Stage 2 完成后会激活）">
+                  后端 collab 路由未注册（mock）
+                </span>
+              )}
+            </div>
+          </div>
+        );
+      }
+
+      // 评论侧栏 —— 抽屉式，挂在 ReportView 右侧
+      function CommentsDrawer({ orgId, reportId, focusCellId, onClose, toast }) {
+        const path = `/orgs/${orgId}/reports/${reportId}/comments?include_resolved=true`;
+        const { data, error, reload } = useFetch(path, [orgId, reportId]);
+        const comments = (data && data.comments) || [];
+        const [body, setBody] = useState("");
+        const [submitting, setSubmitting] = useState(false);
+        const user = useUser();
+        const isMissing = error && error.status === 404;
+
+        const filtered = focusCellId ? comments.filter((c) => c.cell_id === focusCellId) : comments;
+
+        const submit = async () => {
+          if (!body.trim()) return;
+          setSubmitting(true);
+          try {
+            const url = focusCellId
+              ? `/orgs/${orgId}/reports/${reportId}/cells/${focusCellId}/comments`
+              : `/orgs/${orgId}/reports/${reportId}/comments`;
+            await api("POST", url, {
+              body: body.trim(),
+              kind: "general",
+              author_id: user.userId,
+              mentions: [],
+            });
+            setBody("");
+            reload();
+            toast("评论已发布");
+          } catch (e) {
+            if (e.status === 404) toast("发布失败：后端 collab 路由未注册", "warn");
+            else toast(`发布失败：${e.message}`, "err");
+          } finally { setSubmitting(false); }
+        };
+
+        return (
+          <Drawer open onClose={onClose} title={focusCellId ? `评论 · cell ${focusCellId.slice(-12)}` : "报表评论"}>
+            {isMissing && (
+              <div className="upload-result" style={{ background: "rgba(217,119,6,0.06)", borderColor: "rgba(217,119,6,0.30)" }}>
+                后端 collab 路由未注册，评论列表 / 发布暂不可用（mock 模式）。
+              </div>
+            )}
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
+              {filtered.length === 0 && !isMissing && (
+                <div className="empty">暂无评论</div>
+              )}
+              {filtered.map((c) => (
+                <div key={c.id} style={{ padding: 10, background: "var(--bg-soft)", borderRadius: 6 }}>
+                  <div className="text-xs text-muted">
+                    <strong>{c.author_id}</strong> · <span className="badge info" style={{ fontSize: 10 }}>{c.kind}</span> · {fmtTs(c.created_at)}
+                    {c.cell_id && <> · cell <span className="mono">{c.cell_id.slice(-8)}</span></>}
+                  </div>
+                  <div style={{ marginTop: 4 }}>{c.body}</div>
+                </div>
+              ))}
+            </div>
+            <div className="card" style={{ padding: 10 }}>
+              <textarea
+                className="field"
+                rows={4}
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+                placeholder={focusCellId ? "针对该单元格的评论…" : "整体评论…"}
+                data-testid="comment-input"
+              />
+              <div className="flex gap-2 mt-2" style={{ justifyContent: "flex-end" }}>
+                <button className="btn primary sm" disabled={submitting || !body.trim()} onClick={submit}>
+                  {submitting && <Spinner />}发布
+                </button>
+              </div>
+            </div>
+          </Drawer>
+        );
+      }
+
       // ─────────────────────────────────────────────────────────────────
       //  Root：极简 hash router（#/orgs / #/orgs/<id> / #/orgs/<id>/reports/<rid>）
       // ─────────────────────────────────────────────────────────────────
@@ -2509,8 +2981,8 @@
 
         // Stage 4 · 用户上下文（M2 单本机仍是占位切换器；多用户后端接入留 v0.3）
         const [userId, setUserId] = useState(() => localStorage.getItem("finance.user.id") || "local");
-        const [displayName, setDisplayName] = useState(() => localStorage.getItem("finance.user.name") || "本机用户");
-        const [role, setRole] = useState(() => localStorage.getItem("finance.user.role") || "auditor");
+        const [displayName, setDisplayName] = useState(() => localStorage.getItem("finance.user.name") || "本机用户（admin）");
+        const [role, setRole] = useState(() => localStorage.getItem("finance.user.role") || "admin");
         const userCtxValue = useMemo(() => ({
           userId, displayName, role,
           setRole: (r) => { setRole(r); localStorage.setItem("finance.user.role", r); },
@@ -2590,6 +3062,7 @@
                       <option value="2025-FY">2025 年度</option>
                       <option value="2024-FY">2024 年度</option>
                     </select>
+                    <UserSwitcher toast={toasts.push} />
                   </>
                 }
               />
