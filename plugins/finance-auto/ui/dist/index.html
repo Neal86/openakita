@@ -2439,6 +2439,20 @@
           return () => _mockBus.listeners.delete(handler);
         }, []);
 
+        // 测试用：监听 window `mock_consent_request` 自定义事件，
+        // 收到后用 buildSampleConsentRequest() 入队（Playwright 通过
+        // `window.dispatchEvent(new CustomEvent('mock_consent_request'))` 触发）。
+        useEffect(() => {
+          const h = (ev) => {
+            const req = (ev && ev.detail && ev.detail.dialog_id)
+              ? ev.detail
+              : buildSampleConsentRequest();
+            pushMockConsent(req);
+          };
+          window.addEventListener("mock_consent_request", h);
+          return () => window.removeEventListener("mock_consent_request", h);
+        }, []);
+
         // 进入页面时若 URL 带 `?ai_mock=1`，自动注入一个示例请求
         useEffect(() => {
           if (new URLSearchParams(window.location.search).get("ai_mock") === "1") {

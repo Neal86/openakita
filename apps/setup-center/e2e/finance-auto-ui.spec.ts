@@ -119,9 +119,10 @@ test("finance-auto end-to-end smoke (8 steps)", async ({ page }) => {
     await frameLocator.locator("button", { hasText: "关闭" }).first().click();
   }
 
-  // ── 7. 导出 Excel ─────────────────────────────────────────────
+  // ── 7. 导出 Excel（M2 Stage 3 后改成下拉菜单，先点 ▾ 再选「按当前视图导出」） ──
   const downloadPromise = page.waitForEvent("download").catch(() => null);
-  await frameLocator.locator("button", { hasText: "导出 Excel" }).click();
+  await frameLocator.locator('[data-testid="export-menu-btn"]').click();
+  await frameLocator.locator('[data-testid="export-view"]').click();
   const download = await downloadPromise;
   if (download) {
     const path = await download.path();
