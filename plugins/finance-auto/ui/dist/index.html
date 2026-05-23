@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>财务自动化</title>
+    <link rel="icon" href="./icon.svg" />
+    <link rel="stylesheet" href="./_assets/styles.css" />
+    <!-- React + ReactDOM via UMD CDN，与 excel-maker 插件一致 -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <!-- ─────────────────────────────────────────────────────────────────
+         共享：API 客户端 + 桥接 + 工具函数
+         ───────────────────────────────────────────────────────────── -->
+    <script type="text/babel" data-presets="env,react">
+      const { useEffect, useMemo, useState, useRef, useCallback } = React;
+
+      const PLUGIN_ID = "finance-auto";
+      const _inIframe = window.parent && window.parent !== window;
+      let _bridgeCtx = null;
+      let _bridgeConnected = false;
+
+      // ----- 与主程通信桥（OpenAkita PluginAppHost 协议） -----
+      // bridge:handshake / bridge:ready 用于声明 SPA 已挂好；bridge:render-ready
+      // 在 React 首帧渲染后发，让主程立即收起 loading 罩。
+      function postBridge(message) {
+        if (_inIframe) window.parent.postMessage({ __akita_bridge: true, ...message }, "*");
+      }
+
+      window.addEventListener("message", (event) => {
+        const data = event.data;
+        if (!data || typeof data !== "object") return;
+        if (data.type === "bridge:init") {
+          _bridgeCtx = data.ctx || data.payload || {};
+          _bridgeConnected = true;
+        }
+      });
+
+      // 进入 iframe 后立即广播 handshake，主程收到后认为 bridge 可用。
+      if (_inIframe) {
+        const t = setInterval(() => postBridge({ type: "bridge:handshake", pluginId: PLUGIN_ID }), 250);
+        setTimeout(() => clearInterval(t), 8000);
+      }
+
+      function detectApiBase() {
+        // 在 iframe 内部时 location.origin 已经是主程的 origin（同源静态挂载）。
+        // 单独打开 ui/dist/index.html 调试时（端口 5173/1420）走 18900。
+        const loc = window.location;
+        if (loc.port === "5173" || loc.port === "1420") return "http://127.0.0.1:18900";
+        return loc.origin;
+      }
+
+      const API_BASE = detectApiBase();
+      const PLUGIN_BASE = `${API_BASE}/api/plugins/${PLUGIN_ID}`;
+
+      // 统一 fetch 包装：JSON 体自动 stringify，带超时，错误统一抛带 detail 的 Error。
+      async function api(method, path, body, opts = {}) {
+        const url = path.startsWith("http") ? path : `${PLUGIN_BASE}${path}`;
+        const isForm = body instanceof FormData;
+        const controller = new AbortController();
+        const timeoutMs = opts.timeoutMs ?? 30000;
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const resp = await fetch(url, {
+            method,
+            headers: isForm
+              ? undefined
+              : body == null
+                ? undefined
+                : { "Content-Type": "application/json" },
+            body: isForm ? body : body == null ? undefined : JSON.stringify(body),
+            signal: controller.signal,
+          });
+          if (resp.status === 204) return null;
+          // 导出端点直接返回二进制流，由调用方处理。
+          if (opts.raw) return resp;
+          const ct = resp.headers.get("content-type") || "";
+          let data = null;
+          if (ct.includes("application/json")) {
+            data = await resp.json().catch(() => null);
+          } else {
+            data = await resp.text().catch(() => null);
+          }
+          if (!resp.ok) {
+            const detail = (data && data.detail) || (typeof data === "string" ? data : "");
+            const err = new Error(`${resp.status} ${resp.statusText}${detail ? " · " + detail : ""}`);
+            err.status = resp.status;
+            err.body = data;
+            throw err;
+          }
+          return data;
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+
+      // ----- 简易 toast hook -----
+      function useToasts() {
+        const [items, setItems] = useState([]);
+        const push = useCallback((msg, type = "ok", ttl = 4000) => {
+          const id = Math.random().toString(36).slice(2);
+          setItems((cur) => [...cur, { id, msg, type }]);
+          setTimeout(() => setItems((cur) => cur.filter((x) => x.id !== id)), ttl);
+        }, []);
+        const view = (
+          <div className="toast-wrap">
+            {items.map((t) => (
+              <div key={t.id} className={`toast ${t.type === "err" ? "err" : t.type === "warn" ? "warn" : ""}`}>
+                {t.msg}
+              </div>
+            ))}
+          </div>
+        );
+        return { push, view };
+      }
+
+      // ----- 通用 hook：拉取任意端点 -----
+      function useFetch(path, deps = [], opts = {}) {
+        const [data, setData] = useState(null);
+        const [error, setError] = useState(null);
+        const [loading, setLoading] = useState(true);
+        const reload = useCallback(() => {
+          if (!path) { setLoading(false); return; }
+          setLoading(true);
+          setError(null);
+          return api("GET", path, null, opts)
+            .then((d) => { setData(d); setLoading(false); return d; })
+            .catch((e) => { setError(e); setLoading(false); throw e; });
+        // eslint-disable-next-line
+        }, [path, JSON.stringify(opts)]);
+        useEffect(() => { reload(); /* eslint-disable-next-line */ }, deps);
+        return { data, error, loading, reload };
+      }
+
+      // ----- 通用：格式化 -----
+      function fmtMoney(v) {
+        if (v == null) return "—";
+        const n = Number(v);
+        if (Number.isNaN(n)) return String(v);
+        return n.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      }
+      function fmtTs(s) {
+        if (!s) return "—";
+        // ISO -> "MM-DD HH:mm"
+        try {
+          const d = new Date(s);
+          const pad = (n) => String(n).padStart(2, "0");
+          return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        } catch { return s; }
+      }
+      function shortHash(s) { return s ? s.slice(0, 8) : "—"; }
+
+      // ----- 工业枚举 / 准则 / 辅助核算 选项 -----
+      // 顺序贴合财务用户在国内 ERP 选行业 / 准则的常见认知。
+      const INDUSTRY_OPTS = [
+        { v: "general",       l: "一般工商业（默认）" },
+        { v: "manufacturing", l: "制造业" },
+        { v: "trading",       l: "贸易 / 批发零售" },
+        { v: "service",       l: "服务业" },
+        { v: "construction",  l: "建筑施工" },
+        { v: "real_estate",   l: "房地产" },
+        { v: "tech",          l: "科技 / 软件" },
+      ];
+      const STANDARD_OPTS = [
+        { v: "cas",   l: "企业会计准则" },
+        { v: "small", l: "小企业会计准则" },
+        { v: "other", l: "其他 / 自定义" },
+      ];
+      const AUX_OPTS = [
+        { v: "full",  l: "全辅助（项目/部门/客户单独存）" },
+        { v: "light", l: "轻辅助（仅 aux_text 列）" },
+        { v: "none",  l: "不存辅助" },
+      ];
+
+      // ─────────────────────────────────────────────────────────────────
+      //  公用 UI 子组件
+      // ─────────────────────────────────────────────────────────────────
+      function TopBar({ crumbs, right }) {
+        return (
+          <div className="topbar">
+            <div className="topbar-left">
+              <span className="brand-icon">财</span>
+              <div>
+                <div className="topbar-title">财务自动化</div>
+                <div className="topbar-subtitle">M1 W3 · 首版界面</div>
+              </div>
+              {crumbs && crumbs.length > 0 && (
+                <div className="crumb" style={{ marginLeft: 16 }}>
+                  {crumbs.map((c, i) => (
+                    <React.Fragment key={i}>
+                      {i > 0 && <span className="crumb-sep">/</span>}
+                      {c.onClick ? (
+                        <button className="linklike" onClick={c.onClick}>{c.label}</button>
+                      ) : (
+                        <span style={{ color: "var(--text)" }}>{c.label}</span>
+                      )}
+                    </React.Fragment>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="topbar-right">{right}</div>
+          </div>
+        );
+      }
+
+      function Spinner() { return <span className="spinner" />; }
+
+      function EmptyState({ title, desc }) {
+        return <div className="empty"><div style={{ fontWeight: 500, color: "var(--text)" }}>{title}</div>{desc && <div style={{ marginTop: 4 }}>{desc}</div>}</div>;
+      }
+
+      function Modal({ open, onClose, title, sub, children, footer }) {
+        useEffect(() => {
+          if (!open) return;
+          const handler = (e) => { if (e.key === "Escape") onClose && onClose(); };
+          window.addEventListener("keydown", handler);
+          return () => window.removeEventListener("keydown", handler);
+        }, [open, onClose]);
+        if (!open) return null;
+        return (
+          <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose && onClose(); }}>
+            <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
+              <h3>{title}</h3>
+              {sub && <p className="sub">{sub}</p>}
+              {children}
+              {footer && <div className="modal-actions">{footer}</div>}
+            </div>
+          </div>
+        );
+      }
+
+      function Drawer({ open, onClose, title, children }) {
+        if (!open) return null;
+        return (
+          <>
+            <div className="drawer-backdrop" onClick={onClose} />
+            <div className="drawer">
+              <div className="drawer-header">
+                <h3>{title}</h3>
+                <button className="btn subtle sm" onClick={onClose}>关闭 ✕</button>
+              </div>
+              <div className="drawer-body">{children}</div>
+            </div>
+          </>
+        );
+      }
+
+      // ─────────────────────────────────────────────────────────────────
+      //  视图占位（commit 2/3/4 才真正实现）
+      // ─────────────────────────────────────────────────────────────────
+      function ScaffoldNotice() {
+        return (
+          <div className="card">
+            <h3 className="card-title">UI 启动 · 占位</h3>
+            <p className="card-sub">视图实现将在后续 commit 中逐步加入。</p>
+            <div className="text-sm text-muted">
+              本页表示前端骨架已就绪：iframe 桥接、API 客户端、Toast、Modal、Drawer、表格 / 表单 CSS 都已落地，
+              下一步将填入 OrgListView / OrgDetailView / ReportView。
+            </div>
+          </div>
+        );
+      }
+
+      // ─────────────────────────────────────────────────────────────────
+      //  视图：OrgListView（commit 2 占位）
+      // ─────────────────────────────────────────────────────────────────
+      function OrgListView({ onOpenOrg, toast }) {
+        return <ScaffoldNotice />;
+      }
+
+      // ─────────────────────────────────────────────────────────────────
+      //  视图：OrgDetailView（commit 3+4 占位）
+      // ─────────────────────────────────────────────────────────────────
+      function OrgDetailView({ orgId, period, onBack, onOpenReport, toast }) {
+        return <ScaffoldNotice />;
+      }
+
+      // ─────────────────────────────────────────────────────────────────
+      //  视图：ReportView（commit 4 占位）
+      // ─────────────────────────────────────────────────────────────────
+      function ReportView({ orgId, reportId, onBack, toast }) {
+        return <ScaffoldNotice />;
+      }
+
+      // ─────────────────────────────────────────────────────────────────
+      //  Root：极简 hash router（#/orgs / #/orgs/<id> / #/orgs/<id>/reports/<rid>）
+      // ─────────────────────────────────────────────────────────────────
+      function App() {
+        const [route, setRoute] = useState(window.location.hash || "#/orgs");
+        const [period, setPeriod] = useState("2025-FY");
+        const toasts = useToasts();
+
+        useEffect(() => {
+          const onHash = () => setRoute(window.location.hash || "#/orgs");
+          window.addEventListener("hashchange", onHash);
+          // 让主程的 PluginAppHost 立即收起 loading 罩 —— 第一帧已经渲染了。
+          postBridge({ type: "bridge:render-ready", pluginId: PLUGIN_ID });
+          return () => window.removeEventListener("hashchange", onHash);
+        }, []);
+
+        const navigate = (h) => { window.location.hash = h; };
+
+        // 解析路由
+        const m1 = route.match(/^#\/orgs\/?$/);
+        const m2 = route.match(/^#\/orgs\/([^/]+)\/?$/);
+        const m3 = route.match(/^#\/orgs\/([^/]+)\/reports\/([^/]+)\/?$/);
+
+        let body, crumbs;
+        if (m3) {
+          const [, oid, rid] = m3;
+          crumbs = [
+            { label: "账套", onClick: () => navigate("#/orgs") },
+            { label: oid.slice(-8), onClick: () => navigate(`#/orgs/${oid}`) },
+            { label: "报表" },
+          ];
+          body = (
+            <ReportView
+              orgId={oid}
+              reportId={rid}
+              onBack={() => navigate(`#/orgs/${oid}`)}
+              toast={toasts.push}
+            />
+          );
+        } else if (m2) {
+          const [, oid] = m2;
+          crumbs = [
+            { label: "账套", onClick: () => navigate("#/orgs") },
+            { label: oid.slice(-8) },
+          ];
+          body = (
+            <OrgDetailView
+              orgId={oid}
+              period={period}
+              onBack={() => navigate("#/orgs")}
+              onOpenReport={(rid) => navigate(`#/orgs/${oid}/reports/${rid}`)}
+              toast={toasts.push}
+            />
+          );
+        } else {
+          crumbs = [{ label: "账套" }];
+          body = (
+            <OrgListView
+              onOpenOrg={(oid) => navigate(`#/orgs/${oid}`)}
+              toast={toasts.push}
+            />
+          );
+        }
+
+        return (
+          <div className="app">
+            <TopBar
+              crumbs={crumbs}
+              right={
+                <>
+                  <span>期间</span>
+                  <select className="field" style={{ width: 110, padding: "3px 8px" }} value={period} onChange={(e) => setPeriod(e.target.value)}>
+                    <option value="2025-FY">2025 年度</option>
+                    <option value="2024-FY">2024 年度</option>
+                  </select>
+                </>
+              }
+            />
+            <div className="main">{body}</div>
+            {toasts.view}
+          </div>
+        );
+      }
+
+      const root = ReactDOM.createRoot(document.getElementById("root"));
+      root.render(<App />);
+    </script>
+  </body>
+</html>

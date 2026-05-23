@@ -24,10 +24,22 @@
   "requires": {
     "openakita": ">=1.27.0",
     "plugin_api": "~2",
+    "plugin_ui_api": "~1",
     "python": ">=3.11"
   },
   "provides": {
     "routes": true
   },
-  "tool_classes": {}
+  "tool_classes": {},
+  "ui": {
+    "entry": "ui/dist/index.html",
+    "icon": "icon.svg",
+    "title": "财务自动化",
+    "title_i18n": {
+      "zh": "财务自动化",
+      "en": "Finance Auto"
+    },
+    "sidebar_group": "apps",
+    "permissions": ["upload", "download", "notifications", "theme"]
+  }
 }
