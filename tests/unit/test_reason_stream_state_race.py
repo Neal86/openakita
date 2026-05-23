@@ -281,6 +281,181 @@ class TestEnsureReadyForReasoning:
             assert ts.status is TaskStatus.REASONING
 
 
+class TestS5AAuditFixes:
+    """v1.28.3-pre audit hot-fixes (FIX-S5A-1 + FIX-S5A-2).
+
+    The original S5-A landing covered the main-loop reasoning-entry but
+    left two telemetry holes that the audit surfaced:
+
+    FIX-S5A-1: ``_reason_stream_impl`` outer ``except Exception`` would
+    swallow an ``IllegalReasoningEntry`` raised by any future
+    ``ensure_ready_for_reasoning()`` callsite added outside the inner
+    main-loop try/except.  The outer catch ladder must list
+    ``IllegalReasoningEntry`` BEFORE ``Exception`` so the structured
+    error event + counter + pager alarm path is preserved.
+
+    FIX-S5A-2: ``_run_impl`` (IM / CLI path) has three hot-fix sites
+    (main-loop iter / ask_user reply / ask_user timeout) that
+    ``except ValueError: pass`` the REASONING transition.  Without
+    telemetry wiring, the inc_illegal_reasoning_entry counter would
+    stay at zero for IM users — leaving S5-B's gating gate (2 weeks
+    of zero hits) vacuously met irrespective of actual incidence.
+    """
+
+    def test_outer_except_catches_illegal_reasoning_entry_before_exception(
+        self,
+    ) -> None:
+        """FIX-S5A-1: ``except IllegalReasoningEntry`` must appear at the
+        outer-try ladder of ``_reason_stream_impl`` and BEFORE the broad
+        ``except Exception``.  Ordering matters — Python's except ladder
+        is sequential, so a broader catch first would swallow our typed
+        exception and lose ``code="illegal_state"`` + the counter alarm.
+
+        We anchor the outer catch by the unique ``reason_stream_outer``
+        source label (this string only appears in the outer handler we
+        just added; inner main-loop uses ``reason_stream_iter``)."""
+        src = inspect.getsource(ReasoningEngine._reason_stream_impl)
+        outer_marker = src.find("reason_stream_outer")
+        assert outer_marker > 0, (
+            "FIX-S5A-1: the outer IllegalReasoningEntry handler must "
+            "exist with source label `reason_stream_outer`."
+        )
+        # The except keyword line owning this marker is somewhere before
+        # the marker but at most ~1500 chars upstream (handler body +
+        # multi-line explanatory comment).
+        upstream = src[max(0, outer_marker - 1500):outer_marker]
+        assert "except IllegalReasoningEntry" in upstream, (
+            "FIX-S5A-1: the `reason_stream_outer` counter call must live "
+            "inside an `except IllegalReasoningEntry` block — otherwise "
+            "the typed exception is not the trigger and the label is a lie."
+        )
+        # Now check that the FIRST `except Exception as e:` after the
+        # outer IllegalReasoningEntry handler comes AFTER it (i.e. the
+        # outer Exception handler is sibling-after-IllegalReasoningEntry
+        # in the same try block).
+        outer_illegal_kw = src.rfind("except IllegalReasoningEntry", 0, outer_marker)
+        downstream = src[outer_marker:]
+        next_exception_offset = downstream.find("except Exception as e:")
+        assert next_exception_offset > 0, (
+            "FIX-S5A-1: the outer `except Exception as e:` handler must "
+            "still exist as the fall-through after IllegalReasoningEntry."
+        )
+        outer_exception_kw = outer_marker + next_exception_offset
+        assert outer_illegal_kw < outer_exception_kw, (
+            "FIX-S5A-1: `except IllegalReasoningEntry` MUST appear "
+            "before `except Exception as e:` in the outer try ladder — "
+            "Python evaluates except clauses sequentially."
+        )
+
+    def test_outer_catch_uses_reason_stream_outer_label(self) -> None:
+        """FIX-S5A-1: distinct source label lets ops differentiate
+        ``reason_stream_iter`` (inner main-loop catch — common path)
+        from ``reason_stream_outer`` (defensive net for callsites we
+        haven't yet identified)."""
+        src = inspect.getsource(ReasoningEngine._reason_stream_impl)
+        assert "reason_stream_outer" in src, (
+            "FIX-S5A-1: the outer catch must label its counter increment "
+            "as `reason_stream_outer` so ops can distinguish 'main-loop "
+            "race' (expected) from 'unidentified callsite' (alarm)."
+        )
+
+    def test_run_impl_main_loop_hot_fix_increments_counter(self) -> None:
+        """FIX-S5A-2: the v1.27.13 hot-fix at the top of _run_impl's
+        main loop now emits inc_illegal_reasoning_entry on the
+        terminal-state branch.  IM users no longer have 100% blind
+        telemetry."""
+        src = inspect.getsource(ReasoningEngine._run_impl)
+        # The label distinguishes from reason_stream so dashboards can
+        # see which channel surfaces races.
+        assert "run_impl_main_loop" in src, (
+            "FIX-S5A-2: the run() main-loop hot-fix must label its "
+            "counter increment as `run_impl_main_loop` so ops can "
+            "distinguish IM/CLI vs SSE race incidence."
+        )
+
+    def test_run_impl_ask_user_reply_hot_fix_increments_counter(self) -> None:
+        src = inspect.getsource(ReasoningEngine._run_impl)
+        assert "run_impl_ask_user_reply" in src, (
+            "FIX-S5A-2: the run() ask_user-reply hot-fix must label "
+            "its counter increment as `run_impl_ask_user_reply`."
+        )
+
+    def test_run_impl_ask_user_timeout_hot_fix_increments_counter(self) -> None:
+        src = inspect.getsource(ReasoningEngine._run_impl)
+        assert "run_impl_ask_user_timeout" in src, (
+            "FIX-S5A-2: the run() ask_user-timeout hot-fix must label "
+            "its counter increment as `run_impl_ask_user_timeout`."
+        )
+
+    def test_all_three_run_impl_hot_fixes_only_count_on_is_terminal(self) -> None:
+        """The counter should only fire when state.is_terminal — a
+        ValueError on a non-terminal source is the belt-and-suspenders
+        case that S5-B will revisit separately.
+
+        For each of the three counter-fire labels (run_impl_main_loop /
+        run_impl_ask_user_reply / run_impl_ask_user_timeout) we find the
+        anchor in source and walk back up to 1000 chars looking for the
+        nearest `if state.is_terminal:` — that guard MUST exist between
+        the `except ValueError:` and the counter call."""
+        src = inspect.getsource(ReasoningEngine._run_impl)
+        for label in (
+            "run_impl_main_loop",
+            "run_impl_ask_user_reply",
+            "run_impl_ask_user_timeout",
+        ):
+            anchor = f'source="{label}"'
+            pos = src.find(anchor)
+            assert pos > 0, (
+                f"FIX-S5A-2: counter label {label!r} not found in "
+                f"_run_impl source — hot-fix wiring is missing."
+            )
+            window = src[max(0, pos - 1500):pos]
+            assert "if state.is_terminal:" in window, (
+                f"FIX-S5A-2: counter call at {label!r} must be guarded "
+                f"by `if state.is_terminal:` within the nearest 1500 chars "
+                f"upstream — without the guard, the counter fires on "
+                f"every ValueError (including the belt-and-suspenders "
+                f"non-terminal force-write path), masking real race "
+                f"incidence in the dashboard."
+            )
+            assert "except ValueError:" in window, (
+                f"FIX-S5A-2: counter call at {label!r} must live inside "
+                f"the `except ValueError:` block — without that, the "
+                f"counter fires on the happy path and the metric "
+                f"becomes meaningless."
+            )
+
+    def test_run_impl_hot_fixes_use_distinct_source_labels(self) -> None:
+        """All four source labels (reason_stream_iter +
+        reason_stream_outer + 3x run_impl_*) must be unique so ops
+        dashboards can pinpoint which code path the race surfaces in."""
+        from openakita.core import conversation_metrics as metrics
+
+        metrics.reset_for_tests()
+        # Fire each label once.
+        for label in [
+            "reason_stream_iter",
+            "reason_stream_outer",
+            "run_impl_main_loop",
+            "run_impl_ask_user_reply",
+            "run_impl_ask_user_timeout",
+        ]:
+            metrics.inc_illegal_reasoning_entry(source=label)
+        snap = metrics.snapshot()
+        seen_labels = {
+            s["labels"]["source"]
+            for s in snap
+            if s["name"] == "illegal_reasoning_entry"
+        }
+        assert seen_labels == {
+            "reason_stream_iter",
+            "reason_stream_outer",
+            "run_impl_main_loop",
+            "run_impl_ask_user_reply",
+            "run_impl_ask_user_timeout",
+        }
+
+
 class TestIllegalReasoningEntryAlerts:
     """v1.28.3 S5-A: when IllegalReasoningEntry surfaces in
     ``_reason_stream_impl``, an ``inc_illegal_reasoning_entry`` counter

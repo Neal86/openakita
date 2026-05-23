@@ -2450,7 +2450,32 @@ class ReasoningEngine:
                 try:
                     state.transition(TaskStatus.REASONING)
                 except ValueError:
-                    pass
+                    # FIX-S5A-2 (v1.28.3-pre audit): silent swallow remains
+                    # (S5-B will delete it), but emit telemetry so the IM /
+                    # CLI run() path contributes to the inc_illegal_reasoning
+                    # _entry counter on equal footing with reason_stream.
+                    # Without this, telemetry was 100% blind to IM users
+                    # — S5-B's "2-week zero hits" gate would be vacuously
+                    # met regardless of actual race incidence.
+                    if state.is_terminal:
+                        logger.warning(
+                            "[ReAct] Iter %d: state already terminal (%s) "
+                            "before REASONING transition; preempt protocol "
+                            "bypassed (session=%r)",
+                            iteration + 1,
+                            state.status.value,
+                            conversation_id,
+                        )
+                        try:
+                            from .conversation_metrics import (
+                                inc_illegal_reasoning_entry,
+                            )
+
+                            inc_illegal_reasoning_entry(
+                                source="run_impl_main_loop"
+                            )
+                        except Exception:
+                            pass
 
             # Refresh tools only when _discovered_tools actually changes
             # (not every iteration — otherwise Supervisor NUDGE that strips
@@ -2962,7 +2987,26 @@ class ReasoningEngine:
                         try:
                             state.transition(TaskStatus.REASONING)
                         except ValueError:
-                            pass
+                            # FIX-S5A-2: see main-loop hotfix above.
+                            if state.is_terminal:
+                                logger.warning(
+                                    "[ReAct] ask_user reply: state terminal "
+                                    "(%s) on iter %d; preempt protocol "
+                                    "bypassed (session=%r)",
+                                    state.status.value,
+                                    iteration + 1,
+                                    conversation_id,
+                                )
+                                try:
+                                    from .conversation_metrics import (
+                                        inc_illegal_reasoning_entry,
+                                    )
+
+                                    inc_illegal_reasoning_entry(
+                                        source="run_impl_ask_user_reply"
+                                    )
+                                except Exception:
+                                    pass
                         continue  # 继续 ReAct 循环
 
                     elif (
@@ -2993,7 +3037,26 @@ class ReasoningEngine:
                         try:
                             state.transition(TaskStatus.REASONING)
                         except ValueError:
-                            pass
+                            # FIX-S5A-2: see main-loop hotfix above.
+                            if state.is_terminal:
+                                logger.warning(
+                                    "[ReAct] ask_user timeout: state "
+                                    "terminal (%s) on iter %d; preempt "
+                                    "protocol bypassed (session=%r)",
+                                    state.status.value,
+                                    iteration + 1,
+                                    conversation_id,
+                                )
+                                try:
+                                    from .conversation_metrics import (
+                                        inc_illegal_reasoning_entry,
+                                    )
+
+                                    inc_illegal_reasoning_entry(
+                                        source="run_impl_ask_user_timeout"
+                                    )
+                                except Exception:
+                                    pass
                         continue  # 继续 ReAct 循环，让 LLM 自行决策
 
                     else:
@@ -6703,6 +6766,43 @@ class ReasoningEngine:
                 ),
             )
             yield {"type": "text_delta", "content": hint}
+            yield {"type": "done"}
+
+        except IllegalReasoningEntry as _illegal_entry:
+            # FIX-S5A-1 (v1.28.3-pre audit): defensive net for any future
+            # ensure_ready_for_reasoning() callsite added outside the inner
+            # try/except in the main loop (line ~4367).  Without this
+            # branch the exception would fall into the generic
+            # ``except Exception`` below and lose the stable ``code`` field
+            # + the inc_illegal_reasoning_entry counter that ops alert on.
+            logger.error(
+                "[ReAct-Stream] IllegalReasoningEntry escaped to outer "
+                "catch (session=%r): %s",
+                _session_key,
+                _illegal_entry,
+                extra={"alarm": "pager"},
+            )
+            try:
+                from .conversation_metrics import inc_illegal_reasoning_entry
+
+                inc_illegal_reasoning_entry(source="reason_stream_outer")
+            except Exception:
+                pass
+            self._last_working_messages = working_messages
+            self._save_react_trace(
+                react_trace,
+                conversation_id,
+                session_type,
+                "error: illegal_state",
+                _trace_started_at,
+            )
+            yield {
+                "type": "error",
+                "code": "illegal_state",
+                "message": "上一条消息正在收尾，请稍候再试或新建会话。",
+            }
+            with contextlib.suppress(Exception):
+                await broadcast_event("pet-status-update", {"status": "error"})
             yield {"type": "done"}
 
         except Exception as e:
