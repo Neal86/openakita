@@ -84,6 +84,9 @@ class ReportRule:
     simplify: dict[str, Any] | None = None
     """W3 Stage 2: optional v0.2 Part 1 §3 simplification config.  The
     generator passes this verbatim to :class:`renderers.SimplifyConfig`."""
+    manual_input_key: str | None = None
+    """W3 Stage 4: when ``data_source == "manual_input"``, this is the
+    ``field_key`` to look up in the ``manual_inputs`` table."""
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -286,11 +289,18 @@ def _build_rule(
         "is_reclassification",
         "notes",
         "simplify",
+        "manual_input_key",
     }
     extra = {k: v for k, v in raw.items() if k not in known_keys}
 
     simplify_raw = raw.get("simplify")
     simplify = dict(simplify_raw) if isinstance(simplify_raw, dict) else None
+    manual_input_key = raw.get("manual_input_key")
+    if data_source == "manual_input" and not manual_input_key:
+        raise YamlValidationError(
+            f"rules[{idx}] ({reference_code}) data_source=manual_input but "
+            "manual_input_key is missing"
+        )
 
     rule = ReportRule(
         reference_code=reference_code,
@@ -307,6 +317,7 @@ def _build_rule(
         is_reclassification=is_reclassification,
         notes=str(notes) if notes else None,
         simplify=simplify,
+        manual_input_key=str(manual_input_key) if manual_input_key else None,
         extra=extra,
     )
     return rule, warnings

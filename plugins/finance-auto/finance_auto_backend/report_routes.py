@@ -70,6 +70,8 @@ _KIND_TO_FILENAME = {
     "balance_sheet:general_enterprise": "balance_sheet_general_enterprise.yaml",
     "income_statement:small_enterprise": "income_statement_small_enterprise.yaml",
     "income_statement:general_enterprise": "income_statement_general_enterprise.yaml",
+    # M1 W3 Stage 4: minimal cash-flow template wired to manual_inputs.
+    "cash_flow:small_enterprise": "cash_flow_small_enterprise.yaml",
 }
 
 
@@ -378,11 +380,11 @@ def register_report_endpoints(
     async def generate(
         org_id: str, kind: str, payload: ReportGenerateRequest
     ) -> ReportDetailResponse:
-        if kind not in {"balance_sheet", "income_statement"}:
+        if kind not in {"balance_sheet", "income_statement", "cash_flow"}:
             raise HTTPException(
                 status_code=400,
                 detail=f"unsupported report kind: {kind!r}; allowed: "
-                "balance_sheet | income_statement",
+                "balance_sheet | income_statement | cash_flow",
             )
         org = await service.get_org(org_id)
         standard = _standard_for_org(org.standard, payload.accounting_standard)
@@ -395,6 +397,23 @@ def register_report_endpoints(
             period_id=payload.period_id,
             source_import_id=payload.source_import_id,
         )
+        manual_input_values: dict[str, float] = {}
+        if kind == "cash_flow":
+            # W3 Stage 4: pre-load every manual_input filled for this
+            # (org, period) so the generator can substitute them by key.
+            async with service.db.conn.execute(
+                "SELECT field_key, value FROM manual_inputs WHERE org_id=? "
+                "AND period_id=?",
+                (org_id, payload.period_id),
+            ) as cur:
+                async for row in cur:
+                    raw = (row["value"] or "").strip()
+                    if not raw:
+                        continue
+                    try:
+                        manual_input_values[row["field_key"]] = float(raw)
+                    except (TypeError, ValueError):
+                        continue
         generated = generate_report(
             template=template,
             org_id=org_id,
@@ -402,6 +421,7 @@ def register_report_endpoints(
             accounting_standard=standard,
             balance_lines=balance_lines,
             source_import_id=source_id,
+            manual_input_values=manual_input_values,
         )
         await _persist_report(service, template=template, generated=generated)
 

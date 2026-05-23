@@ -725,3 +725,72 @@ class CrossPeriodCheckRequest(BaseModel):
     tolerance: float = Field(1.0, ge=0.0)
     warn_threshold: float = Field(100.0, ge=0.0)
     emit_parse_issues: bool = True
+
+
+# ---------------------------------------------------------------------------
+# manual_inputs (M1 W3 Stage 4 — cash-flow supplementary fields).
+# ---------------------------------------------------------------------------
+
+ManualInputSource = Literal["manual", "vat_declaration", "learning_sample", "import"]
+ManualInputValueType = Literal["cny", "text", "int", "float"]
+
+
+class ManualInputPreset(BaseModel):
+    """One row from ``templates/manual_inputs/*.yaml`` — describes a slot
+    the UI must surface even when no value has been submitted yet."""
+
+    key: str
+    label: str
+    value_type: ManualInputValueType = "cny"
+    default_source: ManualInputSource = "manual"
+    source_hint: str | None = None
+    required_by: list[str] = Field(default_factory=list)
+
+
+class ManualInputRecord(BaseModel):
+    """One persisted row in ``manual_inputs``."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    org_id: str
+    period_id: str
+    field_key: str
+    field_label: str = ""
+    value: str = ""
+    value_type: ManualInputValueType = "cny"
+    source: ManualInputSource = "manual"
+    notes: str | None = None
+    decided_by: str = "local"
+    decided_at: str
+    version: int = 1
+
+
+class ManualInputSlot(BaseModel):
+    """A unified view that merges the preset + the current persisted record
+    (if any) — what the UI usually wants to render in one go."""
+
+    key: str
+    label: str
+    value_type: ManualInputValueType = "cny"
+    default_source: ManualInputSource = "manual"
+    source_hint: str | None = None
+    required_by: list[str] = Field(default_factory=list)
+    record: ManualInputRecord | None = None
+    filled: bool = False
+
+
+class ManualInputListResponse(BaseModel):
+    period_id: str
+    org_id: str
+    slots: list[ManualInputSlot]
+    filled_count: int
+    total_count: int
+
+
+class ManualInputSubmitRequest(BaseModel):
+    value: str
+    value_type: ManualInputValueType = "cny"
+    source: ManualInputSource = "manual"
+    notes: str | None = None
+    decided_by: str = "local"

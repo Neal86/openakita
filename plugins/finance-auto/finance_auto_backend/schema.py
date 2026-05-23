@@ -22,7 +22,7 @@ DDL statement so it does not appear here.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 """History:
 * v1 -- M1 W1 baseline (5 tables).
 * v2 -- M1 W2 Stage 4: adds ``reports`` + ``report_cells``.
@@ -34,6 +34,8 @@ SCHEMA_VERSION = 6
 * v6 -- M1 W3 Stage 3: adds ``cross_period_check_results``
         (跨期校验; v0.3 Part Biz §4).  Carries a ``version`` column to
         satisfy the v0.3 Part Infra C3 optimistic-lock contract.
+* v7 -- M1 W3 Stage 4: adds ``manual_inputs`` for the 7 cash-flow
+        supplementary fields (v0.2 Part 1 §7.2 / design doc §7.2).
 """
 
 # ---------------------------------------------------------------------------
@@ -342,6 +344,31 @@ CREATE TABLE IF NOT EXISTS cross_period_check_results (
 CREATE INDEX IF NOT EXISTS idx_xperiod_org ON cross_period_check_results(org_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_xperiod_imports
     ON cross_period_check_results(prior_import_id, current_import_id);
+
+-- ===========================================================================
+-- M1 W3 Stage 4: manual_inputs (cash-flow supplementary fields).
+-- One row per (org, period, field_key).  ``source`` flags the provenance
+-- ('manual' | 'vat_declaration' | 'learning_sample' | ...).  ``value`` is a
+-- string column so the same row can hold either CNY amounts (typed via
+-- ``value_type='cny'``) or free-form text (``value_type='text'``).
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS manual_inputs (
+    id           TEXT PRIMARY KEY,
+    org_id       TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    period_id    TEXT NOT NULL,
+    field_key    TEXT NOT NULL,
+    field_label  TEXT NOT NULL DEFAULT '',
+    value        TEXT NOT NULL DEFAULT '',
+    value_type   TEXT NOT NULL DEFAULT 'cny',
+    source       TEXT NOT NULL DEFAULT 'manual',
+    notes        TEXT,
+    decided_by   TEXT NOT NULL DEFAULT 'local',
+    decided_at   TEXT NOT NULL,
+    version      INTEGER NOT NULL DEFAULT 1
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_manual_inputs_key
+    ON manual_inputs(org_id, period_id, field_key);
 """
 
 # ---------------------------------------------------------------------------
@@ -379,6 +406,8 @@ MIGRATION_STEPS: tuple[tuple[int, str], ...] = (
     (6, ""),                      # W3 Stage 3: cross_period_check_results
                                   # is a brand-new CREATE TABLE IF NOT EXISTS
                                   # already in SCHEMA_SQL -- no ALTER needed.
+    (7, ""),                      # W3 Stage 4: manual_inputs is a brand-new
+                                  # CREATE TABLE IF NOT EXISTS in SCHEMA_SQL.
 )
 """Each entry: (target_version, idempotent_DDL).  All steps replay the full
 canonical SCHEMA_SQL because every CREATE TABLE in it is IF NOT EXISTS, so

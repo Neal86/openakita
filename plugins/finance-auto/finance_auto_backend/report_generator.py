@@ -312,10 +312,15 @@ def generate_report(
     accounting_standard: str,
     balance_lines: list[TrialBalanceLine],
     source_import_id: str | None,
+    manual_input_values: dict[str, float] | None = None,
 ) -> GeneratedReport:
     """Walk the template's rules and produce cells.
 
     The function is pure (no DB I/O) so it is trivially unit-testable.
+
+    ``manual_input_values`` (W3 Stage 4) is an optional ``{field_key:
+    value}`` dict consumed by rules whose ``data_source == 'manual_input'``;
+    missing keys emit a warning but do not abort generation.
     """
     instance = ReportInstance.new(
         org_id=org_id,
@@ -333,6 +338,7 @@ def generate_report(
     ]
     line_values: dict[str, float] = {}
     line_no_values: dict[int, float] = {}
+    manual_values = manual_input_values or {}
 
     for rule in template.rules:
         cell, value, source_ids = _resolve_rule(
@@ -342,6 +348,7 @@ def generate_report(
             line_no_values=line_no_values,
             warnings=warnings,
             report_id=instance.id,
+            manual_input_values=manual_values,
         )
         cells.append(cell)
         line_values[rule.reference_code] = value
@@ -373,6 +380,7 @@ def _resolve_rule(
     line_no_values: dict[int, float],
     warnings: list[str],
     report_id: str,
+    manual_input_values: dict[str, float] | None = None,
 ) -> tuple[ReportCell, float, list[str]]:
     is_tbd = rule.code == TBD_SENTINEL
     sources: list[str] = []
@@ -430,6 +438,32 @@ def _resolve_rule(
             f"{rule.reference_code} cross_year not supported in M1 W2; rendered as 0"
         )
         value = 0.0
+    elif rule.data_source == "manual_input":
+        mi = manual_input_values or {}
+        key = rule.manual_input_key or rule.code
+        if not key:
+            warnings.append(
+                f"{rule.reference_code} data_source=manual_input but no "
+                "manual_input_key / code provided"
+            )
+            value = 0.0
+        elif key not in mi or mi[key] is None:
+            warnings.append(
+                f"{rule.reference_code} manual_input {key!r} is not yet filled; "
+                "rendered as 0"
+            )
+            value = 0.0
+        else:
+            try:
+                value = float(mi[key]) * (rule.sign or 1)
+            except (TypeError, ValueError):
+                warnings.append(
+                    f"{rule.reference_code} manual_input {key!r}={mi[key]!r} "
+                    "is not numeric; rendered as 0"
+                )
+                value = 0.0
+            else:
+                sources.append(f"manual_input:{key}")
     else:
         warnings.append(
             f"{rule.reference_code} unhandled data_source={rule.data_source!r}"

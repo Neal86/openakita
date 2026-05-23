@@ -26,7 +26,7 @@ SHIPPED_TEMPLATES = PLUGIN_ROOT / "templates" / "reports"
 
 
 def test_shipped_templates_count() -> None:
-    assert len(list_templates(SHIPPED_TEMPLATES)) == 4
+    assert len(list_templates(SHIPPED_TEMPLATES)) == 5
 
 
 def test_load_balance_sheet_small() -> None:
