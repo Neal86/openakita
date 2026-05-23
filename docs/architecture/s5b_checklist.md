@@ -34,7 +34,8 @@ understand; ignoring them and shipping S5-B turns a soft "force-write
 ### 2. Code state
 
 * `tests/unit/test_no_force_write_state_transitions.py` exists and
-  passes — `EXPECTED_FORCE_WRITE_COUNT = 9`.
+  passes — `S5B_BACKLOG_FILES = {"reasoning_engine.py": 9}` +
+  `ARCH_FORCE_WRITE_FILES = {"agent_state.py": 1}`.
 * `IllegalReasoningEntry` + `ensure_ready_for_reasoning` shipped in
   S5-A.
 * `_reason_stream_impl` outer `except IllegalReasoningEntry` exists
@@ -346,7 +347,8 @@ If S5-B causes a production regression in the first 2 weeks:
    stays a subclass either way.
 4. If step 2 (`reasoning_engine.py` deletions) is the culprit,
    the syntax guard test will already have been ratcheted to
-   `EXPECTED_FORCE_WRITE_COUNT = 0`. Revert ratchet first, then
+   `S5B_BACKLOG_FILES[reasoning_engine.py] = 0` (or 1 with
+   MODEL_SWITCHING reclassified). Revert that ratchet first, then
    the source deletions.
 5. After rollback, file a bug against the specific source label
    that fired. Don't re-attempt S5-B until the root cause is

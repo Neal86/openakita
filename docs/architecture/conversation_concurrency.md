@@ -358,19 +358,21 @@ to "cancel" — that's a deliberate safety boundary.
 
 ## Telemetry catalog
 
-All counters live in `core/conversation_metrics.py`. Five rules
-exposing visibility:
+All counters live in `core/conversation_metrics.py`. The table
+below lists the **stored counter name** (what `snapshot()` returns
+in the `"name"` field) and not the `inc_*()` Python function name —
+the analyzer script matches on stored name:
 
-| Counter | Labels | Fires when |
-|---|---|---|
-| `preempt_count` | `channel`, `policy` | A new turn supersedes the previous one |
-| `queue_count` | `channel` | QUEUE policy held a new turn |
-| `settled_timeout_count` | `channel` | QUEUE waited past settle timeout |
-| `abandon_count` | `channel` | Preempted task abandoned its writes |
-| `takeover_count` | `channel` | Preempted task's settled-event fired |
-| `inc_interrupt_downgrade` | `channel`, `reason ∈ {block_in_flight, unknown_tool}` | INTERRUPT downgraded to QUEUE |
-| `inc_queue_extended` | `channel` | QUEUE timeout extended (block tool still in-flight) |
-| `inc_illegal_reasoning_entry` | `source ∈ {reason_stream_iter, reason_stream_outer, run_impl_main_loop, run_impl_ask_user_reply, run_impl_ask_user_timeout}` | Reasoning entry hit a terminal state — race past S1 |
+| Stored name | Inc fn | Labels | Fires when |
+|---|---|---|---|
+| `preempt` | `inc_preempt` | `policy`, `channel` | INTERRUPT/STEER abruptly takes the slot from a prior task |
+| `queue` | `inc_queue` | `channel` | QUEUE policy held a new turn |
+| `settled_timeout` | `inc_settled_timeout` | `policy`, `channel` | QUEUE waited past `preempt_settle_timeout_ms` |
+| `abandon` | `inc_abandon` | `policy`, `channel` | Preempted task abandoned its writes after settle timeout |
+| `takeover` | `inc_takeover` | `channel` | HTTP `start()` returned `took_over` (lock transfer) |
+| `interrupt_downgrade` | `inc_interrupt_downgrade` | `channel`, `reason ∈ {block_in_flight, unknown_tool}` | INTERRUPT downgraded to QUEUE |
+| `queue_extended` | `inc_queue_extended` | `channel`, `reason ∈ {block_in_flight, unknown_tool}` | QUEUE timeout extended (block tool still in-flight) |
+| `illegal_reasoning_entry` | `inc_illegal_reasoning_entry` | `source ∈ {reason_stream_iter, reason_stream_outer, run_impl_main_loop, run_impl_ask_user_reply, run_impl_ask_user_timeout}` | Reasoning entry hit a terminal state — race past S1 |
 
 ### `inc_illegal_reasoning_entry` source labels — why five?
 
@@ -461,27 +463,38 @@ from `"queue"` to `"interrupt"` — that's the only code change.
 See `scripts/concurrency_telemetry_analyzer.py` for the verdict
 machine.
 
-### v1.28.3 / S5-B — delete 18+2 historical safety nets
+### v1.28.3 / S5-B — delete 20 historical safety nets
 
 **Trigger**: 2 weeks of zero hits on `inc_illegal_reasoning_entry`
-across ALL 5 source labels.
+across ALL 5 source labels AND `preempt + queue` traffic above
+`S5B_MIN_TRAFFIC_FLOOR` (analyzer enforces both).
 
 When the trigger is met:
 
-1. Delete 9 `except ValueError: state.status = X` blocks in
-   `reasoning_engine.py` (lines tagged `# s5b-allow-force-write`).
-2. Delete 11 `except ValueError: pass` blocks at non-reasoning
-   transition points (`_run_impl` verify, observe, etc.).
-3. Drop `EXPECTED_FORCE_WRITE_COUNT` in the syntax guard test
-   from 9 to 0.
-4. Update `_each_known_force_write_target_is_present` parametrize
-   list — remove the 7 deleted TaskStatus targets.
-5. Make `TaskState.transition()` raise `IllegalReasoningEntry`
-   instead of `ValueError` on illegal transitions (let the outer
-   `_reason_stream_impl` IllegalReasoningEntry catch handle it).
+1. Introduce `IllegalStateTransition(RuntimeError)` in `agent_state.py`;
+   keep `IllegalReasoningEntry` as a subclass so all existing
+   catch sites keep working.
+2. Delete 8 `except ValueError: state.status = X` blocks in
+   `reasoning_engine.py` (lines tagged `# s5b-allow-force-write`)
+   — the 9th site (MODEL_SWITCHING) is *reclassified* as
+   architectural-permanent (analogous to `cancel-idempotent`).
+3. Delete 8 pure-pass `except ValueError: pass` blocks at
+   non-reasoning transition points in `_run_impl`.
+4. Refactor 3 `except ValueError:` blocks with FIX-S5A-2
+   telemetry wiring (`run_impl_main_loop` /
+   `run_impl_ask_user_reply` / `run_impl_ask_user_timeout`) to
+   `except IllegalStateTransition: ...; raise` — preserves the
+   `inc_illegal_reasoning_entry` counter while letting the
+   exception propagate (no more silent loop continue).
+5. Update `S5B_BACKLOG_FILES[reasoning_engine.py]` in the syntax
+   guard test from 9 to 0 (or 1 if MODEL_SWITCHING is reclassified
+   under a new `model-switch-idempotent-force-write` token).
+6. Update `test_each_known_force_write_target_is_present`
+   parametrize list — remove deleted TaskStatus targets.
 
 See [`docs/architecture/s5b_checklist.md`](./s5b_checklist.md) for
-the line-by-line implementation guide.
+the line-by-line implementation guide, including the 3 telemetry
+refactors that are easy to mis-execute as blind deletes.
 
 ### S2 — RunContext per-call (long-term debt)
 
@@ -555,10 +568,12 @@ identifies the code path.
 as block, OR an unknown tool is in-flight (registry drift).
 
 **Investigate**:
-- Read `inc_interrupt_downgrade` labels — `reason=block_in_flight`
+- Read the `interrupt_downgrade` counter's labels — `reason=block_in_flight`
   means correct downgrade, `reason=unknown_tool` means classification gap.
-- For `unknown_tool`, add to `INTERRUPT_BEHAVIOR_MAP` in
-  `core/tool_interrupt_behavior.py`.
+- For `unknown_tool`, add the tool name to `_INTERRUPT_BEHAVIOR_MAP`
+  in `core/tool_interrupt_behavior.py` (the test
+  `test_tool_interrupt_behavior_completeness` will fail until the
+  classification is added).
 
 ## History
 
@@ -572,7 +587,7 @@ as block, OR an unknown tool is in-flight (registry drift).
 | v1.28.2 | S4: 139 tools classified + INTERRUPT auto-downgrade + QUEUE extension + MCP sub-tool resolve | Rule #5 |
 | v1.28.3-pre | S5-A: `IllegalReasoningEntry` + `ensure_ready_for_reasoning` + 5 telemetry labels + syntax guard | Rule #3 contract typed |
 | v1.28.2.1 | desktop default → INTERRUPT (pending telemetry) | S4 user-visible win |
-| v1.28.3 | S5-B: delete 18+2 historical safety nets (pending telemetry) | Tech debt cleanup |
+| v1.28.3 | S5-B: delete 8+8 force-writes/silent-pass + refactor 3 telemetry sites (pending telemetry) | Tech debt cleanup |
 | v1.28.0 | S2: RunContext per-call (pending, breaking) | Multi-conv hygiene |
 | v1.28.x | S6: multi-tab SSE fan-out (pending, product-driven) | UX enhancement |
 

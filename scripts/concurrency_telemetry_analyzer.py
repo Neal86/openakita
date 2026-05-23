@@ -15,9 +15,9 @@ against the published thresholds in
 
 | Gate | Trigger | Threshold |
 |---|---|---|
-| v1.28.2.1 desktop INTERRUPT default | 1 week of telemetry | ``downgrade_rate < 5%`` + ``abandon_rate < 1%`` |
-| S5-B delete force-writes | 2 weeks of telemetry | All 5 ``inc_illegal_reasoning_entry`` source labels at **0** |
-| FOLLOW-UP-S4-C force-cancel hatch | user feedback + 1-2 weeks | ``queue_extended_rate > 20%`` AND user complaint |
+| v1.28.2.1 desktop INTERRUPT default | 1 week of telemetry | ``downgrade_rate < 5%`` + ``abandon_rate < 1%`` + desktop preempt > 0 |
+| S5-B delete force-writes | 2 weeks of telemetry | All 5 ``illegal_reasoning_entry`` source labels at 0 AND ``preempt + queue >= S5B_MIN_TRAFFIC_FLOOR`` |
+| FOLLOW-UP-S4-C force-cancel hatch | user feedback + 1-2 weeks | ``queue_extended_rate >= 20%`` AND total queue >= ``GATE_MIN_TRAFFIC_FLOOR`` (rate alone is informational, not action-triggering) |
 
 Usage
 -----
@@ -36,7 +36,14 @@ Usage
         import json, sys; json.dump({'counters': snapshot()}, sys.stdout)" \\
         | python scripts/concurrency_telemetry_analyzer.py
 
-Exit code 0 = all gates GO; 1 = at least one gate HOLD/BLOCK.
+Exit codes
+----------
+
+* ``0`` — all gates ``[GO]``; safe to ship the gated change.
+* ``1`` — at least one gate ``[BLOCK]``; pager-worthy.
+* ``2`` — at least one gate ``[HOLD]`` (no ``[BLOCK]``); transient,
+  retry later. CI cron monitors should distinguish 1 vs 2 — only
+  ``1`` should page operators.
 """
 
 from __future__ import annotations
@@ -157,17 +164,56 @@ def _load_snapshot(source: str | None) -> dict[str, Any]:
 # ── aggregation helpers ───────────────────────────────────────────────
 
 
+def _coerce_count(raw: Any) -> int:
+    """Defensive coercion for counter values.  Production payloads
+    are always ``int`` (see ``conversation_metrics._CounterTable``),
+    but a malformed snapshot, hand-edited JSON, or a future schema
+    bump could produce ``None`` / ``"3"`` / ``True`` / floats.
+
+    * ``None`` / missing → 0 (treat as no contribution).
+    * Numeric strings → coerced via ``int(str)``.
+    * Non-coercible types → 0 + best-effort log (not raise, since the
+      analyzer is a read-only reporter; raising on partial data
+      would block valid GO/BLOCK calls on the other 7 counters).
+    """
+    if raw is None:
+        return 0
+    if isinstance(raw, bool):  # bool is subclass of int; coerce explicitly
+        return int(raw)
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        return int(raw)
+    if isinstance(raw, str):
+        try:
+            return int(raw)
+        except ValueError:
+            return 0
+    return 0
+
+
 def _group_by_label(
     counters: Iterable[dict[str, Any]],
     name: str,
     label: str,
 ) -> dict[str, int]:
-    """Sum counter ``name`` values grouped by ``labels[label]``."""
+    """Sum counter ``name`` values grouped by ``labels[label]``.
+
+    Defensive against malformed entries: an entry missing ``labels``
+    or whose ``labels`` is not a dict contributes to the ``"unknown"``
+    bucket rather than raising.
+    """
     bucket: dict[str, int] = defaultdict(int)
     for c in counters:
+        if not isinstance(c, dict):
+            continue
         if c.get("name") != name:
             continue
-        bucket[c.get("labels", {}).get(label, "unknown")] += int(c.get("value", 0))
+        labels = c.get("labels", {})
+        if not isinstance(labels, dict):
+            bucket["unknown"] += _coerce_count(c.get("value", 0))
+            continue
+        bucket[labels.get(label, "unknown")] += _coerce_count(c.get("value", 0))
     return dict(bucket)
 
 
@@ -276,6 +322,13 @@ def gate_s5b_delete_force_writes(
                 f"the docs.",
             )
         )
+        # Exclude unknown labels from the race-detection step so
+        # downstream readers don't get two BLOCK lines describing the
+        # same physical hit.  Hygiene block already alarms ops.
+        by_source = {
+            k: v for k, v in by_source.items()
+            if k in EXPECTED_ILLEGAL_ENTRY_LABELS
+        }
 
     hot_labels = {label: count for label, count in by_source.items() if count > 0}
     if hot_labels:
