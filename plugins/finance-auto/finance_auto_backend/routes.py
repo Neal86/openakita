@@ -763,6 +763,11 @@ def build_router(service: FinanceAutoService) -> APIRouter:
         register_reclassification_endpoints(router, service)
     except ImportError:
         pass
+    try:  # Stage 4 (indirect cash-flow engine).
+        from .cash_flow_routes import register_cash_flow_endpoints
+        register_cash_flow_endpoints(router, service)
+    except ImportError:
+        pass
     try:  # Stage 6 (consolidation).
         from .consolidation_routes import register_consolidation_endpoints
         register_consolidation_endpoints(router, service)
