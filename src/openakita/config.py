@@ -262,6 +262,18 @@ class Settings(BaseSettings):
         default_factory=list,
         description="用户指定的常驻工具分类（如 Browser, MCP），该分类下所有工具不 defer",
     )
+    effective_tools_main_chat_stable: bool = Field(
+        default=True,
+        description=(
+            "When True, the main-chat tool set is fixed to ALWAYS_LOAD_TOOLS + "
+            "all categories with intent_hints disabled, so turn-to-turn tool "
+            "lists are stable. Sub-agents still apply the explicit delegate "
+            "blacklist. Setting this to False restores the legacy intent-driven "
+            "promote/defer churn observed in exploratory testing v10/v11 "
+            "(per-sample swings between 62/70/74 tools). "
+            "See RCA v11 §1.5 (Fix-G4)."
+        ),
+    )
 
     # Thinking 模式配置
     thinking_mode: str = Field(

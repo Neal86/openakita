@@ -1251,6 +1251,35 @@ class Agent:
         if selfcheck_allowed:
             tools = [t for t in tools if t.get("name") in selfcheck_allowed]
 
+        # RCA v11 §1.5 (Fix-G4): in stable main-chat mode, skip the
+        # intent-driven promote/defer pipeline entirely so the tool set
+        # is deterministic across turns. Sub-agents, cron-disabled, and
+        # selfcheck-allowed contexts still run the legacy intent path
+        # because they already have other strong filters above. The
+        # feature flag ``effective_tools_main_chat_stable`` defaults to
+        # True; flipping it to False restores the original churn for
+        # rollback (see config.py).
+        if (
+            not self._is_sub_agent_call
+            and not cron_disabled
+            and not selfcheck_allowed
+            and getattr(settings, "effective_tools_main_chat_stable", True)
+        ):
+            tools = self._stable_main_chat_tool_set(tools)
+            self._last_minimal_toolset = False
+            if hasattr(self, "tool_catalog"):
+                deferred_names = {
+                    t.get("name", "") for t in tools if t.get("_deferred")
+                }
+                self.tool_catalog.set_deferred_tools(deferred_names)
+            ctx = self._get_raw_context_window()
+            if 0 < ctx < 8000:
+                tools = [t for t in tools if t.get("name") in SMALL_CTX_CORE_TOOLS]
+            elif 0 < ctx < 32000:
+                allowed_ctx = SMALL_CTX_CORE_TOOLS | MEDIUM_CTX_EXTRA_TOOLS
+                tools = [t for t in tools if t.get("name") in allowed_ctx]
+            return tools
+
         intent = getattr(self, "_current_intent", None)
         intent_hints = set(intent.tool_hints) if intent and intent.tool_hints else set()
         if intent:
@@ -1367,6 +1396,69 @@ class Agent:
             tools = [t for t in tools if t.get("name") in allowed_ctx]
 
         return tools
+
+    def _stable_main_chat_tool_set(self, tools: list[dict]) -> list[dict]:
+        """Return main-chat tools without intent-driven defer/promote churn.
+
+        Body of ``Fix-G4`` (RCA v11 §1.5). The legacy ``_effective_tools``
+        path mixes intent hints, minimal-prompt filtering, user
+        overrides, hint_names lookup and per-category defer; the result
+        is a tool list that swings by 8-12 entries from one turn to the
+        next, which destabilises tool ordering and pushes high-value
+        tools like ``delegate_to_agent`` out of the API budget in the
+        next stage.
+
+        Stable behaviour:
+
+        - Tools in ``ALWAYS_LOAD_TOOLS`` are marked ``_promoted=True`` so
+          ``Brain._convert_tools_to_llm`` reserves schema budget for
+          them first (see Fix-G3).
+        - User-pinned tools (``settings.always_load_tools``) and
+          categories (``settings.always_load_categories`` plus the
+          built-in ``System`` / ``Memory`` always-keep set) are also
+          marked ``_promoted=True``.
+        - Tools in ``DEFER_INDIVIDUAL_TOOLS`` are dropped from the
+          effective set. These are the low-frequency utilities that
+          the static defer config already flagged as opt-in; removing
+          them from the API tool list keeps the per-turn set stable
+          across all conversations.
+        - Every other tool passes through unchanged (no per-turn
+          ``_deferred`` / ``_promoted`` churn).
+        """
+        from ..tools.defer_config import (
+            ALWAYS_LOAD_TOOLS,
+            DEFER_INDIVIDUAL_TOOLS,
+        )
+
+        user_always_tools = frozenset(settings.always_load_tools)
+        user_always_cats = frozenset(
+            list(settings.always_load_categories) + list(self._ALWAYS_KEEP_CATEGORIES)
+        )
+
+        out: list[dict] = []
+        for tool in tools:
+            name = tool.get("name", "")
+            cat = tool.get("category", "")
+
+            if name in DEFER_INDIVIDUAL_TOOLS:
+                continue
+
+            # Reset any per-turn markers left over from a previous pass
+            # so the snapshot we return reflects only the stable rules.
+            tool.pop("_deferred", None)
+            tool.pop("_always_available", None)
+            tool.pop("_promoted", None)
+
+            if (
+                name in ALWAYS_LOAD_TOOLS
+                or name in user_always_tools
+                or (cat and cat in user_always_cats)
+            ):
+                tool["_promoted"] = True
+
+            out.append(tool)
+
+        return out
 
     @staticmethod
     def _dedupe_tools_by_name(tools: list[dict], *, source: str) -> list[dict]:

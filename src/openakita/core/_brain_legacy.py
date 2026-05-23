@@ -1037,12 +1037,29 @@ class Brain:
         支持 defer_loading：标记 _deferred=True 的工具只传 name + description，
         不传 input_schema，减少 token 消耗。模型通过 tool_search 按需获取完整 schema。
 
+        Budget policy (RCA v11 §4.1, Fix-G3):
+        - Tools in ``ALWAYS_LOAD_TOOLS`` (or explicitly ``_promoted=True``)
+          reserve their schema budget *first*. Contestable tools then
+          compete for what is left. This guarantees that delegation
+          tools like ``delegate_to_agent`` never get pushed out of the
+          prompt by list ordering, which is what produced the
+          intermittent "delegate tool missing" symptom in exploratory
+          tests v10/v11.
+        - When the ``ALWAYS_LOAD_TOOLS`` set is empty/unimportable the
+          behaviour collapses to the original single-pass budget walk.
+
         支持的格式：
         - Anthropic (内部): {"name": ..., "description": ..., "input_schema": {...}}
         - OpenAI:          {"type": "function", "function": {"name": ..., ...}}
         """
         if not tools:
             return None
+
+        # Lazy import to avoid bootstrap cycles (tools package imports core).
+        try:
+            from openakita.tools.defer_config import ALWAYS_LOAD_TOOLS as _ALWAYS_LOAD
+        except Exception:
+            _ALWAYS_LOAD = frozenset()  # type: ignore[assignment]
 
         result: list[Tool] = []
         skipped = 0
@@ -1053,6 +1070,13 @@ class Brain:
         always_available = 0
         schema_budget = self._resolve_api_tools_schema_budget()
         schema_tokens = 0
+
+        # ---- Phase 1: normalise + bucket --------------------------------
+        # Walk the input once, extract canonical (name, description,
+        # schema, is_deferred, cost), drop unnamed/duplicate entries, and
+        # decide up-front whether each entry is always-load or
+        # contestable. The output preserves the caller's original order.
+        entries: list[dict[str, Any]] = []
         for tool in tools:
             name = tool.get("name", "")
             description = tool.get("detail") or tool.get("description", "")
@@ -1091,8 +1115,43 @@ class Brain:
                 except Exception:
                     tool_payload_tokens = 200
 
-            if not is_deferred and schema_budget > 0 and schema_tokens + tool_payload_tokens > schema_budget:
-                is_deferred = True
+            is_always = (
+                not is_deferred
+                and (name in _ALWAYS_LOAD or bool(tool.get("_promoted")))
+            )
+
+            entries.append(
+                {
+                    "tool": tool,
+                    "name": name,
+                    "description": description,
+                    "schema": schema,
+                    "is_deferred": is_deferred,
+                    "cost": tool_payload_tokens,
+                    "is_always": is_always,
+                }
+            )
+
+        # ---- Phase 2: reserve budget for always-load, then iterate ------
+        # When schema_budget <= 0 budgeting is disabled and every
+        # non-deferred entry passes through unchanged (legacy behaviour).
+        always_cost = (
+            sum(e["cost"] for e in entries if e["is_always"]) if schema_budget > 0 else 0
+        )
+        contestable_remaining = (
+            max(0, schema_budget - always_cost) if schema_budget > 0 else 0
+        )
+
+        for entry in entries:
+            is_deferred = entry["is_deferred"]
+            cost = entry["cost"]
+
+            if not is_deferred and schema_budget > 0 and not entry["is_always"]:
+                # Contestable tool: only keep if the remaining slice fits.
+                if cost > contestable_remaining:
+                    is_deferred = True
+                else:
+                    contestable_remaining -= cost
 
             if is_deferred:
                 # Deferred tools are completely omitted from the API tools list.
@@ -1103,19 +1162,20 @@ class Brain:
                 # sending a stub entry with an empty schema.
                 deferred += 1
                 continue
-            else:
-                if tool.get("_always_available"):
-                    always_available += 1
-                if tool.get("_promoted"):
-                    promoted += 1
-                schema_tokens += tool_payload_tokens
-                result.append(
-                    Tool(
-                        name=name,
-                        description=description,
-                        input_schema=schema,
-                    )
+
+            tool = entry["tool"]
+            if tool.get("_always_available"):
+                always_available += 1
+            if tool.get("_promoted"):
+                promoted += 1
+            schema_tokens += cost
+            result.append(
+                Tool(
+                    name=entry["name"],
+                    description=entry["description"],
+                    input_schema=entry["schema"],
                 )
+            )
 
         if skipped:
             logger.warning(
