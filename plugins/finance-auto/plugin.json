@@ -1,0 +1,33 @@
+{
+  "id": "finance-auto",
+  "name": "Finance Auto",
+  "version": "0.1.0",
+  "display_name_zh": "财务自动化",
+  "display_name_en": "Finance Auto",
+  "description": "Finance automation — multi-org books, trial balance import, accounting reports",
+  "description_i18n": {
+    "zh": "财务自动化 — 多账套管理、余额表导入解析、报表自动生成（M1 W1：账套 + 余额表导入闭环）",
+    "en": "Finance automation — multi-org books, trial-balance import & parsing, automated reports (M1 W1: org + trial-balance import loop)"
+  },
+  "type": "python",
+  "entry": "plugin.py",
+  "author": "OpenAkita",
+  "category": "productivity",
+  "tags": ["finance", "accounting", "trial-balance", "audit"],
+  "permissions": [
+    "log",
+    "routes.register",
+    "config.read",
+    "config.write",
+    "data.own"
+  ],
+  "requires": {
+    "openakita": ">=1.27.0",
+    "plugin_api": "~2",
+    "python": ">=3.11"
+  },
+  "provides": {
+    "routes": true
+  },
+  "tool_classes": {}
+}
