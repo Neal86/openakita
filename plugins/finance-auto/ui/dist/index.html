@@ -2971,8 +2971,638 @@
         );
       }
 
+      // ═══════════════════════════════════════════════════════════════════
+      //  M2 STAGE 5 · 合并报表（Consolidation）UI（v0.3 Part Biz §2）
+      //
+      //  数据模型（已在 ai-biz sibling 的 models.py 完成 ConsolidationGroup /
+      //  ConsolidationMember / EliminationEntry / ConsolidatedReport，但
+      //  consolidation_routes.py 文件本身尚未提交 → 全部 API 暂走 mock）。
+      //
+      //  Mock 落地：localStorage 键 `finance.consolidation.groups.v1` 存
+      //  group / members / eliminations / runs；UI 仍然先请求后端 endpoint，
+      //  404 时静默回退本地 mock，后端就绪零改动。
+      // ═══════════════════════════════════════════════════════════════════
+
+      const CONSOL_LS_KEY = "finance.consolidation.groups.v1";
+      const ELIM_KIND_OPTS = [
+        { v: "inter_ar_ap",       l: "内部往来抵消（AR/AP）" },
+        { v: "inter_sales",       l: "内部销售抵消" },
+        { v: "inter_investment",  l: "母对子投资抵消" },
+        { v: "inter_profit",      l: "未实现内部利润" },
+        { v: "minority_interest", l: "少数股东权益" },
+        { v: "other",             l: "其他" },
+      ];
+      const JOIN_METHOD_META = {
+        full:        { label: "全合并 (full)" },
+        equity:      { label: "权益法 (equity)" },
+        proportional:{ label: "比例合并 (proportional)" },
+      };
+      const REPORT_KIND_OPTS = [
+        { v: "balance_sheet",    l: "资产负债表" },
+        { v: "income_statement", l: "利润表" },
+        { v: "cash_flow",        l: "现金流量表" },
+      ];
+
+      function _loadConsolStore() {
+        try { return JSON.parse(localStorage.getItem(CONSOL_LS_KEY) || "{}") || {}; }
+        catch { return {}; }
+      }
+      function _saveConsolStore(s) {
+        localStorage.setItem(CONSOL_LS_KEY, JSON.stringify(s));
+      }
+      function _ensureGroup(s, gid) {
+        if (!s.groups) s.groups = {};
+        if (!s.groups[gid]) s.groups[gid] = { members: [], eliminations: [], runs: [] };
+        return s.groups[gid];
+      }
+
+      function ConsolidationListView({ period, onOpenGroup, toast }) {
+        const [groups, setGroups] = useState([]);
+        const [backendOk, setBackendOk] = useState(null);
+        const [createOpen, setCreateOpen] = useState(false);
+
+        const reload = useCallback(async () => {
+          try {
+            const r = await api("GET", "/consolidation-groups", null, { timeoutMs: 4000 });
+            setGroups((r && r.groups) || []);
+            setBackendOk(true);
+          } catch (e) {
+            const s = _loadConsolStore();
+            setGroups(s.list || []);
+            setBackendOk(false);
+          }
+        }, []);
+        useEffect(() => { reload(); }, [reload]);
+
+        return (
+          <>
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h2 className="page-title">合并报表</h2>
+                <p className="page-subtitle">
+                  集团 / 母子持股 / 抵消分录 / 触发合并（{groups.length} 个集团）
+                  {backendOk === false && (
+                    <span className="badge warn" style={{ marginLeft: 8 }}>
+                      后端 consolidation 路由未注册（mock）
+                    </span>
+                  )}
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <button className="btn" onClick={reload}>刷新</button>
+                <button className="btn primary" onClick={() => setCreateOpen(true)} data-testid="new-group-btn">
+                  + 新建集团
+                </button>
+              </div>
+            </div>
+
+            <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+              {groups.length === 0
+                ? <EmptyState title="还没有集团" desc="点击右上角「+ 新建集团」开始创建" />
+                : (
+                  <table className="report-table">
+                    <thead>
+                      <tr>
+                        <th>名称</th>
+                        <th>母公司</th>
+                        <th className="num">成员数</th>
+                        <th>创建时间</th>
+                        <th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {groups.map((g) => (
+                        <tr key={g.group_id} className="cell-clickable" onClick={() => onOpenGroup(g.group_id)}>
+                          <td><strong>{g.name}</strong>{g.description && <div className="text-xs text-muted">{g.description}</div>}</td>
+                          <td className="mono text-xs">{g.parent_org_id}</td>
+                          <td className="num">{g._members_count || 0}</td>
+                          <td className="text-xs text-muted">{fmtTs(g.created_at) || "—"}</td>
+                          <td><button className="btn subtle sm" onClick={(e) => { e.stopPropagation(); onOpenGroup(g.group_id); }}>打开 →</button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+            </div>
+
+            {createOpen && (
+              <ConsolidationCreateDialog
+                onClose={() => setCreateOpen(false)}
+                onCreated={async (g) => {
+                  setCreateOpen(false);
+                  toast(`集团「${g.name}」已创建`);
+                  await reload();
+                  onOpenGroup(g.group_id);
+                }}
+                toast={toast}
+              />
+            )}
+          </>
+        );
+      }
+
+      function ConsolidationCreateDialog({ onClose, onCreated, toast }) {
+        const [name, setName] = useState("");
+        const [desc, setDesc] = useState("");
+        const [parentOrgId, setParentOrgId] = useState("");
+        const [submitting, setSubmitting] = useState(false);
+        const { data: orgsData } = useFetch("/orgs?limit=200", []);
+        const orgs = (orgsData && orgsData.orgs) || [];
+
+        const submit = async () => {
+          if (!name.trim()) { toast("请输入集团名称", "warn"); return; }
+          if (!parentOrgId) { toast("请选择母公司账套", "warn"); return; }
+          setSubmitting(true);
+          const payload = {
+            name: name.trim(),
+            parent_org_id: parentOrgId,
+            description: desc.trim() || null,
+            created_by: "local",
+          };
+          try {
+            const g = await api("POST", "/consolidation-groups", payload);
+            onCreated(g);
+          } catch (e) {
+            if (e.status === 404) {
+              const s = _loadConsolStore();
+              if (!s.list) s.list = [];
+              const gid = (s._nextId = (s._nextId || 1) + 1);
+              const g = {
+                group_id: gid,
+                ...payload,
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+                _members_count: 1,
+                version: 1,
+              };
+              s.list.push(g);
+              const gs = _ensureGroup(s, gid);
+              gs.members.push({
+                id: 1, group_id: gid, subsidiary_org_id: parentOrgId,
+                ownership_pct: 100, join_method: "full", is_parent: true,
+                added_at: new Date().toISOString(), version: 1,
+              });
+              _saveConsolStore(s);
+              onCreated(g);
+            } else {
+              toast(`创建失败：${e.message}`, "err");
+            }
+          } finally { setSubmitting(false); }
+        };
+
+        return (
+          <Modal
+            open
+            onClose={submitting ? undefined : onClose}
+            title="新建集团"
+            sub="创建后可在详情页添加子公司、抵消分录并触发合并。"
+            footer={
+              <>
+                <button className="btn" onClick={onClose} disabled={submitting}>取消</button>
+                <button className="btn primary" onClick={submit} disabled={submitting}>
+                  {submitting && <Spinner />}创建
+                </button>
+              </>
+            }
+          >
+            <div className="row">
+              <div>
+                <label className="lbl">集团名称<span className="required">*</span></label>
+                <input className="field" value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：集团 ABC" data-testid="group-name" />
+              </div>
+            </div>
+            <div className="row mt-3">
+              <div>
+                <label className="lbl">母公司账套<span className="required">*</span></label>
+                <select className="field" value={parentOrgId} onChange={(e) => setParentOrgId(e.target.value)} data-testid="group-parent">
+                  <option value="">— 选择 —</option>
+                  {orgs.map((o) => <option key={o.org_id} value={o.org_id}>{o.name}（{o.org_id.slice(-8)}）</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="row mt-3">
+              <div>
+                <label className="lbl">备注（可选）</label>
+                <textarea className="field" rows={2} value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="可在此说明合并范围、报告期等" />
+              </div>
+            </div>
+          </Modal>
+        );
+      }
+
+      function ConsolidationDetailView({ groupId, period, onBack, onOpenReport, toast }) {
+        const [tab, setTab] = useState("members");
+        const [group, setGroup] = useState(null);
+        const [members, setMembers] = useState([]);
+        const [elims, setElims] = useState([]);
+        const [runs, setRuns] = useState([]);
+        const [backendOk, setBackendOk] = useState(null);
+        const [loading, setLoading] = useState(true);
+
+        const reload = useCallback(async () => {
+          setLoading(true);
+          try {
+            const g = await api("GET", `/consolidation-groups/${groupId}`, null, { timeoutMs: 4000 });
+            setGroup(g);
+            setMembers((g && g.members) || []);
+            const er = await api("GET", `/consolidation-groups/${groupId}/eliminations`).catch(() => ({ entries: [] }));
+            setElims((er && er.entries) || []);
+            const rr = await api("GET", `/consolidation-groups/${groupId}/reports`).catch(() => ({ reports: [] }));
+            setRuns((rr && rr.reports) || []);
+            setBackendOk(true);
+          } catch (e) {
+            const s = _loadConsolStore();
+            const g = (s.list || []).find((x) => String(x.group_id) === String(groupId));
+            setGroup(g || null);
+            const gs = _ensureGroup(s, groupId);
+            setMembers(gs.members || []);
+            setElims(gs.eliminations || []);
+            setRuns(gs.runs || []);
+            setBackendOk(false);
+          } finally { setLoading(false); }
+        }, [groupId]);
+        useEffect(() => { reload(); }, [reload]);
+
+        if (loading) return <div className="card"><Spinner /> 加载中…</div>;
+        if (!group) return (
+          <div className="card">
+            <button className="btn mb-3" onClick={onBack}>← 返回</button>
+            <div className="upload-result err">找不到集团 {groupId}</div>
+          </div>
+        );
+
+        return (
+          <>
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h2 className="page-title">{group.name}</h2>
+                <p className="page-subtitle">
+                  集团 #{group.group_id} · 母公司 <span className="mono">{group.parent_org_id}</span>
+                  {backendOk === false && (
+                    <span className="badge warn" style={{ marginLeft: 8 }}>mock 模式</span>
+                  )}
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <button className="btn" onClick={onBack}>← 返回列表</button>
+                <button className="btn" onClick={reload}>刷新</button>
+              </div>
+            </div>
+
+            <div className="tabs" style={{ marginBottom: 12 }}>
+              <button className={`tab ${tab === "members" ? "active" : ""}`} onClick={() => setTab("members")} data-testid="tab-members">成员（{members.length}）</button>
+              <button className={`tab ${tab === "elim" ? "active" : ""}`} onClick={() => setTab("elim")} data-testid="tab-elim">抵消分录（{elims.length}）</button>
+              <button className={`tab ${tab === "runs" ? "active" : ""}`} onClick={() => setTab("runs")} data-testid="tab-runs">合并报表（{runs.length}）</button>
+            </div>
+
+            {tab === "members" && (
+              <ConsolidationMembersTab
+                groupId={groupId}
+                members={members}
+                onChanged={reload}
+                backendOk={backendOk}
+                toast={toast}
+              />
+            )}
+            {tab === "elim" && (
+              <ConsolidationEliminationsTab
+                groupId={groupId}
+                elims={elims}
+                period={period}
+                onChanged={reload}
+                backendOk={backendOk}
+                toast={toast}
+              />
+            )}
+            {tab === "runs" && (
+              <ConsolidationRunsTab
+                groupId={groupId}
+                runs={runs}
+                period={period}
+                parentOrgId={group.parent_org_id}
+                onChanged={reload}
+                onOpenReport={onOpenReport}
+                backendOk={backendOk}
+                toast={toast}
+              />
+            )}
+          </>
+        );
+      }
+
+      function ConsolidationMembersTab({ groupId, members, onChanged, backendOk, toast }) {
+        const [adding, setAdding] = useState(false);
+        const [orgId, setOrgId] = useState("");
+        const [pct, setPct] = useState("100");
+        const [method, setMethod] = useState("full");
+        const { data: orgsData } = useFetch("/orgs?limit=200", []);
+        const orgs = (orgsData && orgsData.orgs) || [];
+
+        const submit = async () => {
+          if (!orgId) { toast("请选择子公司账套", "warn"); return; }
+          const num = parseFloat(pct);
+          if (Number.isNaN(num) || num < 0 || num > 100) { toast("持股比例需在 0-100", "warn"); return; }
+          const payload = { subsidiary_org_id: orgId, ownership_pct: num, join_method: method, is_parent: false };
+          try {
+            await api("POST", `/consolidation-groups/${groupId}/members`, payload);
+          } catch (e) {
+            if (e.status !== 404) { toast(`添加失败：${e.message}`, "err"); return; }
+            const s = _loadConsolStore();
+            const gs = _ensureGroup(s, groupId);
+            gs.members.push({ id: gs.members.length + 1, group_id: groupId, ...payload, added_at: new Date().toISOString(), version: 1 });
+            const lg = (s.list || []).find((g) => String(g.group_id) === String(groupId));
+            if (lg) lg._members_count = gs.members.length;
+            _saveConsolStore(s);
+          }
+          setAdding(false); setOrgId(""); setPct("100"); setMethod("full");
+          toast("成员已添加");
+          onChanged();
+        };
+
+        return (
+          <>
+            <div className="card mb-3">
+              <button className="btn primary sm" onClick={() => setAdding(true)} data-testid="add-member-btn">+ 添加子公司</button>
+            </div>
+            <div className="card" style={{ padding: 0 }}>
+              {members.length === 0 ? <EmptyState title="还没有成员" /> : (
+                <table className="report-table">
+                  <thead>
+                    <tr><th>账套</th><th>角色</th><th className="num">持股比例</th><th>合并方法</th><th>加入时间</th></tr>
+                  </thead>
+                  <tbody>
+                    {members.map((m) => (
+                      <tr key={m.id}>
+                        <td className="mono text-xs">{m.subsidiary_org_id}</td>
+                        <td>{m.is_parent ? <span className="badge ok">母公司</span> : <span className="badge info">子公司</span>}</td>
+                        <td className="num">{m.ownership_pct}%</td>
+                        <td>{(JOIN_METHOD_META[m.join_method] || {}).label || m.join_method}</td>
+                        <td className="text-xs text-muted">{fmtTs(m.added_at) || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+            {adding && (
+              <Modal
+                open
+                onClose={() => setAdding(false)}
+                title="添加子公司"
+                footer={<><button className="btn" onClick={() => setAdding(false)}>取消</button><button className="btn primary" onClick={submit} data-testid="add-member-submit">添加</button></>}
+              >
+                <div className="row"><div>
+                  <label className="lbl">子公司账套<span className="required">*</span></label>
+                  <select className="field" value={orgId} onChange={(e) => setOrgId(e.target.value)}>
+                    <option value="">— 选择 —</option>
+                    {orgs.map((o) => <option key={o.org_id} value={o.org_id}>{o.name}（{o.org_id.slice(-8)}）</option>)}
+                  </select>
+                </div></div>
+                <div className="row cols-2 mt-3">
+                  <div>
+                    <label className="lbl">持股比例（%）</label>
+                    <input className="field" value={pct} onChange={(e) => setPct(e.target.value)} placeholder="100" />
+                  </div>
+                  <div>
+                    <label className="lbl">合并方法</label>
+                    <select className="field" value={method} onChange={(e) => setMethod(e.target.value)}>
+                      {Object.keys(JOIN_METHOD_META).map((k) => <option key={k} value={k}>{JOIN_METHOD_META[k].label}</option>)}
+                    </select>
+                  </div>
+                </div>
+              </Modal>
+            )}
+          </>
+        );
+      }
+
+      function ConsolidationEliminationsTab({ groupId, elims, period, onChanged, backendOk, toast }) {
+        const [adding, setAdding] = useState(false);
+        const [form, setForm] = useState({
+          period_id: period, kind: "inter_ar_ap",
+          debit_target: "", credit_target: "", amount: "0",
+          rationale: "", review_required: true,
+        });
+
+        const submit = async () => {
+          if (!form.debit_target.trim() || !form.credit_target.trim()) { toast("借/贷方目标不能为空", "warn"); return; }
+          if (!form.period_id) { toast("请填期间", "warn"); return; }
+          const payload = { ...form, created_by: "local" };
+          try {
+            await api("POST", `/consolidation-groups/${groupId}/eliminations`, payload);
+          } catch (e) {
+            if (e.status !== 404) { toast(`添加失败：${e.message}`, "err"); return; }
+            const s = _loadConsolStore();
+            const gs = _ensureGroup(s, groupId);
+            gs.eliminations.push({
+              id: gs.eliminations.length + 1, group_id: groupId, ...payload,
+              is_auto: false, created_at: new Date().toISOString(), version: 1,
+            });
+            _saveConsolStore(s);
+          }
+          setAdding(false);
+          toast("抵消分录已添加");
+          onChanged();
+        };
+
+        return (
+          <>
+            <div className="card mb-3">
+              <button className="btn primary sm" onClick={() => setAdding(true)} data-testid="add-elim-btn">+ 添加抵消分录</button>
+            </div>
+            <div className="card" style={{ padding: 0 }}>
+              {elims.length === 0 ? <EmptyState title="还没有抵消分录" /> : (
+                <table className="report-table">
+                  <thead>
+                    <tr><th>类型</th><th>期间</th><th>借方目标</th><th>贷方目标</th><th className="num">金额</th><th>来源</th></tr>
+                  </thead>
+                  <tbody>
+                    {elims.map((e) => (
+                      <tr key={e.id}>
+                        <td>{(ELIM_KIND_OPTS.find((k) => k.v === e.kind) || {}).l || e.kind}</td>
+                        <td className="mono text-xs">{e.period_id}</td>
+                        <td className="text-xs">{e.debit_target}</td>
+                        <td className="text-xs">{e.credit_target}</td>
+                        <td className="num mono">{fmtMoney(parseFloat(e.amount || "0"))}</td>
+                        <td>{e.is_auto ? <span className="badge info">自动</span> : <span className="badge">手工</span>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+            {adding && (
+              <Modal
+                open
+                onClose={() => setAdding(false)}
+                title="添加抵消分录"
+                sub="借方 / 贷方 target 一般填 cell_id 或 account_code，由后端解析。"
+                footer={<><button className="btn" onClick={() => setAdding(false)}>取消</button><button className="btn primary" onClick={submit}>添加</button></>}
+              >
+                <div className="row cols-2">
+                  <div>
+                    <label className="lbl">期间</label>
+                    <input className="field mono" value={form.period_id} onChange={(e) => setForm({ ...form, period_id: e.target.value })} />
+                  </div>
+                  <div>
+                    <label className="lbl">类型</label>
+                    <select className="field" value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>
+                      {ELIM_KIND_OPTS.map((o) => <option key={o.v} value={o.v}>{o.l}</option>)}
+                    </select>
+                  </div>
+                </div>
+                <div className="row cols-2 mt-3">
+                  <div>
+                    <label className="lbl">借方目标</label>
+                    <input className="field" value={form.debit_target} onChange={(e) => setForm({ ...form, debit_target: e.target.value })} placeholder="例如：1122_应收账款" />
+                  </div>
+                  <div>
+                    <label className="lbl">贷方目标</label>
+                    <input className="field" value={form.credit_target} onChange={(e) => setForm({ ...form, credit_target: e.target.value })} placeholder="例如：2202_应付账款" />
+                  </div>
+                </div>
+                <div className="row cols-2 mt-3">
+                  <div>
+                    <label className="lbl">金额</label>
+                    <input className="field mono" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder="0" />
+                  </div>
+                  <div>
+                    <label className="lbl">需复核</label>
+                    <select className="field" value={form.review_required ? "y" : "n"} onChange={(e) => setForm({ ...form, review_required: e.target.value === "y" })}>
+                      <option value="y">是</option>
+                      <option value="n">否</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="row mt-3"><div>
+                  <label className="lbl">说明（可选）</label>
+                  <textarea className="field" rows={2} value={form.rationale} onChange={(e) => setForm({ ...form, rationale: e.target.value })} />
+                </div></div>
+              </Modal>
+            )}
+          </>
+        );
+      }
+
+      function ConsolidationRunsTab({ groupId, runs, period, parentOrgId, onChanged, onOpenReport, backendOk, toast }) {
+        const [running, setRunning] = useState(false);
+        const [periodId, setPeriodId] = useState(period);
+        const [kind, setKind] = useState("balance_sheet");
+
+        const trigger = async () => {
+          setRunning(true);
+          try {
+            const r = await api("POST", `/consolidation-groups/${groupId}/runs?period_id=${encodeURIComponent(periodId)}&kind=${kind}`, null, { timeoutMs: 30000 });
+            toast(`合并完成 #${r && r.consolidated_report_id || ""}`);
+          } catch (e) {
+            if (e.status !== 404) { toast(`合并失败：${e.message}`, "err"); return; }
+            const s = _loadConsolStore();
+            const gs = _ensureGroup(s, groupId);
+            gs.runs.push({
+              consolidated_report_id: gs.runs.length + 1,
+              group_id: groupId, period_id: periodId, kind,
+              status: "ok", cells: [], minority_interest: "0",
+              consolidation_meta: { mock: true },
+              member_orgs_snapshot: [], elimination_ids: [],
+              warnings: ["（mock 模式 · 后端 consolidation 路由未注册）"],
+              generated_at: new Date().toISOString(), generated_by: "local", version: 1,
+            });
+            _saveConsolStore(s);
+            toast(`合并完成（mock）`);
+          } finally {
+            setRunning(false);
+            onChanged();
+          }
+        };
+
+        return (
+          <>
+            <div className="card mb-3">
+              <div className="flex gap-2 items-center">
+                <span style={{ fontSize: 12 }}>期间</span>
+                <input className="field mono" style={{ width: 120 }} value={periodId} onChange={(e) => setPeriodId(e.target.value)} />
+                <span style={{ fontSize: 12 }}>报表类型</span>
+                <select className="field" style={{ width: 160 }} value={kind} onChange={(e) => setKind(e.target.value)}>
+                  {REPORT_KIND_OPTS.map((o) => <option key={o.v} value={o.v}>{o.l}</option>)}
+                </select>
+                <button className="btn primary sm" onClick={trigger} disabled={running} data-testid="trigger-run">
+                  {running && <Spinner />}触发合并
+                </button>
+                {backendOk === false && <span className="badge warn">mock 模式</span>}
+              </div>
+            </div>
+            <div className="card" style={{ padding: 0 }}>
+              {runs.length === 0 ? <EmptyState title="还没有合并报表" desc="点击「触发合并」开始一次合并。" /> : (
+                <table className="report-table">
+                  <thead>
+                    <tr><th>#</th><th>期间</th><th>类型</th><th>状态</th><th className="num">少数股东权益</th><th>生成时间</th><th>操作</th></tr>
+                  </thead>
+                  <tbody>
+                    {runs.map((r) => (
+                      <tr key={r.consolidated_report_id}>
+                        <td className="mono text-xs">{r.consolidated_report_id}</td>
+                        <td className="mono text-xs">{r.period_id}</td>
+                        <td>{(REPORT_KIND_OPTS.find((x) => x.v === r.kind) || {}).l || r.kind}</td>
+                        <td>{r.status === "ok" ? <span className="badge ok">成功</span> : r.status === "partial" ? <span className="badge warn">部分</span> : <span className="badge err">失败</span>}</td>
+                        <td className="num mono">{fmtMoney(parseFloat(r.minority_interest || "0"))}</td>
+                        <td className="text-xs text-muted">{fmtTs(r.generated_at)}</td>
+                        <td>
+                          {r.report_id || r.virtual_report_id
+                            ? <button className="btn subtle sm" onClick={() => onOpenReport(parentOrgId, r.report_id || r.virtual_report_id)}>查看 →</button>
+                            : <span className="text-xs text-muted">{r.warnings && r.warnings.length ? r.warnings[0] : "—"}</span>
+                          }
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </>
+        );
+      }
+
       // ─────────────────────────────────────────────────────────────────
-      //  Root：极简 hash router（#/orgs / #/orgs/<id> / #/orgs/<id>/reports/<rid>）
+      //  AI 设置页占位（Stage 6 会替换为完整三 Tab 实现）
+      // ─────────────────────────────────────────────────────────────────
+      function AISettingsView({ toast }) {
+        return (
+          <div className="card">
+            <h2 className="page-title">AI 设置</h2>
+            <p className="page-subtitle">场景设置 / 授权管理 / 调用历史</p>
+            <EmptyState title="Stage 6 待实现" desc="本页占位，Stage 6 将填入三 Tab 内容。" />
+          </div>
+        );
+      }
+
+      // ─────────────────────────────────────────────────────────────────
+      //  顶部导航：账套 / 合并报表 / AI 设置
+      // ─────────────────────────────────────────────────────────────────
+      function MainNav({ active, navigate }) {
+        const items = [
+          { key: "orgs",          label: "账套",      hash: "#/orgs" },
+          { key: "consolidation", label: "合并报表",  hash: "#/consolidation" },
+          { key: "ai-settings",   label: "AI 设置",   hash: "#/ai-settings" },
+        ];
+        return (
+          <div className="tabs" style={{ marginBottom: 12 }}>
+            {items.map((it) => (
+              <button
+                key={it.key}
+                className={`tab ${active === it.key ? "active" : ""}`}
+                onClick={() => navigate(it.hash)}
+                data-testid={`nav-${it.key}`}
+              >
+                {it.label}
+              </button>
+            ))}
+          </div>
+        );
+      }
+
+      // ─────────────────────────────────────────────────────────────────
+      //  Root：极简 hash router（#/orgs / #/orgs/<id> / #/orgs/<id>/reports/<rid>
+      //  / #/consolidation / #/consolidation/<gid> / #/ai-settings）
       // ─────────────────────────────────────────────────────────────────
       function App() {
         const [route, setRoute] = useState(window.location.hash || "#/orgs");
@@ -3008,8 +3638,12 @@
         const m1 = route.match(/^#\/orgs\/?$/);
         const m2 = route.match(/^#\/orgs\/([^/]+)\/?$/);
         const m3 = route.match(/^#\/orgs\/([^/]+)\/reports\/([^/]+)\/?$/);
+        const mC1 = route.match(/^#\/consolidation\/?$/);
+        const mC2 = route.match(/^#\/consolidation\/([^/]+)\/?$/);
+        const mAI = route.match(/^#\/ai-settings\/?$/);
 
         let body, crumbs;
+        let activeNav = "orgs";
         if (m3) {
           const [, oid, rid] = m3;
           crumbs = [
@@ -3040,7 +3674,40 @@
               toast={toasts.push}
             />
           );
+        } else if (mC2) {
+          activeNav = "consolidation";
+          const [, gid] = mC2;
+          crumbs = [
+            { label: "合并报表", onClick: () => navigate("#/consolidation") },
+            { label: `集团 #${gid}` },
+          ];
+          body = (
+            <ConsolidationDetailView
+              groupId={gid}
+              period={period}
+              onBack={() => navigate("#/consolidation")}
+              onOpenReport={(oid, rid) => navigate(`#/orgs/${oid}/reports/${rid}`)}
+              toast={toasts.push}
+            />
+          );
+        } else if (mC1) {
+          activeNav = "consolidation";
+          crumbs = [{ label: "合并报表" }];
+          body = (
+            <ConsolidationListView
+              period={period}
+              onOpenGroup={(gid) => navigate(`#/consolidation/${gid}`)}
+              toast={toasts.push}
+            />
+          );
+        } else if (mAI) {
+          activeNav = "ai-settings";
+          crumbs = [{ label: "AI 设置" }];
+          body = (
+            <AISettingsView toast={toasts.push} />
+          );
         } else {
+          activeNav = "orgs";
           crumbs = [{ label: "账套" }];
           body = (
             <OrgListView
@@ -3066,7 +3733,10 @@
                   </>
                 }
               />
-              <div className="main">{body}</div>
+              <div className="main">
+                <MainNav active={activeNav} navigate={navigate} />
+                {body}
+              </div>
               {toasts.view}
               <AIConsentBridge toast={toasts.push} />
             </div>
