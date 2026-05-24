@@ -806,6 +806,12 @@ def build_router(service: FinanceAutoService) -> APIRouter:
     except ImportError:
         pass
 
+    # M3 Infra Stage 4 — admin surface for key rotation + encrypted
+    # backup/restore + system info.  Wired last so the /admin/* family
+    # never shadows the W1/W2/W3/M2/M3 user-facing endpoints.
+    from .infra_routes import register_infra_endpoints
+    register_infra_endpoints(router, service)
+
     return router
 
 
