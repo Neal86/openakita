@@ -26,8 +26,9 @@ from .db.migrations import v8_ai_tables as _v8
 from .db.migrations import v9_collaboration as _v9_collab
 from .db.migrations import v9_consolidation as _v9_consol
 from .db.migrations import v9_reclassification as _v9_reclass
+from .db.migrations import v10_notes_peer as _v10
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 """History:
 * v1 -- M1 W1 baseline (5 tables).
 * v2 -- M1 W2 Stage 4: adds ``reports`` + ``report_cells``.
@@ -49,6 +50,12 @@ SCHEMA_VERSION = 9
         consolidated reports (v0.3 Part Biz §2); reclassification rules /
         runs / run items (v0.3 Part Biz §3.6).  Every editable table carries
         a ``version`` column per Part Infra C3 optimistic-lock contract.
+* v10 -- M3 Biz Stage 1: report notes + peer comparison.  Adds
+        ``note_templates`` (seeded with 6 data-driven + 2 hybrid rows from
+        v0.3 Part Biz §5), ``note_documents``, ``report_notes``,
+        ``peer_benchmarks`` (seeded with 3 industries × 4 metrics from
+        v0.2 §6.1 S5) and ``peer_comparison_results``.  All editable
+        tables carry a ``version`` column per Part Infra C3.
 """
 
 # ---------------------------------------------------------------------------
@@ -382,7 +389,7 @@ CREATE TABLE IF NOT EXISTS manual_inputs (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_manual_inputs_key
     ON manual_inputs(org_id, period_id, field_key);
-""" + _v8.DDL_SQL + _v9_collab.DDL_SQL + _v9_consol.DDL_SQL + _v9_reclass.DDL_SQL
+""" + _v8.DDL_SQL + _v9_collab.DDL_SQL + _v9_consol.DDL_SQL + _v9_reclass.DDL_SQL + _v10.DDL_SQL
 
 # ---------------------------------------------------------------------------
 # Incremental migration steps.  ``run_migrations(conn, current_version)`` will
@@ -430,6 +437,13 @@ MIGRATION_STEPS: tuple[tuple[int, str], ...] = (
                                   # step inserts the default permission matrix
                                   # (idempotent INSERT OR IGNORE keyed by UNIQUE
                                   # (role, resource, action, scope)).
+    (10, _v10.SEED_SQL),          # M3 Biz Stage 1: note templates + peer benchmarks.
+                                  # DDL is in SCHEMA_SQL; the seed step inserts
+                                  # 6 data-driven + 2 hybrid note templates plus
+                                  # 12 peer-benchmark rows (3 industries × 4
+                                  # metrics).  Both insert chains are
+                                  # ``INSERT OR IGNORE`` keyed by the relevant
+                                  # UNIQUE indexes so re-runs are no-ops.
 )
 """Each entry: (target_version, idempotent_DDL).  All steps replay the full
 canonical SCHEMA_SQL because every CREATE TABLE in it is IF NOT EXISTS, so
