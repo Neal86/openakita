@@ -619,6 +619,7 @@
                 数据分流
                 <PendingIssuesBadge orgId={orgId} />
               </button>
+              <button className={`tab ${tab === "reclass" ? "active" : ""}`} onClick={() => setTab("reclass")} data-testid="tab-reclass">重分类规则</button>
             </div>
 
             {tab === "import" && (
@@ -632,6 +633,9 @@
             )}
             {tab === "issues" && (
               <ParseIssueQueueView orgId={orgId} period={period} toast={toast} />
+            )}
+            {tab === "reclass" && (
+              <ReclassificationView orgId={orgId} period={period} toast={toast} />
             )}
           </>
         );
@@ -647,6 +651,163 @@
         const label = must > 0 ? `${must} 项必修复` : `${pending} 项`;
         return (
           <span className={`badge ${cls}`} style={{ marginLeft: 6 }} title={label}>{label}</span>
+        );
+      }
+
+      // ═══════════════════════════════════════════════════════════════════
+      //  Tab · 重分类规则 (M2 Biz Stage 3)
+      //
+      //  Backend contract (`reclassification_routes.py`, 5 endpoints):
+      //    GET  /orgs/{id}/reclassification-rules          - list rules
+      //    POST /orgs/{id}/reclassification-rules          - create rule
+      //    POST /orgs/{id}/reclassification-runs/preview   - dry-run
+      //    POST /orgs/{id}/reclassification-runs/apply     - persist + emit ParseIssue
+      //    GET  /orgs/{id}/reclassification-runs           - list past runs
+      //
+      //  Audit P1-B: this entire endpoint cluster shipped in M2 Biz with
+      //  zero front-end consumers. This view is the minimum viable UX that
+      //  lets an auditor list rules, create a new rule from a 3-field form
+      //  (科目前缀 → 目标科目 + 阈值), trigger preview / apply, and read
+      //  the resulting run summaries.
+      // ═══════════════════════════════════════════════════════════════════
+      function ReclassificationView({ orgId, period, toast }) {
+        const [refresh, setRefresh] = useState(0);
+        const rules = useFetch(`/orgs/${orgId}/reclassification-rules`, [orgId, refresh]);
+        const runs = useFetch(`/orgs/${orgId}/reclassification-runs?period_id=${encodeURIComponent(period)}`, [orgId, period, refresh]);
+        const [busy, setBusy] = useState(false);
+        const [form, setForm] = useState({
+          name: "",
+          source_prefixes: "1604",
+          target_account: "2701",
+          threshold: "10000",
+          direction: "debit",
+        });
+        const [previewResult, setPreviewResult] = useState(null);
+
+        const submitRule = async () => {
+          if (!form.name.trim()) { toast("请输入规则名称", "warn"); return; }
+          const prefixes = form.source_prefixes.split(",").map((s) => s.trim()).filter(Boolean);
+          if (prefixes.length === 0) { toast("请输入至少一个科目前缀", "warn"); return; }
+          setBusy(true);
+          try {
+            await api("POST", `/orgs/${orgId}/reclassification-rules`, {
+              name: form.name.trim(),
+              description: `auditor-defined rule via UI · 阈值 ${form.threshold}`,
+              when_condition: {
+                account_code_starts: prefixes,
+                balance_direction: form.direction,
+                threshold: Number(form.threshold || 0),
+              },
+              action: {
+                move_to_account_code: form.target_account.trim(),
+                reason: `auto-reclass to ${form.target_account.trim()}`,
+              },
+              active: true,
+              priority: 100,
+            });
+            toast(`已创建规则「${form.name.trim()}」`);
+            setForm({ ...form, name: "" });
+            setRefresh((x) => x + 1);
+          } catch (e) {
+            toast(`创建失败：${e.message}`, "err");
+          } finally { setBusy(false); }
+        };
+
+        const doRun = async (mode) => {
+          setBusy(true);
+          setPreviewResult(null);
+          try {
+            const r = await api("POST",
+              `/orgs/${orgId}/reclassification-runs/${mode === "preview" ? "preview" : "apply"}`,
+              { period_id: period, triggered_by: "ui" });
+            setPreviewResult(r);
+            toast(`${mode === "preview" ? "Preview" : "Apply"} 完成：匹配 ${r.items_count || 0} 项`);
+            if (mode === "apply") setRefresh((x) => x + 1);
+          } catch (e) {
+            if (e.status === 404) toast("没有可用导入或规则", "warn");
+            else toast(`${mode} 失败：${e.message}`, "err");
+          } finally { setBusy(false); }
+        };
+
+        return (
+          <>
+            <div className="card mb-3">
+              <h3 className="card-title">规则列表 · 期间 <span className="mono">{period}</span></h3>
+              {rules.loading ? <div className="text-sm text-muted">加载中…</div> :
+               rules.error ? <div className="upload-result err">{rules.error.message}</div> :
+               ((rules.data && rules.data.rules) || []).length === 0 ? (
+                <EmptyState title="暂无重分类规则" desc="在下方表单创建第一条规则" />
+              ) : (
+                <table className="report-table">
+                  <thead><tr><th>名称</th><th>条件</th><th>动作</th><th>状态</th><th>优先级</th><th>创建时间</th></tr></thead>
+                  <tbody>
+                    {rules.data.rules.map((r) => (
+                      <tr key={r.rule_id} data-testid={`reclass-rule-${r.rule_id}`}>
+                        <td><strong>{r.name}</strong>{r.description && <div className="text-xs text-muted">{r.description}</div>}</td>
+                        <td className="mono text-xs">{JSON.stringify(r.when_condition)}</td>
+                        <td className="mono text-xs">→ {(r.action && r.action.move_to_account_code) || "—"}</td>
+                        <td>{r.active ? <span className="badge ok">启用</span> : <span className="badge">停用</span>}</td>
+                        <td>{r.priority}</td>
+                        <td className="text-xs text-muted">{fmtTs(r.created_at)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            <div className="card mb-3">
+              <h3 className="card-title">新建规则</h3>
+              <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
+                <div><label className="lbl">规则名</label><input className="field" style={{ width: 220 }} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="reclass-form-name" /></div>
+                <div><label className="lbl">源科目前缀 (逗号分隔)</label><input className="field" style={{ width: 200 }} value={form.source_prefixes} onChange={(e) => setForm({ ...form, source_prefixes: e.target.value })} data-testid="reclass-form-prefixes" /></div>
+                <div><label className="lbl">目标科目</label><input className="field" style={{ width: 120 }} value={form.target_account} onChange={(e) => setForm({ ...form, target_account: e.target.value })} data-testid="reclass-form-target" /></div>
+                <div><label className="lbl">阈值</label><input className="field" style={{ width: 120 }} value={form.threshold} onChange={(e) => setForm({ ...form, threshold: e.target.value })} data-testid="reclass-form-threshold" /></div>
+                <div><label className="lbl">余额方向</label>
+                  <select className="field" style={{ width: 100 }} value={form.direction} onChange={(e) => setForm({ ...form, direction: e.target.value })}>
+                    <option value="debit">借方</option><option value="credit">贷方</option>
+                  </select>
+                </div>
+                <div style={{ alignSelf: "flex-end" }}><button className="btn primary" disabled={busy} onClick={submitRule} data-testid="reclass-form-submit">创建规则</button></div>
+              </div>
+            </div>
+
+            <div className="card mb-3">
+              <h3 className="card-title">运行</h3>
+              <div className="row" style={{ gap: 10 }}>
+                <button className="btn" disabled={busy} onClick={() => doRun("preview")} data-testid="reclass-run-preview">Preview (不写库)</button>
+                <button className="btn primary" disabled={busy} onClick={() => doRun("apply")} data-testid="reclass-run-apply">Apply (生成 ParseIssue)</button>
+              </div>
+              {previewResult && (
+                <div className="upload-result ok mt-3" data-testid="reclass-preview-result">
+                  Run #{previewResult.run_id} · mode={previewResult.mode} · 匹配 {previewResult.items_count} 项 · 总额 {fmtMoney(previewResult.total_amount)}
+                </div>
+              )}
+            </div>
+
+            <div className="card">
+              <h3 className="card-title">历史 Run</h3>
+              {runs.loading ? <div className="text-sm text-muted">加载中…</div> :
+               runs.error ? <div className="upload-result err">{runs.error.message}</div> :
+               (runs.data || []).length === 0 ? <EmptyState title="该期间暂无 Run" /> : (
+                <table className="report-table">
+                  <thead><tr><th>Run</th><th>Mode</th><th>规则数</th><th>命中项</th><th>总额</th><th>开始</th></tr></thead>
+                  <tbody>
+                    {(runs.data || []).map((r) => (
+                      <tr key={r.run_id} data-testid={`reclass-run-${r.run_id}`}>
+                        <td className="mono">#{r.run_id}</td>
+                        <td>{r.mode}</td>
+                        <td className="num">{r.rules_count}</td>
+                        <td className="num">{r.items_count}</td>
+                        <td className="num">{fmtMoney(r.total_amount)}</td>
+                        <td className="text-xs text-muted">{fmtTs(r.started_at)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </>
         );
       }
 
