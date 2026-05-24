@@ -40,9 +40,12 @@ holds.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from time import time
 from typing import Any
 
@@ -50,6 +53,48 @@ from .command_service import OrgCommandServiceProtocol, OrgLookupProtocol
 from .runtime import EventBusProtocol
 
 _LOGGER = logging.getLogger(__name__)
+
+# Sprint-3 P0-1 (audit ``_orgs_business_capability_audit_v3.md`` §5.2 / §7):
+# every dispatch to an entry / sub-task node writes a single JSONL line so the
+# v14 finding "delegation_logs/today.jsonl increment = 0" becomes verifiable
+# on the next exploratory pass. We resolve the directory lazily because the
+# dispatch module is imported very early (before ``openakita.config.settings``
+# has materialised its data_dir cache in some headless test contexts), and so
+# the parent ``data/`` directory may not exist yet for fresh installs.
+_DELEGATION_LOG_FALLBACK = Path("data") / "delegation_logs"
+
+
+def _resolve_delegation_log_dir() -> Path | None:
+    """Locate ``data/delegation_logs/`` without forcing ``openakita.config``
+    import at module load time."""
+
+    try:
+        from openakita.config import settings  # local import: avoid cycle
+
+        return Path(settings.data_dir) / "delegation_logs"
+    except Exception:  # noqa: BLE001 -- config not ready yet (early tests)
+        return _DELEGATION_LOG_FALLBACK
+
+
+def _append_delegation_log(record: dict[str, Any]) -> None:
+    """Best-effort JSONL append to ``data/delegation_logs/YYYYMMDD.jsonl``.
+
+    Failures (read-only filesystem, locked file on Windows, missing
+    ``data/`` root) are swallowed: the dispatch loop must never observe
+    an IO error from observability bookkeeping.
+    """
+
+    log_dir = _resolve_delegation_log_dir()
+    if log_dir is None:
+        return
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        record.setdefault("ts", datetime.now().isoformat())
+        path = log_dir / f"{datetime.now().strftime('%Y%m%d')}.jsonl"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except Exception:  # noqa: BLE001 -- observability must not poison dispatch
+        _LOGGER.debug("delegation log append failed", exc_info=True)
 
 # Tracker state constants -- parity with v1 ``OrgRuntime``
 # ``_active_user_cmd`` dict state values.
@@ -239,6 +284,40 @@ class CommandDispatchManager:
             "user_command_submitted",
             {"org_id": org_id, "command_id": tracker_command_id, "node_id": target_node_id},
         )
+        # Sprint-3 P0-1 (audit ``_orgs_business_capability_audit_v3.md`` §5.2):
+        # surface a "subtask assigned to entry node" signal even when the
+        # dispatcher hands the work to a single root node. The v14 audit
+        # found events.jsonl carrying zero ``subtask_assigned`` lines and
+        # ``delegation_logs/today.jsonl`` increment = 0 for 60+ commands,
+        # which made it impossible to tell whether the orchestrator had
+        # actually picked a node or whether everything was being cosplayed
+        # by the root LLM. Emitting the event + appending the JSONL line
+        # here makes node dispatch verifiable end-to-end without yet
+        # implementing the full chained dispatch (producer -> screenwriter
+        # -> ...) that Sprint-3-extended will land.
+        preview = content[:200] if isinstance(content, str) else ""
+        await self._bus.emit(
+            "subtask_assigned",
+            {
+                "org_id": org_id,
+                "command_id": tracker_command_id,
+                "node_id": target_node_id,
+                "parent_node_id": None,  # entry dispatch: parent is the user
+                "child_node_id": target_node_id,
+                "content_preview": preview,
+            },
+        )
+        _append_delegation_log(
+            {
+                "command_id": tracker_command_id,
+                "org_id": org_id,
+                "parent_node": None,
+                "child_node": target_node_id,
+                "node_id": target_node_id,
+                "kind": "entry_dispatch",
+                "content_preview": preview,
+            }
+        )
         if self._agent_dispatch is not None:
             try:
                 await self._agent_dispatch(org_id, target_node_id, tracker_command_id, content)
@@ -263,6 +342,13 @@ class CommandDispatchManager:
                 "command_id": command_id,
                 "already_done": True,
                 "state": tracker.state,
+                # Sprint-3 P0-2 (audit ``_orgs_business_capability_audit_v3.md``
+                # §5.3): even on the already-terminal short-circuit we surface
+                # the root-node id we *would* have cancelled. Pre-fix the
+                # field was always ``[]`` regardless of state, which made the
+                # cancel route impossible to tell apart from "tracker missing
+                # entirely".
+                "cancelled_roots": [tracker.root_node_id] if tracker.root_node_id else [],
             }
         tracker.state = TRACKER_CANCELLED
         tracker.cancel_reason = "user_cancel"
@@ -283,7 +369,16 @@ class CommandDispatchManager:
             "user_command_cancelled",
             {"org_id": org_id, "command_id": command_id, "reason": "user_cancel"},
         )
-        return {"ok": True, "command_id": command_id, "cancelled": True}
+        # Sprint-3 P0-2 (audit v3 §5.3): populate ``cancelled_roots`` so the
+        # service layer's response stops lying with ``[]``. We use the single
+        # tracker root because the current dispatch model fans out from one
+        # root only; chain children will land here once D3-extended ships.
+        return {
+            "ok": True,
+            "command_id": command_id,
+            "cancelled": True,
+            "cancelled_roots": [tracker.root_node_id] if tracker.root_node_id else [],
+        }
 
     def has_active_delegations(self, org_id: str, root_node_id: str) -> bool:
         """v1 ``OrgRuntime._has_active_delegations`` parity (24 LOC -> ~6 LOC)."""

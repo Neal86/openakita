@@ -92,10 +92,14 @@ def test_service_constructs_without_event_bus_back_compat() -> None:
 def test_service_subscribes_to_agent_run_events_when_bus_provided() -> None:
     """case id: p02.service.subscribes_to_agent_run_events
 
-    The wire-up registers handlers for the three events the executor
-    emits during a per-node run. A wildcard tap is **not** used
-    because the named-subscriber surface is the only thing every
-    bus impl is required to expose (``EventBusProtocol`` Protocol).
+    The wire-up registers handlers for every event the executor emits
+    during a per-node run. A wildcard tap is **not** used because the
+    named-subscriber surface is the only thing every bus impl is
+    required to expose (``EventBusProtocol`` Protocol).
+
+    Sprint-3 P0-2 (audit v3 §5.3) added ``agent_run_cancelled`` to the
+    catalogue so user-initiated cancels reach the outcome cache as a
+    distinct terminal state.
     """
 
     bus = _StubEventBus()
@@ -104,6 +108,7 @@ def test_service_subscribes_to_agent_run_events_when_bus_provided() -> None:
         "agent_run_started",
         "agent_run_finished",
         "agent_run_failed",
+        "agent_run_cancelled",
     }
 
 

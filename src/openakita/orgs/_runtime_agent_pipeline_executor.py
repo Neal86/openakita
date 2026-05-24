@@ -14,6 +14,7 @@ AgentPipelineExecutor`` import path keeps resolving byte-for-byte.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Protocol
@@ -178,6 +179,35 @@ class AgentPipelineExecutor:
             return self._result("error", command_id, reason="agent_build_failed")
         try:
             output = await self._invoke_agent(agent, content)
+        except asyncio.CancelledError:
+            # Sprint-3 P0-2 (audit ``_orgs_business_capability_audit_v3.md``
+            # §5.3): the user pressed cancel and ``CancelledError`` arrived
+            # via ``task.cancel()`` somewhere down the await chain
+            # (``Brain.messages_create_async`` -> ``LLMClient.chat`` ->
+            # ``httpx``). Emit a distinct ``agent_run_cancelled`` event so
+            # the command_service outcome cache can flip ``event_ref`` to
+            # ``agent_run_cancelled`` (instead of mis-classifying as
+            # ``agent_run_failed``), then re-raise so the asyncio task
+            # finalises with ``task.cancelled() == True`` and the
+            # ``_run_minimal`` cancel branch runs.
+            #
+            # We swallow ``CancelledError`` from the emit itself: the bus
+            # may surface the cancellation when ``await`` resumes inside
+            # ``_InMemoryEventBus.emit``, but the outcome we *care about*
+            # is the original cancel, not the nested one.
+            try:
+                await self._emit(
+                    "agent_run_cancelled",
+                    {
+                        "org_id": org_id,
+                        "node_id": node_id,
+                        "command_id": command_id,
+                        "reason": "user_cancel",
+                    },
+                )
+            except asyncio.CancelledError:
+                pass
+            raise
         except Exception as exc:  # noqa: BLE001
             _LOGGER.exception("agent.run raised (org=%s node=%s)", org_id, node_id)
             if _looks_like_quota_or_auth_error(exc):

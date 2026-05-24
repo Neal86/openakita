@@ -275,6 +275,18 @@ class OrgCommandService:
         # alone produces. Keyed by ``command_id``; values are a small
         # dict ``{"event", "reason", "error", "node_id", "ts"}``.
         self._command_outcomes: dict[str, dict[str, Any]] = {}
+        # Sprint-3 P0-2 (audit v3 §5.3): per-command inflight task map.
+        # Pre-fix the cancel endpoint accepted the request, recorded the
+        # ``user_command_cancelled`` event, but had no asyncio handle on
+        # the running task, so the underlying ``Brain.messages_create_async``
+        # kept burning tokens until the natural completion. We now stash
+        # the ``asyncio.Task`` created by ``_schedule_run`` so ``cancel``
+        # can call ``task.cancel()`` and have ``CancelledError`` propagate
+        # all the way down to the httpx request, closing the LLM
+        # connection. Tasks are popped in the ``_run_minimal`` finaliser
+        # (success / failure / cancelled all converge there) so the dict
+        # never leaks across commands.
+        self._inflight_tasks: dict[str, asyncio.Task[Any]] = {}
         self._event_bus = event_bus
         if event_bus is not None:
             self._wire_event_bus(event_bus)
@@ -287,10 +299,16 @@ class OrgCommandService:
     # We pre-list them so subscription is explicit and we do not have to
     # rely on a wildcard ``add_tap`` (some bus impls only support the
     # named-subscriber surface).
+    #
+    # Sprint-3 P0-2 (audit v3 §5.3) adds ``agent_run_cancelled`` so a
+    # user-initiated cancel surfaces in the outcome cache + ``event_ref``
+    # snapshot as a *distinct* terminal state instead of being either
+    # silently absent or mis-classified as ``agent_run_failed``.
     _AGENT_RUN_EVENT_NAMES: tuple[str, ...] = (
         "agent_run_started",
         "agent_run_finished",
         "agent_run_failed",
+        "agent_run_cancelled",
     )
 
     def _wire_event_bus(self, event_bus: Any) -> None:
@@ -301,6 +319,13 @@ class OrgCommandService:
         case ``get_status`` simply continues to read the legacy
         ``_run_minimal``-only state, which is still strictly better
         than the pre-Sprint-2 silence.
+
+        Sprint-3 P0-2: each subscription captures the event name in a
+        closure so the handler does not have to re-derive it from the
+        payload shape. The pre-Sprint-3 shape-based inference confused
+        ``agent_run_cancelled`` (which carries ``reason="user_cancel"``)
+        with ``agent_run_failed``; routing by the real event name makes
+        the outcome cache unambiguous.
         """
 
         subscribe = getattr(event_bus, "subscribe", None)
@@ -312,14 +337,34 @@ class OrgCommandService:
             return
         for name in self._AGENT_RUN_EVENT_NAMES:
             try:
-                subscribe(name, self._handle_agent_event)
+                subscribe(name, self._make_event_handler(name))
             except Exception:  # noqa: BLE001 -- bus must not block service init
                 logger.exception(
                     "[OrgCmd] failed to subscribe to event %r; reconciliation degraded",
                     name,
                 )
 
-    def _handle_agent_event(self, payload: dict[str, Any]) -> None:
+    def _make_event_handler(self, event_name: str) -> Any:
+        """Return a sync ``(payload) -> None`` closure that forwards
+        ``(event_name, payload)`` to :meth:`_handle_agent_event`.
+
+        Factored out so the wiring loop stays single-line and so tests
+        that exercise the handler directly (``test_command_status_
+        reconciliation``) can still call ``_handle_agent_event`` with
+        a single ``payload`` arg via the legacy back-compat path.
+        """
+
+        def _h(payload: dict[str, Any]) -> None:
+            self._handle_agent_event(payload, event_name=event_name)
+
+        return _h
+
+    def _handle_agent_event(
+        self,
+        payload: dict[str, Any],
+        *,
+        event_name: str | None = None,
+    ) -> None:
         """Cache the latest agent-run outcome for a command id.
 
         Idempotent: handlers may fire multiple times during a single
@@ -329,6 +374,13 @@ class OrgCommandService:
         ``finished``. The handler is sync (the bus accepts both sync
         and async handlers); callers in this service are sync too,
         so no event-loop hop is needed.
+
+        When ``event_name`` is provided (the new ``_make_event_handler``
+        path) we record it verbatim. When it is missing (legacy direct
+        callers / Sprint-2 tests) we fall back to the payload-shape
+        inference Sprint-2 shipped with -- preserving back-compat with
+        ``test_command_status_reconciliation.py`` which calls this
+        method via ``bus.emit`` -> single-arg subscription.
         """
 
         if not isinstance(payload, dict):
@@ -336,18 +388,16 @@ class OrgCommandService:
         command_id = payload.get("command_id")
         if not isinstance(command_id, str) or not command_id:
             return
-        # Match the event name back from the payload-shape conventions
-        # used by ``AgentPipelineExecutor``: started has only org/node
-        # ids, failed adds ``reason`` + ``error``, finished adds
-        # ``output_len``.
-        if "reason" in payload or "error" in payload:
-            event = "agent_run_failed"
-        elif "output_len" in payload:
-            event = "agent_run_finished"
-        else:
-            event = "agent_run_started"
+        if event_name is None:
+            # Legacy shape-based inference (Sprint-2 back-compat).
+            if "reason" in payload or "error" in payload:
+                event_name = "agent_run_failed"
+            elif "output_len" in payload:
+                event_name = "agent_run_finished"
+            else:
+                event_name = "agent_run_started"
         self._command_outcomes[command_id] = {
-            "event": event,
+            "event": event_name,
             "reason": payload.get("reason"),
             "error": payload.get("error"),
             "node_id": payload.get("node_id"),
@@ -575,6 +625,15 @@ class OrgCommandService:
                 rendered = " ".join(s for s in (reason, error) if s).strip()
                 if rendered:
                     result["error"] = rendered
+            # Sprint-3 P0-2: surface ``phase=cancelled`` while the
+            # ``_run_minimal`` finaliser is still unwinding past the
+            # cancel point. The cmd dict will catch up shortly, but
+            # the SSE stream and pollers may sample this snapshot in
+            # the meantime and we want them to see the real terminal
+            # state immediately.
+            if event_ref == "agent_run_cancelled" and result["status"] == "running":
+                result["status"] = "cancelled"
+                result["phase"] = "cancelled"
         if live:
             result.update(_live_snapshot_view(live))
         elif isinstance(cmd.get("result"), dict):
@@ -599,12 +658,34 @@ class OrgCommandService:
         broadcast goes through :class:`EventEmitterProtocol`
         (no-op when emitter is None -- v1 degraded-mode
         equivalence).
+
+        Sprint-3 P0-2 (audit v3 §5.3): in addition to flipping the
+        tracker state via :class:`CommandRuntimeProtocol`, we now also
+        call ``task.cancel()`` on the inflight ``_run_minimal`` task so
+        ``CancelledError`` propagates down to the LLM ``httpx`` request
+        and the connection is closed. Pre-fix this method only emitted
+        the ``user_command_cancelled`` event; the LLM stayed running
+        until natural completion 60-180 s later, billing real tokens
+        even though the UI button was already greyed out.
         """
         cmd = self._commands.get(command_id)
         if not cmd or cmd.get("org_id") != org_id:
             return None
         if cmd.get("status") != "running":
             return {"ok": True, "command_id": command_id, "already_done": True}
+        # Sprint-3 P0-2: cancel the asyncio task *before* awaiting the
+        # runtime cancel. Two reasons:
+        # 1. ``task.cancel()`` is synchronous: it schedules a
+        #    ``CancelledError`` to fire at the next await, which keeps
+        #    the cancel signal in flight even if ``runtime.cancel_user_command``
+        #    blocks (rare, but possible if the lookup is slow).
+        # 2. The runtime cancel is async and may itself raise; we want
+        #    ``task.cancel()`` to have already landed so a subsequent
+        #    exception on the runtime path does not strand a running
+        #    LLM call.
+        task = self._inflight_tasks.get(command_id)
+        if task is not None and not task.done():
+            task.cancel()
         result = await self._runtime.cancel_user_command(org_id, command_id)
         self._update_command_state(
             command_id,
@@ -717,6 +798,13 @@ class OrgCommandService:
             # ``_commands`` so the per-process outcome cache cannot
             # grow unbounded once a command has aged past TTL.
             self._command_outcomes.pop(cid, None)
+            # Sprint-3 P0-2: same hygiene for the inflight-task map so
+            # a never-finalised task entry (e.g. an asyncio leak) is
+            # cleared on the next ``submit`` instead of pinning the
+            # coroutine across the TTL window.
+            stale_task = self._inflight_tasks.pop(cid, None)
+            if stale_task is not None and not stale_task.done():
+                stale_task.cancel()
 
     def _update_command_state(
         self,
@@ -726,13 +814,23 @@ class OrgCommandService:
         phase: str | None = None,
         **fields: Any,
     ) -> dict[str, Any] | None:
-        """Patch a command record in-place. v1 parity."""
+        """Patch a command record in-place. v1 parity.
+
+        Sprint-3 P0-2 (audit v3 §5.3): ``cancelled`` is now a recognised
+        terminal status (alongside ``done`` / ``error``). Pre-fix the
+        ``_run_minimal`` cancel branch wrote ``status="cancelled"`` but
+        ``phase`` stayed on whatever the snapshot last carried, leaving
+        ``GET /commands/{cid}`` reporting ``phase=running, status=cancelled``
+        (UI shows a spinner with a strikethrough). Including ``cancelled``
+        in the same auto-mirror set as ``done`` / ``error`` keeps the
+        public snapshot self-consistent for the new terminal state.
+        """
         cmd = self._commands.get(command_id)
         if cmd is None:
             return None
         if status is not None:
             cmd["status"] = status
-            if phase is None and status in ("done", "error"):
+            if phase is None and status in ("done", "error", "cancelled"):
                 cmd["phase"] = status
         if phase is not None:
             cmd["phase"] = phase
@@ -822,9 +920,34 @@ class OrgCommandService:
         ``_dispatch_forwards`` fan-out) lands in P9.4b2.
         The minimal scheduler is enough for the P9.4d
         contract + P9.4e SLA tests.
+
+        Sprint-3 P0-1 (audit v3 §5.2 / §4.5): when the caller does not
+        pin a specific node (``request.target_node_id is None``) we now
+        forward the resolved ``root_node_id`` (an entry node such as
+        ``producer`` for ``aigc-video-studio``) to
+        :meth:`CommandRuntimeProtocol.send_command` instead of the
+        unresolved ``None``. Pre-fix the executor's ``ProfileResolver``
+        received ``node_id=None``, so ``_extract_node`` matched no
+        ``OrgNode`` and the system prompt fell back to the literal
+        "node `None` (role: worker)" string that the v14 LLM-debug
+        audit flagged (68/79 files had ``context.node_id=null``).
+
+        Sprint-3 P0-2 (audit v3 §5.3): the created task is stored in
+        ``self._inflight_tasks[command_id]`` so ``cancel`` can call
+        ``task.cancel()`` and have ``CancelledError`` propagate through
+        ``runtime.send_command`` -> ``agent_dispatch`` ->
+        ``executor.activate_and_run`` -> ``Brain.messages_create_async``
+        -> ``httpx`` so the in-flight LLM HTTP request actually gets
+        torn down (real token-burn stops).
         """
 
         async def _run_minimal() -> None:
+            # Sprint-3 P0-1: prefer the resolved root over an unset
+            # target so the executor's ProfileResolver receives a real
+            # node id. The ``request.target_node_id or root_node_id``
+            # pattern keeps an explicit caller-supplied node winning,
+            # which matters for scheduler-driven sub-task dispatch.
+            effective_target = request.target_node_id or root_node_id
             try:
                 if replace_existing_id:
                     try:
@@ -836,7 +959,7 @@ class OrgCommandService:
                         pass
                 result = await self._runtime.send_command(
                     request.org_id,
-                    request.target_node_id,
+                    effective_target,
                     request.content,
                     command_id=command_id,
                 )
@@ -869,6 +992,21 @@ class OrgCommandService:
                         event_ref="agent_run_failed",
                         finished_at=time.time(),
                     )
+                elif outcome is not None and outcome.get("event") == "agent_run_cancelled":
+                    # Sprint-3 P0-2: the executor emitted the cancel
+                    # event but the task itself completed normally
+                    # (e.g. the agent run wrapped the cancel into a
+                    # graceful early-return). Reflect cancelled state
+                    # without crashing the finaliser.
+                    self._update_command_state(
+                        command_id,
+                        status="cancelled",
+                        phase="cancelled",
+                        result=result,
+                        error=None,
+                        event_ref="agent_run_cancelled",
+                        finished_at=time.time(),
+                    )
                 else:
                     self._update_command_state(
                         command_id,
@@ -878,6 +1016,26 @@ class OrgCommandService:
                         event_ref=(outcome or {}).get("event") if outcome else None,
                         finished_at=time.time(),
                     )
+            except asyncio.CancelledError:
+                # Sprint-3 P0-2 (audit v3 §5.3): the user pressed cancel
+                # and ``cancel`` -> ``task.cancel()`` injected
+                # ``CancelledError`` at the LLM await point. Flip the
+                # public snapshot to ``cancelled`` *before* re-raising
+                # so ``GET /commands/{cid}`` immediately returns
+                # ``phase=cancelled, event_ref=agent_run_cancelled``
+                # (pre-fix it kept saying ``phase=running`` until the
+                # LLM happened to finish ~1-3 minutes later, while
+                # token meter kept ticking).
+                self._update_command_state(
+                    command_id,
+                    status="cancelled",
+                    phase="cancelled",
+                    error=None,
+                    event_ref="agent_run_cancelled",
+                    finished_at=time.time(),
+                    cancelled_by_user=True,
+                )
+                raise
             except Exception as exc:
                 self._update_command_state(
                     command_id,
@@ -890,9 +1048,19 @@ class OrgCommandService:
                 root_key = (request.org_id, root_node_id)
                 if self._running_by_root.get(root_key) == command_id:
                     self._running_by_root.pop(root_key, None)
+                # Sprint-3 P0-2: clear the inflight task entry so the
+                # dict cannot grow unbounded and so a stale ``Task``
+                # reference cannot accidentally re-cancel a recycled
+                # command_id.
+                self._inflight_tasks.pop(command_id, None)
 
         loop = asyncio.get_running_loop()
-        loop.create_task(_run_minimal())
+        task = loop.create_task(_run_minimal())
+        # Sprint-3 P0-2: record the task so ``cancel`` can reach it.
+        # We register before any first ``await`` so the cancel-while-
+        # still-pending race window is closed (the dict is mutated
+        # synchronously in the same event-loop tick as ``submit``).
+        self._inflight_tasks[command_id] = task
 
     async def _dispatch_forwards(
         self,

@@ -143,12 +143,24 @@ def test_parity_dispatch_send_command_happy() -> None:
 
 
 def test_parity_dispatch_cancel_user_command_running() -> None:
-    """fixture id: dispatch.cancel_user_command.running -> cancelled"""
+    """fixture id: dispatch.cancel_user_command.running -> cancelled
+
+    Sprint-3 P0-2 (audit ``_orgs_business_capability_audit_v3.md``
+    §5.3): the parity response now carries ``cancelled_roots``
+    populated from the tracker (pre-Sprint-3 the service layer
+    surfaced ``[]`` because the dispatch sibling did not include the
+    field at all). The other three keys keep v1 parity.
+    """
     rt, cs, _bus = _make_runtime()
     r = asyncio.run(rt.send_command("o1", "n1", "do it"))
     cid = r["command_id"]
     out = asyncio.run(rt.cancel_user_command("o1", cid))
-    assert out == {"ok": True, "command_id": cid, "cancelled": True}
+    assert out == {
+        "ok": True,
+        "command_id": cid,
+        "cancelled": True,
+        "cancelled_roots": ["n1"],
+    }
     assert cs.cancelled == [("o1", cid)]
     snap = rt.get_command_tracker_snapshot("o1", cid)
     assert snap is not None and snap["state"] == TRACKER_CANCELLED

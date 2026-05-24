@@ -130,12 +130,23 @@ def test_contract_send_command_org_not_found() -> None:
 
 
 def test_contract_cancel_user_command_running() -> None:
-    """case id: cancel_user_command.running -> cancelled"""
+    """case id: cancel_user_command.running -> cancelled
+
+    Sprint-3 P0-2 (audit v3 §5.3): the response now also carries
+    ``cancelled_roots: [<root_node_id>]`` so the service layer's
+    response stops lying with ``[]``. The other three keys keep v1
+    parity.
+    """
     rt, cs, _bus = _make_runtime()
     r = asyncio.run(rt.send_command("o1", "n1", "task"))
     cid = r["command_id"]
     out = asyncio.run(rt.cancel_user_command("o1", cid))
-    assert out == {"ok": True, "command_id": cid, "cancelled": True}
+    assert out == {
+        "ok": True,
+        "command_id": cid,
+        "cancelled": True,
+        "cancelled_roots": ["n1"],
+    }
     assert cs.cancelled == [("o1", cid)]
     snap = rt.get_command_tracker_snapshot("o1", cid)
     assert snap is not None and snap["state"] == TRACKER_CANCELLED
