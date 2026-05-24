@@ -4238,15 +4238,272 @@
         setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 100);
       }
 
+      // ═══════════════════════════════════════════════════════════════════
+      //  M3 · 同业对比（Peer Comparison）—— Sibling A 后端：
+      //    POST /orgs/{oid}/peer-comparison/run
+      //    GET  /orgs/{oid}/peer-comparison/results
+      //    GET  /peer-benchmarks
+      //  AI 增强分析使用 Sibling B 的 S7 自然语言查询（/ai/raw/nl-query）。
+      //  路由未注册（404）时静默回退本地 mock：finance.peer.mock.v1
+      // ═══════════════════════════════════════════════════════════════════
+      const PEER_LS_KEY = "finance.peer.mock.v1";
+      const INDUSTRY_PEER_OPTS = [
+        { v: "manufacturing", l: "制造业" },
+        { v: "restaurant",    l: "餐饮服务" },
+        { v: "tech_service",  l: "科技服务业" },
+      ];
+      const QUARTILE_META = {
+        well_below:    { label: "远低于同业", cls: "err"  },
+        below:         { label: "低于同业",   cls: "warn" },
+        median_band:   { label: "处于中位",   cls: ""     },
+        above:         { label: "高于同业",   cls: "info" },
+        well_above:    { label: "远高于同业", cls: "ok"   },
+      };
+      const PEER_METRICS = [
+        { key: "gross_margin",     label: "毛利率",     suffix: "%", scale: 100 },
+        { key: "current_ratio",    label: "流动比率",   suffix: "",  scale: 1   },
+        { key: "asset_turnover",   label: "资产周转率", suffix: "",  scale: 1   },
+        { key: "debt_ratio",       label: "资产负债率", suffix: "%", scale: 100 },
+      ];
+
+      function _loadPeerMock() {
+        try {
+          const s = JSON.parse(localStorage.getItem(PEER_LS_KEY) || "null");
+          if (s && s.results) return s;
+        } catch {}
+        const seed = { results: [] };
+        localStorage.setItem(PEER_LS_KEY, JSON.stringify(seed));
+        return seed;
+      }
+      function _savePeerMock(s) { localStorage.setItem(PEER_LS_KEY, JSON.stringify(s)); }
+
+      function _quartileOf(value, p25, p50, p75) {
+        if (value < p25 * 0.7) return "well_below";
+        if (value < p25) return "below";
+        if (value <= p75) return "median_band";
+        if (value < p75 * 1.3) return "above";
+        return "well_above";
+      }
+
+      function _buildMockPeerResult(orgId, periodId, industryCode) {
+        const benchmarks = {
+          manufacturing: { gross_margin: { p25: 0.18, p50: 0.25, p75: 0.32 }, current_ratio: { p25: 1.1, p50: 1.6, p75: 2.2 }, asset_turnover: { p25: 0.6, p50: 0.9, p75: 1.3 }, debt_ratio: { p25: 0.35, p50: 0.50, p75: 0.65 } },
+          restaurant:    { gross_margin: { p25: 0.45, p50: 0.55, p75: 0.65 }, current_ratio: { p25: 0.8, p50: 1.2, p75: 1.7 }, asset_turnover: { p25: 1.5, p50: 2.2, p75: 3.0 }, debt_ratio: { p25: 0.40, p50: 0.55, p75: 0.70 } },
+          tech_service:  { gross_margin: { p25: 0.55, p50: 0.68, p75: 0.78 }, current_ratio: { p25: 1.5, p50: 2.5, p75: 3.5 }, asset_turnover: { p25: 0.4, p50: 0.7, p75: 1.0 }, debt_ratio: { p25: 0.20, p50: 0.35, p75: 0.50 } },
+        }[industryCode] || {};
+        const orgVals = {
+          gross_margin: 0.22 + Math.random() * 0.4,
+          current_ratio: 0.9 + Math.random() * 2.0,
+          asset_turnover: 0.5 + Math.random() * 1.5,
+          debt_ratio: 0.25 + Math.random() * 0.4,
+        };
+        const metrics = {};
+        for (const m of PEER_METRICS) {
+          const b = benchmarks[m.key] || { p25: 0.1, p50: 0.5, p75: 0.9 };
+          const v = orgVals[m.key];
+          metrics[m.key] = { value: v, p25: b.p25, p50: b.p50, p75: b.p75, quartile: _quartileOf(v, b.p25, b.p50, b.p75) };
+        }
+        return {
+          result_id: `peer_mock_${Math.random().toString(36).slice(2, 8)}`,
+          org_id: orgId, period_id: periodId, industry_code: industryCode,
+          metrics, created_at: new Date().toISOString(),
+        };
+      }
+
+      function PeerComparisonView({ toast }) {
+        const { data: orgsData } = useFetch("/orgs?limit=200", []);
+        const orgs = (orgsData && orgsData.organizations) || [];
+        const [orgId, setOrgId] = useState("");
+        const [periodId, setPeriodId] = useState("2025-FY");
+        const [industryCode, setIndustryCode] = useState("manufacturing");
+        const [running, setRunning] = useState(false);
+        const [current, setCurrent] = useState(null);
+        const [history, setHistory] = useState([]);
+        const [backendOk, setBackendOk] = useState(null);
+        const [aiResult, setAiResult] = useState(null);
+        const [aiBusy, setAiBusy] = useState(false);
+
+        const reloadHistory = useCallback(async (oid) => {
+          if (!oid) return;
+          try {
+            const r = await api("GET", `/orgs/${oid}/peer-comparison/results`, null, { timeoutMs: 4000 });
+            setHistory((r && r.results) || []);
+            setBackendOk(true);
+          } catch (e) {
+            const s = _loadPeerMock();
+            setHistory((s.results || []).filter((x) => x.org_id === oid));
+            setBackendOk(false);
+          }
+        }, []);
+
+        useEffect(() => { if (orgId) reloadHistory(orgId); }, [orgId, reloadHistory]);
+
+        const run = async () => {
+          if (!orgId) { toast("请选择账套", "warn"); return; }
+          setRunning(true); setAiResult(null);
+          const body = { period_id: periodId, industry_code: industryCode };
+          try {
+            const r = await api("POST", `/orgs/${orgId}/peer-comparison/run`, body);
+            setCurrent(r);
+            toast("同业对比完成");
+            reloadHistory(orgId);
+          } catch (e) {
+            if (e.status === 404) {
+              const mock = _buildMockPeerResult(orgId, periodId, industryCode);
+              const s = _loadPeerMock();
+              s.results = [mock, ...(s.results || [])].slice(0, 50);
+              _savePeerMock(s);
+              setCurrent(mock);
+              setHistory(s.results.filter((x) => x.org_id === orgId));
+              toast("M3 Sibling A 后端尚未上线，已使用本地 mock 计算", "warn");
+            } else { toast(`计算失败：${e.message}`, "err"); }
+          } finally { setRunning(false); }
+        };
+
+        const aiAnalyze = async () => {
+          if (!current) return;
+          setAiBusy(true);
+          const question = "解读本次同业对比结果";
+          const metrics_json = JSON.stringify(current.metrics);
+          try {
+            const r = await api("POST", `/ai/raw/nl-query`, { question, context_json: metrics_json, execute_sql: false });
+            setAiResult({ ok: true, sql: r.sql || "", summary: r.summary || r.text || "" });
+          } catch (e) {
+            if (e.status === 404) {
+              setAiResult({ ok: false, sql: "-- M3 Sibling B raw NL query 后端尚未上线\n-- 占位 SQL\nSELECT industry_code, AVG(gross_margin) FROM peer_benchmarks GROUP BY industry_code;", summary: "（占位）AI 摘要将在 Sibling B 后端上线后自动启用。" });
+              toast("M3 Sibling B 后端尚未上线，AI 增强使用占位结果", "warn");
+            } else { toast(`AI 分析失败：${e.message}`, "err"); }
+          } finally { setAiBusy(false); }
+        };
+
+        return (
+          <>
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h2 className="page-title">同业对比</h2>
+                <p className="page-subtitle">
+                  比对四项核心指标 vs 行业 25/50/75 分位
+                  {backendOk === false && <span className="badge warn" style={{ marginLeft: 8 }}>M3 Sibling A 后端尚未上线（mock）</span>}
+                </p>
+              </div>
+            </div>
+
+            <div className="card mb-3">
+              <div className="row" style={{ gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
+                <div>
+                  <label className="lbl">账套</label>
+                  <select className="field" style={{ width: 240 }} value={orgId} onChange={(e) => setOrgId(e.target.value)} data-testid="peer-org">
+                    <option value="">— 请选择 —</option>
+                    {orgs.map((o) => <option key={o.id} value={o.id}>{o.name || o.id}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="lbl">期间</label>
+                  <input className="field" style={{ width: 120 }} value={periodId} onChange={(e) => setPeriodId(e.target.value)} />
+                </div>
+                <div>
+                  <label className="lbl">行业</label>
+                  <select className="field" style={{ width: 160 }} value={industryCode} onChange={(e) => setIndustryCode(e.target.value)} data-testid="peer-industry">
+                    {INDUSTRY_PEER_OPTS.map((x) => <option key={x.v} value={x.v}>{x.l}</option>)}
+                  </select>
+                </div>
+                <button className="btn primary" onClick={run} disabled={!orgId || running} data-testid="peer-run">
+                  {running ? <Spinner /> : "运行对比"}
+                </button>
+              </div>
+            </div>
+
+            {current && (
+              <div className="card mb-3">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <h3 className="card-title">本次结果 · <span className="mono text-xs">{current.result_id}</span></h3>
+                    <p className="card-sub">行业 {current.industry_code} · {fmtTs(current.created_at)}</p>
+                  </div>
+                  <button className="btn" onClick={aiAnalyze} disabled={aiBusy} data-testid="peer-ai">
+                    {aiBusy ? <Spinner /> : "AI 增强分析"}
+                  </button>
+                </div>
+                <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 10 }}>
+                  {PEER_METRICS.map((m) => {
+                    const d = (current.metrics || {})[m.key];
+                    if (!d) return null;
+                    return <PeerMetricCard key={m.key} meta={m} data={d} />;
+                  })}
+                </div>
+                {aiResult && (
+                  <div className="card mt-3" style={{ padding: 10, background: "rgba(59,130,246,0.05)" }}>
+                    <h4 className="card-title">AI 增强分析（S7 自然语言查询）</h4>
+                    <pre className="mono text-xs" style={{ background: "var(--bg-soft, rgba(0,0,0,0.04))", padding: 8, borderRadius: 4, overflowX: "auto" }}>{aiResult.sql || "(无 SQL)"}</pre>
+                    <div className="mt-3"><strong>AI 摘要：</strong> {aiResult.summary || "（暂无）"}</div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="card" style={{ padding: 0 }}>
+              <div style={{ padding: 10, borderBottom: "1px solid var(--border, rgba(0,0,0,0.08))" }}>
+                <strong>历史结果</strong> <span className="text-xs text-muted">{history.length} 条</span>
+              </div>
+              {history.length === 0 ? <EmptyState title="暂无历史" /> : (
+                <table className="report-table">
+                  <thead><tr><th>结果 ID</th><th>期间</th><th>行业</th><th>创建时间</th><th></th></tr></thead>
+                  <tbody>
+                    {history.map((h) => (
+                      <tr key={h.result_id} className="cell-clickable" onClick={() => setCurrent(h)}>
+                        <td className="mono text-xs">{h.result_id}</td>
+                        <td>{h.period_id}</td>
+                        <td>{(INDUSTRY_PEER_OPTS.find((x) => x.v === h.industry_code) || {}).l || h.industry_code}</td>
+                        <td className="text-xs text-muted">{fmtTs(h.created_at)}</td>
+                        <td><button className="btn subtle sm">查看 →</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </>
+        );
+      }
+
+      function PeerMetricCard({ meta, data }) {
+        const q = QUARTILE_META[data.quartile] || { label: data.quartile, cls: "" };
+        const valFmt = (v) => `${(v * meta.scale).toFixed(2)}${meta.suffix}`;
+        const minP = Math.min(data.p25, data.value) * 0.9;
+        const maxP = Math.max(data.p75, data.value) * 1.1;
+        const range = maxP - minP || 1;
+        const xOf = (v) => Math.max(0, Math.min(200, ((v - minP) / range) * 200));
+        return (
+          <div className="card" style={{ padding: 10, background: "var(--bg-soft, rgba(0,0,0,0.02))" }}>
+            <div className="flex items-center justify-between">
+              <strong>{meta.label}</strong>
+              <span className={`badge ${q.cls}`}>{q.label}</span>
+            </div>
+            <div className="text-xl mt-3" style={{ fontWeight: 600 }}>{valFmt(data.value)}</div>
+            <svg width="200" height="40" style={{ marginTop: 6 }} aria-label={`peer-chart-${meta.key}`}>
+              <line x1="0" y1="20" x2="200" y2="20" stroke="rgba(0,0,0,0.1)" strokeWidth="1" />
+              <rect x={xOf(data.p25)} y="14" width={Math.max(2, xOf(data.p75) - xOf(data.p25))} height="12" fill="rgba(59,130,246,0.25)" />
+              <line x1={xOf(data.p50)} y1="10" x2={xOf(data.p50)} y2="30" stroke="rgba(59,130,246,0.9)" strokeWidth="2" />
+              <line x1={xOf(data.value)} y1="4" x2={xOf(data.value)} y2="36" stroke="rgba(220,38,38,0.95)" strokeWidth="2" />
+              <circle cx={xOf(data.value)} cy="20" r="3" fill="rgba(220,38,38,0.95)" />
+            </svg>
+            <div className="text-xs text-muted">
+              p25 {valFmt(data.p25)} · p50 {valFmt(data.p50)} · p75 {valFmt(data.p75)}
+            </div>
+          </div>
+        );
+      }
+
       // ─────────────────────────────────────────────────────────────────
       //  顶部导航：账套 / 合并报表 / 报表附注 / AI 设置
       // ─────────────────────────────────────────────────────────────────
       function MainNav({ active, navigate }) {
         const items = [
-          { key: "orgs",          label: "账套",       hash: "#/orgs" },
-          { key: "consolidation", label: "合并报表",   hash: "#/consolidation" },
-          { key: "notes-editor",  label: "报表附注",   hash: "#/notes-editor" },
-          { key: "ai-settings",   label: "AI 设置",    hash: "#/ai-settings" },
+          { key: "orgs",            label: "账套",       hash: "#/orgs" },
+          { key: "consolidation",   label: "合并报表",   hash: "#/consolidation" },
+          { key: "notes-editor",    label: "报表附注",   hash: "#/notes-editor" },
+          { key: "peer-comparison", label: "同业对比",   hash: "#/peer-comparison" },
+          { key: "ai-settings",     label: "AI 设置",    hash: "#/ai-settings" },
         ];
         return (
           <div className="tabs" style={{ marginBottom: 12 }}>
@@ -4306,6 +4563,7 @@
         const mC2 = route.match(/^#\/consolidation\/([^/]+)\/?$/);
         const mAI = route.match(/^#\/ai-settings\/?$/);
         const mNotes = route.match(/^#\/notes-editor\/?$/);
+        const mPeer = route.match(/^#\/peer-comparison\/?$/);
 
         let body, crumbs;
         let activeNav = "orgs";
@@ -4376,6 +4634,12 @@
           crumbs = [{ label: "报表附注" }];
           body = (
             <NotesEditorView toast={toasts.push} />
+          );
+        } else if (mPeer) {
+          activeNav = "peer-comparison";
+          crumbs = [{ label: "同业对比" }];
+          body = (
+            <PeerComparisonView toast={toasts.push} />
           );
         } else {
           activeNav = "orgs";
