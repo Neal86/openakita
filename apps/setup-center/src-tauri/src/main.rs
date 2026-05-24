@@ -4,6 +4,7 @@
 )]
 
 mod crash_handler;
+mod finance;
 mod migrations;
 
 use base64::Engine as _;
@@ -5372,7 +5373,11 @@ fn main() {
             register_cli,
             unregister_cli,
             get_cli_status,
-            start_dragging
+            start_dragging,
+            finance::show_finance_consent_dialog,
+            finance::finance_system_info,
+            finance::finance_show_notification,
+            finance::finance_pick_save_path
         ])
         .build(tauri::generate_context!())
     {
