@@ -621,6 +621,7 @@
               </button>
               <button className={`tab ${tab === "reclass" ? "active" : ""}`} onClick={() => setTab("reclass")} data-testid="tab-reclass">重分类规则</button>
               <button className={`tab ${tab === "xperiod" ? "active" : ""}`} onClick={() => setTab("xperiod")} data-testid="tab-xperiod">跨期校验</button>
+              <button className={`tab ${tab === "cashflow" ? "active" : ""}`} onClick={() => setTab("cashflow")} data-testid="tab-cashflow">现金流量</button>
             </div>
 
             {tab === "import" && (
@@ -640,6 +641,9 @@
             )}
             {tab === "xperiod" && (
               <CrossPeriodView orgId={orgId} period={period} toast={toast} />
+            )}
+            {tab === "cashflow" && (
+              <CashFlowView orgId={orgId} period={period} toast={toast} />
             )}
           </>
         );
@@ -919,6 +923,111 @@
                     </tbody>
                   </table>
                 )}
+              </div>
+            )}
+          </>
+        );
+      }
+
+      // ═══════════════════════════════════════════════════════════════════
+      //  Tab · 现金流量表 (M2 Biz Stage 4 · indirect-method engine)
+      //
+      //  Backend contract (`cash_flow_routes.py`, 3 endpoints):
+      //    GET  /orgs/{id}/cash-flow/keys     - publish synthetic key list
+      //    POST /orgs/{id}/cash-flow/compute  - dry-run (no DB write)
+      //    POST /orgs/{id}/cash-flow/persist  - compute + write to manual_inputs
+      //
+      //  Audit P1-B: 35+ derived `cf_*` keys are published by the engine
+      //  but no front-end ever consumes them. This view triggers compute
+      //  with optional prior_period_id (for BS Δ) and renders the resulting
+      //  keys grouped by 经营 / 投资 / 筹资 bucket plus the net change.
+      // ═══════════════════════════════════════════════════════════════════
+      function CashFlowView({ orgId, period, toast }) {
+        const [priorPeriod, setPriorPeriod] = useState("2024-FY");
+        const [busy, setBusy] = useState(false);
+        const [result, setResult] = useState(null);
+        const keysInfo = useFetch(`/orgs/${orgId}/cash-flow/keys`, [orgId]);
+
+        const compute = async (persist) => {
+          setBusy(true);
+          setResult(null);
+          try {
+            const path = persist ? "persist" : "compute";
+            const r = await api("POST", `/orgs/${orgId}/cash-flow/${path}`, {
+              period_id: period,
+              prior_period_id: priorPeriod || null,
+              decided_by: "ui",
+            });
+            setResult(r);
+            if (persist) toast(`已写入 manual_inputs：${r.persisted || 0} 条`);
+            else toast(`已计算 ${(r.keys || []).length} 个 cf_* 键`);
+          } catch (e) {
+            if (e.status === 404) toast("当前 org 不存在", "warn");
+            else toast(`计算失败：${e.message}`, "err");
+          } finally { setBusy(false); }
+        };
+
+        const groups = useMemo(() => {
+          if (!result || !result.values) return [];
+          const v = result.values;
+          // Bucket cf_* keys by phase for readability; anything we don't
+          // recognise lands in 其它派生项.
+          const sect = (titles, prefixes) => ({
+            title: titles, rows: Object.keys(v).filter((k) => prefixes.some((p) => k.startsWith(p))).sort(),
+          });
+          return [
+            sect("经营活动 (cf_operating_*, cf_*delta)", ["cf_operating", "cf_ar_", "cf_ap_", "cf_other_receivables", "cf_other_payables", "cf_advance_", "cf_inventory_", "cf_taxes_payable", "cf_employee_payable", "cf_tax_refund", "cf_other_operating"]),
+            sect("投资活动", ["cf_investing", "cf_fixed_assets", "cf_intangible_assets", "cf_lt_invest", "cf_other_investing"]),
+            sect("筹资活动", ["cf_financing", "cf_st_borrowing", "cf_lt_borrowing", "cf_paid_in_capital", "cf_dividends_paid", "cf_interest_paid", "cf_interest_received", "cf_other_financing"]),
+            sect("净增加与对账", ["cf_net_change", "cf_cash_delta_bs"]),
+            sect("利润表锚点", ["cf_net_profit", "cf_operating_profit", "cf_finance_cost", "cf_depreciation", "cf_amortization", "cf_asset_impairment"]),
+          ];
+        }, [result]);
+
+        return (
+          <>
+            <div className="card mb-3">
+              <h3 className="card-title">间接法计算</h3>
+              <div className="row" style={{ gap: 10, alignItems: "flex-end" }}>
+                <div><label className="lbl">期初 period_id (可选)</label><input className="field" style={{ width: 160 }} value={priorPeriod} onChange={(e) => setPriorPeriod(e.target.value)} data-testid="cashflow-prior" /></div>
+                <div><label className="lbl">当期 period_id</label><input className="field" style={{ width: 160 }} value={period} disabled /></div>
+                <button className="btn" disabled={busy} onClick={() => compute(false)} data-testid="cashflow-compute">仅计算</button>
+                <button className="btn primary" disabled={busy} onClick={() => compute(true)} data-testid="cashflow-persist">计算并写入 manual_inputs</button>
+              </div>
+              {result && (
+                <div className="upload-result ok mt-3" data-testid="cashflow-summary">
+                  <span className="badge ok">PL 锚点 {result.has_pl_anchor ? "✓" : "—"}</span>{" "}
+                  <span className="badge ok">本期 BS {result.has_balance ? "✓" : "—"}</span>{" "}
+                  <span className="badge info">期初 BS {result.has_prior_balance ? "✓" : "—"}</span>
+                  {" · "}{(result.keys || []).length} 个键
+                  {typeof result.persisted === "number" && <> · 已写入 {result.persisted} 条</>}
+                </div>
+              )}
+            </div>
+
+            {result && groups.map((g) => g.rows.length > 0 && (
+              <div key={g.title} className="card mb-3">
+                <h3 className="card-title">{g.title}</h3>
+                <table className="report-table">
+                  <thead><tr><th>键</th><th className="num">值</th></tr></thead>
+                  <tbody>
+                    {g.rows.map((k) => (
+                      <tr key={k} data-testid={`cashflow-cell-${k}`}>
+                        <td className="mono text-xs">{k}</td>
+                        <td className="num">{fmtMoney(result.values[k])}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ))}
+
+            {!result && keysInfo.data && (
+              <div className="card">
+                <h3 className="card-title">引擎发布的 cf_* 键 ({(keysInfo.data.synthetic_keys || []).length})</h3>
+                <div className="text-xs text-muted" style={{ wordBreak: "break-all" }}>
+                  {(keysInfo.data.synthetic_keys || []).join(" · ")}
+                </div>
               </div>
             )}
           </>
