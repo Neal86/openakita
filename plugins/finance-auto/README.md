@@ -39,7 +39,7 @@ OpenAkita 桌面/服务实例：
 
 - `openpyxl>=3.1.5,<4.0`  — .xlsx 主路径
 - `xlrd==1.2.0`           — .xls 兼容（必须 pin，2.x 已移除 .xls）
-- `xltpl>=0.30,<1.0`      — Excel 模板渲染
+- `xltpl>=0.20,<1.0`      — Excel 模板渲染（PyPI 当前 HEAD 0.21）
 - `keyring>=24.0,<26.0`   — 操作系统密钥环（Windows Credential Manager / macOS Keychain / Linux Secret Service）
 - `pywin32>=306`（Windows-only） — .xls Tier-3 COM fallback
 - `cryptography>=42.0,<46.0` — AES-GCM + PBKDF2-HMAC-SHA256

@@ -189,7 +189,7 @@ all = [
 finance-auto = [
     "openpyxl>=3.1.5,<4.0",        # .xlsx Tier 1 解析
     "xlrd==1.2.0",                 # .xls Tier 2（2.x 已移除 .xls 支持，故锁定）
-    "xltpl>=0.30,<1.0",            # 审计模板 .xlsx 渲染
+    "xltpl>=0.20,<1.0",            # 审计模板 .xlsx 渲染（PyPI 当前 HEAD = 0.21）
     "keyring>=24.0,<26.0",         # OS keyring（Windows Credential Manager / macOS Keychain / Secret Service）
     "pywin32>=306; sys_platform == 'win32'",  # .xls Tier 3 COM fallback（Windows-only）
     "cryptography>=42.0,<46.0",    # AES-256-GCM + PBKDF2-HMAC-SHA256
