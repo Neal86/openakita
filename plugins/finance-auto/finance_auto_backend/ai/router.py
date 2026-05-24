@@ -26,13 +26,93 @@ retry logic — it just calls into the host LLMClient (or the mock).
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import random
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Literal, Protocol
 
 from .desensitizer import SensitivityLevel
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# EX-P2-8 — retry / backoff tunables and helpers
+# ---------------------------------------------------------------------------
+
+#: Default number of retry attempts on top of the initial call.  Three
+#: retries means up to four total calls (1 + 3).  Override via
+#: ``OPENAKITA_FINANCE_AUTO_LLM_RETRIES``.
+DEFAULT_LLM_RETRIES = 3
+LLM_RETRIES_ENV = "OPENAKITA_FINANCE_AUTO_LLM_RETRIES"
+
+#: Initial backoff in seconds.  Successive retries multiply by 2:
+#: 1s, 2s, 4s, ...  Override via ``OPENAKITA_FINANCE_AUTO_LLM_BACKOFF_BASE``.
+DEFAULT_LLM_BACKOFF_BASE_SEC = 1.0
+LLM_BACKOFF_BASE_ENV = "OPENAKITA_FINANCE_AUTO_LLM_BACKOFF_BASE"
+
+#: Maximum amount of random jitter (in seconds) added on top of the
+#: deterministic backoff to spread out concurrent retriers.  Override
+#: via ``OPENAKITA_FINANCE_AUTO_LLM_BACKOFF_JITTER``.
+DEFAULT_LLM_BACKOFF_JITTER_SEC = 0.25
+LLM_BACKOFF_JITTER_ENV = "OPENAKITA_FINANCE_AUTO_LLM_BACKOFF_JITTER"
+
+#: Substrings (case-insensitive) that mark a transient / retryable
+#: failure.  We keep this conservative — only true network / rate-limit
+#: signals belong here; 4xx invalid-request bugs should fail loud and
+#: fast.
+_RETRYABLE_SUBSTRINGS: tuple[str, ...] = (
+    "timeout", "timed out", "temporarily unavailable",
+    "rate limit", "rate_limit", "ratelimited",
+    "connection reset", "connection refused", "connection aborted",
+    "service unavailable", "bad gateway", "gateway timeout",
+    "internal server error",
+    "503", "502", "504", "429", "500",
+    "remote disconnected", "remote end closed",
+)
+
+
+def _resolve_int(env: str, default: int) -> int:
+    raw = os.environ.get(env)
+    if raw is None:
+        return default
+    try:
+        n = int(raw)
+    except ValueError:
+        return default
+    return max(0, n)
+
+
+def _resolve_float(env: str, default: float) -> float:
+    raw = os.environ.get(env)
+    if raw is None:
+        return default
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return default
+
+
+def is_retryable_llm_error(exc: BaseException) -> bool:
+    """Heuristic classifier.  Returns ``True`` for transient errors —
+    5xx, timeout, rate-limit, connection-reset.  4xx and ValueErrors
+    are deemed permanent and short-circuit the retry loop.
+
+    Exporting this so callers can build their own retry loops on top
+    of ``FinanceAIRouter`` if they need to without copying the regex.
+    """
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    msg = (str(exc) or "").lower()
+    if not msg:
+        return False
+    # Explicit 4xx (not 429) is permanent.
+    for code in ("400", "401", "403", "404", "405", "409", "422"):
+        if code in msg and "429" not in msg:
+            return False
+    return any(token in msg for token in _RETRYABLE_SUBSTRINGS)
 
 
 # ---------------------------------------------------------------------------
@@ -358,27 +438,81 @@ class FinanceAIRouter:
         ep_name, is_local = self.pick_endpoint(
             scenario_id=scenario_id, level=level, skip_desensitize=skip_desensitize
         )
-        try:
-            response = await self.responder.complete(
-                prompt=prompt,
-                endpoint_name=ep_name,
-                sensitivity_level=level,
-                scenario_id=scenario_id,
-            )
-        except Exception:
-            raise
-        # Patch is_local into the envelope so callers don't need to
-        # introspect endpoint state separately.
+        # EX-P2-8: retry with exponential backoff on transient errors.
+        # Retryable: 5xx / 429 / connection-reset / timeout.  Non-
+        # retryable 4xx (auth, invalid request) short-circuits the loop
+        # so we don't waste 4×prompt tokens on a permanent failure.
+        max_retries = _resolve_int(LLM_RETRIES_ENV, DEFAULT_LLM_RETRIES)
+        backoff_base = _resolve_float(
+            LLM_BACKOFF_BASE_ENV, DEFAULT_LLM_BACKOFF_BASE_SEC
+        )
+        jitter_max = _resolve_float(
+            LLM_BACKOFF_JITTER_ENV, DEFAULT_LLM_BACKOFF_JITTER_SEC
+        )
+        attempt = 0
+        last_exc: BaseException | None = None
+        while True:
+            try:
+                response = await self.responder.complete(
+                    prompt=prompt,
+                    endpoint_name=ep_name,
+                    sensitivity_level=level,
+                    scenario_id=scenario_id,
+                )
+                if attempt > 0:
+                    logger.info(
+                        "finance-auto llm: scenario=%s endpoint=%s succeeded "
+                        "after %d retry(ies)",
+                        scenario_id, ep_name, attempt,
+                    )
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt >= max_retries or not is_retryable_llm_error(exc):
+                    logger.warning(
+                        "finance-auto llm: scenario=%s endpoint=%s "
+                        "FAILED on attempt %d/%d (retryable=%s): %s",
+                        scenario_id, ep_name, attempt + 1,
+                        max_retries + 1,
+                        is_retryable_llm_error(exc), exc,
+                    )
+                    raise
+                wait = backoff_base * (2 ** attempt)
+                if jitter_max > 0:
+                    wait += random.uniform(0, jitter_max)
+                logger.info(
+                    "finance-auto llm: scenario=%s endpoint=%s "
+                    "transient error on attempt %d/%d (%s); "
+                    "sleeping %.2fs before retry",
+                    scenario_id, ep_name, attempt + 1,
+                    max_retries + 1, exc, wait,
+                )
+                await asyncio.sleep(wait)
+                attempt += 1
+                continue
+        if last_exc is not None and attempt == 0:
+            # Defensive: if we somehow exit the loop with last_exc set
+            # but no successful response we should surface it.  In
+            # practice the break above guarantees response is set when
+            # attempt is 0.
+            raise last_exc  # pragma: no cover
         response.is_local = is_local or response.is_local
         return response
 
 
 __all__ = [
+    "DEFAULT_LLM_BACKOFF_BASE_SEC",
+    "DEFAULT_LLM_BACKOFF_JITTER_SEC",
+    "DEFAULT_LLM_RETRIES",
     "EndpointDescriptor",
     "FinanceAIRouter",
     "LLMResponder",
     "LLMResponse",
+    "LLM_BACKOFF_BASE_ENV",
+    "LLM_BACKOFF_JITTER_ENV",
+    "LLM_RETRIES_ENV",
     "MockLLMResponder",
     "RoutingConfig",
     "collect_endpoints_from_host_client",
+    "is_retryable_llm_error",
 ]
