@@ -149,7 +149,11 @@
       }
 
       const API_BASE = detectApiBase();
-      const PLUGIN_BASE = `${API_BASE}/api/plugins/${PLUGIN_ID}`;
+      // EX-P2-13 (v1.0.0-rc1): every real endpoint now lives under
+      // ``/v1/``.  The legacy un-prefixed paths still 308-redirect, so
+      // older bundles keep working; this constant simply skips the
+      // round-trip.  When v2 ships the new prefix arrives here.
+      const PLUGIN_BASE = `${API_BASE}/api/plugins/${PLUGIN_ID}/v1`;
 
       // 统一 fetch 包装：JSON 体自动 stringify，带超时，错误统一抛带 detail 的 Error。
       async function api(method, path, body, opts = {}) {
@@ -2868,7 +2872,11 @@
           const wsBase = (() => {
             const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
             const host = window.location.host || "127.0.0.1:18900";
-            return `${proto}//${host}/api/plugins/${PLUGIN_ID}/ws`;
+            // EX-P2-13: WebSocket cannot follow HTTP 308 redirects, so
+            // the backend keeps BOTH ``/ws`` (legacy) and ``/v1/ws``
+            // mounted.  This bundle targets the v1 path directly to
+            // align with the new ``/v1/`` prefix used by REST.
+            return `${proto}//${host}/api/plugins/${PLUGIN_ID}/v1/ws`;
           })();
           this.client = makeFinanceWSClient(wsBase, {
             onEvent: (m) => this.eventSubs.forEach((fn) => { try { fn(m); } catch (e) { console.error(e); } }),
