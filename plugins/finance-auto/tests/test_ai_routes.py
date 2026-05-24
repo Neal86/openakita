@@ -41,7 +41,14 @@ async def app_client(tmp_path):
     app = FastAPI()
     app.include_router(router, prefix="/api/plugins/finance-auto")
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    # follow_redirects=True so this test file keeps validating the
+    # legacy ``/api/plugins/finance-auto/ai/...`` paths after EX-P2-13
+    # turned them into 308 redirects to ``/api/plugins/finance-auto/v1/...``.
+    # The test contract (status / body shape) is unchanged; only the
+    # transport layer transparently follows one hop.
+    async with AsyncClient(
+        transport=transport, base_url="http://test", follow_redirects=True,
+    ) as client:
         yield client, service
     await db.close()
 

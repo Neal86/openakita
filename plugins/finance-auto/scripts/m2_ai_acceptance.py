@@ -162,7 +162,12 @@ async def run_acceptance(db_path: Path) -> dict[str, Any]:
         lambda payload: bus_events.append(payload),
     )
 
-    async with AsyncClient(transport=transport, base_url=base_url) as client:
+    # follow_redirects=True so the legacy ``/ai/...`` paths keep
+    # working after EX-P2-13 (v1.0.0-rc1) turned them into 308
+    # redirects to ``/v1/ai/...``.
+    async with AsyncClient(
+        transport=transport, base_url=base_url, follow_redirects=True,
+    ) as client:
         try:
             # 1. schema check ---------------------------------------------
             print("Step 1 — schema v8 sanity")

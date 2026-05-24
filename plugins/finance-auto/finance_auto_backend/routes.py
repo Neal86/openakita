@@ -39,8 +39,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from .db import FinanceAutoDB
 from .encryption import (
@@ -883,7 +883,18 @@ class FinanceAutoService:
 # ---------------------------------------------------------------------------
 
 
-def build_router(service: FinanceAutoService) -> APIRouter:
+def _build_v1_router(service: FinanceAutoService) -> APIRouter:
+    """Build the actual finance-auto API router (the ``v1`` surface).
+
+    This is the single source of truth for every plugin endpoint.  The
+    public ``build_router`` wrapper below mounts this under ``/v1`` and
+    adds the legacy 308 catch-all so existing clients keep working.
+
+    EX-P2-13 (v1.0.0-rc1): the introduction of the ``/v1/`` namespace is
+    a forward-compat preparation for the eventual ``/v2`` schema break.
+    No semantic change in this commit — every endpoint still resolves
+    via 308 from the legacy paths.
+    """
     router = APIRouter(tags=["finance-auto"])
     # EX-P1-2: bind the service onto every incoming request so the
     # RBAC dependency factory (``rbac.require_permission``) can find
@@ -1200,6 +1211,99 @@ def build_router(service: FinanceAutoService) -> APIRouter:
     register_infra_endpoints(router, service)
 
     return router
+
+
+# ---------------------------------------------------------------------------
+# EX-P2-13: legacy ``/api/plugins/finance-auto/<path>`` → 308 redirect to
+# ``/api/plugins/finance-auto/v1/<path>`` so existing UI bundles and any
+# pinned-version downstream tooling keep working without code changes.
+# ---------------------------------------------------------------------------
+
+
+# Plugin manager mounts the router at this prefix, so the redirect target
+# must include it.  Kept as a constant so a host-level rename surfaces in
+# one place.
+PLUGIN_MOUNT_PREFIX = "/api/plugins/finance-auto"
+
+# Path segments that should NOT be redirected — they are either:
+#   * already the v1 surface (``v1/...``)
+#   * the WebSocket endpoint, which cannot accept an HTTP 308 (clients
+#     must reconnect to the new URL; we keep both ``/ws`` and ``/v1/ws``
+#     mounted so existing browser bundles keep streaming until they ship
+#     the path bump).
+_LEGACY_REDIRECT_EXEMPT_PREFIXES: tuple[str, ...] = ("v1/", "v1", "ws", "ws/")
+
+
+def _attach_legacy_redirects(outer: APIRouter, service: FinanceAutoService) -> None:
+    """Mount a catch-all on ``outer`` that 308-redirects every non-v1
+    HTTP path to the corresponding ``/v1/`` URL.
+
+    Preserves the query string and the request body (308 — unlike 301/302
+    — guarantees the client replays the same method + body to the new
+    target, which is what we need for POST/PUT/DELETE).
+    """
+
+    @outer.api_route(
+        "/{legacy_path:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+        include_in_schema=False,
+        name="finance_auto_legacy_v1_redirect",
+    )
+    async def legacy_redirect(legacy_path: str, request: Request) -> RedirectResponse:
+        # Exempt: v1/* and ws — see _LEGACY_REDIRECT_EXEMPT_PREFIXES.
+        normalised = legacy_path.lstrip("/")
+        for skip in _LEGACY_REDIRECT_EXEMPT_PREFIXES:
+            if normalised == skip.rstrip("/") or normalised.startswith(skip):
+                # Bubble up as 404 so FastAPI's normal "path not found"
+                # response surfaces; we never want to redirect onto
+                # ourselves and create an infinite loop.
+                raise HTTPException(status_code=404, detail="not_found")
+        target = f"{PLUGIN_MOUNT_PREFIX}/v1/{normalised}"
+        if request.url.query:
+            target = f"{target}?{request.url.query}"
+        return RedirectResponse(url=target, status_code=308)
+
+
+def build_router(service: FinanceAutoService) -> APIRouter:
+    """Public router factory used by ``plugin.py`` + the e2e harness.
+
+    Layout (post-EX-P2-13):
+
+    * ``/v1/...`` — the real endpoint surface (every route defined by
+      ``_build_v1_router``).
+    * ``/ws`` + ``/v1/ws`` — duplicated WebSocket registration so the UI
+      bundle's existing ``/ws`` URL keeps streaming during the v1.0.x
+      transition window.
+    * ``/{anything-else}`` — 308 redirect to ``/v1/{anything-else}``,
+      preserving query string + method + body.
+
+    The wrapper is intentionally additive: the legacy paths still resolve
+    (via 308) so no client breakage; new clients (and the v1.x UI rev)
+    should target ``/v1/`` directly to save the round-trip.
+    """
+    outer = APIRouter(tags=["finance-auto"])
+    # The outer router needs the same RBAC service binding so the
+    # legacy redirect doesn't blow up before the redirect fires.
+    from .rbac import attach_service_for_rbac
+    attach_service_for_rbac(outer, service)
+
+    # Real surface — every endpoint lives here.
+    v1 = _build_v1_router(service)
+    outer.include_router(v1, prefix="/v1")
+
+    # WebSocket dual-mount: ``/ws`` (legacy) + ``/v1/ws`` (current).  The
+    # v1 router already carries ``/ws`` (registered by
+    # ``register_ws_endpoint`` inside ``_build_v1_router``); include_router
+    # remounted it at ``/v1/ws``.  We also expose the legacy ``/ws`` at
+    # the outer level so the existing UI bundle keeps streaming until
+    # task 5 step 6 ships the URL switch.
+    from .ai.ws import register_ws_endpoint
+    register_ws_endpoint(outer)
+
+    # Catch-all 308 redirect for legacy HTTP paths.
+    _attach_legacy_redirects(outer, service)
+
+    return outer
 
 
 # ---------------------------------------------------------------------------

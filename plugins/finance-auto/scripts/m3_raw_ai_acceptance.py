@@ -230,7 +230,11 @@ async def run_async(args: argparse.Namespace, work: Path) -> dict[str, Any]:
     await _enable_raw_scenarios(service)
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://acceptance") as client:
+    # follow_redirects=True so the legacy paths keep working after
+    # EX-P2-13 (v1.0.0-rc1) turned them into 308 redirects.
+    async with AsyncClient(
+        transport=transport, base_url="http://acceptance", follow_redirects=True,
+    ) as client:
         try:
             # 1. GET /ai/raw/scenarios -------------------------------
             t = time.perf_counter()
