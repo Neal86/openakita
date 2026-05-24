@@ -627,6 +627,7 @@ class NotesGenerator:
         await cur.close()
 
         notes_payload: list[dict[str, Any]] = []
+        narrative_seam: list[dict[str, Any]] = []
         for tmpl in templates:
             note = await self._render_one(
                 org_id=org_id,
@@ -635,6 +636,21 @@ class NotesGenerator:
                 template=tmpl,
             )
             notes_payload.append(note)
+            if note["kind"] in ("narrative_pending_ai", "narrative_pending_user"):
+                narrative_seam.append(
+                    {
+                        "org_id": org_id,
+                        "period_id": period_id,
+                        "user_id": user_id,
+                        "document_id": document_id,
+                        "note_id": note["id"],
+                        "template_id": tmpl["id"],
+                        "note_section": tmpl["note_section"],
+                        "note_item_code": tmpl["note_item_code"],
+                        "ai_scenario_id": tmpl.get("ai_scenario_id") or "S11",
+                        "fallback_content": note["content"],
+                    }
+                )
 
         await self._svc.db.conn.commit()
         try:
@@ -650,6 +666,18 @@ class NotesGenerator:
             )
         except Exception as exc:  # noqa: BLE001 — emission failure must not break the API
             logger.warning("finance-auto: notes.generated emit failed: %s", exc)
+        # Each hybrid / narrative template emits a draft_requested event so
+        # Sibling B's S11 worker (subscribed via attach_event_bus_subscriber)
+        # can pick the row up and replace the placeholder.  Failures in the
+        # subscriber chain must not break this API call.
+        for payload in narrative_seam:
+            try:
+                await self._bus.emit("finance.notes.draft_requested", payload)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "finance-auto: notes.draft_requested emit failed (note %s): %s",
+                    payload["note_id"], exc,
+                )
 
         return {
             "document_id": document_id,

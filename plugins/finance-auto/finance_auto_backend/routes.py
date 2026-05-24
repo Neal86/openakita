@@ -792,6 +792,20 @@ def build_router(service: FinanceAutoService) -> APIRouter:
     register_raw_ai_endpoints(router, service)
     attach_event_bus_subscriber(service)
 
+    # M3 Biz endpoints (Stage 3 + Stage 5 of Sibling A): report notes
+    # auto-generation + peer comparison.  Notes go in first because the
+    # generator subscriber attached above relies on the report_notes
+    # table introduced in schema v10; the peer module wire-up below uses
+    # an ImportError guard so this stage can land before peer_routes.py
+    # exists.
+    from .notes_routes import register_notes_endpoints
+    register_notes_endpoints(router, service)
+    try:
+        from .peer_routes import register_peer_endpoints
+        register_peer_endpoints(router, service)
+    except ImportError:
+        pass
+
     return router
 
 
