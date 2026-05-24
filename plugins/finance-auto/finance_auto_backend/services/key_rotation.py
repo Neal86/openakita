@@ -29,6 +29,7 @@ per-org KeyManager refactor is tracked separately in
 
 from __future__ import annotations
 
+import json
 import logging
 import secrets
 import time
@@ -61,6 +62,22 @@ _ENCRYPTED_TABLES: tuple[str, ...] = (
     "trial_balance_imports",
     "trial_balance_rows",
 )
+
+# Tables whose encrypted payload is embedded inside a JSON column instead of
+# living in a dedicated ``_encrypted_payload`` BLOB.  ``parse_issues`` is the
+# only such table today: the route layer packs amounts/PII into a hex blob
+# under the ``__enc_blob__`` key of ``original_data`` (see
+# ``parse_issue_routes._persist_detected_issues``).  Rotation must walk these
+# rows separately because the regular ``_encrypted_payload`` scan misses
+# them — that gap was the P1-D finding in the audit report.
+_EMBEDDED_BLOB_TABLES: tuple[tuple[str, str, str], ...] = (
+    # (table_name, primary_key_col, json_column_with_blob)
+    ("parse_issues", "id", "original_data"),
+)
+
+# JSON key inside the embedded column that holds the hex-encoded encrypted
+# blob.  Must match ``parse_issue_routes`` / ``_decode_original_data``.
+_EMBEDDED_BLOB_KEY = "__enc_blob__"
 
 _PROGRESS_FLUSH_EVERY = 200  # rows; controls how often we update rows_processed.
 
@@ -169,6 +186,20 @@ class KeyRotationService:
             except aiosqlite.OperationalError:
                 n = 0
             counts[table] = n
+            total += n
+        # Embedded ``__enc_blob__`` rows live inside a JSON column; SQLite has
+        # no easy index on substring content so we fall back to ``LIKE``.
+        for table, _pk, json_col in _EMBEDDED_BLOB_TABLES:
+            try:
+                async with conn.execute(
+                    f"SELECT COUNT(*) AS n FROM {table} "
+                    f"WHERE {json_col} LIKE '%\"__enc_blob__\"%'"
+                ) as cur:
+                    row = await cur.fetchone()
+                n = int(row["n"]) if row else 0
+            except aiosqlite.OperationalError:
+                n = 0
+            counts[f"{table}.{json_col}"] = n
             total += n
         current_version_row = await self._find_active_version(component)
         return {
@@ -316,6 +347,16 @@ class KeyRotationService:
                 total_rows += int(r["n"]) if r else 0
             except aiosqlite.OperationalError:
                 continue
+        for table, _pk, json_col in _EMBEDDED_BLOB_TABLES:
+            try:
+                async with conn.execute(
+                    f"SELECT COUNT(*) AS n FROM {table} "
+                    f"WHERE {json_col} LIKE '%\"__enc_blob__\"%'"
+                ) as c:
+                    r = await c.fetchone()
+                total_rows += int(r["n"]) if r else 0
+            except aiosqlite.OperationalError:
+                continue
         await conn.execute(
             "UPDATE key_rotation_runs SET total_rows=? WHERE id=?",
             (total_rows, run_id),
@@ -330,6 +371,10 @@ class KeyRotationService:
             for table in _ENCRYPTED_TABLES:
                 rows_processed = await self._reencrypt_table(
                     table, old_km, new_km, run_id, rows_processed
+                )
+            for table, pk_col, json_col in _EMBEDDED_BLOB_TABLES:
+                rows_processed = await self._reencrypt_embedded_blob(
+                    table, pk_col, json_col, old_km, new_km, run_id, rows_processed
                 )
             # Flip the previous version to retired + commit.
             await conn.execute(
@@ -502,6 +547,107 @@ class KeyRotationService:
             await conn.execute(
                 f"UPDATE {table} SET _encrypted_payload=? WHERE id=?",
                 (new_blob, rid),
+            )
+            rows_processed += 1
+            if (
+                rows_processed % _PROGRESS_FLUSH_EVERY == 0
+                or (time.time() - last_flush) > 1.0
+            ):
+                await conn.execute(
+                    "UPDATE key_rotation_runs SET rows_processed=? WHERE id=?",
+                    (rows_processed, run_id),
+                )
+                last_flush = time.time()
+        return rows_processed
+
+
+    async def _reencrypt_embedded_blob(
+        self,
+        table: str,
+        pk_col: str,
+        json_col: str,
+        old_km: KeyManager,
+        new_km: KeyManager,
+        run_id: int,
+        rows_processed: int,
+    ) -> int:
+        """Re-encrypt rows whose payload is embedded inside a JSON column.
+
+        Used by ``parse_issues`` where ``original_data`` carries a hex-encoded
+        ``__enc_blob__`` value containing the AES-GCM ciphertext of the PII
+        and amount sub-fields.  Without this walk the rotation succeeds at
+        the table level but leaves these embedded blobs encrypted under the
+        OLD key, making subsequent reads fail (the audit's P1-D finding).
+
+        Skipped tables / malformed JSON are logged at WARNING but do not
+        abort the rotation transaction (the embedded blob is a "best effort"
+        side-channel — the canonical ``_encrypted_payload`` columns are what
+        the rest of the system relies on).
+        """
+        conn = self.db.conn
+        try:
+            async with conn.execute(
+                f"SELECT {pk_col} AS pk, {json_col} AS payload FROM {table} "
+                f"WHERE {json_col} LIKE '%\"{_EMBEDDED_BLOB_KEY}\"%'"
+            ) as cur:
+                rows = await cur.fetchall()
+        except aiosqlite.OperationalError as exc:
+            logger.warning(
+                "finance-auto: skipping rotation for embedded-blob table "
+                "%s.%s: %s",
+                table, json_col, exc,
+            )
+            return rows_processed
+
+        last_flush = time.time()
+        for row in rows:
+            pk = row["pk"]
+            raw = row["payload"]
+            if not raw:
+                continue
+            try:
+                doc = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                logger.warning(
+                    "finance-auto: %s.%s pk=%r holds non-JSON payload; "
+                    "skipping rotation for this row: %s",
+                    table, json_col, pk, exc,
+                )
+                continue
+            if not isinstance(doc, dict):
+                continue
+            blob_hex = doc.get(_EMBEDDED_BLOB_KEY)
+            if not blob_hex:
+                continue
+            try:
+                old_blob = bytes.fromhex(blob_hex)
+            except ValueError as exc:
+                logger.warning(
+                    "finance-auto: %s.%s pk=%r holds non-hex __enc_blob__; "
+                    "skipping rotation for this row: %s",
+                    table, json_col, pk, exc,
+                )
+                continue
+            try:
+                payload = unpack_payload(old_km, old_blob)
+            except Exception as exc:  # noqa: BLE001 — best-effort isolation
+                logger.warning(
+                    "finance-auto: %s.%s pk=%r __enc_blob__ failed to "
+                    "decrypt with old key; leaving as-is: %s",
+                    table, json_col, pk, exc,
+                )
+                continue
+            new_blob = pack_payload(
+                new_km,
+                amounts=payload.get("amounts") or None,
+                pii=payload.get("pii") or None,
+                docrefs=payload.get("docrefs") or None,
+            )
+            doc[_EMBEDDED_BLOB_KEY] = new_blob.hex()
+            new_payload = json.dumps(doc, ensure_ascii=False, default=str)
+            await conn.execute(
+                f"UPDATE {table} SET {json_col}=? WHERE {pk_col}=?",
+                (new_payload, pk),
             )
             rows_processed += 1
             if (
