@@ -26,6 +26,9 @@ from . import (
     cash_flow_aux_classify,
     cross_period_anomaly,
     erp_source_detect,
+    raw_audit_opinion,
+    raw_nl_query,
+    raw_notes_draft,
     trial_balance_diagnose,
 )
 
@@ -40,6 +43,10 @@ SCENARIO_REGISTRY: dict[str, ScenarioRunner] = {
     cross_period_anomaly.SCENARIO_ID: cross_period_anomaly.run,
     cash_flow_aux_classify.SCENARIO_ID: cash_flow_aux_classify.run,
     audit_risk_warning.SCENARIO_ID: audit_risk_warning.run,
+    # M3 raw scenarios (S6 audit opinion / S7 NL query / S11 notes).
+    raw_audit_opinion.SCENARIO_ID: raw_audit_opinion.run,
+    raw_nl_query.SCENARIO_ID: raw_nl_query.run,
+    raw_notes_draft.SCENARIO_ID: raw_notes_draft.run,
 }
 
 
@@ -56,5 +63,8 @@ __all__ = [
     "cross_period_anomaly",
     "erp_source_detect",
     "list_scenario_ids",
+    "raw_audit_opinion",
+    "raw_nl_query",
+    "raw_notes_draft",
     "trial_balance_diagnose",
 ]
