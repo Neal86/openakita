@@ -3942,14 +3942,311 @@
         );
       }
 
+      // ═══════════════════════════════════════════════════════════════════
+      //  M3 · 报表附注（Notes Editor）—— Sibling A 后端：
+      //    POST /orgs/{oid}/notes/generate
+      //    GET  /orgs/{oid}/notes/documents
+      //    GET  /orgs/{oid}/notes/documents/{doc_id}/notes
+      //    PATCH /orgs/{oid}/notes/{note_id}  body { content, version }  乐观锁
+      //    POST /orgs/{oid}/notes/documents/{doc_id}/finalize
+      //    GET  /orgs/{oid}/notes/documents/{doc_id}/export?format=md
+      //  路由未注册（404）时静默回退本地 mock：finance.notes.mock.v1
+      // ═══════════════════════════════════════════════════════════════════
+      const NOTES_LS_KEY = "finance.notes.mock.v1";
+      const NOTE_KIND_META = {
+        data:                     { label: "数据",        cls: "ok" },
+        narrative:                { label: "文字",        cls: "info" },
+        hybrid:                   { label: "数据+文字",   cls: "info" },
+        narrative_pending_ai:     { label: "待 AI 起草",  cls: "warn" },
+        narrative_pending_user:   { label: "待用户填写",  cls: "warn" },
+      };
+
+      function _loadNotesMock() {
+        try {
+          const s = JSON.parse(localStorage.getItem(NOTES_LS_KEY) || "null");
+          if (s && s.documents) return s;
+        } catch {}
+        const seed = {
+          documents: [
+            {
+              doc_id: "doc_mock_001",
+              org_id: "(mock)",
+              period_id: "2025-FY",
+              status: "draft",
+              notes_count: 4,
+              created_at: new Date().toISOString(),
+              notes: [
+                { note_id: "n1", section_title: "重要会计政策", kind: "data", version: 1, content: "本公司采用企业会计准则编制财务报表。" },
+                { note_id: "n2", section_title: "应收账款", kind: "hybrid", version: 1, content: "期末余额 1,234,567.89 元，账龄分析见下表。" },
+                { note_id: "n3", section_title: "或有事项", kind: "narrative_pending_ai", version: 1, content: "（待 AI 起草）" },
+                { note_id: "n4", section_title: "关联方交易", kind: "narrative_pending_user", version: 1, content: "" },
+              ],
+            },
+            {
+              doc_id: "doc_mock_002",
+              org_id: "(mock)",
+              period_id: "2024-FY",
+              status: "finalized",
+              notes_count: 2,
+              created_at: new Date(Date.now() - 86400000 * 30).toISOString(),
+              notes: [
+                { note_id: "m1", section_title: "存货", kind: "data", version: 2, content: "存货采用加权平均法核算。" },
+                { note_id: "m2", section_title: "固定资产", kind: "narrative", version: 1, content: "采用直线法计提折旧。" },
+              ],
+            },
+          ],
+        };
+        localStorage.setItem(NOTES_LS_KEY, JSON.stringify(seed));
+        return seed;
+      }
+      function _saveNotesMock(s) { localStorage.setItem(NOTES_LS_KEY, JSON.stringify(s)); }
+
+      function NotesEditorView({ toast }) {
+        const { data: orgsData } = useFetch("/orgs?limit=200", []);
+        const orgs = (orgsData && orgsData.organizations) || [];
+        const [orgId, setOrgId] = useState("");
+        const [periodId, setPeriodId] = useState("2025-FY");
+        const [docs, setDocs] = useState([]);
+        const [selectedDoc, setSelectedDoc] = useState(null);
+        const [notes, setNotes] = useState([]);
+        const [backendOk, setBackendOk] = useState(null);
+        const [generating, setGenerating] = useState(false);
+
+        const reloadDocs = useCallback(async (oid) => {
+          if (!oid) return;
+          try {
+            const r = await api("GET", `/orgs/${oid}/notes/documents`, null, { timeoutMs: 4000 });
+            setDocs((r && r.documents) || []);
+            setBackendOk(true);
+          } catch (e) {
+            const s = _loadNotesMock();
+            setDocs(s.documents || []);
+            setBackendOk(false);
+          }
+        }, []);
+
+        useEffect(() => { if (orgId) reloadDocs(orgId); }, [orgId, reloadDocs]);
+
+        const openDoc = async (d) => {
+          setSelectedDoc(d);
+          if (backendOk) {
+            try {
+              const r = await api("GET", `/orgs/${orgId}/notes/documents/${d.doc_id}/notes`);
+              setNotes((r && r.notes) || []);
+              return;
+            } catch (e) { /* fall through to mock */ }
+          }
+          setNotes(d.notes || []);
+        };
+
+        const generate = async () => {
+          if (!orgId) { toast("请选择账套", "warn"); return; }
+          setGenerating(true);
+          try {
+            await api("POST", `/orgs/${orgId}/notes/generate`, { period_id: periodId });
+            toast("已生成附注文档");
+            reloadDocs(orgId);
+          } catch (e) {
+            if (e.status === 404) {
+              const s = _loadNotesMock();
+              const newDoc = {
+                doc_id: `doc_mock_${Math.random().toString(36).slice(2, 8)}`,
+                org_id: orgId, period_id: periodId, status: "draft",
+                notes_count: 1, created_at: new Date().toISOString(),
+                notes: [{ note_id: `n_${Date.now()}`, section_title: "新生成附注", kind: "narrative_pending_ai", version: 1, content: "（mock 占位）" }],
+              };
+              s.documents = [newDoc, ...(s.documents || [])];
+              _saveNotesMock(s);
+              setDocs(s.documents);
+              toast("M3 Sibling A 后端尚未上线，已生成本地占位文档", "warn");
+            } else {
+              toast(`生成失败：${e.message}`, "err");
+            }
+          } finally { setGenerating(false); }
+        };
+
+        const saveNote = async (note, newContent) => {
+          try {
+            const updated = await api("PATCH", `/orgs/${orgId}/notes/${note.note_id}`, { content: newContent, version: note.version });
+            toast("已保存（版本 +1）");
+            setNotes((cur) => cur.map((x) => x.note_id === note.note_id ? { ...x, content: newContent, version: (updated && updated.version) || (note.version + 1) } : x));
+          } catch (e) {
+            if (e.status === 404 || e.status === 409 && !backendOk) {
+              const s = _loadNotesMock();
+              const doc = (s.documents || []).find((x) => x.doc_id === selectedDoc.doc_id);
+              if (doc) {
+                doc.notes = (doc.notes || []).map((x) => x.note_id === note.note_id ? { ...x, content: newContent, version: (note.version || 1) + 1 } : x);
+                _saveNotesMock(s);
+              }
+              setNotes((cur) => cur.map((x) => x.note_id === note.note_id ? { ...x, content: newContent, version: (x.version || 1) + 1 } : x));
+              toast("已保存到本地 mock", "warn");
+            } else if (e.status === 409) {
+              toast("版本冲突，请刷新后再保存", "err");
+            } else {
+              toast(`保存失败：${e.message}`, "err");
+            }
+          }
+        };
+
+        const finalize = async () => {
+          if (!selectedDoc) return;
+          if (!window.confirm("确认定稿？定稿后将无法继续修改。")) return;
+          try {
+            await api("POST", `/orgs/${orgId}/notes/documents/${selectedDoc.doc_id}/finalize`, {});
+            toast("已定稿");
+            const upd = { ...selectedDoc, status: "finalized" };
+            setSelectedDoc(upd);
+            setDocs((cur) => cur.map((x) => x.doc_id === upd.doc_id ? upd : x));
+          } catch (e) {
+            if (e.status === 404) {
+              const s = _loadNotesMock();
+              const d = (s.documents || []).find((x) => x.doc_id === selectedDoc.doc_id);
+              if (d) { d.status = "finalized"; _saveNotesMock(s); }
+              setSelectedDoc({ ...selectedDoc, status: "finalized" });
+              setDocs((cur) => cur.map((x) => x.doc_id === selectedDoc.doc_id ? { ...x, status: "finalized" } : x));
+              toast("已在本地 mock 定稿", "warn");
+            } else { toast(`定稿失败：${e.message}`, "err"); }
+          }
+        };
+
+        const exportMd = async () => {
+          if (!selectedDoc) return;
+          try {
+            const resp = await api("GET", `/orgs/${orgId}/notes/documents/${selectedDoc.doc_id}/export?format=md`, null, { raw: true });
+            if (!resp.ok) throw Object.assign(new Error("export failed"), { status: resp.status });
+            const blob = await resp.blob();
+            _triggerDownload(blob, `${selectedDoc.doc_id}.md`);
+          } catch (e) {
+            const md = `# ${selectedDoc.doc_id}\n\n_period: ${selectedDoc.period_id}_\n\n` +
+              (notes || []).map((n) => `## ${n.section_title}\n\n${n.content || ""}\n`).join("\n");
+            _triggerDownload(new Blob([md], { type: "text/markdown" }), `${selectedDoc.doc_id}.md`);
+            toast("后端导出未上线，已使用本地 mock 导出", "warn");
+          }
+        };
+
+        const isFinalized = selectedDoc && selectedDoc.status === "finalized";
+
+        return (
+          <>
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h2 className="page-title">报表附注</h2>
+                <p className="page-subtitle">
+                  根据余额表 / 报表生成附注草稿，AI 协助起草文字段落
+                  {backendOk === false && <span className="badge warn" style={{ marginLeft: 8 }}>M3 Sibling A 后端尚未上线（mock）</span>}
+                </p>
+              </div>
+            </div>
+
+            <div className="card mb-3">
+              <div className="row" style={{ gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
+                <div>
+                  <label className="lbl">账套</label>
+                  <select className="field" style={{ width: 240 }} value={orgId} onChange={(e) => setOrgId(e.target.value)} data-testid="notes-org">
+                    <option value="">— 请选择 —</option>
+                    {orgs.map((o) => <option key={o.id} value={o.id}>{o.name || o.id}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="lbl">期间</label>
+                  <input className="field" style={{ width: 120 }} value={periodId} onChange={(e) => setPeriodId(e.target.value)} data-testid="notes-period" />
+                </div>
+                <button className="btn primary" onClick={generate} disabled={!orgId || generating} data-testid="notes-generate">
+                  {generating ? <Spinner /> : "生成附注"}
+                </button>
+                <button className="btn" onClick={() => orgId && reloadDocs(orgId)} disabled={!orgId}>刷新</button>
+              </div>
+            </div>
+
+            <div className="card" style={{ padding: 0, marginBottom: 12 }}>
+              {(!orgId || docs.length === 0) ? <EmptyState title={orgId ? "暂无附注文档" : "请先选择账套"} />
+                : (
+                  <table className="report-table">
+                    <thead><tr><th>文档</th><th>期间</th><th>状态</th><th className="num">附注数</th><th>创建时间</th></tr></thead>
+                    <tbody>
+                      {docs.map((d) => (
+                        <tr key={d.doc_id} className="cell-clickable" onClick={() => openDoc(d)}>
+                          <td className="mono text-xs">{d.doc_id}</td>
+                          <td>{d.period_id}</td>
+                          <td>{d.status === "finalized" ? <span className="badge ok">已定稿</span> : <span className="badge">草稿</span>}</td>
+                          <td className="num">{d.notes_count ?? (d.notes || []).length}</td>
+                          <td className="text-xs text-muted">{fmtTs(d.created_at)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+            </div>
+
+            {selectedDoc && (
+              <div className="card">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <h3 className="card-title">附注详情 · <span className="mono text-xs">{selectedDoc.doc_id}</span></h3>
+                    <p className="card-sub">期间 {selectedDoc.period_id} · {(notes || []).length} 个段落</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <button className="btn" onClick={exportMd} data-testid="notes-export">导出 Markdown</button>
+                    <button className="btn primary" onClick={finalize} disabled={isFinalized} data-testid="notes-finalize">
+                      {isFinalized ? "已定稿" : "定稿"}
+                    </button>
+                  </div>
+                </div>
+                <div className="grid" style={{ gap: 8 }}>
+                  {(notes || []).map((n) => <NoteCard key={n.note_id} note={n} disabled={isFinalized} onSave={(c) => saveNote(n, c)} />)}
+                </div>
+              </div>
+            )}
+          </>
+        );
+      }
+
+      function NoteCard({ note, disabled, onSave }) {
+        const [open, setOpen] = useState(true);
+        const [content, setContent] = useState(note.content || "");
+        useEffect(() => { setContent(note.content || ""); }, [note.note_id, note.version]);
+        const meta = NOTE_KIND_META[note.kind] || { label: note.kind, cls: "" };
+        return (
+          <div className="card" style={{ padding: 10, background: "var(--bg-soft, rgba(0,0,0,0.02))" }}>
+            <div className="flex items-center justify-between" style={{ cursor: "pointer" }} onClick={() => setOpen(!open)}>
+              <div className="flex items-center gap-2">
+                <strong>{note.section_title}</strong>
+                <span className={`badge ${meta.cls}`}>{meta.label}</span>
+                <span className="text-xs text-muted">v{note.version}</span>
+              </div>
+              <span className="text-xs text-muted">{open ? "▾" : "▸"}</span>
+            </div>
+            {open && (
+              <div className="mt-3">
+                <textarea className="field" rows={4} value={content} disabled={disabled}
+                  onChange={(e) => setContent(e.target.value)} data-testid={`note-content-${note.note_id}`} />
+                <div className="flex justify-end mt-3">
+                  <button className="btn primary sm" disabled={disabled || content === note.content}
+                    onClick={() => onSave(content)} data-testid={`note-save-${note.note_id}`}>保存</button>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      }
+
+      function _triggerDownload(blob, filename) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = filename;
+        document.body.appendChild(a); a.click();
+        setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 100);
+      }
+
       // ─────────────────────────────────────────────────────────────────
-      //  顶部导航：账套 / 合并报表 / AI 设置
+      //  顶部导航：账套 / 合并报表 / 报表附注 / AI 设置
       // ─────────────────────────────────────────────────────────────────
       function MainNav({ active, navigate }) {
         const items = [
-          { key: "orgs",          label: "账套",      hash: "#/orgs" },
-          { key: "consolidation", label: "合并报表",  hash: "#/consolidation" },
-          { key: "ai-settings",   label: "AI 设置",   hash: "#/ai-settings" },
+          { key: "orgs",          label: "账套",       hash: "#/orgs" },
+          { key: "consolidation", label: "合并报表",   hash: "#/consolidation" },
+          { key: "notes-editor",  label: "报表附注",   hash: "#/notes-editor" },
+          { key: "ai-settings",   label: "AI 设置",    hash: "#/ai-settings" },
         ];
         return (
           <div className="tabs" style={{ marginBottom: 12 }}>
@@ -4008,6 +4305,7 @@
         const mC1 = route.match(/^#\/consolidation\/?$/);
         const mC2 = route.match(/^#\/consolidation\/([^/]+)\/?$/);
         const mAI = route.match(/^#\/ai-settings\/?$/);
+        const mNotes = route.match(/^#\/notes-editor\/?$/);
 
         let body, crumbs;
         let activeNav = "orgs";
@@ -4072,6 +4370,12 @@
           crumbs = [{ label: "AI 设置" }];
           body = (
             <AISettingsView toast={toasts.push} />
+          );
+        } else if (mNotes) {
+          activeNav = "notes-editor";
+          crumbs = [{ label: "报表附注" }];
+          body = (
+            <NotesEditorView toast={toasts.push} />
           );
         } else {
           activeNav = "orgs";
