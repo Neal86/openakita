@@ -44,6 +44,9 @@ from finance_auto_backend.ai.scenarios import (
     cash_flow_aux_classify,
     cross_period_anomaly,
     erp_source_detect,
+    raw_audit_opinion,
+    raw_nl_query,
+    raw_notes_draft,
     trial_balance_diagnose,
 )
 from finance_auto_backend.routes import build_router_and_service
@@ -88,9 +91,13 @@ def _local_router(canned: dict | None = None) -> FinanceAIRouter:
 # ---------------------------------------------------------------------------
 
 
-def test_registry_lists_six_scenarios():
+def test_registry_lists_all_scenarios():
+    # M2 ships 6 scenarios (S1–S6).  M3 raw AI sibling adds 3 more
+    # (audit_opinion_draft / nl_query / notes_draft) for a total of 9.
+    # Assert the exact set so a future regression of *missing* a scenario
+    # surfaces here instead of waiting for acceptance to flag it.
     ids = sorted(scenarios_pkg.list_scenario_ids())
-    assert ids == sorted(
+    expected = sorted(
         [
             erp_source_detect.SCENARIO_ID,
             account_classify_suggest.SCENARIO_ID,
@@ -98,8 +105,13 @@ def test_registry_lists_six_scenarios():
             cross_period_anomaly.SCENARIO_ID,
             cash_flow_aux_classify.SCENARIO_ID,
             audit_risk_warning.SCENARIO_ID,
+            raw_audit_opinion.SCENARIO_ID,
+            raw_nl_query.SCENARIO_ID,
+            raw_notes_draft.SCENARIO_ID,
         ]
     )
+    assert ids == expected
+    assert len(ids) >= 9
 
 
 # ---------------------------------------------------------------------------
