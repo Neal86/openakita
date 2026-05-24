@@ -2,7 +2,7 @@
 
 > **版本**：v1.0.0-rc1 (Release Candidate 1)
 > **协议**：AGPL-3.0-only（随 OpenAkita 主体）
-> **状态**：90 个 REST 路由 + 1 个 WebSocket，10/10 acceptance suite 全绿
+> **状态**：91 个 REST 路由 + 1 个 WebSocket，10/10 acceptance suite 全绿
 > **设计参考**：`_finance_plugin_design_v0.3_INDEX.md` / `_finance_plugin_final_handover.md`
 
 ---
@@ -73,8 +73,9 @@ pip install -r plugins/finance-auto/requirements.txt
 
 ### 3.2 数据库初始化
 
-无需手动迁移。首次启动时插件会自动执行 `v0 → v1 → … → v11` 全链
-schema 升级（idempotent）。
+无需手动迁移。首次启动时插件会自动执行 `v0 → v1 → … → v13` 全链
+schema 升级（idempotent；fix-round-3 引入 v12 extended permissions
+seeds + v13 reclassification undo history）。
 
 ### 3.3 加密密钥种子
 
@@ -93,7 +94,7 @@ schema 升级（idempotent）。
 # 启动 OpenAkita 后端（finance-auto 自动加载）
 openakita serve
 
-# 验证插件已注册（应见 90+ /api/plugins/finance-auto/* 路由）
+# 验证插件已注册（应见 91 /api/plugins/finance-auto/* 路由）
 curl http://127.0.0.1:18900/api/plugins/finance-auto/health
 ```
 
@@ -143,7 +144,7 @@ curl http://127.0.0.1:18900/api/plugins/finance-auto/health
 | 13 | 同业 Peer 对比（12 行业基准）| ✅ | Peer 对比 | `/orgs/{id}/peer/*` |
 | 14 | 密钥轮换 + 加密备份/恢复 | ✅ | 密钥管理 | `/admin/key-*`, `/backups/*` |
 
-> 完整 90 路由清单见 `routes.build_router_and_service` 入口及
+> 完整 91 路由清单见 `routes.build_router_and_service` 入口及
 > `_finance_plugin_final_handover.md` §3。
 
 ---
@@ -153,8 +154,12 @@ curl http://127.0.0.1:18900/api/plugins/finance-auto/health
 ### 6.1 加密
 
 - **算法**：AES-256-GCM（cipher）+ PBKDF2-HMAC-SHA256（KDF，
-  v1.0 RC：200 000 迭代，**v1.0 正式 GA 前计划提到 600 000**，
-  详 `_finance_plugin_audit_extended_report.md` EX-P1-3）。
+  v1.0 RC：**600 000 迭代**，符合 OWASP 2023 推荐；可通过环境变量
+  `OPENAKITA_FINANCE_AUTO_KDF_ITERATIONS` 进一步调优，最低 100 000
+  保护下限。已发布的旧 200k 备份仍可正常恢复——`restore_backup`
+  从 manifest 读取 `kdf_iterations` 字段实现向后兼容。详
+  `_finance_plugin_audit_extended_report.md` EX-P1-3 / fix-round-3
+  `8a628d1f`）。
 - **AAD**：固定 `openakita-finance-v1`，防止跨场景密文复用。
 - **Nonce**：每次加密 `os.urandom(12)`，杜绝重用风险。
 - **加密范围**：trial_balance / consent_records / ai_audit_log
@@ -172,12 +177,20 @@ curl http://127.0.0.1:18900/api/plugins/finance-auto/health
 
 | 模块 | 应用层 RBAC |
 | --- | --- |
-| `review_workflow` 复核流转（draft → sign-off）| ✅ 8 处 `check_permission` |
-| 其余 admin / reclass / cashflow / notes / peer 等 9 个模块 | ⚠️ 仅 host bearer token；**v1.0 正式 GA 计划补齐**（EX-P1-2）|
+| `review_workflow` 复核流转（draft → sign-off）| ✅ 7 处 `check_permission`（v9 既有）|
+| 9 个写操作模块：admin / reclass / cashflow / xperiod / audit-tpl / manual / consol / parse / notes / peer | ✅ 22 处 `require_permission` 路由依赖（fix-round-3 EX-P1-2 补齐，schema v12 seed 41 行权限）|
 
-> 当前部署假设：单机桌面用户即 admin；多用户/多审计师 v1.0 RC
-> 通过 `assignments` 表的项目-角色绑定提供**协作记录**，但写操作
-> 的角色校验仍在 v1.x 路线图中。
+RBAC 模型沿 v0.3 Part Biz §1.1：
+- `admin` — 系统级危险操作（备份创建/恢复、密钥轮换）。
+- `partner` — 业务最高级；全部 `auditor` + `manager` 权限再 + `notes.edit` / `audit-tpl.delete`。
+- `manager` — `auditor` 全权 + `reclassification.apply` / `peer.run` / `audit-tpl.upload`。
+- `auditor` — 日常账套作业（preview / generate / compute / decide / learn）。
+- 未注册用户 → 整路由 `403 rbac_denied`（`X-OpenAkita-User-Id` header 或 `?user_id=` query 均可标识；缺省 `local` 走单机管理员旁路）。
+
+> 当前部署假设：单机桌面用户走 `local` 旁路；多用户/多审计师 v1.0
+> RC 通过 `assignments` 表的项目-角色绑定执行写操作 RBAC。22 处路由
+> 依赖 + 7 处 service 校验均经 round-3 矩阵实测（10/10 模块返回
+> `rbac_denied`）。
 
 ### 6.4 API 路径约定（v1.0 RC + v2 升级路径）
 
@@ -187,7 +200,7 @@ curl http://127.0.0.1:18900/api/plugins/finance-auto/health
   `/api/plugins/finance-auto/v2/` 子路由 + v1 路径保留兼容 308
   重定向的方式滚动升级（参考 host 的 `orgs_v2_legacy_redirects.py`
   pattern）。详见 `_finance_plugin_audit_extended_report.md`
-  EX-P2-13。
+  EX-P2-13 + `CHANGELOG.md` v1.0.x 段落。
 
 ---
 
@@ -224,35 +237,34 @@ docker run -d --name openakita \
 
 ## §8 已知限制 (Known Limitations)
 
-诚实清单（v1.0 RC，详细 RCA 见 `_finance_plugin_audit_extended_report.md`）：
+诚实清单（v1.0 RC，详细 RCA 见 `_finance_plugin_audit_extended_report.md`
++ `_finance_plugin_audit_report_round3.md`）：
 
-1. **应用层 RBAC 不一致**（EX-P1-2）：除 review_workflow 外，admin /
-   reclass / cashflow / xperiod / audit-tpl / manual / consol / notes /
-   peer 9 个模块的写操作目前不在应用层校验角色，仅依赖 host bearer
-   token。计划 v1.0 正式 GA 前补齐。
-2. **PBKDF2 迭代数 200 k**（EX-P1-3）：低于 OWASP 2023 推荐的 600 k。
-   `BACKUP_KDF_ITERATIONS` 与 `PBKDF2_ITERATIONS` 计划在 v1.0 GA
-   提升到 600 k+（一次性 ~3s desktop unlock 延迟可接受）。
-3. **路径遍历**（EX-P1-1）：备份/恢复 admin endpoint 接受用户传入
-   `dest_dir` / `target_db_path`，沙盒校验在 v1.0 GA 加入。当前
-   通过单机部署假设缓解。
-4. **`m2_closing_acceptance.py` 不能干净退出**：scheduler 后台线程
-   非 daemon。v1.0 GA 计划 daemonise + 加 `service.shutdown()` 钩子。
-5. **AI 原始（🔴）场景在 CI 中走 mock**：S6/S7/S11 通过 monkey-patch
+1. **`m2_closing_acceptance.py` 偶发 timeout**：scheduler 后台线程
+   非 daemon，acceptance 在批量串行第 N 次复用时偶发卡 120s；单独
+   subprocess 始终 3.1s natural exit。v1.0 GA 计划 daemonise + 加
+   `service.shutdown()` 钩子。
+2. **AI 原始（🔴）场景在 CI 中走 mock**：S6/S7/S11 通过 monkey-patch
    `FinanceAIRouter` 注入 stub local endpoint。生产部署需配置真实
    Ollama / OpenAI-compatible endpoint。
-6. **Tauri 桌面命令未进 closing harness**：4 个 Rust 命令
+3. **Tauri 桌面命令未进 closing harness**：4 个 Rust 命令
    （consent / notification / save-as / system-info）已实现且
-   `m3_ui_acceptance.py` 单元覆盖；端到端测试在路线图。
-7. **附注模板 8 节**：A-share 实际财报常含 ~40 节；v1.x 计划扩展。
-8. **同业基准是 JSON 静态数据**：12 行业分位线；v1.x 计划接入
+   `m3_ui_acceptance.py` 单元覆盖；端到端 IPC 测试在路线图。
+4. **附注模板 8 节**：A-share 实际财报常含 ~40 节；v1.x 计划扩展。
+5. **同业基准是 JSON 静态数据**：12 行业分位线；v1.x 计划接入
    CSRC / Wind 实时摄取。
-9. **WebSocket 无 message replay**：客户端断线重连不补发漏掉的事件
-   （v1.0 RC 已加客户端 cursor 占位，等后端 `?since=` 支持）。
-10. **`reclassification.apply` 单条 INSERT 循环**：100 规则 ≈ 100 次
-    round-trip。v1.1 改 `executemany`。
-11. **无 `DELETE /orgs/{id}` endpoint**：账套清理需通过手动 SQL。
-12. **CHANGELOG**：完整变更见 [`CHANGELOG.md`](./CHANGELOG.md)。
+6. **WebSocket 无 message replay**：v1.0 RC 已加客户端 cursor +
+   `?since=` query 占位 + reconnecting badge 状态机；服务端 replay
+   逻辑（按 cursor 重发未消费事件）在 v1.x 路线。
+7. **无 `DELETE /orgs/{id}` endpoint**：账套清理需通过手动 SQL；
+   计划 v1.0.x 加入（EX-P2-10）。
+8. **无 `/v1/` URL 前缀**：当前直接挂 `/api/plugins/finance-auto/`，
+   未来 v2 升级将通过 308 兼容引入 `/v1/` 子路径（EX-P2-13）。
+9. **Docker 镜像未本机 build 验证**：`docs/DEPLOY_DOCKER.md` 提供
+   compose / k8s 模板，但官方 image push 在 v1.0 GA 完成。
+10. **多用户密钥协商**：当前组件密钥按 `key_meta` 全局共享，无
+    per-user 子密钥协商；v1.1 计划。
+11. **CHANGELOG**：完整变更见 [`CHANGELOG.md`](./CHANGELOG.md)。
 
 ---
 
@@ -323,8 +335,9 @@ docker run -d --name openakita \
   不构成原创作品；用户上传的会计师事务所内部模板版权归原作者。
 - **插件版本**：`v1.0.0-rc1`（见 [`plugin.json`](./plugin.json)
   + [`CHANGELOG.md`](./CHANGELOG.md)）。
-- **后端 schema 版本**：v11（migration 自动执行）。
-- **REST 路由数**：90 + WebSocket 1。
+- **后端 schema 版本**：v13（migration 自动执行；含 v12 extended
+  permissions seeds + v13 reclassification undo history）。
+- **REST 路由数**：91 + WebSocket 1。
 
 ### 10.1 前端开发者补充
 
