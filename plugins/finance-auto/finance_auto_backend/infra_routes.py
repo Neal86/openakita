@@ -181,7 +181,14 @@ def register_infra_endpoints(
         summary="校验并恢复备份 (M3 Infra)",
     )
     async def restore_backup_endpoint(
-        backup_id: int, payload: dict = Body(...)
+        backup_id: int,
+        payload: dict = Body(...),
+        overwrite: bool = Query(
+            default=False,
+            description=(
+                "EX-P1-1: 显式覆盖已存在的目标 DB 文件；缺省 false 触发 409"
+            ),
+        ),
     ) -> dict[str, Any]:
         passphrase = payload.get("passphrase")
         if not passphrase:
@@ -191,12 +198,18 @@ def register_infra_endpoints(
         target_db_raw = payload.get("target_db_path")
         target_db_path = Path(target_db_raw) if target_db_raw else None
         dry_run = bool(payload.get("dry_run", False))
+        # ``overwrite`` may also be passed inside the JSON body for
+        # callers that find query strings awkward; the query-string
+        # wins so URL surface stays canonical.
+        body_overwrite = bool(payload.get("overwrite", False))
+        effective_overwrite = overwrite or body_overwrite
         try:
             return await backup_service.restore_backup(
                 backup_id=backup_id,
                 passphrase=passphrase,
                 target_db_path=target_db_path,
                 dry_run=dry_run,
+                overwrite=effective_overwrite,
             )
         except BackupRestoreError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

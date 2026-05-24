@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
+from fastapi import HTTPException
 
 from ..key_meta import GLOBAL_COMPONENT, read_key_meta
 from ..schema import SCHEMA_VERSION
@@ -61,6 +62,58 @@ BACKUP_SALT_LEN = 32
 BACKUP_NONCE_LEN = 12
 BACKUP_AAD = b"openakita-finance-backup-v1"
 BACKUP_MIN_SIZE_BYTES = 256
+
+
+# Sandbox root for create / restore (EX-P1-1).  Default is under the
+# user's home dir; can be overridden via env var so headless installs
+# (Docker / CI) can stash backups in a volume-mounted directory.
+BACKUP_ROOT_ENV = "OPENAKITA_FINANCE_AUTO_BACKUP_ROOT"
+
+
+def _default_backup_root() -> Path:
+    raw = os.environ.get(BACKUP_ROOT_ENV)
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / ".openakita" / "finance_auto" / "backups"
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    """Return True iff ``path`` (after resolve()) is rooted under ``root``.
+
+    Uses :meth:`Path.is_relative_to` which is the canonical 3.9+
+    helper.  ``resolve(strict=False)`` flattens ``..`` traversal and
+    symlinks so a request like ``backups/../../etc/passwd`` is caught
+    before any I/O happens.
+    """
+    try:
+        resolved = path.resolve(strict=False)
+        anchor = root.resolve(strict=False)
+        return resolved == anchor or resolved.is_relative_to(anchor)
+    except (OSError, ValueError):
+        return False
+
+
+def _ensure_within_sandbox(
+    path: Path, allowed_root: Path, *, label: str
+) -> Path:
+    """Validate ``path`` lives under ``allowed_root`` (sandbox check).
+
+    Raises ``HTTPException(403)`` when the resolved path escapes the
+    sandbox.  The string ``label`` is purely for the error detail so
+    callers can tell which input failed (e.g. ``dest_dir`` vs
+    ``target_db_path``).
+    """
+    if not _is_within(path, allowed_root):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "path_outside_sandbox",
+                "field": label,
+                "given": str(path),
+                "allowed_root": str(allowed_root.resolve(strict=False)),
+            },
+        )
+    return path
 
 
 def _utcnow_iso() -> str:
@@ -116,12 +169,33 @@ class WrongPassphraseError(BackupRestoreError):
 class BackupRestoreService:
     """Backup + restore orchestrator backed by ``backup_history``."""
 
-    def __init__(self, service: Any, *, default_dest: Path | None = None):
+    def __init__(
+        self,
+        service: Any,
+        *,
+        default_dest: Path | None = None,
+        allowed_root: Path | None = None,
+    ):
         self.service = service
         self.db = service.db
-        self.default_dest = (
-            Path(default_dest) if default_dest else Path("data/finance_backups")
+        # Sandbox root for both create + restore (EX-P1-1).  When a
+        # caller passes ``allowed_root`` we honour it (useful for
+        # tests pointing at ``tmp_path``); otherwise we resolve from
+        # env var / home-dir fallback.
+        self.allowed_root: Path = (
+            Path(allowed_root) if allowed_root else _default_backup_root()
         )
+        self.allowed_root.mkdir(parents=True, exist_ok=True)
+        # ``default_dest`` is kept for backward compatibility with
+        # older test fixtures but always resolved to live INSIDE the
+        # sandbox.  Path("data/finance_backups") legacy default is
+        # ignored when it would escape the allowed root.
+        if default_dest is not None and _is_within(
+            Path(default_dest), self.allowed_root
+        ):
+            self.default_dest = Path(default_dest)
+        else:
+            self.default_dest = self.allowed_root
 
     # ------------------------------------------------------------- create
 
@@ -140,6 +214,7 @@ class BackupRestoreService:
             raise BackupRestoreError("passphrase is required for create_backup")
 
         dest = Path(dest_dir) if dest_dir else self.default_dest
+        dest = _ensure_within_sandbox(dest, self.allowed_root, label="dest_dir")
         dest.mkdir(parents=True, exist_ok=True)
 
         ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -286,8 +361,16 @@ class BackupRestoreService:
         passphrase: str,
         target_db_path: Path | str | None = None,
         dry_run: bool = False,
+        overwrite: bool = False,
     ) -> dict:
-        """Verify + (optionally) materialise an archive."""
+        """Verify + (optionally) materialise an archive.
+
+        EX-P1-1: ``target_db_path`` must resolve inside
+        :attr:`allowed_root` *OR* equal the live DB path (the only
+        in-place restore destination we permit by default).  An
+        existing file at the target raises 409 unless ``overwrite``
+        is explicitly true.
+        """
         backup = await self.get_backup(backup_id)
         if backup is None:
             raise BackupRestoreError(f"backup {backup_id} not found")
@@ -327,7 +410,11 @@ class BackupRestoreService:
                 "key_versions_count": len(key_versions_rows),
             }
 
-        # 2. Materialise the embedded DB.
+        # 2. Resolve the materialised DB path with sandbox + overwrite
+        #    enforcement.  An explicit ``target_db_path`` must either
+        #    live under the sandbox OR equal the currently-open
+        #    ``self.db.path`` (a true in-place restore).  ``overwrite``
+        #    flips the existing-file → 409 behaviour off.
         if target_db_path is None:
             ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
             target = self.db.path.parent / (
@@ -335,6 +422,25 @@ class BackupRestoreService:
             )
         else:
             target = Path(target_db_path)
+            live_db = self.db.path.resolve(strict=False)
+            if target.resolve(strict=False) != live_db:
+                _ensure_within_sandbox(
+                    target, self.allowed_root, label="target_db_path"
+                )
+
+        if target.exists() and not overwrite:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "target_already_exists",
+                    "target_db_path": str(target),
+                    "hint": (
+                        "pass overwrite=true (query string ?overwrite=true) "
+                        "to confirm clobbering an existing DB file"
+                    ),
+                },
+            )
+
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(db_bytes)
 
@@ -590,7 +696,11 @@ __all__ = [
     "BACKUP_AAD",
     "BACKUP_KDF_ITERATIONS",
     "BACKUP_MIN_SIZE_BYTES",
+    "BACKUP_ROOT_ENV",
     "BackupRestoreError",
     "BackupRestoreService",
     "WrongPassphraseError",
+    "_default_backup_root",
+    "_ensure_within_sandbox",
+    "_is_within",
 ]
