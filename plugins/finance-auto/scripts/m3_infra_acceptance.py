@@ -393,6 +393,12 @@ def run(args: argparse.Namespace) -> int:
     db_path = work / "m3_infra.sqlite"
     backup_dir = work / "backups"
     backup_dir.mkdir()
+    # fix-round-3 EX-P1-1: the backup service now sandboxes
+    # ``dest_dir`` against an allowed root.  Point the env var at our
+    # tmp directory so the acceptance script can write its synthetic
+    # backups without escaping the sandbox.
+    import os as _os
+    _os.environ["OPENAKITA_FINANCE_AUTO_BACKUP_ROOT"] = str(work)
 
     results: list[dict] = []
     failures: list[str] = []
@@ -416,9 +422,13 @@ def run(args: argparse.Namespace) -> int:
         asyncio.run(db.init())
         client = TestClient(app)
 
-        # 01 — schema_version=11 -----------------------------------
+        # 01 — schema_version >= 11 --------------------------------
+        # fix-round-3 EX-P1-2 + EX-P2-9 bumped SCHEMA_VERSION to 13.
+        # The infra acceptance only requires v11+ to satisfy the M3
+        # Infra Stage 1 contract (key versioning + rotation + backup
+        # ledger).
         t = time.perf_counter()
-        assert SCHEMA_VERSION == 11, SCHEMA_VERSION
+        assert SCHEMA_VERSION >= 11, SCHEMA_VERSION
         results.append(_checkpoint(
             "01_schema_v11", t, True, schema_version=SCHEMA_VERSION
         ))
@@ -632,7 +642,7 @@ def run(args: argparse.Namespace) -> int:
         assert body["ok"] is True and body["verified"] is True, body
         assert body["dry_run"] is True, body
         manifest = body["manifest"]
-        assert manifest["schema_version"] == 11, manifest
+        assert manifest["schema_version"] >= 11, manifest
         results.append(_checkpoint(
             "13_restore_dry_run_ok", t, True,
             key_versions_count=body["key_versions_count"],
@@ -659,7 +669,7 @@ def run(args: argparse.Namespace) -> int:
                 "WHERE component='finance_auto'"
             )
             row = cur.fetchone()
-        assert row is not None and int(row[0]) == 11, row
+        assert row is not None and int(row[0]) >= 11, row
         results.append(_checkpoint(
             "14_restore_materialise", t, True,
             restored_schema_version=int(row[0]),
@@ -684,7 +694,7 @@ def run(args: argparse.Namespace) -> int:
         r = client.get(f"{BASE}/admin/system-info")
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["schema_version"] == 11, body
+        assert body["schema_version"] >= 11, body
         assert body["encryption_enabled"] is True, body
         assert body["kdf_iterations"] == PBKDF2_ITERATIONS, body
         assert body["key_version"] == 2, body

@@ -375,6 +375,11 @@ def _upload_balance(client: TestClient, work: Path, org_id: str, period_id: str,
 def run(args: argparse.Namespace) -> int:
     work = Path(tempfile.mkdtemp(prefix="m3_closing_"))
     db_path = work / "m3_closing.sqlite"
+    # fix-round-3 EX-P1-1: sandbox the backup root so the synthetic
+    # ``<work>/backups`` destination passes the new path-traversal
+    # check in ``BackupRestoreService``.
+    import os as _os
+    _os.environ["OPENAKITA_FINANCE_AUTO_BACKUP_ROOT"] = str(work)
     results: list[dict] = []
     failures: list[str] = []
     started_all = time.perf_counter()
@@ -389,8 +394,13 @@ def run(args: argparse.Namespace) -> int:
         client = TestClient(app)
 
         # ---- 00. schema_version + route count -----------------------
+        # fix-round-3: SCHEMA_VERSION bumped to 13 by v12 (RBAC seeds) +
+        # v13 (reclassification undo history).  Closing acceptance now
+        # asserts ``>= 11`` so future bumps don't break the gate
+        # automatically — the M3 closing contract is "v11 or later
+        # with all M3 features present".
         t = time.perf_counter()
-        assert SCHEMA_VERSION == 11, SCHEMA_VERSION
+        assert SCHEMA_VERSION >= 11, SCHEMA_VERSION
         routes_total = len(router.routes)
         assert routes_total >= 90, routes_total
         results.append(_checkpoint(
