@@ -27,8 +27,9 @@ from .db.migrations import v9_collaboration as _v9_collab
 from .db.migrations import v9_consolidation as _v9_consol
 from .db.migrations import v9_reclassification as _v9_reclass
 from .db.migrations import v10_notes_peer as _v10
+from .db.migrations import v11_key_rotation_backup as _v11
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 """History:
 * v1 -- M1 W1 baseline (5 tables).
 * v2 -- M1 W2 Stage 4: adds ``reports`` + ``report_cells``.
@@ -56,6 +57,15 @@ SCHEMA_VERSION = 10
         ``peer_benchmarks`` (seeded with 3 industries × 4 metrics from
         v0.2 §6.1 S5) and ``peer_comparison_results``.  All editable
         tables carry a ``version`` column per Part Infra C3.
+* v11 -- M3 Infra Stage 1: key versioning + rotation + encrypted backup
+        ledger.  Adds ``key_versions`` (append-only history of derivation
+        salts per component, with a ``sample_canary_ct`` for round-trip
+        verification), ``key_rotation_runs`` (one row per rotate-key
+        invocation; the service updates ``rows_processed`` periodically)
+        and ``backup_history`` (one row per encrypted tar.gz archive
+        produced by ``BackupRestoreService``).  All three tables carry a
+        ``version`` column per Part Infra C3.  v0.3 Part Infra §2.5
+        (密钥轮换) + §2.4 (备份/迁移) row.
 """
 
 # ---------------------------------------------------------------------------
@@ -389,7 +399,7 @@ CREATE TABLE IF NOT EXISTS manual_inputs (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_manual_inputs_key
     ON manual_inputs(org_id, period_id, field_key);
-""" + _v8.DDL_SQL + _v9_collab.DDL_SQL + _v9_consol.DDL_SQL + _v9_reclass.DDL_SQL + _v10.DDL_SQL
+""" + _v8.DDL_SQL + _v9_collab.DDL_SQL + _v9_consol.DDL_SQL + _v9_reclass.DDL_SQL + _v10.DDL_SQL + _v11.DDL_SQL
 
 # ---------------------------------------------------------------------------
 # Incremental migration steps.  ``run_migrations(conn, current_version)`` will
@@ -444,6 +454,14 @@ MIGRATION_STEPS: tuple[tuple[int, str], ...] = (
                                   # metrics).  Both insert chains are
                                   # ``INSERT OR IGNORE`` keyed by the relevant
                                   # UNIQUE indexes so re-runs are no-ops.
+    (11, _v11.SEED_SQL),          # M3 Infra Stage 1: key versioning + rotation
+                                  # runs + encrypted backup ledger.  DDL is in
+                                  # SCHEMA_SQL; the seed step inserts an
+                                  # idempotent ``__migration_marker__`` row into
+                                  # key_versions so the migration chain has a
+                                  # non-empty step to replay.  The real v1
+                                  # key_versions row is materialised lazily by
+                                  # KeyRotationService on first rotate / preview.
 )
 """Each entry: (target_version, idempotent_DDL).  All steps replay the full
 canonical SCHEMA_SQL because every CREATE TABLE in it is IF NOT EXISTS, so
