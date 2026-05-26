@@ -774,7 +774,7 @@ class OrgCommandService:
 
         The Sprint-5 commit pre-seeded
         ``_command_outcomes[cid]["cancelled_by"]`` in
-        :meth:`cancel_all_for_org` (``stop_org:*``) and the watchdog
+        :meth:`cancel_all_for_org` (``stop_org``) and the watchdog
         (``watchdog``) but the ``agent_run_cancelled`` event the
         executor emits on ``CancelledError`` hard-coded
         ``reason="user_cancel"`` -- the cache marker never reached
@@ -783,6 +783,14 @@ class OrgCommandService:
         verbatim. Returns ``None`` when the outcome is missing or
         carries no source (user-initiated cancels fall through and
         keep the legacy ``user_cancel`` reason).
+
+        Sprint-7 P0-A (audit v7 §1.2 + §5 finding 5): the source string
+        was previously interpolated as ``stop_org:<reason>`` by the
+        :func:`api.server._on_stop_org_cancel_inflight` shim, which
+        produced ``stop_org:stop`` compound values on disk. The shim
+        now passes the literal ``"stop_org"`` to keep the taxonomy at
+        exactly three values: ``user_cancel``, ``stop_org``,
+        ``watchdog``.
         """
 
         outcome = self._command_outcomes.get(command_id)

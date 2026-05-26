@@ -219,6 +219,52 @@ def _mount_web_frontend(app: FastAPI) -> None:
     app.mount("/web", StaticFiles(directory=str(web_dist), html=True), name="web-frontend")
 
 
+def _build_on_stop_org_cancel_inflight_handler(
+    org_command_service: Any,
+) -> Any:
+    """Mint the ``on_stop_org`` callback used by ``OrgRuntime`` lifecycle.
+
+    Sprint-5 P0-2 wired ``POST /api/v2/orgs/{id}/stop`` to drain in-flight
+    commands through :meth:`OrgCommandService.cancel_all_for_org`. Sprint-6
+    P0-2 added the ``cancelled_by`` source that survives onto
+    ``events.jsonl``. Sprint-7 P0-A fixes the regression caught by v18
+    (audit ``_orgs_business_capability_audit_v7.md`` §1.2 + §5 finding 5):
+    the Sprint-6 wiring interpolated the lifecycle's inner reason kwarg
+    (``"stop"`` / ``"restart"`` / ...) into a compound
+    ``stop_org:<reason>`` source value, so the on-disk
+    ``cancelled_by="stop_org:stop"`` no longer matched the Sprint-6
+    changelog's contracted single-value taxonomy
+    {``user_cancel``, ``stop_org``, ``watchdog``}.
+
+    The handler now passes the literal ``"stop_org"`` to
+    ``cancel_all_for_org`` regardless of the lifecycle's inner reason --
+    the inner reason ("stop" vs "restart") is preserved on the separate
+    ``org_stopped`` lifecycle event payload (see
+    :meth:`OrgLifecycleManager.stop_org`), so dropping the suffix here
+    loses no information for downstream readers.
+
+    Extracted to a module-level builder so a regression test can pin
+    the literal source string without standing up the full
+    :func:`create_app` lifespan.
+    """
+
+    async def _on_stop_org_cancel_inflight(org_id: str, reason: str) -> None:  # noqa: ARG001 -- protocol shape
+        try:
+            cancelled = await org_command_service.cancel_all_for_org(
+                org_id, reason="stop_org"
+            )
+            if cancelled:
+                logger.info(
+                    "stop_org cancelled %d in-flight orgs_v2 command(s) (org=%s)",
+                    len(cancelled),
+                    org_id,
+                )
+        except Exception:
+            logger.debug("stop_org cancel-all failed", exc_info=True)
+
+    return _on_stop_org_cancel_inflight
+
+
 def create_app(
     agent: Any = None,
     shutdown_event: asyncio.Event | None = None,
@@ -585,21 +631,9 @@ def create_app(
     # lifecycle ``on_stop_org`` callback so ``POST /api/v2/orgs/{id}/stop``
     # cancels every per-org in-flight task instead of just flipping
     # the spec to STOPPED while the LLM keeps burning tokens.
-    async def _on_stop_org_cancel_inflight(org_id: str, reason: str) -> None:
-        try:
-            cancelled = await org_command_service.cancel_all_for_org(
-                org_id, reason=f"stop_org:{reason}"
-            )
-            if cancelled:
-                logger.info(
-                    "stop_org cancelled %d in-flight orgs_v2 command(s) (org=%s)",
-                    len(cancelled),
-                    org_id,
-                )
-        except Exception:
-            logger.debug("stop_org cancel-all failed", exc_info=True)
-
-    org_runtime.set_on_stop_org(_on_stop_org_cancel_inflight)
+    org_runtime.set_on_stop_org(
+        _build_on_stop_org_cancel_inflight_handler(org_command_service)
+    )
 
     # Sprint-6 P0-1 (RCA ``_v17_p1_rca.md`` §1.5): mint a
     # :class:`NodeToolHost` from the desktop Agent if one is already

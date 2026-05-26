@@ -208,7 +208,52 @@ def _available_nodes_block(spec: AgentSpec) -> str:
     return "\n".join(lines)
 
 
-def _persona_system_prompt(spec: AgentSpec, *, depth: int = 0) -> str:
+def _tool_use_encouragement() -> str:
+    """Sprint-7 P0-B node-level tool-use encouragement.
+
+    Audit ``_orgs_business_capability_audit_v7.md`` §1.1 + §5 finding 2:
+    8 v18 R.D4 cases explicitly asked the dispatched node to call a
+    specific tool (``write_file`` / ``read_file`` / ``web_search`` /
+    ``list_dir`` / ``run_shell`` / ``web_fetch``), but only 3/8 LLM
+    turns actually emitted a ``tool_use`` block -- the other 5 replied
+    with plain text refusing or describing what they would do. The
+    Sprint-6 system prompt only said "Reply directly to the user
+    instruction below" which gives the LLM no reason to prefer the
+    available tools over chat-style prose.
+
+    This block is appended **only when the resolved node has at least
+    one available tool**: we don't want the encouragement to hallucinate
+    tools that the node's external_tools whitelist + plugin manifest
+    did not actually expose. The phrasing is deliberately conservative
+    (``SHOULD use`` not ``MUST use``) so the LLM still has the latitude
+    to reply with text when no listed tool applies; the goal is to
+    flip the default from "narrate then maybe call" to "call when a
+    listed tool clearly fits".
+
+    The "match by intent, not by exact wording" line addresses the v18
+    observation that some Chinese prompts named the tool with a verb
+    ("调用 list_dir") that the LLM treated as a label rather than an
+    instruction.
+    """
+
+    return (
+        "Tool-use policy: You have access to the tools listed below. "
+        "When the user's request can be satisfied by invoking one of "
+        "these tools (e.g. write/read a file, list a directory, run a "
+        "shell command, search/fetch the web, generate or edit an image "
+        "or video, query plugin functions, etc.), you SHOULD emit a "
+        "`tool_use` block and call the tool instead of replying with "
+        "plain text describing what you would do. Match the user's "
+        "intent against the available tools by purpose, not by exact "
+        "wording. Do not invent tool names that are not in the list; "
+        "if none of the listed tools fits the request, reply with text "
+        "explaining why."
+    )
+
+
+def _persona_system_prompt(
+    spec: AgentSpec, *, depth: int = 0, has_tools: bool = False
+) -> str:
     """Compose the per-node system prompt from the resolved spec.
 
     Kept deliberately small (< 1 KB on a typical node) so single-shot
@@ -222,6 +267,13 @@ def _persona_system_prompt(spec: AgentSpec, *, depth: int = 0) -> str:
     Sprint-5 P0-1 / unexpected-finding #1 splices the closed list of
     available child node ids in at depth 0 (after the dispatch
     tutorial) so the producer LLM dispatches to real targets only.
+
+    Sprint-7 P0-B (audit v7 §1.1 + §5 finding 2): when the node has
+    at least one resolved tool, append :func:`_tool_use_encouragement`
+    so the LLM treats the tool surface as the default action path
+    instead of narrating around it. The flag is opt-in (defaults to
+    ``False``) so unit tests / parity gates that build the prompt
+    without a tool-host context keep the byte-for-byte Sprint-5 shape.
     """
 
     persona = (spec.persona or "").strip()
@@ -246,6 +298,8 @@ def _persona_system_prompt(spec: AgentSpec, *, depth: int = 0) -> str:
             "is handled by the orchestrator at the entry level, not by "
             "you)."
         )
+    if has_tools:
+        parts.append(_tool_use_encouragement())
     return "\n".join(parts)
 
 
@@ -449,7 +503,9 @@ class _BrainBackedNodeAgent:
                 )
             except Exception:  # noqa: BLE001 -- trace tagging is best-effort
                 pass
-        system_prompt = _persona_system_prompt(self._spec, depth=depth)
+        system_prompt = _persona_system_prompt(
+            self._spec, depth=depth, has_tools=bool(tool_defs)
+        )
 
         # Sprint-5 P0-1: branch on whether the node has any resolved
         # tools. Zero-tool nodes still use the Sprint-4 single-shot
