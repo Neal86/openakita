@@ -293,10 +293,13 @@ _SECURITY_PROFILE_OFF_ACK = "确认风险同意关闭"
 
 
 def _normalize_security_profile(profile: str) -> str:
-    # 出厂默认 = trust：和 ``PolicyConfigV2.profile.current`` 的 schema 默认
-    # 保持一致。空字符串 / 未知值的兜底也指向 trust，让 setup-center 的"刷新
-    # 全部"在配置仍为空时不会误显示成 protect。
-    value = (profile or "trust").strip().lower()
+    # 出厂默认从 ``policy_v2/defaults.py::FACTORY_DEFAULT_PROFILE`` 取——
+    # 单一真源，与 schema 默认 + ``_apply_security_profile_defaults`` 共享，
+    # 改默认 profile 时只需改 defaults.py 一处。空字符串 / 未知值的兜底也
+    # 指向出厂默认，让 setup-center 的"刷新全部"在 YAML 仍为空时不会误显示。
+    from openakita.core.policy_v2.defaults import FACTORY_DEFAULT_PROFILE
+
+    value = (profile or FACTORY_DEFAULT_PROFILE).strip().lower()
     aliases = {
         "yolo": "trust",
         "smart": "protect",
@@ -304,7 +307,7 @@ def _normalize_security_profile(profile: str) -> str:
     }
     value = aliases.get(value, value)
     if value not in ("trust", "protect", "strict", "off", "custom"):
-        value = "trust"
+        value = FACTORY_DEFAULT_PROFILE
     return value
 
 
@@ -326,46 +329,35 @@ def _write_profile_event(profile: str, *, previous: str | None = None) -> None:
 
 
 def _apply_security_profile_defaults(sec: dict[str, Any], profile: str) -> None:
+    """把 baked profile 套餐写到 raw ``security`` dict 上。
+
+    Bundle 真源 = ``policy_v2/defaults.py::PROFILE_BUNDLES``。本函数只做两件
+    事：(1) 写 ``profile.current`` / ``profile.base`` 元数据；(2) 把
+    bundle 的原子字段 deep-merge 到现有 ``sec`` 上（保留用户已设过的
+    ``timeout_seconds`` / ``custom_critical`` 等非 bundle 字段）。
+
+    ``custom`` 不在 PROFILE_BUNDLES 里——它表示"用户自己拼"，本函数只更新
+    ``profile.current``，原子字段一动不动。
+    """
+    from openakita.core.policy_v2.defaults import PROFILE_BUNDLES, profile_bundle
+
     profile = _normalize_security_profile(profile)
     prev = (sec.get("profile") or {}).get("current")
     sec["profile"] = {"current": profile, "base": None if profile != "custom" else prev}
-    conf = sec.setdefault("confirmation", {})
-    sandbox = sec.setdefault("sandbox", {})
-    shell_risk = sec.setdefault("shell_risk", {})
-    death_switch = sec.setdefault("death_switch", {})
-    checkpoint = sec.setdefault("checkpoint", {})
-    if profile == "trust":
-        sec["enabled"] = True
-        conf["mode"] = "trust"
-        sandbox["enabled"] = False
-        shell_risk["enabled"] = True
-        death_switch["enabled"] = True
-        checkpoint["enabled"] = True
-    elif profile == "protect":
-        sec["enabled"] = True
-        conf["mode"] = "default"
-        sandbox["enabled"] = True
-        shell_risk["enabled"] = True
-        death_switch["enabled"] = True
-        checkpoint["enabled"] = True
-    elif profile == "strict":
-        sec["enabled"] = True
-        conf["mode"] = "strict"
-        sandbox["enabled"] = True
-        shell_risk["enabled"] = True
-        death_switch["enabled"] = True
-        checkpoint["enabled"] = True
-    elif profile == "off":
-        # off 同时把 security.enabled 关掉，使二者保持单一语义：
-        # "整套策略停摆"。engine.preflight 任一为关都会短路 ALLOW，
-        # 但只有这里二者同时被写下，未来导出/迁移/审计才不会出现
-        # "enabled=True 但 profile=off" 这种荒谬组合。
-        sec["enabled"] = False
-        conf["mode"] = "trust"
-        sandbox["enabled"] = False
-        shell_risk["enabled"] = False
-        death_switch["enabled"] = False
-        checkpoint["enabled"] = False
+
+    if profile not in PROFILE_BUNDLES:
+        # custom（或未来新增的非 baked profile）：保留原子字段不动，
+        # 只让 profile.current 跟随调用方意图。
+        return
+
+    # profile_bundle() 返回 fresh deep-copy，下面直接 mutate sec 也不会污染
+    # PROFILE_BUNDLES 真源（即便未来 bundle 里加 list/dict 子字段也安全）。
+    bundle = profile_bundle(profile)
+    sec["enabled"] = bundle["enabled"]
+    for block, fields in bundle.items():
+        if block == "enabled":
+            continue
+        sec.setdefault(block, {}).update(fields)
 
 
 def _mark_security_profile_custom(sec: dict[str, Any]) -> None:
@@ -380,9 +372,12 @@ def _mark_security_profile_custom(sec: dict[str, Any]) -> None:
     prev = profile.get("current")
     leaving_off = prev == "off"
     if prev != "custom":
-        # base 兜底 = trust：与新出厂默认对齐。用户从 custom 还原时回到信任方案，
-        # 而不是回到 v1.27 时代的 protect。
-        profile["base"] = prev or "trust"
+        # base 兜底走 ``defaults.FACTORY_DEFAULT_PROFILE``——用户从 custom 还
+        # 原时回到出厂方案（当前 = trust）。这条与 schema 默认 + 出厂体验保持
+        # 单一真源。
+        from openakita.core.policy_v2.defaults import FACTORY_DEFAULT_PROFILE
+
+        profile["base"] = prev or FACTORY_DEFAULT_PROFILE
         profile["current"] = "custom"
     # custom 模式下 security.enabled 永远应该是 True（否则不存在意义）。
     sec["enabled"] = True
@@ -391,9 +386,13 @@ def _mark_security_profile_custom(sec: dict[str, Any]) -> None:
 
 
 def _mode_from_security(sec: dict[str, Any] | None) -> str:
-    # 出厂默认 = yolo（= trust）：与 PolicyConfigV2 schema 默认一致。
+    # 出厂默认 = yolo（= trust）：与 PolicyConfigV2 schema 默认 +
+    # ``policy_v2/defaults.py::FACTORY_DEFAULT_PROFILE`` 单一真源对齐。
     # 即便 raw dict 里没有 confirmation 块，也按"信任模式"汇报，保持
-    # /security/options 与运行时引擎的一致性。
+    # /security/options 与运行时引擎的一致性。两条真源之间的契约由
+    # ``tests/unit/test_security_permission_mode_api.py::
+    # test_schema_default_and_trust_bundle_agree_on_confirmation_mode``
+    # 钉死。
     conf = (sec or {}).get("confirmation", {})
     mode = conf.get("mode")
     if mode:
@@ -1891,8 +1890,11 @@ async def write_security_path_policy(body: SecurityPathPolicyUpdate):
     sec.pop("zones", None)
     profile = sec.setdefault("profile", {})
     if profile.get("current") != "custom":
-        # base 兜底与 _mark_security_profile_custom 保持一致：新出厂默认 = trust。
-        profile["base"] = profile.get("current") or "trust"
+        # base 兜底与 _mark_security_profile_custom 保持一致：走单一真源
+        # ``defaults.FACTORY_DEFAULT_PROFILE``。
+        from openakita.core.policy_v2.defaults import FACTORY_DEFAULT_PROFILE
+
+        profile["base"] = profile.get("current") or FACTORY_DEFAULT_PROFILE
         profile["current"] = "custom"
     _write_policies_yaml(data)
     try:

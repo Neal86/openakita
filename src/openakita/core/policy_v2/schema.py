@@ -28,6 +28,10 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, Strict, field_validator
 
+from .defaults import (
+    factory_default_confirmation_mode,
+    factory_default_profile_current,
+)
 from .enums import ApprovalClass, ConfirmationMode, SessionRole
 
 # C16 Phase B：所有从 YAML 来的 bool 字段一律走严格模式——拒绝 `"yes"` / `"no"`
@@ -128,16 +132,19 @@ class SecurityProfileConfig(_Strict):
     across confirmation/path/sandbox/risk settings, while each mechanism remains
     independently editable.
 
-    Default is ``"trust"``:  a fresh install ships with the recommended balance
-    of "let the assistant work without constant interruptions, while keeping
-    matrix safety nets (DESTRUCTIVE → CONFIRM, UNKNOWN → CONFIRM, safety_immune
-    paths, death_switch) intact". Users who want stronger gating can switch to
-    ``protect`` / ``strict`` from SecurityView; users with an existing
-    ``POLICIES.yaml`` keep whatever they configured (the YAML always wins over
-    this default).
+    出厂默认通过 ``factory_default_profile_current()`` 从
+    ``policy_v2/defaults.py::FACTORY_DEFAULT_PROFILE`` 取——单一真源，与
+    ``api/routes/config.py::_apply_security_profile_defaults`` 套用的 bundle
+    共用同一份 ``PROFILE_BUNDLES``。当前 = ``"trust"``：fresh install 落到
+    推荐的"少打扰但保留矩阵安全网"档（DESTRUCTIVE → CONFIRM、UNKNOWN →
+    CONFIRM、safety_immune、death_switch 仍生效）。用户想要更严格的门可在
+    SecurityView 切到 ``protect`` / ``strict``；既有 ``POLICIES.yaml`` 永远
+    覆盖此默认。
     """
 
-    current: Literal["trust", "protect", "strict", "off", "custom"] = "trust"
+    current: Literal["trust", "protect", "strict", "off", "custom"] = Field(
+        default_factory=factory_default_profile_current,
+    )
     base: Literal["trust", "protect", "strict", "off"] | None = None
     off_acknowledged_at: str | None = None
     off_acknowledged_by: str | None = None
@@ -171,13 +178,16 @@ class WorkspaceConfig(_Strict):
 class ConfirmationConfig(_Strict):
     """确认门配置（v2 mode 只有 5 档，详见 enums.ConfirmationMode）。
 
-    ``mode`` 默认 ``TRUST``，与 ``SecurityProfileConfig.current = "trust"`` 配套：
-    出厂体验是"高频工具 ALLOW、DESTRUCTIVE / UNKNOWN 仍 CONFIRM、safety_immune
-    路径仍 CONFIRM、death_switch 仍生效"。需要更严的 ``default`` / ``strict``
-    模式由用户主动在 SecurityView 切换或在 YAML 显式覆盖。
+    ``mode`` 默认通过 ``factory_default_confirmation_mode()`` 从
+    ``policy_v2/defaults.py::PROFILE_BUNDLES[FACTORY_DEFAULT_PROFILE]`` 取——
+    单一真源。当前 = ``ConfirmationMode.TRUST``，与 ``SecurityProfileConfig.current``
+    = ``"trust"`` 配套：出厂体验是"高频工具 ALLOW、DESTRUCTIVE / UNKNOWN 仍
+    CONFIRM、safety_immune 路径仍 CONFIRM、death_switch 仍生效"。需要更严的
+    ``default`` / ``strict`` 模式由用户主动在 SecurityView 切换或在 YAML 显
+    式覆盖。
     """
 
-    mode: ConfirmationMode = ConfirmationMode.TRUST
+    mode: ConfirmationMode = Field(default_factory=factory_default_confirmation_mode)
     timeout_seconds: int = Field(default=60, ge=1, le=86400)
     default_on_timeout: Literal["allow", "deny"] = "deny"
     confirm_ttl: float = Field(default=120.0, ge=0.0, le=86400.0)
