@@ -866,23 +866,37 @@ class Settings(BaseSettings):
     #    tasks; that responsibility stays with the hard ceiling so the
     #    two layers do not race.
     supervisor_hard_ceiling_s: int = Field(
-        default=1800,
+        default=900,
         description=(
             "Supervisor.run() 单次最大墙钟（秒）。超过后会先调用 "
             "cancel_token.cancel('hard_ceiling') 给协作式取消一次机会，"
             "再让外层 asyncio.wait_for 抛 TimeoutError 让 finally 释放 "
             "_running_by_root 槽位；防止 LLM provider hang 导致同 org 后续 "
             "G/H/I 命令永久 409。0 表示禁用，回退到 Sprint-9 默认无外层硬上限的行为。"
+            "v22 RCA RC-6：默认 900s (15min) 覆盖绝大多数健康长任务，"
+            "同时避免原 1800s (30min) 在异常态下过度宽松。"
         ),
     )
     orgs_reconcile_interval_s: int = Field(
-        default=30,
+        default=10,
         description=(
             "OrgCommandService 后台 _reconcile_tick 周期（秒）。每轮扫描 "
             "_running_by_root：若对应 command 已 done/error/cancelled 或 "
             "_active_supervisors 已不存在 → pop 该槽位，专治 hard_ceiling 兜底失败 "
             "时的孤儿表项。reconcile 只对账不杀人；真正的杀手是 "
             "supervisor_hard_ceiling_s。0 表示关闭后台循环。"
+            "v22 RCA RC-6：默认 10s（原 30s）让异常态下槽位释放对 UI 更可见，"
+            "也仍保持 reconcile < hard_ceiling/2 的安全比例。"
+        ),
+    )
+    orgs_cancel_drain_budget_s: int = Field(
+        default=8,
+        description=(
+            "OrgCommandService._cooperative_cancel 的协作取消窗口（秒）：发出 "
+            "cancel_token.cancel() 后等待 supervisor 自然写出 final checkpoint 的预算，"
+            "超时则 task.cancel() 强杀。v22 RCA RC-6：原硬编码 5.0s 在 LLM 慢路径下"
+            "几乎必然 force-cancel，提高到 8s 给 cancel_token → LLM httpx 桥接（RC-4）"
+            "充足窗口。0 表示禁用 graceful 窗口直接强杀。"
         ),
     )
 

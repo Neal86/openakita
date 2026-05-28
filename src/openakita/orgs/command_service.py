@@ -587,7 +587,7 @@ class OrgCommandService:
                     # supervisor's own ``_terminate`` will have to
                     # catch up on the next event loop tick.
                     await self._cooperative_cancel(
-                        existing_id or "", reason="replaced", timeout=5.0
+                        existing_id or "", reason="replaced"
                     )
                 elif request.continue_previous:
                     # Continue-previous on a STILL-RUNNING command is
@@ -817,7 +817,7 @@ class OrgCommandService:
             return None
         if cmd.get("status") != "running":
             return {"ok": True, "command_id": command_id, "already_done": True}
-        await self._cooperative_cancel(command_id, reason=reason, timeout=5.0)
+        await self._cooperative_cancel(command_id, reason=reason)
         self._update_command_state(
             command_id,
             cancel_requested_by_user=True,
@@ -871,7 +871,7 @@ class OrgCommandService:
         command_id: str,
         *,
         reason: str,
-        timeout: float = 5.0,
+        timeout: float | None = None,
     ) -> None:
         """Fire the supervisor's cancel token + drain its final checkpoint.
 
@@ -889,8 +889,18 @@ class OrgCommandService:
         ``task.cancel()`` as a hard fallback -- the task should
         already be unwinding from the cooperative signal but we
         cannot block the caller indefinitely.
+
+        ``timeout`` defaults to ``settings.orgs_cancel_drain_budget_s``
+        (v22 RCA RC-6). Explicit ``float`` values from callers still
+        override; tests may pass a small budget to exercise the
+        force-cancel path quickly.
         """
 
+        effective_timeout = (
+            float(self._cancel_drain_budget_s())
+            if timeout is None
+            else float(timeout)
+        )
         supervisor = self._active_supervisors.get(command_id)
         if supervisor is not None:
             try:
@@ -920,11 +930,13 @@ class OrgCommandService:
         if task is None or task.done():
             return
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=max(0.1, timeout))
+            await asyncio.wait_for(
+                asyncio.shield(task), timeout=max(0.1, effective_timeout)
+            )
         except TimeoutError:
             logger.warning(
                 "[OrgCmd] supervisor drain timed out after %.1fs; force-cancelling cid=%s",
-                timeout,
+                effective_timeout,
                 command_id,
             )
             if not task.done():
@@ -1007,7 +1019,7 @@ class OrgCommandService:
             reason,
         )
         await asyncio.gather(
-            *(self._cooperative_cancel(cid, reason=reason, timeout=5.0) for cid in cids),
+            *(self._cooperative_cancel(cid, reason=reason) for cid in cids),
             return_exceptions=True,
         )
         # Best-effort runtime cancels so the dispatch tracker mirrors
@@ -1599,9 +1611,26 @@ class OrgCommandService:
         try:
             from openakita.config import settings as _settings
 
-            return int(getattr(_settings, "orgs_reconcile_interval_s", 30) or 0)
+            return int(getattr(_settings, "orgs_reconcile_interval_s", 10) or 0)
         except Exception:  # noqa: BLE001 -- never block startup
-            return 30
+            return 10
+
+    @staticmethod
+    def _cancel_drain_budget_s() -> int:
+        """Read ``settings.orgs_cancel_drain_budget_s`` defensively.
+
+        v22 RCA RC-6: the graceful drain window used by
+        :meth:`_cooperative_cancel`. Lazy import keeps the
+        ``openakita.orgs`` <-> ``openakita.config`` cycle loose and a
+        config-load failure cannot block cancel; falls back to the
+        Sprint-9 historical 5s on any error.
+        """
+        try:
+            from openakita.config import settings as _settings
+
+            return int(getattr(_settings, "orgs_cancel_drain_budget_s", 8) or 0)
+        except Exception:  # noqa: BLE001 -- never block cancel
+            return 5
 
     async def _reconcile_loop(self, interval: int) -> None:
         """Background coroutine: sleep, then ``_reconcile_tick``, repeat.

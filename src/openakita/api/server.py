@@ -922,13 +922,14 @@ def create_app(
     async def _startup_org_runtime():
         loop = asyncio.get_running_loop()
         loop.slow_callback_duration = 0.5
-        if hasattr(app.state, "org_runtime") and app.state.org_runtime:
-            try:
-                from openakita.core.engine_bridge import to_engine
-
-                await to_engine(app.state.org_runtime.start())
-            except Exception as e:
-                logger.warning(f"OrgRuntime startup error (non-fatal): {e}")
+        # v22 RCA RC-7: ``OrgRuntime`` is a composed lifecycle component
+        # whose surface is ``start_org`` / ``stop_org`` / ``pause_org`` /
+        # ``resume_org`` (see ``orgs/runtime.py``). The single
+        # ``OrgRuntime.start()`` entrypoint was retired when org
+        # lifecycle was decomposed; calling it here only produced a
+        # warning on every boot. Reconcile / NodeToolHost / SSE bus
+        # wiring already happens through dedicated component init, so
+        # nothing additional needs to fire at startup.
         # v22 P1 (audit v10 §19 / cmd_..._f092f4 slot leak): start
         # the ``OrgCommandService`` reconcile loop so a stale
         # ``_running_by_root`` slot eventually drops even if the
