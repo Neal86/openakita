@@ -24,7 +24,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
 from openakita.config import settings
-from openakita.orgs import OrgNotFound, get_default_store
+from openakita.orgs import OrgNotFound
 from openakita.runtime.stream import StreamEvent
 from openakita.runtime.stream_registry import (
     get_or_create_org_stream_bus,
@@ -118,19 +118,43 @@ def _build_streaming_response(request: Request, org_id: str) -> StreamingRespons
     Shared by both the legacy ``/api/v2/orgs-spec/{id}/stream`` route
     and the Sprint-9 alias ``/api/v2/orgs/{id}/events/stream`` so
     the two surfaces are byte-for-byte equivalent.
+
+    v22 fix (audit v10 §19 "SSE org not found"): the org-existence
+    probe used to call :func:`get_default_store().get` -- the legacy
+    ``JsonOrgStore`` backed by ``data/orgs_v2.json``. After Sprint-9
+    every ``POST /api/v2/orgs/from-template`` mints orgs through
+    :class:`~openakita.orgs.manager.OrgManager` (``data/orgs/<id>/
+    org.json``) and never writes ``orgs_v2.json``, so every freshly
+    minted org's SSE stream 404'd. We now look the org up through
+    ``request.app.state.org_manager`` so both routes see the live
+    org registry the rest of the v2 surface writes to.
     """
     if not getattr(settings, "runtime_v2_enabled", False):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="runtime v2 is disabled",
         )
+    # Local import: ``orgs_v2_runtime`` is loaded after this module
+    # during the side-effect import chain in ``server.py`` -- a
+    # module-level import would either circular-import or pin a
+    # mid-init module reference. The lazy import is exercised once
+    # per SSE handshake (already an IO-bound op), so the cost is
+    # negligible.
+    from .orgs_v2_runtime import _get_manager
+
+    manager = _get_manager(request)
     try:
-        get_default_store().get(org_id)
-    except OrgNotFound as exc:
+        org = manager.get(org_id)
+    except (FileNotFoundError, KeyError, OrgNotFound) as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"org {org_id} not found",
         ) from exc
+    if org is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"org {org_id} not found",
+        )
 
     return StreamingResponse(
         _event_stream(request, org_id),

@@ -325,6 +325,12 @@ class OrgCommandService:
         self._checkpointer_provider = checkpointer_provider
         self._supervisor_factory = supervisor_factory
         self._event_bus = event_bus
+        # v22 P1: background reconcile loop for ``_running_by_root``
+        # bookkeeping. Started on-demand by :meth:`start_reconcile_loop`
+        # (typically from ``api/server.py`` lifespan startup) and
+        # stopped by :meth:`stop_reconcile_loop`. None until started.
+        self._reconcile_task: asyncio.Task[Any] | None = None
+        self._reconcile_stop_event: asyncio.Event | None = None
         if event_bus is not None:
             self._wire_event_bus(event_bus)
 
@@ -1373,7 +1379,9 @@ class OrgCommandService:
                             resume_checkpoint_id,
                             exc,
                         )
-                outcome = await supervisor.run()
+                outcome = await self._run_supervisor_with_hard_ceiling(
+                    supervisor, command_id
+                )
                 self._reflect_supervisor_outcome(command_id, supervisor, outcome)
             except asyncio.CancelledError:
                 # Hard fallback path: the supervisor's cooperative
@@ -1424,6 +1432,255 @@ class OrgCommandService:
         # against a live task slot.
         self._inflight_tasks[command_id] = task
         self._inflight_by_org.setdefault(request.org_id, set()).add(command_id)
+
+    async def _run_supervisor_with_hard_ceiling(
+        self, supervisor: Supervisor, command_id: str
+    ) -> Any:
+        """Run ``supervisor.run()`` under ``settings.supervisor_hard_ceiling_s``.
+
+        v22 P1 (audit v10 ``cmd_1779887674678_00000035_f092f4`` 14m49s
+        slot leak): when the supervisor itself is wedged inside a
+        provider call that has no cooperative cancel point, the
+        cooperative :class:`CancellationToken` never sees a check, so
+        the ``_schedule_run.run`` ``finally`` block that releases
+        ``_running_by_root`` never executes. We wrap the awaitable in
+        :func:`asyncio.wait_for` so the outer loop fires after
+        ``supervisor_hard_ceiling_s`` wall-clock seconds:
+
+        1. fire ``supervisor.cancel_token.cancel("hard_ceiling")`` so
+           the cooperative path still gets one chance to write a
+           ``cancelled`` final checkpoint;
+        2. ``asyncio.sleep(0.5)`` -- short grace window so the
+           supervisor's ``_terminate`` can flush;
+        3. re-raise :class:`asyncio.TimeoutError` so the surrounding
+           generic ``except Exception`` branch records a FAILED
+           outcome and the ``finally`` block runs (releasing the
+           slot).
+
+        Returns the supervisor outcome on the happy path. Setting
+        ``settings.supervisor_hard_ceiling_s <= 0`` disables the
+        wrapper and falls back to the Sprint-9 ``await
+        supervisor.run()`` behaviour byte-for-byte (so anyone who
+        explicitly opts out via env keeps the old semantics).
+        """
+        ceiling = self._hard_ceiling_seconds()
+        if ceiling <= 0:
+            return await supervisor.run()
+        try:
+            return await asyncio.wait_for(supervisor.run(), timeout=ceiling)
+        except TimeoutError as exc:
+            logger.warning(
+                "[OrgCmd] supervisor hard ceiling exceeded for cid=%s "
+                "(ceiling=%ds); forcing cancel",
+                command_id,
+                ceiling,
+            )
+            try:
+                supervisor.cancel_token.cancel("hard_ceiling")
+            except Exception:  # noqa: BLE001 -- defensive, we are already aborting
+                logger.debug(
+                    "[OrgCmd] cancel_token.cancel raised under hard ceiling",
+                    exc_info=True,
+                )
+            # Brief grace window so the supervisor's cooperative
+            # ``_terminate`` can write its final checkpoint before
+            # the outer finally clears bookkeeping. 0.5s is enough
+            # for an in-process checkpoint write; LLM-stuck supervisors
+            # will not observe it anyway and the slot is still released.
+            with suppress(Exception):
+                await asyncio.sleep(0.5)
+            # Stamp the outcome cache so observability has a real
+            # ``cancelled_by`` / ``reason`` instead of a bare
+            # ``status=error`` from the generic except branch.
+            prior = self._command_outcomes.get(command_id) or {}
+            prior.update(
+                {
+                    "event": "agent_run_cancelled",
+                    "cancelled_by": "hard_ceiling",
+                    "reason": "supervisor_hard_ceiling_exceeded",
+                    "ts": time.time(),
+                }
+            )
+            self._command_outcomes[command_id] = prior
+            # Best-effort: fabricate a SupervisorOutcome so
+            # ``_reflect_supervisor_outcome`` writes a FAILED state
+            # consistent with cooperative-cancel paths instead of the
+            # generic ``except Exception`` branch's plain "error".
+            try:
+                from openakita.runtime.supervisor import FinalOutcome, SupervisorOutcome
+
+                synthetic = SupervisorOutcome(
+                    outcome=FinalOutcome.FAILED,
+                    final_message="supervisor hard ceiling exceeded",
+                    final_checkpoint_id=getattr(supervisor, "last_checkpoint_id", None),
+                    n_turns=int(getattr(getattr(supervisor, "stall_detector", None), "n_turns", 0) or 0),
+                    n_replans=int(getattr(supervisor, "n_replans", 0) or 0),
+                    reason="hard_ceiling",
+                )
+                self._reflect_supervisor_outcome(command_id, supervisor, synthetic)
+            except Exception:  # noqa: BLE001 -- never block the cleanup path
+                logger.debug(
+                    "[OrgCmd] hard-ceiling outcome reflection failed",
+                    exc_info=True,
+                )
+            raise exc
+
+    @staticmethod
+    def _hard_ceiling_seconds() -> int:
+        """Read ``settings.supervisor_hard_ceiling_s`` defensively.
+
+        Lazy import keeps the ``openakita.orgs`` <-> ``openakita.config``
+        cycle loose (settings reads .env at process startup). Falls
+        back to ``0`` (= disabled) when the attribute is missing so a
+        fork that prunes the field cannot crash the runtime.
+        """
+        try:
+            from openakita.config import settings as _settings
+
+            return int(getattr(_settings, "supervisor_hard_ceiling_s", 0) or 0)
+        except Exception:  # noqa: BLE001 -- never block submit()
+            return 0
+
+    # ------------------------------------------------------------------
+    # v22 P1: background reconcile loop for ``_running_by_root``
+    # ------------------------------------------------------------------
+
+    async def start_reconcile_loop(self) -> None:
+        """Spawn the background ``_reconcile_loop`` task (idempotent).
+
+        Called from ``api/server.py`` lifespan startup. When
+        ``settings.orgs_reconcile_interval_s <= 0`` the loop is
+        disabled and this is a no-op. Safe to call twice -- the
+        second call returns without spawning a duplicate task.
+        """
+        if self._reconcile_task is not None and not self._reconcile_task.done():
+            return
+        interval = self._reconcile_interval_seconds()
+        if interval <= 0:
+            logger.debug(
+                "[OrgCmd] reconcile loop disabled (orgs_reconcile_interval_s=%d)",
+                interval,
+            )
+            return
+        loop = asyncio.get_running_loop()
+        self._reconcile_stop_event = asyncio.Event()
+        self._reconcile_task = loop.create_task(
+            self._reconcile_loop(interval),
+            name="openakita-orgs-reconcile-loop",
+        )
+        logger.info(
+            "[OrgCmd] reconcile loop started (interval=%ds)", interval
+        )
+
+    async def stop_reconcile_loop(self, *, timeout: float = 2.0) -> None:
+        """Signal + await the background reconcile task (idempotent)."""
+        task = self._reconcile_task
+        stop_event = self._reconcile_stop_event
+        self._reconcile_task = None
+        self._reconcile_stop_event = None
+        if task is None or task.done():
+            return
+        if stop_event is not None:
+            stop_event.set()
+        try:
+            await asyncio.wait_for(task, timeout=timeout)
+        except TimeoutError:
+            task.cancel()
+            with suppress(BaseException):
+                await task
+        except Exception:  # noqa: BLE001 -- best-effort shutdown
+            logger.debug(
+                "[OrgCmd] reconcile loop stop raised", exc_info=True
+            )
+
+    @staticmethod
+    def _reconcile_interval_seconds() -> int:
+        """Read ``settings.orgs_reconcile_interval_s`` defensively."""
+        try:
+            from openakita.config import settings as _settings
+
+            return int(getattr(_settings, "orgs_reconcile_interval_s", 30) or 0)
+        except Exception:  # noqa: BLE001 -- never block startup
+            return 30
+
+    async def _reconcile_loop(self, interval: int) -> None:
+        """Background coroutine: sleep, then ``_reconcile_tick``, repeat.
+
+        Listens on ``_reconcile_stop_event`` so ``stop_reconcile_loop``
+        can wake us promptly. A tick that raises is logged + the loop
+        keeps running -- a transient failure on one org should not
+        wedge the reconciler for the whole process.
+        """
+        stop_event = self._reconcile_stop_event
+        while True:
+            try:
+                if stop_event is not None:
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                    except TimeoutError:
+                        pass
+                    if stop_event.is_set():
+                        return
+                else:
+                    await asyncio.sleep(interval)
+                try:
+                    self._reconcile_tick()
+                except Exception:  # noqa: BLE001 -- never wedge the loop
+                    logger.exception("[OrgCmd] _reconcile_tick raised")
+            except asyncio.CancelledError:
+                return
+
+    def _reconcile_tick(self) -> None:
+        """Scan ``_running_by_root`` and pop stale entries.
+
+        Pop conditions (audit v10 §19 / cmd_..._f092f4 trace):
+
+        * the command id is missing from ``_commands`` entirely;
+        * the command id is in ``_commands`` but its ``status`` is
+          terminal (``done`` / ``error`` / ``cancelled``);
+        * the command id has no live :class:`Supervisor` in
+          ``_active_supervisors`` (the supervisor exited but the
+          finally release path was skipped, e.g. KeyError before the
+          pop reached us).
+
+        Reconcile NEVER cancels live tasks. The Sprint-9 watchdog used
+        to do that and conflated "stale bookkeeping" with "stuck
+        supervisor"; we kept that responsibility in the hard ceiling
+        wrapper instead so the two layers do not race each other.
+        """
+        # Materialise the keys upfront so we can mutate ``_running_by_root``
+        # while iterating without a RuntimeError.
+        stale_keys: list[tuple[str, str]] = []
+        for key, cid in list(self._running_by_root.items()):
+            cmd = self._commands.get(cid)
+            has_supervisor = cid in self._active_supervisors
+            if cmd is None:
+                # Command bookkeeping is gone (TTL purge / crash) but
+                # the slot lingers. Safe to drop.
+                stale_keys.append(key)
+                continue
+            status = cmd.get("status")
+            if status in ("done", "error", "cancelled"):
+                # Terminal command still pinning the slot -> definitely
+                # a leak (real running cmds keep status=running).
+                stale_keys.append(key)
+                continue
+            if status == "running" and not has_supervisor:
+                # The supervisor entry is gone but the command thinks
+                # it is still running. This is the classic
+                # ``cmd_..._f092f4`` shape: the finally block was
+                # skipped before reaching ``_running_by_root.pop``.
+                stale_keys.append(key)
+                continue
+        for key in stale_keys:
+            popped_cid = self._running_by_root.pop(key, None)
+            if popped_cid is not None:
+                logger.warning(
+                    "[OrgCmd] reconcile dropped stale _running_by_root "
+                    "entry %s -> %s",
+                    key,
+                    popped_cid,
+                )
 
     def _reflect_supervisor_outcome(
         self,

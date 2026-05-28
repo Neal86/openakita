@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Iterator
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -23,8 +25,8 @@ from openakita.api.routes.orgs_v2_stream import (
     stream_org_progress,
 )
 from openakita.config import settings
-from openakita.runtime.models import NodeType, NodeV2, OrgV2
 from openakita.orgs import reset_default_store
+from openakita.runtime.models import NodeType, NodeV2, OrgV2
 from openakita.runtime.stream_registry import (
     get_or_create_org_stream_bus,
     list_org_stream_buses,
@@ -59,12 +61,40 @@ def _make_org(store, org_id: str = "org_sse_test") -> OrgV2:
     return org
 
 
+class _FakeManager:
+    """Minimal :class:`OrgManager` stand-in used by SSE route validation.
+
+    v22 ``_build_streaming_response`` resolves the org via
+    ``request.app.state.org_manager.get(org_id)`` (the same surface
+    the mint POST writes to). The legacy ``JsonOrgStore`` fixture used
+    to gate org existence is no longer consulted, so we wire a
+    duck-typed manager that mirrors the relevant
+    :class:`OrgManager.get` semantics: return ``None`` for misses.
+    """
+
+    def __init__(self, *, known: set[str] | None = None) -> None:
+        self._known: set[str] = set(known or ())
+
+    def add(self, org_id: str) -> None:
+        self._known.add(org_id)
+
+    def get(self, org_id: str) -> Any | None:
+        if org_id in self._known:
+            return SimpleNamespace(id=org_id)
+        return None
+
+
 def _client(monkeypatch, tmp_path, *, enabled: bool, with_org: bool = True) -> TestClient:
     monkeypatch.setattr(settings, "runtime_v2_enabled", enabled, raising=False)
+    # Keep the JSON store fixture wired so any indirect callers
+    # (e.g. v1 contract tests sharing the same conftest) still see a
+    # tmp_path-scoped backend. The SSE route itself no longer reads
+    # from it after v22.
     store = reset_default_store(path=tmp_path / "orgs_v2.json")
     if with_org:
         _make_org(store)
     app = FastAPI()
+    app.state.org_manager = _FakeManager(known={"org_sse_test"} if with_org else set())
     app.include_router(orgs_v2_stream.router)
     return TestClient(app)
 
@@ -90,8 +120,15 @@ def test_returns_404_when_org_unknown(monkeypatch, tmp_path) -> None:
 
 
 class _FakeRequest:
-    def __init__(self) -> None:
+    def __init__(self, *, known_orgs: set[str] | None = None) -> None:
         self.disconnect = asyncio.Event()
+        # v22: ``_build_streaming_response`` reads
+        # ``request.app.state.org_manager`` to validate the org id, so a
+        # stand-in Request needs at least a ``.app.state.org_manager``
+        # chain. ``_event_stream`` itself only touches
+        # ``request.is_disconnected`` and is unaffected.
+        state = SimpleNamespace(org_manager=_FakeManager(known=known_orgs or set()))
+        self.app = SimpleNamespace(state=state)
 
     async def is_disconnected(self) -> bool:
         return self.disconnect.is_set()
@@ -132,9 +169,9 @@ async def _collect(gen, n: int, *, timeout: float = 3.0) -> list[dict]:
 
 async def test_response_headers_are_correct(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(settings, "runtime_v2_enabled", True, raising=False)
-    store = reset_default_store(path=tmp_path / "orgs_v2.json")
-    _make_org(store)
-    response = await stream_org_progress(_FakeRequest(), "org_sse_test")  # type: ignore[arg-type]
+    reset_default_store(path=tmp_path / "orgs_v2.json")
+    req = _FakeRequest(known_orgs={"org_sse_test"})
+    response = await stream_org_progress(req, "org_sse_test")  # type: ignore[arg-type]
     assert response.status_code == 200
     assert response.media_type == "text/event-stream"
     assert response.headers["cache-control"] == "no-cache, no-transform"

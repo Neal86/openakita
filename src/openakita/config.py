@@ -838,6 +838,53 @@ class Settings(BaseSettings):
             "Set ORGS_V2_BACKEND=sqlite in .env to opt in (P-RC-3)."
         ),
     )
+    # v22 P1: Supervisor hard ceiling + OrgCommandService reconcile loop.
+    #
+    # Exploratory v10 (audit `_v21_biz/_orgs_business_capability_audit_v10.md`)
+    # caught command `cmd_1779887674678_00000035_f092f4` sitting in
+    # ``OrgCommandService._running_by_root`` for 14m49s after the
+    # supervisor task ought to have unwound. Subsequent G/H/I commands
+    # for the same org all 409'd because the root-key slot stayed
+    # pinned. Root cause: a Supervisor.run() can hang inside an LLM
+    # provider call (no cooperative cancel point), so the surrounding
+    # ``_schedule_run.run`` finally block that releases the slot never
+    # executes.
+    #
+    # Two-layer defence:
+    #
+    # 1. ``supervisor_hard_ceiling_s`` -- the outer
+    #    ``asyncio.wait_for`` budget around ``supervisor.run()``. When
+    #    breached we fire ``supervisor.cancel_token.cancel("hard_ceiling")``
+    #    + raise, so the ``finally`` slot release runs even if the
+    #    cooperative cancel itself races a frozen await.
+    # 2. ``orgs_reconcile_interval_s`` -- the
+    #    :meth:`OrgCommandService._reconcile_tick` cadence. Reconciles
+    #    ``_running_by_root`` against ``_commands`` / ``_active_supervisors``
+    #    so a stale slot is dropped even if the hard ceiling never
+    #    fires (e.g. process restart, raw KeyError in the finally).
+    #    The reconciler is bookkeeping-only -- it never cancels live
+    #    tasks; that responsibility stays with the hard ceiling so the
+    #    two layers do not race.
+    supervisor_hard_ceiling_s: int = Field(
+        default=1800,
+        description=(
+            "Supervisor.run() 单次最大墙钟（秒）。超过后会先调用 "
+            "cancel_token.cancel('hard_ceiling') 给协作式取消一次机会，"
+            "再让外层 asyncio.wait_for 抛 TimeoutError 让 finally 释放 "
+            "_running_by_root 槽位；防止 LLM provider hang 导致同 org 后续 "
+            "G/H/I 命令永久 409。0 表示禁用，回退到 Sprint-9 默认无外层硬上限的行为。"
+        ),
+    )
+    orgs_reconcile_interval_s: int = Field(
+        default=30,
+        description=(
+            "OrgCommandService 后台 _reconcile_tick 周期（秒）。每轮扫描 "
+            "_running_by_root：若对应 command 已 done/error/cancelled 或 "
+            "_active_supervisors 已不存在 → pop 该槽位，专治 hard_ceiling 兜底失败 "
+            "时的孤儿表项。reconcile 只对账不杀人；真正的杀手是 "
+            "supervisor_hard_ceiling_s。0 表示关闭后台循环。"
+        ),
+    )
 
     @field_validator("runtime_v2_canary_orgs", mode="before")
     @classmethod

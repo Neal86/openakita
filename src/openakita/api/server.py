@@ -929,13 +929,32 @@ def create_app(
                 await to_engine(app.state.org_runtime.start())
             except Exception as e:
                 logger.warning(f"OrgRuntime startup error (non-fatal): {e}")
+        # v22 P1 (audit v10 §19 / cmd_..._f092f4 slot leak): start
+        # the ``OrgCommandService`` reconcile loop so a stale
+        # ``_running_by_root`` slot eventually drops even if the
+        # ``_schedule_run.run`` ``finally`` block was skipped. The
+        # hard ceiling wrapper inside ``_run_supervisor_with_hard_ceiling``
+        # is the first line of defence; reconcile is the second.
+        # Best-effort: a startup failure here must not crash the API.
+        svc = getattr(app.state, "org_command_service", None)
+        if svc is not None:
+            start_loop = getattr(svc, "start_reconcile_loop", None)
+            if callable(start_loop):
+                try:
+                    await start_loop()
+                except Exception as exc:  # noqa: BLE001 -- best-effort
+                    logger.warning(
+                        "[Startup] OrgCommandService.start_reconcile_loop failed: %s",
+                        exc,
+                    )
         # Sprint-9 supervisor HTTP takeover: the legacy
         # ``OrgCommandService.start_watchdog()`` wall-clock loop is
         # gone. Stall detection is now LLM-evaluated by the
         # supervisor's :class:`StallDetector` on
         # :class:`ProgressLedger` signals, with the hard
-        # ``max_turns`` cap as the only wall-style guard. Nothing to
-        # start at boot.
+        # ``max_turns`` cap as the only wall-style guard. The new
+        # reconcile loop above only reconciles bookkeeping; it does
+        # not perform any wall-clock termination.
 
         # Endpoint health check: detect stale/broken endpoints early
         try:
@@ -981,6 +1000,19 @@ def create_app(
 
     @app.on_event("shutdown")
     async def _shutdown_org_runtime():
+        # v22 P1: stop the reconcile loop FIRST so it cannot fire
+        # against a half-torn-down runtime. Best-effort; a shutdown
+        # failure here only logs.
+        svc = getattr(app.state, "org_command_service", None)
+        if svc is not None:
+            stop_loop = getattr(svc, "stop_reconcile_loop", None)
+            if callable(stop_loop):
+                try:
+                    await stop_loop(timeout=2.0)
+                except Exception as exc:  # noqa: BLE001 -- best-effort
+                    logger.debug(
+                        "OrgCommandService.stop_reconcile_loop error: %s", exc
+                    )
         # Sprint-9 supervisor takeover: close per-org sqlite
         # checkpointers so the file handles are released cleanly. The
         # legacy ``stop_watchdog()`` call is gone with the watchdog
