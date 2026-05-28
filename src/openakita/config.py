@@ -81,6 +81,40 @@ class Settings(BaseSettings):
             "_v32_biz/_phase_b_watchdog_redesign.md。"
         ),
     )
+    shutdown_diagnostics_enabled: bool = Field(
+        default=True,
+        description=(
+            "Sprint 15 / v32 Phase B Task C：lifespan 退出后启动后台 daemon "
+            "thread，每 shutdown_diagnostics_interval_s 秒 dump 一次 "
+            "threading.enumerate() 到 data/logs/shutdown_diagnostics_*.log，"
+            "外加 atexit 钩子做最终 dump。用于定位 lifespan 完成→process exit "
+            "之间 ~13s hang 的根因（哪个 non-daemon thread / atexit / uvicorn "
+            "keep-alive 在阻塞）。详见 _v32_biz/_phase_b_hang_rca.md。"
+            "生产可关；默认 True 以便首批 v32 e2e 回归立刻产出数据。"
+        ),
+    )
+    shutdown_diagnostics_interval_s: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=30.0,
+        description=(
+            "shutdown_diagnostics 后台 daemon thread 两次 dump 之间的间隔秒数，"
+            "默认 1.0s（足够分辨 lifespan→exit 13s hang 的逐秒变化）。"
+        ),
+    )
+    uvicorn_graceful_shutdown_timeout_s: float = Field(
+        default=3.0,
+        ge=0.0,
+        le=60.0,
+        description=(
+            "uvicorn Server.shutdown() 等 keep-alive HTTP/WebSocket 连接 "
+            "graceful close 的最长秒数（uvicorn 默认 None=无限等）。"
+            "Sprint 15 / v32 Phase B Task C 假设根因之一即 uvicorn 默认无限 "
+            "等代理 / 浏览器 / openakita stop CLI 自身的 keep-alive 连接 "
+            "导致 lifespan 完成后 process 仍不退；3.0s 给浏览器 / SSE 客户端 "
+            "一个干净窗口，超时即强 close。0 表示禁用此 cap（恢复 uvicorn 默认）。"
+        ),
+    )
     lifespan_stage_timeout_s: int = Field(
         default=8,
         ge=1,

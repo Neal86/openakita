@@ -1408,6 +1408,39 @@ def create_app(
         except Exception as e:  # noqa: BLE001 -- never block startup
             logger.debug("[Startup] Frontend bundle freshness check skipped: %s", e)
 
+    # ------------------------------------------------------------
+    # Sprint 15 / v32 Phase B Task C: lifespan→process-exit hang RCA.
+    # Registered LAST so it runs LAST in Starlette's FIFO shutdown
+    # order, i.e. after every other shutdown handler has done its
+    # cleanup. This is when the unexplained ~13s hang historically
+    # begins (see ``_v32_biz/_phase_b_hang_rca.md``).
+    # ------------------------------------------------------------
+    @app.on_event("shutdown")
+    async def _arm_shutdown_diagnostics() -> None:
+        try:
+            from openakita.config import settings as _settings
+
+            if not bool(getattr(_settings, "shutdown_diagnostics_enabled", True)):
+                return
+            interval = float(
+                getattr(_settings, "shutdown_diagnostics_interval_s", 1.0) or 1.0
+            )
+        except Exception:
+            interval = 1.0
+
+        try:
+            from openakita.api._shutdown_diagnostics import arm_shutdown_diagnostics
+
+            try:
+                from openakita.config import settings as _settings2
+
+                log_dir = Path(_settings2.project_root) / "data" / "logs"
+            except Exception:
+                log_dir = Path.cwd() / "data" / "logs"
+            arm_shutdown_diagnostics(log_dir, interval_s=interval)
+        except Exception as exc:  # noqa: BLE001 -- diagnostics must not block
+            logger.warning("[Shutdown] Failed to arm shutdown diagnostics: %s", exc)
+
     return app
 
 
@@ -1463,15 +1496,38 @@ async def start_api_server(
     )
     app.state.engine_loop = engine_loop
 
-    config = uvicorn.Config(
-        app=app,
-        host=host,
-        port=port,
-        log_level="warning",
-        access_log=False,
-        http="h11",
-        log_config=None,
-    )
+    # Sprint 15 / v32 Phase B Task C hypothesis fix (forensics in
+    # ``_v32_biz/_phase_b_hang_rca.md``): uvicorn's default
+    # ``timeout_graceful_shutdown`` is ``None`` (= infinite wait for
+    # keep-alive HTTP / WebSocket clients to close). Combined with
+    # operator browsers / SSE clients / proxy tunnels that hold
+    # connections open, this can easily account for the ~13s lifespan
+    # → process exit hang v31 forensics observed. ``3.0s`` gives any
+    # well-behaved client a clean window to drain and then forces
+    # the close. ``0`` disables the cap to recover uvicorn's default.
+    try:
+        from openakita.config import settings as _serve_settings
+
+        graceful_s = float(
+            getattr(_serve_settings, "uvicorn_graceful_shutdown_timeout_s", 3.0)
+            or 0.0
+        )
+    except Exception:
+        graceful_s = 3.0
+
+    uvicorn_kwargs: dict[str, Any] = {
+        "app": app,
+        "host": host,
+        "port": port,
+        "log_level": "warning",
+        "access_log": False,
+        "http": "h11",
+        "log_config": None,
+    }
+    if graceful_s > 0:
+        uvicorn_kwargs["timeout_graceful_shutdown"] = int(graceful_s)
+
+    config = uvicorn.Config(**uvicorn_kwargs)
     server = uvicorn.Server(config)
 
     # ── Launch uvicorn in a background thread ────────────────────────
