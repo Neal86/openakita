@@ -15,6 +15,7 @@ AgentPipelineExecutor`` import path keeps resolving byte-for-byte.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Protocol
@@ -62,9 +63,39 @@ class _AgentRunCallable(Protocol):
     executor only calls ``await agent.run(content)`` and
     expects a string-coercible response. Concrete agents
     (e.g. ``openakita.core.agent.Agent``) already match.
+
+    Sprint-13 H1: production agents may optionally accept a
+    ``cancel_event`` keyword. The executor probes the runtime
+    signature so legacy implementations without the kwarg keep
+    working byte-for-byte; only callables that opt in receive the
+    event and are expected to thread it down to
+    ``Brain.messages_create_async`` and ``LLMClient.chat``.
     """
 
     async def run(self, content: str) -> Any: ...
+
+
+def _run_accepts_cancel_event(run: Any) -> bool:
+    """True when ``run`` declares ``cancel_event`` or accepts ``**kwargs``.
+
+    Sprint-13 H1: cancel_event is a structural extension; the executor
+    only forwards it to callables that opted in. Callables for which
+    :func:`inspect.signature` raises (C-implemented, slot wrapper) are
+    treated as accepting it because we cannot prove otherwise and
+    those wrappers typically forward via ``**kwargs``. Cached per
+    callable identity keeps the introspection cost negligible across
+    storm-shaped workloads (10+ concurrent runs).
+    """
+    try:
+        sig = inspect.signature(run)
+    except (TypeError, ValueError):
+        return True
+    params = sig.parameters
+    if "cancel_event" in params:
+        return True
+    return any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
 
 
 def _looks_like_quota_or_auth_error(exc: BaseException) -> bool:
@@ -155,6 +186,7 @@ class AgentPipelineExecutor:
         unattended: bool = False,
         depth: int = 0,
         parent_node_id: str | None = None,
+        cancel_event: asyncio.Event | None = None,
     ) -> dict[str, Any]:
         """v1 ``_activate_and_run`` + ``_activate_and_run_inner`` parity.
 
@@ -242,7 +274,17 @@ class AgentPipelineExecutor:
         depth_token = dispatch_depth_var.set(max(0, int(depth)))
         cid_token = current_command_id_var.set(str(command_id or ""))
         try:
-            output = await self._invoke_agent(agent, content)
+            # Sprint-13 H1 (RC-4 §6 H1): forward ``cancel_event`` so
+            # the agent's ``run`` (and through it
+            # ``brain.messages_create_async`` and ``LLMClient.chat``)
+            # can race ``_race_with_cancel`` against the in-flight
+            # ``httpx`` request and abort the moment a user cancel
+            # fires. Old test agents whose ``run`` signature has no
+            # ``cancel_event`` kwarg keep working via the signature
+            # probe inside ``_invoke_agent``.
+            output = await self._invoke_agent(
+                agent, content, cancel_event=cancel_event
+            )
         except asyncio.CancelledError:
             # Sprint-3 P0-2 (audit ``_orgs_business_capability_audit_v3.md``
             # §5.3): the user pressed cancel and ``CancelledError`` arrived
@@ -367,6 +409,7 @@ class AgentPipelineExecutor:
         parent_command_id: str | None,
         child_node_id: str,
         child_content: str,
+        cancel_event: asyncio.Event | None = None,
     ) -> str:
         """Sprint-4 P0-1 -- recurse from a parent node into a child node.
 
@@ -471,6 +514,7 @@ class AgentPipelineExecutor:
             command_id=parent_command_id,
             depth=next_depth,
             parent_node_id=parent_node_id,
+            cancel_event=cancel_event,
         )
         return str(result.get("output") or "")
 
@@ -507,11 +551,23 @@ class AgentPipelineExecutor:
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def _invoke_agent(agent: Any, content: str) -> Any:
+    async def _invoke_agent(
+        agent: Any,
+        content: str,
+        *,
+        cancel_event: asyncio.Event | None = None,
+    ) -> Any:
         # Accept any agent that exposes ``async run(content) -> Any``.
+        # Sprint-13 H1: probe the agent's signature before forwarding
+        # ``cancel_event`` so legacy unit-test agents that declare
+        # ``async def run(self, content)`` keep working unchanged. The
+        # production :class:`._default_agent_builder._BrainBackedNodeAgent`
+        # accepts the kwarg and chains it into the brain call.
         run = getattr(agent, "run", None)
         if run is None:
             raise RuntimeError(f"agent {type(agent).__name__} has no .run()")
+        if cancel_event is not None and _run_accepts_cancel_event(run):
+            return await run(content, cancel_event=cancel_event)
         return await run(content)
 
     async def _emit(self, event: str, payload: dict[str, Any]) -> None:

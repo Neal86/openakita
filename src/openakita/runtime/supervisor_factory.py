@@ -133,6 +133,7 @@ def _make_executor_deliver(
     org_id: str,
     command_id: str,
     executor: Any,
+    cancel_event: asyncio.Event | None = None,
 ) -> DeliverCallable:
     """Build a :class:`DeliverCallable` that routes to the v2 executor.
 
@@ -144,6 +145,20 @@ def _make_executor_deliver(
     keeps working unchanged. The executor remains the single owner
     of all per-node lifecycle; the supervisor only owns inter-node
     orchestration.
+
+    Sprint-13 H1 (RC-4 §6 H1 / ``_v27_biz/_drain_rca.md`` R-A): when
+    :func:`build_supervisor_for_command` minted a ``cancel_event`` for
+    the supervisor's :class:`CancellationToken` it is closure-captured
+    here so every ``executor.activate_and_run`` call carries the same
+    event without changing the public
+    :data:`DeliverCallable` protocol shape -- supervisor unit tests
+    that construct ``async def deliver(speaker, instruction, progress)``
+    deliverers keep working unchanged. The event flows
+    ``deliver -> executor -> agent.run -> brain.messages_create_async
+    -> LLMClient.chat -> _race_with_cancel`` so a user cancel under
+    the 10-concurrent storm shape from v25 C6 aborts the in-flight
+    ``httpx`` request immediately instead of unwinding 13 await frames
+    over the 8s drain budget.
     """
 
     async def _deliver(speaker: str, instruction: str, progress: Any) -> DelegationResult:
@@ -158,6 +173,7 @@ def _make_executor_deliver(
                 node_id=node_id,
                 content=instruction,
                 command_id=command_id,
+                cancel_event=cancel_event,
             )
         except asyncio.CancelledError:
             raise
@@ -252,19 +268,29 @@ def build_supervisor_for_command(
     resolved_checkpointer = checkpointer or get_or_create_checkpointer(org_id)
     resolved_token = cancel_token or CancellationToken()
     resolved_brain = brain or PassThroughSupervisorBrain(root_node_id=root_node_id)
-    resolved_deliver = deliver or _make_executor_deliver(
-        org_id=org_id, command_id=command_id, executor=executor
-    )
 
-    # v22 RCA RC-4: bridge ``cancel_token`` -> ``asyncio.Event`` at the
-    # composition root so the bridge is established even before
-    # :meth:`Supervisor.run` is awaited. The supervisor passes the
-    # event down through :class:`SupervisorBrain` to the LLM client's
-    # ``_race_with_cancel`` wrapper; that lets a user-issued cancel
-    # abort an in-flight ``httpx`` request immediately instead of
-    # waiting for the historical 5s drain budget to expire.
+    # v22 RCA RC-4 / Sprint-13 H1: bridge ``cancel_token`` ->
+    # ``asyncio.Event`` at the composition root so the bridge is
+    # established even before :meth:`Supervisor.run` is awaited. The
+    # supervisor passes the event down through
+    # :class:`SupervisorBrain` (used by ``extract_facts`` / ``draft_plan``
+    # / ``emit_progress_ledger``) AND -- new in H1 -- the executor
+    # ``deliver`` adapter closure-captures the same event so it
+    # reaches ``Brain.messages_create_async`` ->
+    # ``LLMClient._race_with_cancel`` and aborts the in-flight
+    # ``httpx`` request the instant a user cancel fires
+    # (audit ``_v27_biz/_drain_rca.md`` R-A). We mint the event before
+    # building the deliver closure so the same instance flows down
+    # both paths.
     cancel_event = asyncio.Event()
     resolved_token.add_callback(cancel_event.set)
+
+    resolved_deliver = deliver or _make_executor_deliver(
+        org_id=org_id,
+        command_id=command_id,
+        executor=executor,
+        cancel_event=cancel_event,
+    )
 
     return Supervisor(
         command_id=command_id,

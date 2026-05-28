@@ -320,6 +320,7 @@ def test_run_with_tools_runs_one_round_when_tool_use_emitted(monkeypatch) -> Non
         messages: list[dict[str, Any]],
         system: str,
         tools: list[dict[str, Any]],
+        cancel_event: Any = None,  # Sprint-13 H1: accept plumbed kwarg
     ) -> SimpleNamespace:
         captured_calls.append({"messages": messages, "tools": tools})
         if len(captured_calls) == 1:

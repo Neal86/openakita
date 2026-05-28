@@ -69,6 +69,8 @@ keep working unchanged.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -92,6 +94,7 @@ __all__ = [
     "MAX_DISPATCH_DEPTH",
     "BuilderUnavailable",
     "DefaultAgentBuilder",
+    "DispatchCallback",
     "NodeToolEmit",
     "NodeToolHostProvider",
     "dispatch_depth_var",
@@ -132,6 +135,32 @@ _DISPATCH_RE = re.compile(
 # Type alias for the dispatch callback the executor wires in. Keeping
 # it on the module so tests / docstrings can refer to a single name.
 DispatchCallback = Callable[..., Awaitable[str]]
+
+
+def _callable_accepts_kwarg(fn: Callable[..., Any], name: str) -> bool:
+    """Detect whether ``fn`` accepts a keyword argument named ``name``.
+
+    Sprint-13 H1: we plumb ``cancel_event`` into the dispatch callback so
+    a user cancel reaches grandchildren. Old test fakes (e.g.
+    ``_dispatch_subtask_cb`` in ``test_child_dispatch.py``) were written
+    before the kwarg existed and have a closed signature; calling them
+    with ``cancel_event=...`` would raise ``TypeError``. We probe the
+    signature once per call site and only pass the kwarg when the
+    callee actually declares it (or accepts ``**kwargs``). Failures of
+    :func:`inspect.signature` (C-implemented callables, slot wrappers)
+    default to ``True`` because such callables typically forward via
+    ``**kwargs`` themselves and we cannot prove otherwise.
+    """
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return True
+    params = sig.parameters
+    if name in params:
+        return True
+    return any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
 
 
 # Type alias for the artefact persistor (Sprint-4 P0-2). The executor
@@ -455,7 +484,20 @@ class _BrainBackedNodeAgent:
         self._event_emitter = event_emitter
         self._tool_host_provider = tool_host_provider
 
-    async def run(self, content: str) -> str:
+    async def run(
+        self,
+        content: str,
+        *,
+        cancel_event: asyncio.Event | None = None,
+    ) -> str:
+        # Sprint-13 H1 (RC-4 §6): ``cancel_event`` is the asyncio event
+        # the supervisor wires from its ``cancel_token``. We forward it
+        # straight to ``brain.messages_create_async`` (via ``run_with_tools``
+        # for the tool-call path) so :meth:`LLMClient._race_with_cancel`
+        # can abort the in-flight ``httpx`` request the instant a user
+        # cancel fires. Child dispatches also receive the same event so
+        # the cancel propagates through ``<dispatch>`` recursion without
+        # leaving long-running grandchildren stranded.
         text = content if isinstance(content, str) else str(content or "")
         if not text.strip():
             # Empty content shouldn't land here (command_service rejects
@@ -526,12 +568,14 @@ class _BrainBackedNodeAgent:
                 command_id=command_id_for_events,
                 emit=self._event_emitter,
                 tool_host=tool_host,
+                cancel_event=cancel_event,
             )
         else:
             response = await self._brain.messages_create_async(
                 messages=[{"role": "user", "content": text}],
                 system=system_prompt,
                 tools=[],
+                cancel_event=cancel_event,
             )
         parent_text = _extract_text_from_response(response)
 
@@ -547,14 +591,33 @@ class _BrainBackedNodeAgent:
             return parent_text
 
         children: list[tuple[str, str]] = []
+        dispatch_accepts_cancel = _callable_accepts_kwarg(
+            self._dispatch_callback, "cancel_event"
+        )
         for child_target, child_content in blocks:
             try:
-                child_output = await self._dispatch_callback(
-                    org_id=self._spec.org_id,
-                    parent_node_id=self._spec.node_id,
-                    child_node_id=child_target,
-                    child_content=child_content,
-                )
+                # Sprint-13 H1: forward ``cancel_event`` into child
+                # dispatch so a user cancel terminates grandchildren
+                # without waiting for the parent to finish its outer
+                # await frame. Old test callbacks (audit
+                # ``tests/runtime/orgs/test_child_dispatch.py``) have a
+                # closed signature without ``cancel_event``; the probe
+                # above keeps them working.
+                if dispatch_accepts_cancel:
+                    child_output = await self._dispatch_callback(
+                        org_id=self._spec.org_id,
+                        parent_node_id=self._spec.node_id,
+                        child_node_id=child_target,
+                        child_content=child_content,
+                        cancel_event=cancel_event,
+                    )
+                else:
+                    child_output = await self._dispatch_callback(
+                        org_id=self._spec.org_id,
+                        parent_node_id=self._spec.node_id,
+                        child_node_id=child_target,
+                        child_content=child_content,
+                    )
             except Exception as exc:  # noqa: BLE001 -- one child failure
                 # must not poison siblings or the parent's reply. The
                 # executor inside the callback already emitted

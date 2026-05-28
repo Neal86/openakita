@@ -482,6 +482,7 @@ async def run_with_tools(
     emit: NodeToolEmit | None = None,
     second_round_caller: Callable[[list[dict[str, Any]]], Awaitable[Any]] | None = None,
     tool_host: NodeToolHost | None = None,
+    cancel_event: asyncio.Event | None = None,
 ) -> tuple[Any, int]:
     """One-round tool-use loop on top of :meth:`Brain.messages_create_async`.
 
@@ -498,6 +499,15 @@ async def run_with_tools(
     tools=tools)`` for the second round directly. Tests pass a stub
     that captures the messages list for assertion without touching a
     real brain.
+
+    Sprint-13 H1 (RC-4 §6 H1): ``cancel_event`` is the asyncio event
+    minted by :func:`supervisor_factory.build_supervisor_for_command`
+    and wired to ``Supervisor.cancel_token``. When non-None it is
+    forwarded straight to ``brain.messages_create_async`` (both rounds)
+    so :meth:`LLMClient._race_with_cancel` can race the in-flight
+    ``httpx`` request and abort the moment a user cancel fires --
+    closing the 13-await-deep ``CancelledError`` unwind gap that v25/v27
+    storms hit (audit ``_v27_biz/_drain_rca.md``).
     """
 
     messages: list[dict[str, Any]] = [{"role": "user", "content": user_content}]
@@ -505,6 +515,7 @@ async def run_with_tools(
         messages=messages,
         system=system_prompt,
         tools=tools,
+        cancel_event=cancel_event,
     )
 
     tool_blocks = extract_tool_use_blocks(response) if tools else []
@@ -562,5 +573,6 @@ async def run_with_tools(
             messages=messages,
             system=system_prompt,
             tools=tools,
+            cancel_event=cancel_event,
         )
     return final, 1
