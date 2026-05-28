@@ -817,6 +817,27 @@ class OrgCommandService:
             return None
         if cmd.get("status") != "running":
             return {"ok": True, "command_id": command_id, "already_done": True}
+        # v23 RC-4 observability: capture the active supervisor's root
+        # *before* the cooperative drain pops it off
+        # ``_active_supervisors``. Pre-fix the response always read
+        # ``cancelled_roots`` off ``runtime.cancel_user_command`` only,
+        # which returns ``None`` for HTTP-submitted commands (the
+        # supervisor takeover path does not register a runtime tracker
+        # via ``runtime.send_command``). The empty list misled v23
+        # regression triage into thinking the cancel never found a
+        # supervisor; in reality the supervisor was found and its
+        # cancel_token was fired -- the runtime tracker simply does
+        # not exist for this path. We therefore fall back to the
+        # supervisor's own root so ``GET /cancel`` callers can tell
+        # "no supervisor / nothing to cancel" apart from "supervisor
+        # was cancelled, runtime tracker just doesn't exist".
+        active_supervisor = self._active_supervisors.get(command_id)
+        supervisor_root: str | None = None
+        if active_supervisor is not None:
+            supervisor_root = (
+                getattr(getattr(active_supervisor, "task_ledger", None), "root_node_id", None)
+                or cmd.get("root_node_id")
+            )
         await self._cooperative_cancel(command_id, reason=reason)
         self._update_command_state(
             command_id,
@@ -837,6 +858,11 @@ class OrgCommandService:
                 "[OrgCmd] runtime.cancel_user_command raised after cooperative cancel",
                 exc_info=True,
             )
+        runtime_roots = list(runtime_result.get("cancelled_roots") or [])
+        if not runtime_roots and supervisor_root:
+            cancelled_roots: list[str] = [supervisor_root]
+        else:
+            cancelled_roots = runtime_roots
         if self._emitter is not None:
             try:
                 await self._emitter.broadcast(
@@ -845,7 +871,7 @@ class OrgCommandService:
                         "org_id": org_id,
                         "command_id": command_id,
                         "by": "user",
-                        "cancelled_roots": runtime_result.get("cancelled_roots", []),
+                        "cancelled_roots": cancelled_roots,
                     },
                 )
             except Exception:
@@ -862,7 +888,7 @@ class OrgCommandService:
         return {
             "ok": True,
             "command_id": command_id,
-            "cancelled_roots": runtime_result.get("cancelled_roots", []),
+            "cancelled_roots": cancelled_roots,
             "reason": reason,
         }
 
@@ -929,18 +955,28 @@ class OrgCommandService:
         task = self._inflight_tasks.get(command_id)
         if task is None or task.done():
             return
-        # v22 RCA RC-4: pre-bridge cancel_token->httpx the inner ``task``
-        # would have stalled inside ``await provider.chat(...)`` for the
-        # full LLM latency (often >>5s), and we wrapped it in
-        # ``asyncio.shield`` so the surrounding ``wait_for`` could not
-        # nudge it. Now ``cancel_token.cancel()`` flips an
-        # ``asyncio.Event`` that races the in-flight ``httpx`` request,
-        # so the task terminates naturally within a few hundred ms of
-        # the cancel. Drop the shield and let ``wait_for`` cancel the
-        # task itself as the timeout fallback -- the shield is no
-        # longer load-bearing and removing it shortens force-cancel
-        # paths that the bridge cannot recover (e.g. node-level CPU
-        # spins between brain calls).
+        # v23 RC-4 fix: the d1275851 ``cancel_event`` bridge only reaches
+        # :class:`SupervisorBrain`. The production
+        # :class:`PassThroughSupervisorBrain` returns canned JSON without
+        # ever calling the LLM; the real LLM call lives inside
+        # :meth:`Supervisor.deliver` ->
+        # :meth:`AgentPipelineExecutor.activate_and_run` ->
+        # ``agent.run`` -> ``Brain.messages_create_async``, which never
+        # receives ``cancel_event`` (audit
+        # ``_v23_biz/_rc4_debug_notes.md``). Without an explicit
+        # ``task.cancel()`` the in-flight ``httpx`` request stays
+        # blocked for the full drain budget. We therefore fire
+        # ``task.cancel()`` immediately when a live supervisor was
+        # registered: the resulting ``CancelledError`` unwinds through
+        # ``httpx`` in ~100 ms, :meth:`Supervisor.run`'s new
+        # ``except CancelledError`` branch absorbs it and runs
+        # ``_terminate`` so the final ``cancelled`` checkpoint is
+        # written, and the surrounding ``wait_for`` re-raises
+        # ``CancelledError`` (which :meth:`_schedule_run._run`'s
+        # ``except`` reads ``supervisor.last_checkpoint_id`` off of
+        # before clearing bookkeeping).
+        if supervisor is not None:
+            task.cancel()
         try:
             await asyncio.wait_for(task, timeout=max(0.1, effective_timeout))
         except TimeoutError:
@@ -1412,6 +1448,28 @@ class OrgCommandService:
                 # raises CancelledByToken on the cooperative path and
                 # _terminate writes a cancelled checkpoint already, so
                 # we only land here on the rare hard-cancel.
+                #
+                # v23 RC-4 fix: :meth:`Supervisor.run` now also catches
+                # :class:`asyncio.CancelledError` when its
+                # ``cancel_token`` was already fired (by
+                # :meth:`_cooperative_cancel`'s explicit
+                # ``task.cancel()``) and runs ``_terminate`` to write
+                # the final ``cancelled`` checkpoint -- but the
+                # surrounding ``asyncio.wait_for`` inside
+                # :meth:`_run_supervisor_with_hard_ceiling` still
+                # re-raises ``CancelledError`` once its own wait was
+                # cancelled, so the outcome value never reaches the
+                # ``_reflect_supervisor_outcome`` happy path. We
+                # therefore read the checkpoint id + turn counters
+                # off the supervisor instance here and mirror them
+                # onto the command state so ``last_checkpoint_id``
+                # surfaces on ``GET /command/{cid}`` and the command
+                # is resumable via ``continue_previous``.
+                cancel_cp = getattr(supervisor, "last_checkpoint_id", None)
+                cancel_n_turns = int(
+                    getattr(getattr(supervisor, "stall_detector", None), "n_turns", 0) or 0
+                )
+                cancel_n_replans = int(getattr(supervisor, "n_replans", 0) or 0)
                 self._update_command_state(
                     command_id,
                     status="cancelled",
@@ -1420,6 +1478,10 @@ class OrgCommandService:
                     event_ref="agent_run_cancelled",
                     finished_at=time.time(),
                     cancelled_by_user=True,
+                    supervisor_outcome="cancelled",
+                    supervisor_n_turns=cancel_n_turns,
+                    supervisor_n_replans=cancel_n_replans,
+                    supervisor_last_checkpoint_id=cancel_cp,
                 )
                 raise
             except Exception as exc:  # noqa: BLE001 -- last-resort guardrail

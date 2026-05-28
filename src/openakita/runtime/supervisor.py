@@ -298,6 +298,35 @@ class Supervisor:
             return await self._terminate(
                 FinalOutcome.CANCELLED, exc.reason or "cancelled"
             )
+        except asyncio.CancelledError:
+            # v23 RC-4 fix: the d1275851 ``cancel_event`` bridge only
+            # reaches ``SupervisorBrain`` (production
+            # ``PassThroughSupervisorBrain`` ignores it). The real LLM
+            # call lives deeper, inside ``self.deliver ->
+            # executor.activate_and_run -> agent.run ->
+            # Brain.messages_create_async``, where ``cancel_event`` is
+            # never plumbed (audit ``_v23_biz/_rc4_debug_notes.md``).
+            # The defensive cancel path therefore fires
+            # ``task.cancel()`` from
+            # :meth:`OrgCommandService._cooperative_cancel` after
+            # ``cancel_token.cancel()``; the resulting
+            # ``CancelledError`` unwinds through ``httpx`` into here.
+            # When the token has been cancelled we still want to
+            # write the final ``cancelled`` checkpoint so the command
+            # stays resumable -- mirroring the cooperative
+            # :class:`CancelledByToken` branch above. We absorb the
+            # single cancellation and run ``_terminate`` normally:
+            # only one cancellation is requested in this flow (by
+            # ``wait_for``'s ``_cancel_and_wait`` inside
+            # :meth:`_run_supervisor_with_hard_ceiling`), so no
+            # further ``CancelledError`` will preempt the
+            # checkpoint write.
+            if self.cancel_token.is_cancelled():
+                reason = self.cancel_token.reason or "cancelled"
+                return await self._terminate(
+                    FinalOutcome.CANCELLED, reason
+                )
+            raise
 
     # ------------------------------------------------------------------
     # Resume from checkpoint (Sprint-9 HTTP-takeover continue_previous)
