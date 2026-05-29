@@ -679,6 +679,13 @@ fn log_to_file(msg: &str) {
         .append(true)
         .open(&path)
         .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+    // Mirror every diagnostic line into the crash-handler ring buffer so
+    // both Rust panics (via the panic hook) and SEH faults (via the SEH
+    // filter writing <pid>-<tick>.events.txt) ship with a precise
+    // "what happened in the last few seconds" trail. record_event uses
+    // try_lock and is a no-op on contention, so it cannot stall the
+    // autostart-log writer or any caller.
+    crash_handler::record_event(msg);
 }
 
 fn desktop_session_token() -> String {
@@ -5104,9 +5111,21 @@ fn main() {
         let payload = panic_payload_to_string(info.payload());
         let backtrace = std::backtrace::Backtrace::force_capture();
         let machine = machine_info_snapshot();
+        // Embed the recent-events trail directly into crash.log so a
+        // single uploaded file is enough to reconstruct the cause chain.
+        // snapshot_events uses try_lock and silently returns an empty Vec
+        // on contention; that's acceptable because the ring buffer is a
+        // diagnostic aid, not a transactional log.
+        let events = crash_handler::snapshot_events();
+        let events_block = if events.is_empty() {
+            "<none>".to_string()
+        } else {
+            events.join("\n")
+        };
         let msg = format!(
             "PANIC at {location}\n\
              Message: {payload}\n\n\
+             === Recent events (oldest -> newest) ===\n{events_block}\n\n\
              === Machine info ===\n{machine}\n\n\
              === Backtrace ===\n{backtrace}"
         );
