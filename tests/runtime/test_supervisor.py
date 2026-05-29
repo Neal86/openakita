@@ -18,6 +18,7 @@ from collections.abc import Awaitable, Callable
 
 import pytest
 
+from openakita.agent.errors import UserCancelledError
 from openakita.runtime.cancel_token import CancellationToken
 from openakita.runtime.checkpoint import CheckpointStatus, MemoryCheckpointer
 from openakita.runtime.ledger import ProgressLedger
@@ -69,6 +70,10 @@ class FakeBrain(SupervisorBrain):
         self.facts_calls = 0
         self.plan_calls = 0
         self.progress_calls = 0
+        # RC-5 S1: record the recent_outputs the supervisor feeds in on each
+        # progress-ledger call (one snapshot per call) so tests can assert the
+        # delegation_history feedback loop is wired.
+        self.recent_outputs_seen: list[list] = []
 
     async def extract_facts(self, *, task: str, **_kwargs) -> str:
         self.facts_calls += 1
@@ -89,9 +94,11 @@ class FakeBrain(SupervisorBrain):
         facts: str,
         plan: str,
         history: list[ProgressLedger],
+        recent_outputs: list | None = None,
         **_kwargs,
     ) -> str:
         self.progress_calls += 1
+        self.recent_outputs_seen.append(list(recent_outputs or []))
         if not self._progress:
             return _ledger_json(satisfied=True)
         return self._progress.pop(0)
@@ -242,7 +249,12 @@ async def test_supervisor_out_of_turns_when_progressing_forever() -> None:
         deliver=deliver,
         stream=bus,
         checkpointer=store,
+        # max_turns=5 with max_stalls=1/max_replans=1 -> min budget 1*(1+2)=3
+        # <= 5, so S0's clamp leaves max_turns at 5. The brain always reports
+        # progress (never satisfied, never stalls) so we still hit OUT_OF_TURNS.
         max_turns=5,
+        max_stalls=1,
+        max_replans=1,
     )
     out = await sup.run()
     assert out.outcome is FinalOutcome.OUT_OF_TURNS
@@ -382,6 +394,163 @@ async def test_supervisor_emits_progress_ledger_and_checkpoint_events() -> None:
     assert "started" in seen_lifecycle
     assert "task_ledger_published" in seen_lifecycle
     assert "done" in seen_lifecycle
+
+
+# ---------------------------------------------------------------------------
+# RC-5 S0: max_turns clamp keeps the replan budget reachable
+# ---------------------------------------------------------------------------
+
+
+async def test_max_turns_clamped_to_replan_budget() -> None:
+    """A too-small max_turns is clamped UP to max_stalls*(max_replans+2)."""
+    bus = StreamBus(strict=True)
+    store = MemoryCheckpointer()
+    brain = FakeBrain(progress_responses=[_ledger_json(satisfied=True)])
+    deliver, _ = _make_deliver()
+
+    sup = Supervisor(
+        command_id="cmd_clamp",
+        org_id="org_1",
+        root_node_id="node_root",
+        task="t",
+        brain=brain,
+        deliver=deliver,
+        stream=bus,
+        checkpointer=store,
+        max_turns=6,
+        max_stalls=3,
+        max_replans=2,
+    )
+    # 3 * (2 + 2) = 12 > 6 -> clamped up to 12.
+    assert sup.cfg.max_turns == 12
+    assert sup.stall_detector.max_turns == 12
+    # Other params untouched.
+    assert sup.cfg.max_stalls == 3
+    assert sup.cfg.max_replans == 2
+
+
+async def test_max_turns_not_clamped_when_constraint_satisfied() -> None:
+    """The production default 30/3/5 already satisfies the constraint."""
+    bus = StreamBus(strict=True)
+    store = MemoryCheckpointer()
+    brain = FakeBrain(progress_responses=[_ledger_json(satisfied=True)])
+    deliver, _ = _make_deliver()
+
+    sup = Supervisor(
+        command_id="cmd_noclamp",
+        org_id="org_1",
+        root_node_id="node_root",
+        task="t",
+        brain=brain,
+        deliver=deliver,
+        stream=bus,
+        checkpointer=store,
+        # defaults: max_turns=30, max_stalls=3, max_replans=5 -> 3*7=21 <= 30
+    )
+    assert sup.cfg.max_turns == 30
+    assert sup.stall_detector.max_turns == 30
+
+
+# ---------------------------------------------------------------------------
+# RC-5 S1 (gap⑤): node outputs are fed back to the brain's progress ledger
+# ---------------------------------------------------------------------------
+
+
+async def test_supervisor_feeds_delegation_history_to_progress_ledger() -> None:
+    """On turn 2+ the brain receives the prior turn's DelegationResult.
+
+    Turn 1: brain delegates to ``node_root`` (no outputs yet -> recent_outputs
+    is empty). The supervisor records the resulting DelegationResult. Turn 2:
+    the brain must now see exactly that record in ``recent_outputs`` -- proving
+    the gap⑤ feedback loop is wired through the production skeleton.
+    """
+    bus = StreamBus(strict=True)
+    store = MemoryCheckpointer()
+    brain = FakeBrain(
+        progress_responses=[
+            _ledger_json(progress=True, speaker="node_root"),  # turn 1: delegate
+            _ledger_json(satisfied=True),  # turn 2: done
+        ]
+    )
+    deliver, log = _make_deliver()
+
+    sup = Supervisor(
+        command_id="cmd_feedback",
+        org_id="org_1",
+        root_node_id="node_root",
+        task="write something",
+        brain=brain,
+        deliver=deliver,
+        stream=bus,
+        checkpointer=store,
+    )
+    out = await sup.run()
+    assert out.outcome is FinalOutcome.DONE
+    # Two progress-ledger calls were made.
+    assert brain.progress_calls == 2
+    # Turn 1 saw no outputs yet.
+    assert brain.recent_outputs_seen[0] == []
+    # Turn 2 saw exactly the turn-1 delegation result.
+    turn2 = brain.recent_outputs_seen[1]
+    assert len(turn2) == 1
+    assert isinstance(turn2[0], DelegationResult)
+    assert turn2[0].speaker == "node_root"
+    assert "produced output" in turn2[0].message
+    # The supervisor's own delegation_history mirrors what was fed back.
+    assert len(sup.delegation_history) == 1
+    assert log[0]["speaker"] == "node_root"
+
+
+# ---------------------------------------------------------------------------
+# RC-5 S5: Supervisor.run absorbs UserCancelledError into a cancelled terminal
+# ---------------------------------------------------------------------------
+
+
+class _UserCancellingBrain(SupervisorBrain):
+    """Raises UserCancelledError from emit_progress_ledger (deep LLM cancel)."""
+
+    async def extract_facts(self, *, task: str, **_kwargs) -> str:
+        return "facts"
+
+    async def draft_plan(self, *, task: str, facts: str, **_kwargs) -> str:
+        return "plan"
+
+    async def emit_progress_ledger(
+        self,
+        *,
+        task: str,
+        facts: str,
+        plan: str,
+        history: list[ProgressLedger],
+        recent_outputs: list | None = None,
+        **_kwargs,
+    ) -> str:
+        raise UserCancelledError("用户点了停止", source="llm_call")
+
+
+async def test_supervisor_absorbs_user_cancelled_error() -> None:
+    bus = StreamBus(strict=True)
+    store = MemoryCheckpointer()
+    brain = _UserCancellingBrain()
+    deliver, _ = _make_deliver()
+
+    sup = Supervisor(
+        command_id="cmd_usercancel",
+        org_id="org_1",
+        root_node_id="node_root",
+        task="cancel me mid-flight",
+        brain=brain,
+        deliver=deliver,
+        stream=bus,
+        checkpointer=store,
+    )
+    # Must NOT raise; must terminate cleanly as CANCELLED.
+    out = await sup.run()
+    assert out.outcome is FinalOutcome.CANCELLED
+    assert "用户点了停止" in out.final_message
+    fetched = await store.aget(out.final_checkpoint_id)  # type: ignore[arg-type]
+    assert fetched is not None
+    assert fetched.metadata.status == CheckpointStatus.CANCELLED
 
 
 # ---------------------------------------------------------------------------

@@ -108,6 +108,7 @@ class _CapturingBrain(SupervisorBrain):
         facts: str,
         plan: str,
         history: list[ProgressLedger],
+        recent_outputs: list | None = None,
         cancel_event: asyncio.Event | None = None,
     ) -> str:
         self.captured.append(("emit_progress_ledger", cancel_event))
@@ -160,6 +161,7 @@ class _SlowCancelAwareBrain(SupervisorBrain):
         facts: str,
         plan: str,
         history: list[ProgressLedger],
+        recent_outputs: list | None = None,
         cancel_event: asyncio.Event | None = None,
     ) -> str:
         self.entered_emit_progress.set()

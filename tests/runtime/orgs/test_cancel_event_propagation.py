@@ -158,6 +158,7 @@ class _RecordingBrain(SupervisorBrain):
         facts: str,
         plan: str,
         history,
+        recent_outputs=None,
         cancel_event: asyncio.Event | None = None,
     ) -> str:
         self.events.append(("emit_progress_ledger", cancel_event))

@@ -88,6 +88,7 @@ class FakeSupervisorBrain(SupervisorBrain):
         facts: str,
         plan: str,
         history: list[ProgressLedger],
+        recent_outputs: list | None = None,
         **_kwargs: object,
     ) -> str:
         return self._ledgers.pop(0)

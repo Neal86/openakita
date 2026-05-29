@@ -140,6 +140,15 @@ class SupervisorBrain(Protocol):
     drain timeout. Stub / pass-through brains may ignore the
     argument; the default ``None`` keeps the protocol backward
     compatible with existing implementations.
+
+    RC-5 S1 (gap⑤): ``emit_progress_ledger`` additionally accepts an
+    optional ``recent_outputs`` -- the most recent
+    :class:`DelegationResult` records the supervisor collected from the
+    ``deliver`` callable. Only the LLM orchestration brain consumes them
+    (to render the *actual* node deliverables into its convergence
+    prompt); scaffold / pass-through brains ignore the argument. As with
+    ``cancel_event``, the default ``None`` keeps the protocol backward
+    compatible.
     """
 
     async def extract_facts(
@@ -162,6 +171,7 @@ class SupervisorBrain(Protocol):
         facts: str,
         plan: str,
         history: list[ProgressLedger],
+        recent_outputs: list[DelegationResult] | None = None,
         cancel_event: asyncio.Event | None = None,
     ) -> str:  # raw JSON
         ...
@@ -242,6 +252,29 @@ class Supervisor:
             cancel_event = asyncio.Event()
             self.cancel_token.add_callback(cancel_event.set)
         self._cancel_event = cancel_event
+        # RC-5 S0: clamp the turn budget UP so the graceful replan path is
+        # always reachable. StallDetector evaluates DONE -> OUT_OF_TURNS ->
+        # REPLAN, so if ``max_turns`` is smaller than what it takes to burn
+        # the whole replan budget (each replan needs ``max_stalls`` stalls,
+        # for ``max_replans + 1`` segments, plus a facts/plan + finish
+        # buffer), a contradictory task hits the hard turn cap before it can
+        # terminate gracefully via ``replan_budget_exhausted``. We never
+        # raise here -- breaking submit is worse than a slightly larger cap;
+        # we clamp UP and warn. See ``_rc5_biz/sprint_plan/
+        # _prereq_convergence_params.md`` §4.2 (first layer).
+        min_turns = max_stalls * (max_replans + 2)
+        if max_turns < min_turns:
+            logger.warning(
+                "Supervisor(command_id=%s): max_turns=%d < "
+                "max_stalls*(max_replans+2)=%d; clamping max_turns up to %d "
+                "to keep the replan budget reachable (else the hard turn cap "
+                "pre-empts graceful replan termination).",
+                command_id,
+                max_turns,
+                min_turns,
+                min_turns,
+            )
+            max_turns = min_turns
         self.cfg = _SupervisorConfig(
             max_stalls=max_stalls,
             max_turns=max_turns,
@@ -252,6 +285,14 @@ class Supervisor:
             max_stalls=max_stalls, max_turns=max_turns
         )
         self.history: list[ProgressLedger] = []
+        # RC-5 S1 (gap⑤): the real node deliverables, fed back to the brain's
+        # progress ledger so it can judge satisfaction/progress from concrete
+        # outputs instead of being "blind" to what nodes actually produced.
+        # Intentionally NOT persisted in checkpoints (the outputs already live
+        # on the stream/artefact path, and the restored ``history`` carries
+        # enough context); resume starts this empty by design -- see
+        # ``_rc5_biz/sprint_plan/sprint_implementation_plan.md`` S1 risk note.
+        self.delegation_history: list[DelegationResult] = []
         self.n_replans: int = 0
         self.last_checkpoint_id: str | None = None
         # Sprint-9: set to True by :meth:`resume_from_checkpoint` so
@@ -278,6 +319,14 @@ class Supervisor:
           the full restored ``history`` on the first turn so the
           decision-making continues exactly where it left off.
         """
+        # RC-5 S5: imported lazily inside ``run`` to avoid an import-time
+        # cycle. ``supervisor`` is imported very early (the agent package init
+        # pulls in ``runtime.state_graph`` which imports ``DelegationResult``
+        # from here); a top-level ``from ..agent.errors import ...`` would
+        # re-enter the half-initialised module. By the time ``run`` executes
+        # this module is fully loaded, so the import resolves cleanly.
+        from ..agent.errors import UserCancelledError
+
         if self._resumed:
             await self._emit_lifecycle(
                 "resumed",
@@ -295,6 +344,19 @@ class Supervisor:
                 await self._outer_loop_setup()
             return await self._inner_loop()
         except CancelledByToken as exc:
+            return await self._terminate(
+                FinalOutcome.CANCELLED, exc.reason or "cancelled"
+            )
+        except UserCancelledError as exc:
+            # RC-5 S5: ``UserCancelledError`` is a plain ``Exception``
+            # subclass (``openakita.agent.errors``), so neither the
+            # cooperative ``CancelledByToken`` arm above nor the
+            # ``asyncio.CancelledError`` arm below catches it. It bubbles up
+            # from the deep LLM path (``LLMClient.chat(cancel_event=...)``
+            # raising on a user "stop") through ``emit_progress_ledger`` /
+            # ``deliver``. Absorb it into a clean ``cancelled`` terminal
+            # checkpoint so the command stays resumable instead of crashing
+            # with an uncaught exception.
             return await self._terminate(
                 FinalOutcome.CANCELLED, exc.reason or "cancelled"
             )
@@ -544,6 +606,9 @@ class Supervisor:
                 )
             except CancelledByToken:
                 raise
+            # RC-5 S1 (gap⑤): retain the real node deliverable so the next
+            # turn's progress ledger can be judged from concrete outputs.
+            self.delegation_history.append(result)
             await self.stream.emit(
                 "updates",
                 "delegation_result",
@@ -571,6 +636,7 @@ class Supervisor:
                 facts=self.task_ledger.facts,
                 plan=self.task_ledger.plan,
                 history=list(self.history),
+                recent_outputs=list(self.delegation_history),
                 cancel_event=self._cancel_event,
             )
             try:

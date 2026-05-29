@@ -80,6 +80,7 @@ class DegenerateSupervisorBrain(SupervisorBrain):
         facts: str,
         plan: str,
         history: list[ProgressLedger],
+        recent_outputs: list[Any] | None = None,  # noqa: ARG002 -- protocol shape (RC-5 S1)
         cancel_event: asyncio.Event | None = None,  # noqa: ARG002 -- protocol shape
     ) -> str:
         payload: dict[str, Any] = {
@@ -157,6 +158,7 @@ class PassThroughSupervisorBrain(SupervisorBrain):
         facts: str,
         plan: str,
         history: list[ProgressLedger],
+        recent_outputs: list[Any] | None = None,  # noqa: ARG002 -- protocol shape (RC-5 S1)
         cancel_event: asyncio.Event | None = None,  # noqa: ARG002 -- protocol shape
     ) -> str:
         turn_index = len(history)
