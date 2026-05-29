@@ -1209,8 +1209,41 @@ class OrgCommandService:
                 node_directory = self._build_node_directory(org_id)
                 if node_directory:
                     kwargs["node_directory"] = node_directory
+                # RC-conv: only the real LLM-orchestration path opts into the
+                # tighter convergence budgets + wall-clock soft landing. The
+                # passthrough single-shot path keeps the factory defaults
+                # (byte-for-byte unchanged). Config read is defensive: any
+                # failure leaves the factory defaults in place.
+                self._apply_convergence_budget(kwargs)
 
         return factory(**kwargs)
+
+    @staticmethod
+    def _apply_convergence_budget(kwargs: dict[str, Any]) -> None:
+        """Inject the LLM-path convergence budgets + soft ceiling into kwargs.
+
+        RC-conv: aligns ``max_turns`` / ``max_replans`` / ``max_stalls`` so the
+        graceful terminals are reachable inside the wall clock, and derives the
+        self-imposed ``wall_clock_soft_budget_s`` from
+        ``supervisor_hard_ceiling_s * orgs_supervisor_soft_ceiling_ratio`` so
+        the supervisor degrades gracefully (with a deliverable) *before* the
+        external hard ceiling force-cancels it into a bare ``status=error``.
+        """
+        try:
+            from openakita.config import settings as _settings
+
+            kwargs["max_turns"] = int(getattr(_settings, "orgs_supervisor_max_turns", 12) or 12)
+            kwargs["max_replans"] = int(getattr(_settings, "orgs_supervisor_max_replans", 2) or 2)
+            kwargs["max_stalls"] = int(getattr(_settings, "orgs_supervisor_max_stalls", 3) or 3)
+            ceiling = int(getattr(_settings, "supervisor_hard_ceiling_s", 0) or 0)
+            ratio = float(getattr(_settings, "orgs_supervisor_soft_ceiling_ratio", 0.8) or 0.0)
+            if ceiling > 0 and ratio > 0:
+                kwargs["wall_clock_soft_budget_s"] = float(ceiling) * ratio
+        except Exception:  # noqa: BLE001 -- config must never break submit
+            logger.debug(
+                "[OrgCmd] convergence budget read failed; using factory defaults",
+                exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # RC-5 S3: org-gated LLM orchestration brain wiring
@@ -1723,13 +1756,25 @@ class OrgCommandService:
             try:
                 from openakita.runtime.supervisor import FinalOutcome, SupervisorOutcome
 
+                # RC-conv: even on the hard-ceiling fallback, salvage whatever
+                # concrete output the run produced so the command can degrade
+                # to a "completed-with-partial-result" instead of a bare error.
+                try:
+                    ceiling_deliverable = supervisor.best_effort_deliverable()
+                except Exception:  # noqa: BLE001 -- never block the cleanup path
+                    ceiling_deliverable = ""
                 synthetic = SupervisorOutcome(
                     outcome=FinalOutcome.FAILED,
-                    final_message="supervisor hard ceiling exceeded",
+                    final_message=(
+                        f"supervisor hard ceiling exceeded\n\n{ceiling_deliverable}"
+                        if ceiling_deliverable
+                        else "supervisor hard ceiling exceeded"
+                    ),
                     final_checkpoint_id=getattr(supervisor, "last_checkpoint_id", None),
                     n_turns=int(getattr(getattr(supervisor, "stall_detector", None), "n_turns", 0) or 0),
                     n_replans=int(getattr(supervisor, "n_replans", 0) or 0),
                     reason="hard_ceiling",
+                    deliverable=ceiling_deliverable,
                 )
                 self._reflect_supervisor_outcome(command_id, supervisor, synthetic)
             except Exception:  # noqa: BLE001 -- never block the cleanup path
@@ -1929,18 +1974,35 @@ class OrgCommandService:
         n_replans = int(getattr(outcome, "n_replans", 0) or 0)
         final_cp = getattr(outcome, "final_checkpoint_id", None)
         final_msg = getattr(outcome, "final_message", "") or ""
+        deliverable = str(getattr(outcome, "deliverable", "") or "")
 
+        # RC-conv (优雅降级): OUT_OF_TURNS / REPLAN_BUDGET_EXHAUSTED are budget
+        # exits, not crashes. When the run actually produced a usable
+        # deliverable we surface a "completed-with-partial-result" instead of a
+        # bare ``status=error`` with no output -- the worst UX. Only when there
+        # is genuinely nothing to show do we fall back to the error state.
+        graceful_partial = bool(deliverable.strip())
         if outcome_value == FinalOutcome.DONE.value:
             status, phase, error = "done", "done", None
         elif outcome_value == FinalOutcome.CANCELLED.value:
             status, phase, error = "cancelled", "cancelled", None
-        elif outcome_value in (
-            FinalOutcome.FAILED.value,
-            FinalOutcome.REPLAN_BUDGET_EXHAUSTED.value,
-        ):
-            status, phase, error = "error", "error", final_msg or outcome_value
         elif outcome_value == FinalOutcome.OUT_OF_TURNS.value:
-            status, phase, error = "error", "out_of_turns", final_msg or outcome_value
+            if graceful_partial:
+                status, phase, error = "done", "partial", None
+            else:
+                status, phase, error = "error", "out_of_turns", final_msg or outcome_value
+        elif outcome_value == FinalOutcome.REPLAN_BUDGET_EXHAUSTED.value:
+            if graceful_partial:
+                status, phase, error = "done", "partial", None
+            else:
+                status, phase, error = "error", "error", final_msg or outcome_value
+        elif outcome_value == FinalOutcome.FAILED.value:
+            # hard-ceiling / hard failure: still surface a partial deliverable
+            # if the run managed to produce one before being force-cancelled.
+            if graceful_partial:
+                status, phase, error = "done", "partial", None
+            else:
+                status, phase, error = "error", "error", final_msg or outcome_value
         else:
             status, phase, error = "done", "done", None
 
@@ -1951,6 +2013,8 @@ class OrgCommandService:
             phase=phase,
             result={
                 "final_message": final_msg,
+                "deliverable": deliverable,
+                "partial": (phase == "partial"),
                 "n_turns": n_turns,
                 "n_replans": n_replans,
                 "final_checkpoint_id": final_cp,

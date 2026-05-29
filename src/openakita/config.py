@@ -1027,6 +1027,44 @@ class Settings(BaseSettings):
             "充足窗口。0 表示禁用 graceful 窗口直接强杀。"
         ),
     )
+    # RC-conv (组织编排收敛预算 + 软着陆)：真编排 LLMSupervisorBrain 路径下的
+    # 收敛预算。原先 _build_supervisor 不传这些值 → 走 factory 默认 max_turns=30，
+    # 而真编排每 turn ~30-50s，900s 硬上限会在 ~18 turn 时先于 turn 上限触发，
+    # 导致 OUT_OF_TURNS / REPLAN_BUDGET_EXHAUSTED 这两条“优雅终止”路径在真实
+    # 运行中根本不可达，唯一可达终止是 hard ceiling → status=error 且无产出。
+    # 这里把预算压到能在硬上限内优雅收尾的量级（仅作用于 LLM 编排脑路径；
+    # passthrough 单发路径不受影响）。
+    orgs_supervisor_max_turns: int = Field(
+        default=12,
+        description=(
+            "LLM 编排脑路径下 Supervisor 内层循环的硬 turn 上限。真编排每 turn 含"
+            "一次编排脑 LLM + 一次节点运行，约 30-50s；设 12 让最坏情形 ~600s 内"
+            "经 OUT_OF_TURNS 优雅收尾（带产出），远小于 900s 硬上限。会被 S0 clamp "
+            "抬升到 max_stalls*(max_replans+2) 以保证 replan 预算可达。"
+        ),
+    )
+    orgs_supervisor_max_replans: int = Field(
+        default=2,
+        description=(
+            "LLM 编排脑路径下外层循环 replan 预算。配合 max_turns=12 / max_stalls=3，"
+            "min_turns = max_stalls*(max_replans+2)=12，正好不被 clamp 抬高。"
+        ),
+    )
+    orgs_supervisor_max_stalls: int = Field(
+        default=3,
+        description=(
+            "LLM 编排脑路径下 StallDetector 触发 REPLAN 的累计 stall 阈值。"
+        ),
+    )
+    orgs_supervisor_soft_ceiling_ratio: float = Field(
+        default=0.8,
+        description=(
+            "软着陆比例：Supervisor 自管墙钟软预算 = supervisor_hard_ceiling_s * 该比例。"
+            "超过软预算时 Supervisor 在下一 turn 前主动以 OUT_OF_TURNS 优雅收尾并带出"
+            "当前最佳产出，避免被外层 hard ceiling 强杀成无产出的 status=error。"
+            "0 表示禁用软着陆（回退到仅靠 turn 上限 + 硬上限）。仅作用于 LLM 编排脑路径。"
+        ),
+    )
 
     @field_validator("runtime_v2_canary_orgs", mode="before")
     @classmethod

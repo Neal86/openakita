@@ -338,8 +338,11 @@ async def test_s2_progress_prompt_contains_convergence_rules() -> None:
     prompt = client.user_by_role["progress_ledger"][0]
     # The {outputs} block placeholder header is present.
     assert "=== ACTUAL OUTPUTS" in prompt
-    # The three explicit convergence Decision rules are fixed into the prompt.
+    # The explicit convergence Decision rules are fixed into the prompt.
     assert "Decision rules" in prompt
-    assert "is_request_satisfied = true ONLY IF" in prompt
+    # RC-conv: good-enough / best-effort satisfaction wording (replaces the
+    # original strict "ONLY IF ... fully and concretely satisfy every part").
+    assert "is_request_satisfied = true when" in prompt
+    assert "good-enough" in prompt
     assert "is_progress_being_made = false" in prompt
     assert "is_in_loop = true" in prompt

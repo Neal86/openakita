@@ -324,6 +324,7 @@ def build_supervisor_for_command(
     max_turns: int = 30,
     max_replans: int = 5,
     progress_ledger_max_retries: int = 10,
+    wall_clock_soft_budget_s: float = 0.0,
 ) -> Supervisor:
     """Build a fully-wired :class:`Supervisor` for one user command.
 
@@ -431,6 +432,7 @@ def build_supervisor_for_command(
         max_turns=max_turns,
         max_replans=max_replans,
         progress_ledger_max_retries=progress_ledger_max_retries,
+        wall_clock_soft_budget_s=wall_clock_soft_budget_s,
     )
 
 

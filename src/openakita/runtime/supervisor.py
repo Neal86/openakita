@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -74,6 +75,12 @@ class SupervisorOutcome:
     n_turns: int
     n_replans: int
     reason: str = ""
+    # RC-conv: the best-effort concrete deliverable assembled from the real
+    # node outputs (``delegation_history``). On DONE this is the produced
+    # content; on the graceful-degradation terminals (OUT_OF_TURNS /
+    # REPLAN_BUDGET_EXHAUSTED) it is the best partial result so the command
+    # surfaces something useful instead of a bare "ran out of budget" reason.
+    deliverable: str = ""
 
     def to_jsonable(self) -> dict[str, Any]:
         return {
@@ -83,6 +90,7 @@ class SupervisorOutcome:
             "n_turns": self.n_turns,
             "n_replans": self.n_replans,
             "reason": self.reason,
+            "deliverable": self.deliverable,
         }
 
 
@@ -226,6 +234,10 @@ class Supervisor:
         max_turns: int = 30,
         max_replans: int = 5,
         progress_ledger_max_retries: int = 10,
+        wall_clock_soft_budget_s: float = 0.0,
+        deliver_includes_recent_outputs: bool = True,
+        recent_output_window: int = 4,
+        recent_output_char_cap: int = 2400,
     ) -> None:
         self.command_id = command_id
         self.org_id = org_id
@@ -299,6 +311,23 @@ class Supervisor:
         # :meth:`run` skips the outer-loop setup and dives straight
         # into the inner loop with restored history.
         self._resumed: bool = False
+        # RC-conv (graceful degradation): self-imposed wall-clock budget that
+        # fires *before* the external ``supervisor_hard_ceiling_s`` so the
+        # supervisor terminates itself gracefully (with a best-effort
+        # deliverable) instead of being force-cancelled into a bare
+        # ``status=error``. <= 0 disables (tests + opt-out keep old behaviour).
+        self._wall_clock_soft_budget_s = float(wall_clock_soft_budget_s or 0.0)
+        self._start_monotonic: float | None = None
+        # RC-conv (context回灌给节点): whether the delegated ``content`` carries
+        # an inline copy of the most-recent peer node outputs. The brain feeds
+        # outputs into its own convergence prompt (gap⑤), but a node is
+        # activated in a *fresh* conversation -- without this it never sees the
+        # "Output N above" the brain's instruction references, so it
+        # hallucinates "missing file / paste the data" and the org spins until
+        # the wall clock. See the v* convergence RCA.
+        self._deliver_includes_recent_outputs = bool(deliver_includes_recent_outputs)
+        self._recent_output_window = max(1, int(recent_output_window))
+        self._recent_output_char_cap = max(200, int(recent_output_char_cap))
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -327,6 +356,7 @@ class Supervisor:
         # this module is fully loaded, so the import resolves cleanly.
         from ..agent.errors import UserCancelledError
 
+        self._start_monotonic = time.monotonic()
         if self._resumed:
             await self._emit_lifecycle(
                 "resumed",
@@ -539,6 +569,22 @@ class Supervisor:
         while True:
             self.cancel_token.raise_if_cancelled()
 
+            # RC-conv: graceful self-termination before the external hard
+            # ceiling. We check *before* starting another (expensive) turn so
+            # the supervisor unwinds with a best-effort deliverable instead of
+            # being force-cancelled into ``status=error`` at the wall clock.
+            if self._soft_budget_exceeded():
+                elapsed = self._elapsed_s()
+                return await self._terminate(
+                    FinalOutcome.OUT_OF_TURNS,
+                    (
+                        f"wall-clock soft budget reached after {elapsed:.0f}s / "
+                        f"{self._wall_clock_soft_budget_s:.0f}s "
+                        f"({self.stall_detector.n_turns} turns); finishing "
+                        f"gracefully with the best result produced so far"
+                    ),
+                )
+
             progress = await self._emit_progress_ledger()
             self.history.append(progress)
             await self.stream.emit(
@@ -602,7 +648,9 @@ class Supervisor:
             )
             try:
                 result = await self.deliver(
-                    progress.next_speaker_name, progress.instruction, progress
+                    progress.next_speaker_name,
+                    self._compose_delegated_content(progress.instruction),
+                    progress,
                 )
             except CancelledByToken:
                 raise
@@ -621,6 +669,96 @@ class Supervisor:
                 org_id=self.org_id,
                 superstep=self.stall_detector.n_turns,
             )
+
+    # ------------------------------------------------------------------
+    # RC-conv: wall-clock soft budget + node context injection helpers
+    # ------------------------------------------------------------------
+
+    def _elapsed_s(self) -> float:
+        if self._start_monotonic is None:
+            return 0.0
+        return time.monotonic() - self._start_monotonic
+
+    def _soft_budget_exceeded(self) -> bool:
+        if self._wall_clock_soft_budget_s <= 0:
+            return False
+        # Never pre-empt before at least one real delegation has produced
+        # something; otherwise a misconfigured tiny budget would return an
+        # empty deliverable on turn 1.
+        if not self.delegation_history:
+            return False
+        return self._elapsed_s() >= self._wall_clock_soft_budget_s
+
+    def _compose_delegated_content(self, instruction: str) -> str:
+        """Append the most-recent peer node outputs to the delegated content.
+
+        RC-conv (context回灌给节点): the orchestration brain writes instructions
+        that reference prior deliverables ("use the report in Output 3
+        above"), but each node is activated in a *fresh* conversation and only
+        receives this ``content``. Without the actual outputs inlined the node
+        is blind to what its peers produced and hallucinates missing context.
+        We render the same bounded window of real ``DelegationResult`` records
+        the brain sees into the content so the node can build on them.
+        """
+        if not self._deliver_includes_recent_outputs or not self.delegation_history:
+            return instruction
+        recent = self.delegation_history[-self._recent_output_window :]
+        blocks: list[str] = []
+        for i, r in enumerate(recent, start=1):
+            if not getattr(r, "success", False):
+                continue
+            body = str(getattr(r, "message", "") or "").strip()
+            if not body:
+                continue
+            if len(body) > self._recent_output_char_cap:
+                body = body[: self._recent_output_char_cap] + "\n…（已截断）"
+            blocks.append(f"[Output {i}] 来自节点 {r.speaker!r} 的产出：\n{body}")
+        if not blocks:
+            return instruction
+        joined = "\n\n".join(blocks)
+        return (
+            f"{instruction}\n\n"
+            "=== 上游节点已产出的真实内容（请直接基于这些内容工作，"
+            "不要假设缺失、不要模拟搜索文件、不要要求用户重新粘贴） ===\n"
+            f"{joined}\n"
+            "=== 以上为可直接使用的上游产出 ==="
+        )
+
+    def _best_effort_deliverable(self) -> str:
+        """Assemble the best concrete deliverable from real node outputs.
+
+        Used to surface something useful on every terminal: the produced
+        content on DONE, and the best partial result on the graceful
+        degradation terminals. Prefers the most-recent *successful* output
+        (the org's pipeline funnels the synthesised result to the last
+        speaker); falls back to the longest successful output, then to the
+        last output of any kind.
+        """
+        if not self.delegation_history:
+            return ""
+        successes = [
+            r for r in self.delegation_history
+            if getattr(r, "success", False) and str(getattr(r, "message", "") or "").strip()
+        ]
+        chosen: DelegationResult | None = None
+        if successes:
+            last = successes[-1]
+            longest = max(successes, key=lambda r: len(str(r.message or "")))
+            # The last successful output is usually the synthesised final
+            # answer; only prefer a much longer earlier output when the last
+            # one is conspicuously thin (a one-liner ack).
+            chosen = last
+            if len(str(last.message or "")) < 200 <= len(str(longest.message or "")):
+                chosen = longest
+        elif self.delegation_history:
+            chosen = self.delegation_history[-1]
+        if chosen is None:
+            return ""
+        return str(getattr(chosen, "message", "") or "").strip()
+
+    def best_effort_deliverable(self) -> str:
+        """Public accessor for the hard-ceiling fallback in command_service."""
+        return self._best_effort_deliverable()
 
     # ------------------------------------------------------------------
     # Progress ledger acquisition with retry
@@ -768,11 +906,30 @@ class Supervisor:
         await self._emit_lifecycle(
             outcome.value, {"reason": reason, "n_turns": self.stall_detector.n_turns}
         )
+        # RC-conv: surface the concrete produced content on the terminals
+        # where a deliverable makes sense. DONE -> the produced answer;
+        # OUT_OF_TURNS / REPLAN_BUDGET_EXHAUSTED -> the best partial result so
+        # the command degrades gracefully into a "completed-with-output"
+        # instead of a bare reason string. CANCELLED / FAILED keep their reason
+        # unchanged.
+        deliverable = ""
+        if outcome in (
+            FinalOutcome.DONE,
+            FinalOutcome.OUT_OF_TURNS,
+            FinalOutcome.REPLAN_BUDGET_EXHAUSTED,
+        ):
+            deliverable = self._best_effort_deliverable()
+        final_message = reason
+        if deliverable and outcome is FinalOutcome.DONE:
+            final_message = deliverable
+        elif deliverable:
+            final_message = f"{reason}\n\n{deliverable}"
         return SupervisorOutcome(
             outcome=outcome,
-            final_message=reason,
+            final_message=final_message,
             final_checkpoint_id=cp_id,
             n_turns=self.stall_detector.n_turns,
             n_replans=self.n_replans,
             reason=reason,
+            deliverable=deliverable,
         )

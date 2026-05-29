@@ -145,14 +145,28 @@ Your own past progress assessments (most recent last):
 === ACTUAL OUTPUTS produced by the nodes so far (most recent last) ===
 These are the REAL deliverables each node has returned. Judge progress and
 satisfaction from THESE concrete outputs, not from optimism about future work.
+IMPORTANT: every node you delegate to ALSO receives these same upstream
+outputs inlined in its instruction. So a node has no excuse to claim "I don't
+see the data / the file is missing / please paste it again" -- the content is
+right there in front of it.
 
 {outputs}
 === end of actual outputs ===
 
 Decision rules (follow strictly):
-- is_request_satisfied = true ONLY IF the actual outputs above ALREADY fully
-  and concretely satisfy every part of the request. If so, we will finish
-  immediately and gracefully -- do NOT keep delegating busywork.
+- is_request_satisfied = true when the actual outputs above ALREADY cover the
+  substantive parts of the request well enough to hand back to the user. Aim
+  for a useful, good-enough deliverable -- do NOT hold out for an idealised
+  perfect version or keep delegating polish/busywork once the core ask is met.
+  When in doubt and the outputs already contain a concrete, usable result,
+  prefer finishing.
+- If a node's latest output is mostly a refusal / a complaint about missing
+  context / a request for the user to re-paste data that is ALREADY shown in
+  the outputs above, treat that as a node-side failure, NOT a real blocker:
+  set is_in_loop = true and either (a) re-instruct the SAME node to use the
+  inlined upstream outputs directly and produce the concrete deliverable now,
+  or (b) route to a different, more capable node. Do NOT keep repeating the
+  identical instruction to a node that is stuck.
 - If the request is impossible, self-contradictory, or under-specified such
   that no output can ever satisfy it, set is_progress_being_made = false and
   explain why in the reason; do NOT pretend optimistic progress.
