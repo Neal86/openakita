@@ -61,6 +61,18 @@ class Settings(BaseSettings):
             "默认 8s（足够 wework_ws/qqbot 走完正常 cancel；超过即视为已 hang）。"
         ),
     )
+    channels_ws_force_close_after_s: float = Field(
+        default=2.0,
+        ge=0.1,
+        le=10.0,
+        description=(
+            "Sprint 17 / v34 P1-A：长链 WS adapter（wework_ws / qqbot）stop() 内部"
+            "单个 cooperative await（connection_task / ws.close / webhook.close）的硬超时秒数。"
+            "超时后强制走 transport.close() 强关 socket，不再等待 close-frame ack。"
+            "默认 2.0s（v33 实测 wework_ws ws.close() ~4s 是当前 IM drain p50 2.71s 头号瓶颈；"
+            "改 2s 后预期单 adapter 砍 ~2s）。"
+        ),
+    )
     shutdown_force_exit_grace_s: int = Field(
         default=15,
         ge=0,
