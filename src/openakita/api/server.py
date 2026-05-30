@@ -817,6 +817,25 @@ def create_app(
     set_command_service(org_command_service)
     app.state.org_command_service = org_command_service
 
+    # B1 (audit data-contract gap): wire the per-org ProjectStore /
+    # OrgBlackboard / NodeScheduler registries. Pre-fix these were never
+    # attached to app.state, so GET /{id}/{projects,memory,tasks,...}
+    # all 503'd ("subsystem_not_wired") and the kanban / blackboard /
+    # project UI panels were permanently empty. The registries resolve
+    # the real per-org backend from the request path (see
+    # ``orgs_v2_runtime._get_project_store`` / ``_get_blackboard``), so
+    # org isolation is preserved. ``/_p97/health`` reports all_wired once
+    # these (plus the runtime status/node-status methods above) exist.
+    from openakita.orgs.scoped_subsystems import (
+        OrgScopedBlackboard,
+        OrgScopedProjectStore,
+        OrgScopedScheduler,
+    )
+
+    app.state.project_store = OrgScopedProjectStore(org_manager)
+    app.state.org_blackboard = OrgScopedBlackboard(org_manager)
+    app.state.node_scheduler = OrgScopedScheduler(org_manager)
+
     # Sprint-5 P0-2 (audit v5 §5.2 #1 + v15 §6.2.4 B6.4): wire the
     # lifecycle ``on_stop_org`` callback so ``POST /api/v2/orgs/{id}/stop``
     # cancels every per-org in-flight task instead of just flipping

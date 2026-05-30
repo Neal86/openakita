@@ -414,6 +414,9 @@ class OrgRuntime:
         if callable(register_tap):
             register_tap(self._persist_event_tap)
             register_tap(self._stream_event_tap)
+            # B2: bridge v2 dispatch events onto the legacy ``org:*`` WS
+            # channel so the React node graph animates in real time.
+            register_tap(self._ws_event_tap)
 
     # ------------------------------------------------------------------
     # OrgLookupProtocol delegation (Protocol satisfied via composition)
@@ -682,6 +685,72 @@ class OrgRuntime:
             "implementation": "sprint5_stub",
         }
 
+    # ------------------------------------------------------------------
+    # B1: org-level status snapshot + node-status mutators (P9.7 wiring).
+    # The /_p97/health probe expects ``get_status_snapshot`` /
+    # ``set_node_status`` / ``freeze_node`` to be callable before it
+    # reports the runtime subsystem "wired"; the GET /{id}/status route
+    # also depends on ``get_status_snapshot``.
+    # ------------------------------------------------------------------
+
+    def get_status_snapshot(self, org_id: str) -> dict[str, Any] | None:
+        """Compact org-level status envelope for ``GET /{id}/status``.
+
+        Reuses :meth:`get_stats` (single source of truth for the node
+        roster + live status buckets) and adds the org-level lifecycle
+        state. Returns ``None`` for an unknown org so the route 404s.
+        """
+        stats = self.get_stats(org_id)
+        if stats is None:
+            return None
+        try:
+            org_state = self._state.get_org_state(org_id)
+        except Exception:  # noqa: BLE001
+            org_state = None
+        return {
+            "org_id": org_id,
+            "name": stats.get("name", org_id),
+            "state": org_state,
+            "is_active": stats.get("is_active", False),
+            "health": stats.get("health", "healthy"),
+            "node_count": stats.get("node_count", 0),
+            "node_stats": stats.get("node_stats", {}),
+            "nodes": stats.get("per_node", []),
+        }
+
+    async def set_node_status(
+        self, org_id: str, node_id: str, new_status: str, *, reason: str | None = None
+    ) -> str | None:
+        """Set a node's live status via the lifecycle backend.
+
+        Returns the prior status string (best-effort). Also mirrors the
+        change onto the legacy ``org:node_status`` WebSocket event so the
+        node graph reflects manual freezes / resumes immediately.
+        """
+        prior: str | None = None
+        try:
+            prior = self._node_lifecycle.get_node_status(org_id, node_id)
+        except Exception:  # noqa: BLE001
+            prior = None
+        try:
+            await self._node_lifecycle.set_node_status(
+                org_id, node_id, new_status, reason=reason
+            )
+        except TypeError:
+            # Some lifecycle backends are sync / take no reason kwarg.
+            res = self._node_lifecycle.set_node_status(org_id, node_id, new_status)
+            if asyncio.iscoroutine(res):
+                await res
+        await self._broadcast_ws_safe(
+            "org:node_status",
+            {"org_id": org_id, "node_id": node_id, "status": new_status},
+        )
+        return prior
+
+    async def freeze_node(self, org_id: str, node_id: str, *, reason: str | None = None) -> str | None:
+        """Freeze a node (status -> ``frozen``)."""
+        return await self.set_node_status(org_id, node_id, "frozen", reason=reason or "freeze")
+
     def get_stats(self, org_id: str) -> dict[str, Any] | None:
         """A1 fix: real org runtime statistics for the dashboard.
 
@@ -718,9 +787,8 @@ class OrgRuntime:
             # static status field for nodes that never activated.
             status = "idle"
             try:
-                live = self._node_lifecycle.get_status(org_id, nid)
-                if live:
-                    status = str(live).lower()
+                live = self._node_lifecycle.get_node_status(org_id, nid)
+                status = str(live).lower() if live else str(_attr(n, "status", "idle") or "idle").lower()
             except Exception:  # noqa: BLE001
                 status = str(_attr(n, "status", "idle") or "idle").lower()
             # Normalise lifecycle vocab onto the 5 dashboard buckets.
@@ -960,6 +1028,88 @@ class OrgRuntime:
                 org_id,
                 exc,
             )
+
+    async def _broadcast_ws_safe(self, event: str, data: dict[str, Any]) -> None:
+        """Best-effort legacy ``org:*`` WebSocket broadcast.
+
+        Imports the API broadcaster lazily (the runtime layer must not
+        hard-depend on the FastAPI layer) and swallows every failure so
+        the dispatch loop is never poisoned by a missing/closed socket.
+        """
+        try:
+            from openakita.api.routes.websocket import broadcast_event
+
+            await broadcast_event(event, data)
+        except Exception:  # noqa: BLE001 -- WS is informational
+            _LOGGER.debug("OrgRuntime WS broadcast failed for %r", event, exc_info=True)
+
+    async def _ws_event_tap(self, event_name: str, payload: dict[str, Any]) -> None:
+        """B2 bridge: translate v2 dispatch/executor events into the legacy
+        ``org:*`` WebSocket events the React node graph + chat panel listen
+        for, and keep the per-node live status in sync.
+
+        Pre-fix the agent-pipeline executor only emitted ``agent_run_*`` /
+        ``subtask_assigned`` onto the in-memory bus (persisted + streamed
+        over SSE), but never onto the ``org:*`` WS channel the node graph
+        animates from -- so a running org looked frozen ("处理中…" with no
+        node movement, 图2). This tap closes that gap without touching the
+        executor: it observes the same events the persist/stream taps do.
+        """
+        if not isinstance(payload, dict):
+            return
+        org_id = payload.get("org_id")
+        if not isinstance(org_id, str) or not org_id:
+            return
+        node_id = payload.get("node_id")
+        parent = payload.get("parent_node_id")
+        child = payload.get("child_node_id")
+        preview = payload.get("content_preview")
+        try:
+            if event_name == "agent_run_started" and node_id:
+                # Reflect "busy" so both the graph and get_stats see it.
+                try:
+                    await self._node_lifecycle.set_node_status(org_id, node_id, "busy")
+                except Exception:  # noqa: BLE001
+                    pass
+                await self._broadcast_ws_safe(
+                    "org:node_status",
+                    {
+                        "org_id": org_id,
+                        "node_id": node_id,
+                        "status": "busy",
+                        "current_task": preview or "",
+                    },
+                )
+            elif event_name in ("agent_run_finished", "agent_run_failed", "agent_run_cancelled") and node_id:
+                try:
+                    await self._node_lifecycle.set_node_status(org_id, node_id, "idle")
+                except Exception:  # noqa: BLE001
+                    pass
+                await self._broadcast_ws_safe(
+                    "org:node_status",
+                    {"org_id": org_id, "node_id": node_id, "status": "idle"},
+                )
+                if event_name == "agent_run_finished":
+                    await self._broadcast_ws_safe(
+                        "org:task_complete", {"org_id": org_id, "node_id": node_id}
+                    )
+            elif event_name == "subtask_assigned":
+                await self._broadcast_ws_safe(
+                    "org:task_delegated",
+                    {
+                        "org_id": org_id,
+                        "from_node": parent or node_id or "",
+                        "to_node": child or node_id or "",
+                        "content": preview or "",
+                    },
+                )
+            elif event_name in ("command_done", "org_command_done"):
+                await self._broadcast_ws_safe(
+                    "org:command_done",
+                    {"org_id": org_id, "command_id": payload.get("command_id") or ""},
+                )
+        except Exception:  # noqa: BLE001 -- bridge must not poison dispatch
+            _LOGGER.debug("OrgRuntime ws tap failed for %r", event_name, exc_info=True)
 
 
 def get_runtime() -> OrgRuntime | None:

@@ -135,20 +135,36 @@ def _get_command_service(request: Request) -> Any:
     return svc
 
 
+def _scope_to_org(subsystem: Any, request: Request) -> Any:
+    """Resolve a per-org backend from a scoped registry.
+
+    The projects / blackboard routes call the store WITHOUT an org_id
+    (it is in the URL path), but the real backends are per-org. When the
+    wired instance is an ``OrgScoped*`` registry, resolve the concrete
+    per-org backend using the path ``org_id`` so org isolation holds.
+    Plain instances (e.g. injected test doubles) are returned as-is.
+    """
+    for_org = getattr(subsystem, "for_org", None)
+    org_id = request.path_params.get("org_id")
+    if callable(for_org) and org_id:
+        return for_org(org_id)
+    return subsystem
+
+
 def _get_blackboard(request: Request) -> Any:
-    """Lift ``OrgBlackboard`` (P9.1) off ``request.app.state``."""
+    """Lift the per-org ``OrgBlackboard`` (P9.1) for the request path org."""
     bb = getattr(request.app.state, "org_blackboard", None)
     if bb is None:
         raise _subsystem_unavailable("blackboard", "OrgBlackboard")
-    return bb
+    return _scope_to_org(bb, request)
 
 
 def _get_project_store(request: Request) -> Any:
-    """Lift ``ProjectStore`` (P9.2) off ``request.app.state``."""
+    """Lift the per-org ``ProjectStore`` (P9.2) for the request path org."""
     ps = getattr(request.app.state, "project_store", None)
     if ps is None:
         raise _subsystem_unavailable("project_store", "ProjectStore")
-    return ps
+    return _scope_to_org(ps, request)
 
 
 def _get_scheduler(request: Request) -> Any:
