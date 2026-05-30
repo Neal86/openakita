@@ -17,12 +17,15 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import secrets
+import time
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Protocol
 
 from ._runtime_agent_pipeline import (
     MAX_DISPATCH_DEPTH,
     ORG_STATE_PAUSED,
+    current_chain_id_var,
     current_command_id_var,
     dispatch_depth_var,
 )
@@ -37,6 +40,16 @@ if TYPE_CHECKING:
     from ._runtime_agent_pipeline import AgentCache, ProfileResolver
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _new_chain_id() -> str:
+    """Mint a unique-per-run chain id (``chain_<13ms>_<8hex>``).
+
+    Loosely chronological + collision-free within a millisecond, so the
+    delegation tree edges (``parent_chain_id`` -> ``chain_id``) stay
+    stable across the events.jsonl stream and the kanban task store.
+    """
+    return f"chain_{int(time.time() * 1000):013d}_{secrets.token_hex(4)}"
 
 
 _QUOTA_AUTH_HINTS: tuple[str, ...] = (
@@ -186,6 +199,8 @@ class AgentPipelineExecutor:
         unattended: bool = False,
         depth: int = 0,
         parent_node_id: str | None = None,
+        chain_id: str | None = None,
+        parent_chain_id: str | None = None,
         cancel_event: asyncio.Event | None = None,
     ) -> dict[str, Any]:
         """v1 ``_activate_and_run`` + ``_activate_and_run_inner`` parity.
@@ -232,11 +247,19 @@ class AgentPipelineExecutor:
         )
         if spec is None:
             return self._result("error", command_id, reason="profile_unresolved")
+        # Resolve this run's chain id. The root entry run (no chain
+        # passed in) mints a fresh one; a child run carries the chain
+        # ``dispatch_subtask`` minted for it. Stamped on every lifecycle
+        # event below so the kanban can rebuild the parent/child tree.
+        run_chain_id = chain_id or _new_chain_id()
         started_payload: dict[str, Any] = {
             "org_id": org_id,
             "node_id": node_id,
             "command_id": command_id,
+            "chain_id": run_chain_id,
         }
+        if parent_chain_id:
+            started_payload["parent_chain_id"] = parent_chain_id
         if depth:
             started_payload["depth"] = depth
         if parent_node_id:
@@ -252,6 +275,7 @@ class AgentPipelineExecutor:
                     "org_id": org_id,
                     "node_id": node_id,
                     "command_id": command_id,
+                    "chain_id": run_chain_id,
                     "reason": "agent_build_failed",
                     "error": str(exc),
                 },
@@ -273,6 +297,9 @@ class AgentPipelineExecutor:
         # left behind.
         depth_token = dispatch_depth_var.set(max(0, int(depth)))
         cid_token = current_command_id_var.set(str(command_id or ""))
+        # Expose THIS run's chain so a ``<dispatch>`` the agent emits is
+        # attributed to it as the child's ``parent_chain_id``.
+        chain_token = current_chain_id_var.set(run_chain_id)
         try:
             # Sprint-13 H1 (RC-4 §6 H1): forward ``cancel_event`` so
             # the agent's ``run`` (and through it
@@ -323,6 +350,7 @@ class AgentPipelineExecutor:
                 "org_id": org_id,
                 "node_id": node_id,
                 "command_id": command_id,
+                "chain_id": run_chain_id,
                 "reason": cancel_source or "user_cancel",
                 "cancelled_by": cancel_source or "user_cancel",
             }
@@ -342,6 +370,7 @@ class AgentPipelineExecutor:
                     "org_id": org_id,
                     "node_id": node_id,
                     "command_id": command_id,
+                    "chain_id": run_chain_id,
                     "reason": "agent_run_raised",
                     "error": str(exc),
                 },
@@ -350,6 +379,7 @@ class AgentPipelineExecutor:
         finally:
             dispatch_depth_var.reset(depth_token)
             current_command_id_var.reset(cid_token)
+            current_chain_id_var.reset(chain_token)
 
         # Sprint-4 P0-2: persist the artefact + memory summary BEFORE
         # emitting agent_run_finished so the event payload can carry
@@ -391,7 +421,10 @@ class AgentPipelineExecutor:
             "node_id": node_id,
             "command_id": command_id,
             "output_len": len(output_text),
+            "chain_id": run_chain_id,
         }
+        if parent_chain_id:
+            finished_payload["parent_chain_id"] = parent_chain_id
         if depth:
             finished_payload["depth"] = depth
         if parent_node_id:
@@ -476,19 +509,28 @@ class AgentPipelineExecutor:
             return f"[dispatch to `{target}` skipped: unknown node]"
 
         preview = body[:200]
-        await self._emit(
-            "subtask_assigned",
-            {
-                "org_id": org_id,
-                "command_id": parent_command_id,
-                "node_id": target,
-                "parent_node_id": parent_node_id,
-                "child_node_id": target,
-                "content_preview": preview,
-                "depth": next_depth,
-                "kind": "child_dispatch",
-            },
-        )
+        # Chain wiring: the parent's chain (set by its own
+        # ``activate_and_run``) becomes this edge's ``parent_chain_id``;
+        # the child run gets a freshly-minted chain that we both emit on
+        # ``subtask_assigned`` and thread into ``activate_and_run`` so the
+        # child's ``agent_run_*`` events carry the SAME chain. This lets
+        # the kanban link child task -> parent task by chain id exactly.
+        parent_chain_id = current_chain_id_var.get("") or None
+        child_chain_id = _new_chain_id()
+        subtask_payload: dict[str, Any] = {
+            "org_id": org_id,
+            "command_id": parent_command_id,
+            "node_id": target,
+            "parent_node_id": parent_node_id,
+            "child_node_id": target,
+            "content_preview": preview,
+            "depth": next_depth,
+            "kind": "child_dispatch",
+            "chain_id": child_chain_id,
+        }
+        if parent_chain_id:
+            subtask_payload["parent_chain_id"] = parent_chain_id
+        await self._emit("subtask_assigned", subtask_payload)
         # Mirror Sprint-3's entry-dispatch delegation log shape so
         # downstream log readers don't have to special-case child
         # entries. ``kind`` distinguishes the two so analyses that
@@ -504,6 +546,8 @@ class AgentPipelineExecutor:
                 "kind": "child_dispatch",
                 "depth": next_depth,
                 "content_preview": preview,
+                "chain_id": child_chain_id,
+                "parent_chain_id": parent_chain_id,
             }
         )
 
@@ -514,6 +558,8 @@ class AgentPipelineExecutor:
             command_id=parent_command_id,
             depth=next_depth,
             parent_node_id=parent_node_id,
+            chain_id=child_chain_id,
+            parent_chain_id=parent_chain_id,
             cancel_event=cancel_event,
         )
         return str(result.get("output") or "")

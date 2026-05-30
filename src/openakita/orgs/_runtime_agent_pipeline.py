@@ -90,6 +90,21 @@ thread it through ``agent.run(content)``. Children share the parent's
 command id by design: outcomes / cancellation / status are tracked at
 the user-command granularity, not per-node."""
 
+current_chain_id_var: ContextVar[str] = ContextVar(
+    "openakita_orgs_v2_chain_id", default=""
+)
+"""Per-run chain-id marker. Unlike ``current_command_id_var`` (shared
+by every node of one user command) this is UNIQUE per agent run, so a
+delegation tree can be reconstructed exactly: the root entry run mints
+a fresh chain id; :meth:`AgentPipelineExecutor.dispatch_subtask` reads
+the parent's chain off this var as ``parent_chain_id`` and mints a new
+chain for the child run. ``subtask_assigned`` carries both
+(``chain_id`` of the child + ``parent_chain_id`` of the dispatcher) and
+``agent_run_started/finished`` carry the run's own ``chain_id`` -- so
+the kanban (``OrgRuntime._contract_event_tap`` B5) can set
+``ProjectTask.parent_task_id`` precisely instead of guessing from the
+node id."""
+
 
 @dataclass
 class AgentSpec:
@@ -449,6 +464,7 @@ __all__ = [
     "AgentCache",
     "AgentSpec",
     "ProfileResolver",
+    "current_chain_id_var",
     "current_command_id_var",
     "dispatch_depth_var",
 ]

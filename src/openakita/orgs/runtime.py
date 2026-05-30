@@ -902,10 +902,10 @@ class OrgRuntime:
         created = _attr(org, "created_at", None)
         if isinstance(created, str) and created:
             try:
-                from datetime import datetime, timezone
+                from datetime import UTC, datetime
 
                 dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
-                uptime_s = max(0.0, datetime.now(timezone.utc).timestamp() - dt.timestamp())
+                uptime_s = max(0.0, datetime.now(UTC).timestamp() - dt.timestamp())
             except (ValueError, TypeError):
                 uptime_s = 0.0
 
@@ -1189,6 +1189,13 @@ class OrgRuntime:
         parent = payload.get("parent_node_id")
         child = payload.get("child_node_id")
         preview = (payload.get("content_preview") or "").strip()
+        # chain_id / parent_chain_id let us rebuild the exact delegation
+        # tree (see ``_runtime_agent_pipeline_executor``); both are
+        # additive event fields so older producers (no chain) fall back
+        # to the flat node-based mapping below.
+        chain_id = payload.get("chain_id") or None
+        parent_chain_id = payload.get("parent_chain_id") or None
+        ev_depth = int(payload.get("depth") or 0)
         try:
             if event_name == "subtask_assigned" and ps_registry is not None and child:
                 # B5: register the delegated subtask as a project task.
@@ -1197,6 +1204,17 @@ class OrgRuntime:
                 if pid:
                     from .project_models import ProjectTask, TaskStatus
 
+                    # Resolve the precise parent task via the dispatcher's
+                    # chain id; falls back to None (root task) when the
+                    # parent chain isn't registered yet / event lacks it.
+                    parent_task_id = None
+                    if parent_chain_id:
+                        try:
+                            ptask = ps.find_task_by_chain(parent_chain_id)
+                            if ptask is not None:
+                                parent_task_id = getattr(ptask, "id", None)
+                        except Exception:  # noqa: BLE001
+                            parent_task_id = None
                     task = ProjectTask(
                         project_id=pid,
                         title=(preview[:80] or f"{parent or '?'} -> {child}"),
@@ -1204,21 +1222,51 @@ class OrgRuntime:
                         status=TaskStatus.IN_PROGRESS,
                         assignee_node_id=child,
                         delegated_by=parent,
+                        chain_id=chain_id,
+                        parent_task_id=parent_task_id,
+                        depth=ev_depth,
                         started_at=None,
                     )
                     ps.add_task(pid, task)
             elif event_name == "agent_run_finished" and node_id:
                 output_len = int(payload.get("output_len") or 0)
                 artifact_path = payload.get("artifact_path")
-                # B5: close out the node's most recent in-progress task.
+                # Resolve the artifact name/size ONCE so every surface
+                # (task card / blackboard panel / command-center file card)
+                # shares an identical, download-ready contract. The three
+                # React consumers historically expect DIFFERENT key names:
+                #   * ProjectTask.file_attachments -> {filename,file_path,file_size}
+                #     (FileAttachmentCard's native ``FileAttachment`` shape)
+                #   * OrgBlackboardPanel entry.attachments -> {filename,path,size_bytes}
+                #   * OrgChatPanel ``org:blackboard_update`` -> filename + file_path|path
+                # so we emit BOTH path spellings + both size spellings to
+                # keep all three rendering the same downloadable file.
+                art_name = Path(str(artifact_path)).name if artifact_path else ""
+                art_size = 0
+                if artifact_path:
+                    try:
+                        art_size = Path(str(artifact_path)).stat().st_size
+                    except OSError:
+                        art_size = 0
+                # B5: close out this run's task. Prefer the EXACT task
+                # by chain id (precise tree); fall back to the node's
+                # most recent in-progress task for chain-less producers.
                 if ps_registry is not None:
                     ps = ps_registry.for_org(org_id)
                     try:
-                        open_tasks = [
-                            t
-                            for t in ps.all_tasks(assignee=node_id)
-                            if t.get("status") == "in_progress"
-                        ]
+                        open_tasks: list[dict[str, Any]] = []
+                        if chain_id:
+                            open_tasks = [
+                                t
+                                for t in ps.all_tasks(chain_id=chain_id)
+                                if t.get("status") == "in_progress"
+                            ]
+                        if not open_tasks:
+                            open_tasks = [
+                                t
+                                for t in ps.all_tasks(assignee=node_id)
+                                if t.get("status") == "in_progress"
+                            ]
                         if open_tasks:
                             t = open_tasks[-1]
                             updates: dict[str, Any] = {
@@ -1228,8 +1276,9 @@ class OrgRuntime:
                             if artifact_path:
                                 updates["file_attachments"] = [
                                     {
-                                        "filename": Path(str(artifact_path)).name,
+                                        "filename": art_name,
                                         "file_path": str(artifact_path),
+                                        "file_size": art_size,
                                     }
                                 ]
                             from .project_models import TaskStatus
@@ -1242,10 +1291,17 @@ class OrgRuntime:
                 if bb_registry is not None and (output_len or artifact_path):
                     attachments = None
                     if artifact_path:
+                        # ``path`` + ``size_bytes`` is the canonical blackboard
+                        # attachment shape (OrgBlackboardPanel reads exactly
+                        # those keys); ``file_path``/``file_size`` are added as
+                        # aliases so a raw FileAttachmentCard also works.
                         attachments = [
                             {
-                                "filename": Path(str(artifact_path)).name,
+                                "filename": art_name,
+                                "path": str(artifact_path),
                                 "file_path": str(artifact_path),
+                                "size_bytes": art_size,
+                                "file_size": art_size,
                             }
                         ]
                     content = (
@@ -1260,9 +1316,29 @@ class OrgRuntime:
                             tags=["deliverable"],
                             attachments=attachments,
                         )
+                        # B6: the command-center timeline renders a file card
+                        # only when the update advertises ``memory_type=resource``
+                        # + filename + path. Without these fields OrgChatPanel
+                        # fell through to a plain "blackboard updated" line and
+                        # the deliverable was never downloadable from chat.
+                        ws_payload: dict[str, Any] = {
+                            "org_id": org_id,
+                            "node_id": node_id,
+                        }
+                        if artifact_path:
+                            ws_payload.update(
+                                {
+                                    "memory_type": "resource",
+                                    "filename": art_name,
+                                    "file_path": str(artifact_path),
+                                    "path": str(artifact_path),
+                                    "file_size": art_size,
+                                    "size": art_size,
+                                }
+                            )
                         await self._broadcast_ws_safe(
                             "org:blackboard_update",
-                            {"org_id": org_id, "node_id": node_id},
+                            ws_payload,
                         )
                     except Exception:  # noqa: BLE001
                         _LOGGER.debug("contract: blackboard publish failed", exc_info=True)
