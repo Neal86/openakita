@@ -836,6 +836,14 @@ def create_app(
     app.state.org_blackboard = OrgScopedBlackboard(org_manager)
     app.state.node_scheduler = OrgScopedScheduler(org_manager)
 
+    # B4/B5/B6: hand the runtime the per-org project/blackboard registries
+    # so its contract-bridge event tap can persist delegated subtasks as
+    # kanban tasks and node deliverables as blackboard facts/resources.
+    org_runtime.set_contract_sinks(
+        project_store=app.state.project_store,
+        blackboard=app.state.org_blackboard,
+    )
+
     # Sprint-5 P0-2 (audit v5 §5.2 #1 + v15 §6.2.4 B6.4): wire the
     # lifecycle ``on_stop_org`` callback so ``POST /api/v2/orgs/{id}/stop``
     # cancels every per-org in-flight task instead of just flipping

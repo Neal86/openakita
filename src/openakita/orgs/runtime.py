@@ -410,6 +410,15 @@ class OrgRuntime:
         # ``: ping``). Duck-typed against ``add_tap`` so injected
         # bus implementations that don't support wildcard observation
         # silently skip the bridge instead of raising.
+        # B4/B5/B6 contract bridge sinks (set by the composition root via
+        # ``set_contract_sinks``). When wired, ``_contract_event_tap``
+        # turns the dispatch event stream into ProjectStore tasks +
+        # OrgBlackboard facts/resources so the kanban / blackboard /
+        # deliverable UI panels are populated from real runs.
+        self._contract_project_store: Any = None
+        self._contract_blackboard: Any = None
+        self._contract_project_by_org: dict[str, str] = {}
+
         register_tap = getattr(self._event_bus, "add_tap", None)
         if callable(register_tap):
             register_tap(self._persist_event_tap)
@@ -417,6 +426,19 @@ class OrgRuntime:
             # B2: bridge v2 dispatch events onto the legacy ``org:*`` WS
             # channel so the React node graph animates in real time.
             register_tap(self._ws_event_tap)
+            # B4/B5/B6: project/task + blackboard/resource persistence.
+            register_tap(self._contract_event_tap)
+
+    def set_contract_sinks(self, *, project_store: Any = None, blackboard: Any = None) -> None:
+        """Wire the per-org ProjectStore / OrgBlackboard registries.
+
+        The composition root calls this once after constructing the
+        ``OrgScoped*`` registries so the contract bridge tap can persist
+        structured product data (projects/tasks, blackboard facts and
+        deliverable resources) keyed by the org on each event.
+        """
+        self._contract_project_store = project_store
+        self._contract_blackboard = blackboard
 
     # ------------------------------------------------------------------
     # OrgLookupProtocol delegation (Protocol satisfied via composition)
@@ -1110,6 +1132,142 @@ class OrgRuntime:
                 )
         except Exception:  # noqa: BLE001 -- bridge must not poison dispatch
             _LOGGER.debug("OrgRuntime ws tap failed for %r", event_name, exc_info=True)
+
+    # ------------------------------------------------------------------
+    # B4/B5/B6 contract bridge: dispatch events -> projects/tasks +
+    # blackboard facts/resources. Synchronous file-backed stores are
+    # cheap to write; the whole tap is isolated (failures logged, never
+    # re-raised) so it can never poison the dispatch loop.
+    # ------------------------------------------------------------------
+
+    def _ensure_org_project(self, ps: Any, org_id: str) -> str | None:
+        """Return the per-org working project id, creating it once."""
+        cached = self._contract_project_by_org.get(org_id)
+        if cached is not None:
+            return cached
+        # Reuse an existing working project if one was created earlier
+        # (process restart resilience).
+        try:
+            for proj in ps.list_projects():
+                pid = proj.get("id") if isinstance(proj, dict) else getattr(proj, "id", None)
+                pname = proj.get("name") if isinstance(proj, dict) else getattr(proj, "name", "")
+                if pid and pname == "\u7ec4\u7ec7\u534f\u4f5c\u770b\u677f":
+                    self._contract_project_by_org[org_id] = pid
+                    return pid
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from .project_models import OrgProject, ProjectStatus, ProjectType
+
+            proj = OrgProject(
+                org_id=org_id,
+                name="\u7ec4\u7ec7\u534f\u4f5c\u770b\u677f",
+                description="\u7531\u7f16\u6392\u8fd0\u884c\u81ea\u52a8\u767b\u8bb0\u7684\u4efb\u52a1\u770b\u677f",
+                project_type=ProjectType.TEMPORARY,
+                status=ProjectStatus.ACTIVE,
+            )
+            created = ps.create_project(proj)
+            pid = created.get("id") if isinstance(created, dict) else getattr(created, "id", None)
+            if pid:
+                self._contract_project_by_org[org_id] = pid
+            return pid
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("contract: ensure_project failed for %s", org_id, exc_info=True)
+            return None
+
+    async def _contract_event_tap(self, event_name: str, payload: dict[str, Any]) -> None:
+        ps_registry = self._contract_project_store
+        bb_registry = self._contract_blackboard
+        if ps_registry is None and bb_registry is None:
+            return
+        if not isinstance(payload, dict):
+            return
+        org_id = payload.get("org_id")
+        if not isinstance(org_id, str) or not org_id:
+            return
+        node_id = payload.get("node_id")
+        parent = payload.get("parent_node_id")
+        child = payload.get("child_node_id")
+        preview = (payload.get("content_preview") or "").strip()
+        try:
+            if event_name == "subtask_assigned" and ps_registry is not None and child:
+                # B5: register the delegated subtask as a project task.
+                ps = ps_registry.for_org(org_id)
+                pid = self._ensure_org_project(ps, org_id)
+                if pid:
+                    from .project_models import ProjectTask, TaskStatus
+
+                    task = ProjectTask(
+                        project_id=pid,
+                        title=(preview[:80] or f"{parent or '?'} -> {child}"),
+                        description=preview,
+                        status=TaskStatus.IN_PROGRESS,
+                        assignee_node_id=child,
+                        delegated_by=parent,
+                        started_at=None,
+                    )
+                    ps.add_task(pid, task)
+            elif event_name == "agent_run_finished" and node_id:
+                output_len = int(payload.get("output_len") or 0)
+                artifact_path = payload.get("artifact_path")
+                # B5: close out the node's most recent in-progress task.
+                if ps_registry is not None:
+                    ps = ps_registry.for_org(org_id)
+                    try:
+                        open_tasks = [
+                            t
+                            for t in ps.all_tasks(assignee=node_id)
+                            if t.get("status") == "in_progress"
+                        ]
+                        if open_tasks:
+                            t = open_tasks[-1]
+                            updates: dict[str, Any] = {
+                                "status": "delivered",
+                                "progress_pct": 100,
+                            }
+                            if artifact_path:
+                                updates["file_attachments"] = [
+                                    {
+                                        "filename": Path(str(artifact_path)).name,
+                                        "file_path": str(artifact_path),
+                                    }
+                                ]
+                            from .project_models import TaskStatus
+
+                            updates["status"] = TaskStatus.DELIVERED
+                            ps.update_task(t.get("project_id"), t.get("id"), updates)
+                    except Exception:  # noqa: BLE001
+                        _LOGGER.debug("contract: task close failed", exc_info=True)
+                # B4 + B6: record a blackboard fact + downloadable resource.
+                if bb_registry is not None and (output_len or artifact_path):
+                    attachments = None
+                    if artifact_path:
+                        attachments = [
+                            {
+                                "filename": Path(str(artifact_path)).name,
+                                "file_path": str(artifact_path),
+                            }
+                        ]
+                    content = (
+                        f"\u8282\u70b9 {node_id} \u5b8c\u6210\u4ea4\u4ed8"
+                        f"\uff08{output_len} \u5b57\uff09"
+                    )
+                    try:
+                        bb_registry.publish(
+                            org_id,
+                            content,
+                            source_node=node_id,
+                            tags=["deliverable"],
+                            attachments=attachments,
+                        )
+                        await self._broadcast_ws_safe(
+                            "org:blackboard_update",
+                            {"org_id": org_id, "node_id": node_id},
+                        )
+                    except Exception:  # noqa: BLE001
+                        _LOGGER.debug("contract: blackboard publish failed", exc_info=True)
+        except Exception:  # noqa: BLE001 -- bridge must not poison dispatch
+            _LOGGER.debug("OrgRuntime contract tap failed for %r", event_name, exc_info=True)
 
 
 def get_runtime() -> OrgRuntime | None:
