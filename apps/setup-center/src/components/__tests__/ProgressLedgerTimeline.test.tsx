@@ -27,51 +27,62 @@ function ev(id: string, opts: EvOpts = {}): ProgressLedgerEvent {
 }
 
 describe("ProgressLedgerTimeline", () => {
-  it("renders an empty-state hint when no events are present", () => {
-    render(<ProgressLedgerTimeline events={[]} />);
-    expect(screen.getByText(/暂无进度记录/)).toBeInTheDocument();
+  it("renders nothing when no events are present (no permanent banner)", () => {
+    const { container } = render(<ProgressLedgerTimeline events={[]} />);
+    expect(container.querySelector('[data-testid="progress-ledger-timeline"]')).toBeNull();
   });
 
-  it("renders one card per event, newest first", () => {
+  it("groups consecutive same-node events into one segment, chronological order", () => {
     const events: ProgressLedgerEvent[] = [
       ev("1", { next_speaker: "alpha", is_progress_being_made: true }),
       ev("2", { next_speaker: "beta", is_progress_being_made: true }),
-      ev("3", { next_speaker: "gamma", is_progress_being_made: true }),
+      ev("3", { next_speaker: "beta", is_progress_being_made: true, instruction: "more" }),
+      ev("4", { next_speaker: "gamma", is_progress_being_made: true }),
     ];
     render(<ProgressLedgerTimeline events={events} />);
     const entries = screen.getAllByTestId("progress-ledger-entry");
+    // beta's two consecutive events collapse into one segment -> 3 segments.
     expect(entries).toHaveLength(3);
-    // First card should reflect the newest entry (id=3, gamma).
-    expect(entries[0]).toHaveTextContent("gamma");
-    expect(entries[2]).toHaveTextContent("alpha");
+    expect(entries[0]).toHaveTextContent("alpha");
+    expect(entries[1]).toHaveTextContent("beta");
+    expect(entries[2]).toHaveTextContent("gamma");
   });
 
-  it("derives the badge label from the boolean fields", () => {
+  it("renders Chinese status labels, not English badges", () => {
     const events: ProgressLedgerEvent[] = [
-      ev("a", { is_request_satisfied: true }),
-      ev("b", { is_in_loop: true }),
-      ev("c", { is_progress_being_made: true }),
-      ev("d"),
+      ev("a", { next_speaker: "n1", is_request_satisfied: true }),
+      ev("b", { next_speaker: "n2", is_in_loop: true }),
+      ev("c", { next_speaker: "n3", is_progress_being_made: true }),
+      ev("d", { next_speaker: "n4" }),
     ];
     render(<ProgressLedgerTimeline events={events} />);
-    expect(screen.getByTestId("progress-ledger-badge-done")).toBeInTheDocument();
-    expect(screen.getByTestId("progress-ledger-badge-loop")).toBeInTheDocument();
-    expect(screen.getByTestId("progress-ledger-badge-progress")).toBeInTheDocument();
-    expect(screen.getByTestId("progress-ledger-badge-stall")).toBeInTheDocument();
+    expect(screen.getByText("已完成")).toBeInTheDocument();
+    expect(screen.getByText("检测到循环")).toBeInTheDocument();
+    expect(screen.getByText("进行中")).toBeInTheDocument();
+    expect(screen.getByText("停滞")).toBeInTheDocument();
+    expect(screen.queryByText("DONE")).toBeNull();
   });
 
-  it("collapses old entries past initialVisible and toggles open", () => {
-    const events: ProgressLedgerEvent[] = Array.from({ length: 12 }).map((_, i) =>
-      ev(`e${i}`, { next_speaker: `n${i}` }),
+  it("maps raw node ids to display names via nodeNameOf", () => {
+    const events: ProgressLedgerEvent[] = [ev("1", { next_speaker: "writer-a" })];
+    render(
+      <ProgressLedgerTimeline
+        events={events}
+        nodeNameOf={(id) => (id === "writer-a" ? "文案写手A" : id)}
+      />,
     );
-    render(<ProgressLedgerTimeline events={events} initialVisible={5} />);
+    expect(screen.getByText("文案写手A")).toBeInTheDocument();
+  });
 
-    expect(screen.getAllByTestId("progress-ledger-entry")).toHaveLength(5);
-    const toggle = screen.getByTestId("progress-ledger-toggle");
-    expect(toggle).toHaveTextContent("展开剩余 7 条");
-
-    fireEvent.click(toggle);
-    expect(screen.getAllByTestId("progress-ledger-entry")).toHaveLength(12);
-    expect(screen.getByTestId("progress-ledger-toggle")).toHaveTextContent("收起");
+  it("collapses a completed segment to a summary and expands on click", () => {
+    const events: ProgressLedgerEvent[] = [
+      ev("1", { next_speaker: "alpha", instruction: "线索A", is_progress_being_made: true }),
+    ];
+    // running=false -> the segment is not the active one, so it starts collapsed.
+    render(<ProgressLedgerTimeline events={events} running={false} />);
+    const head = screen.getByText("alpha");
+    fireEvent.click(head);
+    // After expanding, the content line is shown in the lines area.
+    expect(screen.getAllByText("线索A").length).toBeGreaterThan(0);
   });
 });

@@ -2549,8 +2549,14 @@ export function OrgEditorView({
                 task_timeout:    { icon: "⏱", label: t("org.dashboard.feedTimeout"),  tip: t("org.dashboard.feedTimeoutTip"),  cls: "feed-timeout" },
                 task_completed:  { icon: "✓", label: t("org.dashboard.feedComplete"), tip: t("org.dashboard.feedCompleteTip"), cls: "feed-completed" },
                 node_activated:  { icon: "▶", label: t("org.dashboard.feedExecute"),  tip: t("org.dashboard.feedExecuteTip"),  cls: "feed-activated" },
+                // UI issue #3: these were missing, so a cancelled/failed task fell
+                // through to ``meta.label || t.type`` and rendered the RAW ENGLISH
+                // event type (e.g. "task_cancelled") in an otherwise-Chinese feed.
+                task_cancelled:  { icon: "⏹", label: t("org.dashboard.feedCancel"),   tip: t("org.dashboard.feedCancelTip"),   cls: "feed-rejected" },
+                task_failed:     { icon: "✗", label: t("org.dashboard.feedFailed"),   tip: t("org.dashboard.feedFailedTip"),   cls: "feed-rejected" },
               };
-              const defaultMeta = { icon: "•", label: "", tip: "", cls: "" };
+              // Chinese generic fallback so an unmapped type never leaks English.
+              const defaultMeta = { icon: "•", label: t("org.dashboard.feedEvent"), tip: "", cls: "" };
 
               const busyLines: { key: string; node: string; text: string; pct: number }[] = [];
               for (const n of perNode) {
@@ -2614,7 +2620,7 @@ export function OrgEditorView({
                         <span className="org-feed-time" title={fullTimeStr}>{timeStr}</span>
                         <span className={`org-feed-badge ${meta.cls}`} title={meta.tip}>
                           <span className="org-feed-badge-icon">{meta.icon}</span>
-                          {meta.label || t.type}
+                          {meta.label || t("org.dashboard.feedEvent")}
                         </span>
                         <span className="org-feed-who">{fromLabel}</span>
                         {toLabel && <>

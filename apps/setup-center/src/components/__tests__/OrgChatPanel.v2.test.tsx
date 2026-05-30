@@ -78,7 +78,9 @@ describe("OrgChatPanel v1/v2 dispatch", () => {
       "org_v2",
       { apiBase: "http://test" },
     );
-    expect(screen.getByTestId("ocp-v2-timeline")).toBeInTheDocument();
+    // The live-process feed now lives inside the message column and only
+    // appears once there is at least one event (no permanent empty banner).
+    expect(screen.queryByTestId("ocp-v2-timeline")).toBeNull();
 
     // Drive a progress_ledger event through the captured handler
     // and assert the timeline renders the new entry.
@@ -93,6 +95,7 @@ describe("OrgChatPanel v1/v2 dispatch", () => {
         instruction_or_question: "draft synopsis",
       });
     });
+    expect(screen.getByTestId("ocp-v2-timeline")).toBeInTheDocument();
     expect(screen.getByText("writer")).toBeInTheDocument();
     expect(screen.getByText("draft synopsis")).toBeInTheDocument();
   });

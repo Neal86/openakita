@@ -1,8 +1,5 @@
 ﻿import { useMemo, useState } from "react";
 
-import { Badge } from "./ui/badge";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
-
 /**
  * One progress-ledger entry, mirroring the payload shape the v2
  * supervisor emits on the ``progress_ledger`` channel (ADR-0006
@@ -25,7 +22,7 @@ export interface ProgressLedgerEvent {
   is_in_loop: boolean;
   /** Whether forward progress was made this turn. */
   is_progress_being_made: boolean;
-  /** Next-speaker hint from the supervisor (node role). */
+  /** Next-speaker hint from the supervisor (node role / id / name). */
   next_speaker: string;
   /** Verbatim instruction the supervisor will hand to next_speaker. */
   instruction_or_question: string;
@@ -34,112 +31,166 @@ export interface ProgressLedgerEvent {
 export interface ProgressLedgerTimelineProps {
   /** Newest-last sequence of ledger entries. */
   events: ProgressLedgerEvent[];
-  /** How many entries to show before the "expand" toggle (default 10). */
-  initialVisible?: number;
+  /** Resolve a raw node id/role to a human (Chinese) display name. */
+  nodeNameOf?: (id: string) => string;
+  /** Whether a command is still running (drives the live pulse). */
+  running?: boolean;
   /** Optional ``data-testid`` for the outer container. */
   "data-testid"?: string;
 }
 
-interface BadgeStyle {
-  variant: "default" | "secondary" | "destructive" | "outline";
-  label: string;
+type SegStatus = "running" | "done" | "loop" | "stall";
+
+interface Segment {
+  key: string;
+  node: string;
+  lines: string[];
+  status: SegStatus;
+  satisfied: boolean;
+  ts: string;
 }
 
-function progressBadge(ev: ProgressLedgerEvent): BadgeStyle {
-  if (ev.is_request_satisfied) return { variant: "default", label: "DONE" };
-  if (ev.is_in_loop) return { variant: "destructive", label: "LOOP" };
-  if (ev.is_progress_being_made) return { variant: "default", label: "PROGRESS" };
-  return { variant: "secondary", label: "STALL" };
+// UI issue #3: the old component rendered English status pills
+// (DONE/LOOP/PROGRESS/STALL). The whole product runs in Chinese, so the
+// process log must be Chinese too. These are the user-facing labels.
+const STATUS_LABEL: Record<SegStatus, string> = {
+  running: "进行中",
+  done: "已完成",
+  loop: "检测到循环",
+  stall: "停滞",
+};
+
+const STATUS_CLASS: Record<SegStatus, string> = {
+  running: "plt-pill plt-pill-running",
+  done: "plt-pill plt-pill-done",
+  loop: "plt-pill plt-pill-loop",
+  stall: "plt-pill plt-pill-stall",
+};
+
+function fmtTs(ts: string): string {
+  if (!ts) return "";
+  // Accept ISO strings and epoch numbers alike.
+  const d = /^\d+$/.test(ts) ? new Date(Number(ts)) : new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts.slice(11, 19);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 /**
- * Render a v2 ``progress_ledger`` channel as a vertical timeline.
+ * Render the v2 live-process feed as a connected, conversational timeline.
  *
- * Visual: one shadcn Card per entry, newest first; "DONE" / "LOOP" /
- * "PROGRESS" / "STALL" badge derived from the boolean fields. Old
- * entries collapse below ``initialVisible`` (default 10) and a
- * "展开/收起" toggle reveals the full history.
+ * Redesign (exploratory testing v12): the previous version rendered one big
+ * shadcn Card per ledger entry with English badges and "(尚未指定)/(无指令)"
+ * placeholders, sitting in a detached strip above the chat — the "大白块 +
+ * 割裂 + 英文" the user reported. This version:
+ *
+ *  * groups consecutive events by node into ONE segment (a node's whole turn
+ *    is a single bubble, not N cards),
+ *  * shows each node's actual content lines (not just an action verb),
+ *  * auto-collapses every COMPLETED node to a one-line summary (click to
+ *    expand) and keeps only the active node expanded with a live pulse,
+ *  * is fully Chinese, and
+ *  * renders NOTHING when there are no meaningful events, so the old
+ *    "暂无进度记录…" banner never sits permanently above a finished task.
+ *
+ * It is meant to live INSIDE the message scroll column (not a bounded strip),
+ * so the command center reads as a single conversation that scrolls as one.
  */
 export function ProgressLedgerTimeline({
   events,
-  initialVisible = 10,
+  nodeNameOf,
+  running = false,
   ...rest
 }: ProgressLedgerTimelineProps) {
-  const [expanded, setExpanded] = useState(false);
+  const [openKeys, setOpenKeys] = useState<Record<string, boolean>>({});
 
-  // UI issue #2: drop "empty shell" entries that have neither a next-speaker
-  // nor an instruction. Those rendered as large blank "(尚未指定)/(无指令)"
-  // cards and were the bulk of the "大白块" clutter the user reported.
-  const meaningful = useMemo(
-    () =>
-      events.filter(
-        (e) =>
-          (e.next_speaker && e.next_speaker.trim()) ||
-          (e.instruction_or_question && e.instruction_or_question.trim()) ||
-          e.is_request_satisfied,
-      ),
-    [events],
-  );
-
-  const reversed = useMemo(() => [...meaningful].reverse(), [meaningful]);
-  const visibleCount = expanded ? reversed.length : initialVisible;
-  const visible = reversed.slice(0, visibleCount);
-  const hidden = reversed.length - visible.length;
-
-  if (meaningful.length === 0) {
-    return (
-      <div
-        className="text-sm text-muted-foreground"
-        data-testid={rest["data-testid"] ?? "progress-ledger-timeline"}
-      >
-        暂无进度记录。等待 v2 supervisor 发出第一条 ``progress_ledger`` 事件…
-      </div>
+  const segments = useMemo<Segment[]>(() => {
+    const resolve = (id: string) => (nodeNameOf ? nodeNameOf(id) : id) || id;
+    // Drop empty-shell entries (no speaker AND no instruction AND not a
+    // terminal "satisfied" marker) — those were the bulk of the "大白块".
+    const meaningful = events.filter(
+      (e) =>
+        (e.next_speaker && e.next_speaker.trim()) ||
+        (e.instruction_or_question && e.instruction_or_question.trim()) ||
+        e.is_request_satisfied,
     );
-  }
+    const segs: Segment[] = [];
+    for (const e of meaningful) {
+      const node = resolve((e.next_speaker || "").trim()) || "协调";
+      const line = (e.instruction_or_question || "").trim();
+      const last = segs[segs.length - 1];
+      let status: SegStatus = "running";
+      if (e.is_request_satisfied) status = "done";
+      else if (e.is_in_loop) status = "loop";
+      else if (!e.is_progress_being_made) status = "stall";
+      if (last && last.node === node && !last.satisfied) {
+        if (line && !last.lines.includes(line)) last.lines.push(line);
+        last.status = status;
+        last.satisfied = last.satisfied || e.is_request_satisfied;
+        last.ts = e.ts || last.ts;
+      } else {
+        segs.push({
+          key: e.id,
+          node,
+          lines: line ? [line] : [],
+          status,
+          satisfied: e.is_request_satisfied,
+          ts: e.ts,
+        });
+      }
+    }
+    return segs;
+  }, [events, nodeNameOf]);
+
+  if (segments.length === 0) return null;
+
+  const lastIdx = segments.length - 1;
 
   return (
-    <div
-      className="flex flex-col gap-2"
-      data-testid={rest["data-testid"] ?? "progress-ledger-timeline"}
-    >
-      {visible.map((ev) => {
-        const badge = progressBadge(ev);
+    <div className="plt-feed" data-testid={rest["data-testid"] ?? "progress-ledger-timeline"}>
+      {segments.map((seg, idx) => {
+        const isActive = running && idx === lastIdx && seg.status === "running";
+        // Active node stays open; completed nodes collapse to one line unless
+        // the user explicitly expanded them.
+        const open = openKeys[seg.key] ?? isActive;
+        const summary = seg.lines[seg.lines.length - 1] || STATUS_LABEL[seg.status];
         return (
-          <Card key={ev.id} data-testid="progress-ledger-entry">
-            <CardHeader className="flex flex-row items-center justify-between gap-2 py-2">
-              <CardTitle className="text-sm font-medium">
-                {ev.next_speaker || "(尚未指定)"}
-              </CardTitle>
-              <div className="flex items-center gap-2">
-                <Badge
-                  variant={badge.variant}
-                  data-testid={`progress-ledger-badge-${badge.label.toLowerCase()}`}
-                >
-                  {badge.label}
-                </Badge>
-                <CardDescription className="text-xs">
-                  {ev.ts.slice(0, 19).replace("T", " ")}
-                </CardDescription>
-              </div>
-            </CardHeader>
-            <CardContent className="text-sm py-2">
-              {ev.instruction_or_question || (
-                <span className="text-muted-foreground">(无指令)</span>
+          <div
+            key={seg.key}
+            className={`plt-seg${isActive ? " plt-seg-active" : ""}`}
+            data-testid="progress-ledger-entry"
+          >
+            <div className={`plt-rail${isActive ? " plt-rail-active" : ""}`}>
+              <span className={`plt-dot plt-dot-${seg.status}${isActive ? " plt-dot-pulse" : ""}`} />
+            </div>
+            <div className="plt-body">
+              <button
+                type="button"
+                className="plt-head"
+                onClick={() => setOpenKeys((p) => ({ ...p, [seg.key]: !open }))}
+              >
+                <span className="plt-node">{seg.node}</span>
+                <span className={STATUS_CLASS[seg.status]}>{STATUS_LABEL[seg.status]}</span>
+                <span className="plt-time">{fmtTs(seg.ts)}</span>
+                {seg.lines.length > 0 && (
+                  <span className="plt-caret">{open ? "▾" : "▸"}</span>
+                )}
+              </button>
+              {open ? (
+                seg.lines.length > 0 && (
+                  <div className="plt-lines">
+                    {seg.lines.map((ln, i) => (
+                      <div className="plt-line" key={i}>{ln}</div>
+                    ))}
+                  </div>
+                )
+              ) : (
+                <div className="plt-summary" title={summary}>{summary}</div>
               )}
-            </CardContent>
-          </Card>
+            </div>
+          </div>
         );
       })}
-      {(reversed.length > initialVisible) && (
-        <button
-          type="button"
-          className="text-xs text-primary hover:underline self-start"
-          onClick={() => setExpanded((prev) => !prev)}
-          data-testid="progress-ledger-toggle"
-        >
-          {expanded ? "收起" : `展开剩余 ${hidden} 条`}
-        </button>
-      )}
     </div>
   );
 }

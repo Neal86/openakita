@@ -538,6 +538,10 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
   // The legacy ``onWsEvent`` path below stays intact -- this useEffect
   // is purely additive and is short-circuited when ``runtime !== "v2"``.
   const [v2LedgerEvents, setV2LedgerEvents] = useState<ProgressLedgerEvent[]>([]);
+  // Keep the conversation pinned to the bottom as live process events stream in
+  // (the feed now lives inside the message column, so new node activity should
+  // scroll into view just like a new message).
+  useEffect(scrollToBottom, [v2LedgerEvents, scrollToBottom]);
   // (``nodeNamesRef`` is declared once above and kept current there.)
   useEffect(() => {
     if (runtime !== "v2" || !orgId) return;
@@ -575,12 +579,24 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
       const child = (p.child_node_id as string) || "";
       const parent = (p.parent_node_id as string) || "";
       const preview = (p.content_preview as string) || "";
+      const outputLen = Number(p.output_len || 0);
+      const artifact = (p.artifact_path as string) || "";
+      const artifactName = artifact ? artifact.replace(/\\/g, "/").split("/").pop() : "";
       let speaker = ""; let note = ""; let satisfied = false; let progress = true;
       switch (etype) {
         case "agent_run_started":
+          // Show what the node was actually asked to do, not just "开始执行".
           speaker = nameOf(node); note = `开始执行${preview ? `：${preview}` : ""}`; break;
-        case "agent_run_finished":
-          speaker = nameOf(node); note = "完成任务"; break;
+        case "agent_run_finished": {
+          // UI issue #3/#7: a completion must carry CONTENT, not just an action
+          // verb — surface the output size and any delivered file.
+          speaker = nameOf(node);
+          const bits = ["完成任务"];
+          if (outputLen > 0) bits.push(`（产出 ${outputLen} 字）`);
+          if (artifactName) bits.push(`📎 ${artifactName}`);
+          note = bits.join(" ");
+          break;
+        }
         case "agent_run_failed":
           speaker = nameOf(node); note = "执行失败"; progress = false; break;
         case "subtask_assigned":
@@ -1593,12 +1609,6 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
         </div>
       )}
 
-      {runtime === "v2" && (
-        <div className="ocp-v2-timeline" data-testid="ocp-v2-timeline">
-          <ProgressLedgerTimeline events={v2LedgerEvents} />
-        </div>
-      )}
-
       <div ref={listRef} className="ocp-messages">
         {!loaded && (
           <div className="ocp-empty">
@@ -1659,6 +1669,24 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
             </div>
           </div>
         ))}
+        {/* UI redesign: the v2 live-process feed now lives INSIDE the single
+            message scroll column (was a detached 168px strip above it), so the
+            command center reads as one continuous conversation that scrolls as
+            one. It renders nothing when idle/empty, so the old "暂无进度记录…"
+            banner never sits permanently above a finished task. */}
+        {runtime === "v2" && v2LedgerEvents.length > 0 && (
+          <div className="ocp-process" data-testid="ocp-v2-timeline">
+            <div className="ocp-process-title">
+              <span className="ocp-process-spark" />
+              {t("org.chat.liveProcessTitle", "编排过程")}
+            </div>
+            <ProgressLedgerTimeline
+              events={v2LedgerEvents}
+              nodeNameOf={(id) => nodeNamesRef.current?.[id] || id}
+              running={sending || !!pendingCmdId}
+            />
+          </div>
+        )}
       </div>
 
       {/* Non-header mode: show clear button inline */}
@@ -1937,18 +1965,88 @@ const CHAT_CSS = `
 .ocp-close:hover { background: rgba(239,68,68,0.1); color: #ef4444 !important; -webkit-text-fill-color: #ef4444 !important; }
 .ocp-close:hover svg { stroke: #ef4444 !important; }
 
-/* ─── v2 live-progress strip ─── */
-/* Bounded so a long progress_ledger history can never push the message list
-   off-screen. This was the "无法滚动" root cause: an unbounded sibling above a
-   flex:1 list whose own min-height defaulted to auto never lets it scroll. */
-.ocp-v2-timeline {
-  flex-shrink: 0;
-  max-height: 168px;
-  overflow-y: auto;
-  padding: 8px 12px 0 12px;
+/* ─── v2 live-process feed (in-conversation) ─── */
+/* Now lives INSIDE the message scroll column as the conversation's live tail,
+   so everything scrolls as one (the old detached 168px strip was the "无法滚动"
+   + "割裂" root cause). Styled to read as a connected process timeline. */
+.ocp-process {
+  align-self: stretch;
+  margin: 4px 0 2px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--ocp-process-bg, rgba(99,102,241,0.06));
+  border: 1px solid rgba(99,102,241,0.18);
 }
-.ocp-v2-timeline::-webkit-scrollbar { width: 4px; }
-.ocp-v2-timeline::-webkit-scrollbar-thumb { background: rgba(51,65,85,0.5); border-radius: 2px; }
+.ocp-process-title {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 600; letter-spacing: .02em;
+  color: var(--muted, #64748b); margin-bottom: 8px;
+}
+.ocp-process-spark {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #6366f1; box-shadow: 0 0 0 0 rgba(99,102,241,.5);
+  animation: ocpProcessSpark 1.8s ease-out infinite;
+}
+@keyframes ocpProcessSpark {
+  0% { box-shadow: 0 0 0 0 rgba(99,102,241,.45); }
+  70% { box-shadow: 0 0 0 6px rgba(99,102,241,0); }
+  100% { box-shadow: 0 0 0 0 rgba(99,102,241,0); }
+}
+.plt-feed { display: flex; flex-direction: column; gap: 2px; }
+.plt-seg { display: flex; gap: 8px; }
+.plt-rail {
+  position: relative; flex: 0 0 12px; display: flex; justify-content: center;
+}
+/* connecting vertical line through the rail */
+.plt-rail::before {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 50%;
+  width: 1px; transform: translateX(-50%);
+  background: rgba(100,116,139,0.25);
+}
+.plt-feed .plt-seg:first-child .plt-rail::before { top: 9px; }
+.plt-feed .plt-seg:last-child .plt-rail::before { bottom: auto; height: 9px; }
+.plt-dot {
+  position: relative; z-index: 1; margin-top: 5px;
+  width: 8px; height: 8px; border-radius: 50%; background: #94a3b8;
+}
+.plt-dot-running { background: #6366f1; }
+.plt-dot-done { background: #22c55e; }
+.plt-dot-loop { background: #f59e0b; }
+.plt-dot-stall { background: #94a3b8; }
+.plt-dot-pulse { animation: pltPulse 1.4s ease-out infinite; }
+@keyframes pltPulse {
+  0% { box-shadow: 0 0 0 0 rgba(99,102,241,.55); }
+  70% { box-shadow: 0 0 0 7px rgba(99,102,241,0); }
+  100% { box-shadow: 0 0 0 0 rgba(99,102,241,0); }
+}
+.plt-body { flex: 1; min-width: 0; padding-bottom: 6px; }
+.plt-head {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: none; border: none; padding: 2px 0; cursor: pointer; text-align: left;
+}
+.plt-node { font-size: 12px; font-weight: 600; color: var(--fg, #e2e8f0); }
+:root[data-theme="light"] .plt-node { color: #0f172a; }
+.plt-pill {
+  font-size: 10px; padding: 1px 7px; border-radius: 999px; font-weight: 600;
+  white-space: nowrap;
+}
+.plt-pill-running { background: rgba(99,102,241,.16); color: #818cf8; }
+.plt-pill-done { background: rgba(34,197,94,.16); color: #4ade80; }
+.plt-pill-loop { background: rgba(245,158,11,.16); color: #fbbf24; }
+.plt-pill-stall { background: rgba(148,163,184,.16); color: #94a3b8; }
+.plt-time { font-size: 10px; color: var(--muted, #64748b); margin-left: auto; }
+.plt-caret { font-size: 10px; color: var(--muted, #64748b); }
+.plt-lines { margin-top: 3px; display: flex; flex-direction: column; gap: 3px; }
+.plt-line {
+  font-size: 12px; line-height: 1.55; color: var(--fg, #cbd5e1);
+  white-space: pre-wrap; word-break: break-word;
+  border-left: 2px solid rgba(99,102,241,0.3); padding-left: 8px;
+}
+:root[data-theme="light"] .plt-line { color: #334155; }
+.plt-summary {
+  margin-top: 1px; font-size: 12px; color: var(--muted, #94a3b8);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 /* ─── Messages ─── */
 .ocp-messages {

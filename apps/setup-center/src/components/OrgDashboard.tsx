@@ -98,7 +98,9 @@ const DB_TYPE_META: Record<string, { icon: string; label: string; cls: string }>
   task_timeout:    { icon: "⏱", label: "org.dashboard.feedTimeout",  cls: "db-ev-timeout" },
   task_completed:  { icon: "✓", label: "org.dashboard.feedComplete", cls: "db-ev-completed" },
   node_activated:  { icon: "▶", label: "org.dashboard.feedExecute",  cls: "db-ev-activated" },
-  _default:        { icon: "•", label: "",                           cls: "" },
+  task_cancelled:  { icon: "⏹", label: "org.dashboard.feedCancel",   cls: "db-ev-rejected" },
+  task_failed:     { icon: "✗", label: "org.dashboard.feedFailed",   cls: "db-ev-rejected" },
+  _default:        { icon: "•", label: "org.dashboard.feedEvent",    cls: "" },
 };
 
 function stripMd(s: string): string {
