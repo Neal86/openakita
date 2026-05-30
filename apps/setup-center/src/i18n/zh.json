@@ -3019,6 +3019,7 @@
       "recentActivity": "最近活动",
       "noActivity": "暂无活动记录",
       "expandFull": "点击展开全文",
+      "collapse": "点击收起",
       "thinkingChain": "思维链",
       "noThinkingChain": "暂无思维链记录",
       "showAllFields": "点击查看全部 {{count}} 个字段"

@@ -3011,6 +3011,7 @@
       "recentActivity": "Recent Activity",
       "noActivity": "No activity records",
       "expandFull": "Click to expand",
+      "collapse": "Click to collapse",
       "thinkingChain": "Thinking Chain",
       "noThinkingChain": "No thinking chain records",
       "showAllFields": "Click to see all {{count}} fields"

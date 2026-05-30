@@ -386,12 +386,20 @@ export function OrgMonitorPanel({ orgId, nodeId, apiBaseUrl, nodes, visible }: O
                       <span style={{ color: "var(--muted)", fontSize: 10, marginLeft: "auto" }}>
                         {fmtTime(evt.timestamp)}
                       </span>
+                      {fullText && (
+                        <span aria-hidden style={{
+                          fontSize: 9, color: "var(--muted)", flexShrink: 0,
+                          display: "inline-block", transition: "transform 0.2s ease",
+                          transform: isEvtExpanded ? "rotate(90deg)" : "rotate(0deg)",
+                        }}>▸</span>
+                      )}
                     </div>
                     {fullText && (
                       <div className="bb-entry-content" style={{
                         marginTop: 2, marginLeft: 12, fontSize: 10,
-                        maxHeight: isEvtExpanded ? "none" : 48,
-                        overflow: isEvtExpanded ? "visible" : "hidden",
+                        maxHeight: isEvtExpanded ? 400 : 40,
+                        overflow: "hidden",
+                        transition: "max-height 0.28s ease",
                         ...WRAP_TEXT_STYLE,
                       }}>
                         {mdModules ? (
@@ -399,8 +407,10 @@ export function OrgMonitorPanel({ orgId, nodeId, apiBaseUrl, nodes, visible }: O
                         ) : <div style={{ whiteSpace: "pre-wrap" }}>{fullText}</div>}
                       </div>
                     )}
-                    {!isEvtExpanded && fullText.length > 80 && (
-                      <div style={{ fontSize: 9, color: "var(--primary)", marginTop: 2, marginLeft: 12 }}>{t("org.monitor.expandFull")}</div>
+                    {fullText.length > 80 && (
+                      <div style={{ fontSize: 9, color: "var(--primary)", marginTop: 2, marginLeft: 12 }}>
+                        {isEvtExpanded ? t("org.monitor.collapse") : t("org.monitor.expandFull")}
+                      </div>
                     )}
                   </div>
                 );
