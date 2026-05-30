@@ -192,15 +192,24 @@ def _dispatch_instructions() -> str:
     """
 
     return (
-        "If you need a specialist node to handle part of the task, you "
+        "If you need specialist nodes to handle parts of the task, you "
         "may emit one or more dispatch blocks in your reply using EXACTLY "
         "this XML syntax: <dispatch target=\"NODE_ID\">instruction for "
         "that node</dispatch>. Use the literal node id (e.g. "
         "'screenwriter', 'art-director'). Emit at most "
-        f"{MAX_DISPATCH_BLOCKS} dispatch blocks. Do not nest dispatch "
-        "blocks. After the dispatch blocks the orchestrator will append "
-        "each child's output to your reply, so your own text should "
-        "focus on coordination (which child does what and why)."
+        f"{MAX_DISPATCH_BLOCKS} dispatch blocks. "
+        "IMPORTANT — work in parallel: when several subtasks are "
+        "independent of each other (e.g. a long-form post, a short-video "
+        "script, a storyboard and an SEO title can all be drafted at the "
+        "same time), put ALL of their dispatch blocks in THIS SAME reply. "
+        "The orchestrator runs every dispatch block in the same reply "
+        "concurrently, so batching independent work is far faster than "
+        "handing it off one node at a time. Only split work across "
+        "separate replies when a later subtask truly depends on an "
+        "earlier node's output. Do not nest dispatch blocks. After the "
+        "dispatch blocks the orchestrator will append each child's output "
+        "to your reply, so your own text should focus on coordination "
+        "(which child does what and why)."
     )
 
 
@@ -621,11 +630,11 @@ class _BrainBackedNodeAgent:
         if not blocks:
             return parent_text
 
-        children: list[tuple[str, str]] = []
         dispatch_accepts_cancel = _callable_accepts_kwarg(
             self._dispatch_callback, "cancel_event"
         )
-        for child_target, child_content in blocks:
+
+        async def _run_one(child_target: str, child_content: str) -> str:
             try:
                 # Sprint-13 H1: forward ``cancel_event`` into child
                 # dispatch so a user cancel terminates grandchildren
@@ -649,6 +658,12 @@ class _BrainBackedNodeAgent:
                         child_node_id=child_target,
                         child_content=child_content,
                     )
+                return child_output or ""
+            except asyncio.CancelledError:
+                # A user cancel must unwind the whole tree -- re-raise so
+                # ``gather`` cancels the surviving siblings too (Sprint-3
+                # P0-2 cancel pipeline stays intact under fan-out).
+                raise
             except Exception as exc:  # noqa: BLE001 -- one child failure
                 # must not poison siblings or the parent's reply. The
                 # executor inside the callback already emitted
@@ -662,8 +677,25 @@ class _BrainBackedNodeAgent:
                     child_target,
                     exc,
                 )
-                child_output = f"[child dispatch failed: {exc}]"
-            children.append((child_target, child_output or ""))
+                return f"[child dispatch failed: {exc}]"
+
+        # UI issue #9: fan the sibling dispatches out **concurrently** via
+        # ``asyncio.gather`` instead of awaiting them one-by-one. This is the
+        # root of the "一次只一个节点、一跳一跳" complaint -- e.g. the editor-in-chief
+        # delegating to writer-a / writer-b / visual / seo now runs them in
+        # parallel rather than serially. Convergence is preserved (we still
+        # await every child before aggregating) and ``gather`` keeps results in
+        # the original dispatch order, so ``_aggregate_with_children`` produces
+        # byte-identical aggregation to the old serial path. The block count is
+        # already bounded by ``MAX_DISPATCH_BLOCKS`` so the fan-out can't run
+        # away. Per-org isolation is unchanged (each child still routes through
+        # its own executor + node agent under the same org).
+        results = await asyncio.gather(
+            *(_run_one(t, c) for t, c in blocks)
+        )
+        children: list[tuple[str, str]] = [
+            (blocks[i][0], results[i]) for i in range(len(blocks))
+        ]
         return _aggregate_with_children(parent_text, children)
 
 
