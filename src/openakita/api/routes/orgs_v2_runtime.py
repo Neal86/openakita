@@ -139,15 +139,22 @@ def _scope_to_org(subsystem: Any, request: Request) -> Any:
     """Resolve a per-org backend from a scoped registry.
 
     The projects / blackboard routes call the store WITHOUT an org_id
-    (it is in the URL path), but the real backends are per-org. When the
+    (it is in the URL path), but the real backends are per-org.     When the
     wired instance is an ``OrgScoped*`` registry, resolve the concrete
     per-org backend using the path ``org_id`` so org isolation holds.
     Plain instances (e.g. injected test doubles) are returned as-is.
+
+    The check is an explicit ``isinstance`` against
+    :class:`OrgScopedRegistry` rather than ``hasattr(obj, "for_org")``
+    so a ``unittest.mock.Mock`` double (which auto-vivifies *any*
+    attribute, ``for_org`` included) is NOT mistaken for a real
+    registry and stays returned verbatim with its configured returns.
     """
-    for_org = getattr(subsystem, "for_org", None)
+    from openakita.orgs.scoped_subsystems import OrgScopedRegistry
+
     org_id = request.path_params.get("org_id")
-    if callable(for_org) and org_id:
-        return for_org(org_id)
+    if isinstance(subsystem, OrgScopedRegistry) and org_id:
+        return subsystem.for_org(org_id)
     return subsystem
 
 

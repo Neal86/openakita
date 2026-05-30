@@ -28,6 +28,20 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+class OrgScopedRegistry:
+    """Marker base for the per-org subsystem registries below.
+
+    The v2 route helpers (``orgs_v2_runtime._scope_to_org``) use an
+    ``isinstance`` check against this base to decide whether to resolve
+    a concrete per-org backend via ``for_org(org_id)``. ``isinstance``
+    is deliberately used (rather than ``hasattr(obj, "for_org")``)
+    because the contract tests inject ``unittest.mock.Mock`` doubles
+    directly as ``app.state.<subsystem>`` -- a Mock auto-creates a
+    ``for_org`` attribute, so a duck-typed check would wrongly scope the
+    double to a throw-away child mock and drop its configured returns.
+    """
+
+
 def _node_ids(org: Any) -> list[str]:
     nodes = getattr(org, "nodes", None)
     if nodes is None and isinstance(org, dict):
@@ -40,7 +54,7 @@ def _node_ids(org: Any) -> list[str]:
     return out
 
 
-class OrgScopedProjectStore:
+class OrgScopedProjectStore(OrgScopedRegistry):
     """Resolve a per-org :class:`ProjectStore` from the org dir.
 
     ``for_org`` delegates to ``get_default_project_store`` which already
@@ -81,7 +95,7 @@ class OrgScopedProjectStore:
             pass
 
 
-class OrgScopedBlackboard:
+class OrgScopedBlackboard(OrgScopedRegistry):
     """Resolve (and cache) a per-org :class:`OrgBlackboard`.
 
     ``publish`` is the health-required convenience method; it also gives
@@ -114,7 +128,7 @@ class OrgScopedBlackboard:
         return self.for_org(org_id).write_org(content, source_node=source_node, **kwargs)
 
 
-class OrgScopedScheduler:
+class OrgScopedScheduler(OrgScopedRegistry):
     """Minimal per-org schedule reader.
 
     The full :class:`OrgNodeScheduler` (timer loops) is not started here
@@ -164,5 +178,6 @@ class OrgScopedScheduler:
 __all__ = [
     "OrgScopedBlackboard",
     "OrgScopedProjectStore",
+    "OrgScopedRegistry",
     "OrgScopedScheduler",
 ]
