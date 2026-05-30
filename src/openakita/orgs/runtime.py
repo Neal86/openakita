@@ -67,6 +67,26 @@ _ChainCancelCb = Callable[[str, str, str], Awaitable[None]]
 _EventTap = Callable[[str, dict[str, Any]], Any]
 
 
+def _pick_event_field(
+    ev: dict[str, Any], nested: dict[str, Any], keys: tuple[str, ...]
+) -> Any:
+    """First non-empty value across ``ev`` then ``nested`` for any of ``keys``.
+
+    Helper for :meth:`OrgRuntime.get_node_thinking`: agent-pipeline events
+    stamp meaningful fields either at the top level or under a nested
+    ``data``/``payload`` mapping depending on the producer, so the timeline
+    projection probes both.
+    """
+
+    for k in keys:
+        v = ev.get(k)
+        if v in (None, "", []):
+            v = nested.get(k)
+        if v not in (None, "", []):
+            return v
+    return None
+
+
 # =====================================================================
 # Three new Protocols (P9.6; each <= 5 methods per ADR-0011)
 # =====================================================================
@@ -612,42 +632,89 @@ class OrgRuntime:
     # ------------------------------------------------------------------
 
     def get_node_thinking(self, org_id: str, node_id: str) -> dict[str, Any]:
-        """Best-effort thinking timeline (Sprint-5 stub).
+        """Per-node thinking / activity timeline for the monitor panel.
 
-        Returns recent ``command_phase`` / ``subtask_assigned`` events
-        for ``node_id`` from the per-org event store. Empty list when
-        the store is missing or empty; no AttributeError ever again.
+        UI issue #5/#6: this used to return ``{"thinking": [<raw events>]}``
+        but the frontend (and the B31 contract) read ``data.timeline`` whose
+        items must be shaped ``{type: "event", event_type, data, timestamp}``
+        (or ``type: "message"``). The old key + raw shape meant the "思维链"
+        panel was ALWAYS empty even after a full multi-node run. We now:
+
+        * return the ``timeline`` key the panel expects,
+        * include every event acted by ``node_id`` AND every delegation where
+          it is the dispatching parent or the dispatched child (so a node's
+          chain shows both "I was asked X" and "I handed Y to Z"),
+        * project the raw top-level fields onto the small set of ``data`` keys
+          that already have Chinese ``DATA_KEY_LABELS`` translations so each
+          row renders readable text instead of a bare colored dot.
         """
 
-        events: list[dict[str, Any]] = []
+        timeline: list[dict[str, Any]] = []
         try:
             store = self.get_event_store(org_id)
             if store is not None and hasattr(store, "query"):
-                for ev in store.query(limit=200) or []:
+                for ev in store.query(limit=300) or []:
                     if not isinstance(ev, dict):
                         continue
-                    # A4 fix: the dispatch / agent-pipeline events stamp
-                    # ``node_id`` at the TOP level of the record (see
-                    # ``_runtime_agent_pipeline_executor._emit`` ->
-                    # ``OrgEventStore.append``), NOT under a nested
-                    # ``data`` / ``payload`` key. The old lookup read
-                    # ``ev["data"]["node_id"]`` which never existed, so
-                    # the thinking timeline came back empty for every
-                    # node even after a full multi-node run. Read the
-                    # canonical top-level field first, then fall back to
-                    # the nested shape for any legacy producer.
+                    # A4 fix: dispatch / agent-pipeline events stamp ``node_id``
+                    # at the TOP level (see ``_runtime_agent_pipeline_executor``
+                    # -> ``OrgEventStore.append``); legacy producers nest it.
                     nested = ev.get("data") or ev.get("payload") or {}
                     nested = nested if isinstance(nested, dict) else {}
                     ev_node = ev.get("node_id") or nested.get("node_id")
-                    if ev_node == node_id:
-                        events.append(ev)
+                    parent = ev.get("parent_node_id") or nested.get("parent_node_id")
+                    child = ev.get("child_node_id") or nested.get("child_node_id")
+                    if node_id not in (ev_node, parent, child):
+                        continue
+                    etype = ev.get("type") or ev.get("event_type") or ""
+                    # Project onto already-translated ``DATA_KEY_LABELS`` keys.
+                    data: dict[str, Any] = {}
+                    preview = _pick_event_field(
+                        ev, nested, ("content_preview", "content", "instruction")
+                    )
+                    if preview is not None:
+                        data["task"] = preview
+                    result_prev = _pick_event_field(
+                        ev, nested, ("result_preview", "result", "summary")
+                    )
+                    if result_prev is not None:
+                        data["result_preview"] = result_prev
+                    if child:
+                        data["to"] = child
+                    if parent and parent != node_id:
+                        data["from"] = parent
+                    for key in ("reason", "exit_reason", "tool", "tool_name", "status"):
+                        val = _pick_event_field(ev, nested, (key,))
+                        if val is not None:
+                            data[key if key != "exit_reason" else "reason"] = val
+                    out_len = ev.get("output_len", nested.get("output_len"))
+                    if isinstance(out_len, int) and out_len > 0:
+                        data["result_preview"] = data.get(
+                            "result_preview", ""
+                        ) or f"（输出 {out_len} 字）"
+                    artifact = ev.get("artifact_path") or nested.get("artifact_path")
+                    if artifact:
+                        data["filename"] = str(artifact).replace("\\", "/").rsplit("/", 1)[-1]
+                    timeline.append(
+                        {
+                            "type": "event",
+                            "event_type": etype,
+                            "node_id": ev_node,
+                            "data": data,
+                            "timestamp": ev.get("ts") or ev.get("at") or ev.get("timestamp"),
+                        }
+                    )
         except Exception:  # noqa: BLE001
             pass
         return {
             "org_id": org_id,
             "node_id": node_id,
-            "thinking": events,
-            "count": len(events),
+            # ``timeline`` is the canonical key (matches B31 contract +
+            # frontend); keep ``thinking`` as a back-compat mirror for any
+            # older reader that still expects the Sprint-5 shape.
+            "timeline": timeline,
+            "thinking": timeline,
+            "count": len(timeline),
         }
 
     def preview_node_prompt(self, org_id: str, node_id: str) -> dict[str, Any]:

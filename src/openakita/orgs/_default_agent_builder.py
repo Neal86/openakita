@@ -237,6 +237,28 @@ def _available_nodes_block(spec: AgentSpec) -> str:
     return "\n".join(lines)
 
 
+def _language_consistency_rule() -> str:
+    """Force every node reply to match the user's input language.
+
+    Exploratory testing v11 (UI issue #10): Chinese tasks were coming
+    back with English deliverables because the English system prompt
+    biased the model toward English. This single rule -- appended to
+    EVERY node prompt regardless of depth/tools -- pins the output
+    language to whatever language the instruction is written in, which
+    is the user's original language since the supervisor now relays
+    instructions in that language too.
+    """
+
+    return (
+        "Language policy (MANDATORY): Always write your ENTIRE reply in the "
+        "same natural language as the instruction you receive. If the "
+        "instruction is in Chinese, respond fully in Chinese; if in English, "
+        "respond in English. This applies to all prose, headings, file "
+        "contents and summaries you produce. Do NOT switch to English just "
+        "because this system prompt is in English."
+    )
+
+
 def _tool_use_encouragement() -> str:
     """Sprint-7 P0-B node-level tool-use encouragement.
 
@@ -329,6 +351,7 @@ def _persona_system_prompt(
         )
     if has_tools:
         parts.append(_tool_use_encouragement())
+    parts.append(_language_consistency_rule())
     return "\n".join(parts)
 
 

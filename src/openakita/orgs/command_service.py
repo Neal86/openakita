@@ -653,6 +653,36 @@ class OrgCommandService:
             }
             self._running_by_root[root_key] = command_id
 
+        # UI issue #1: record the user's instruction as a ``user_command``
+        # event so the command center can rebuild the user's own command
+        # bubble after a reload / org-switch / remount. Previously NOTHING
+        # persisted the submitted instruction in a retrievable place, so on
+        # reload only node replies survived and the user bubble vanished.
+        # Best-effort: never let observability break command submission.
+        try:
+            es = self._runtime.get_event_store(request.org_id)
+            if es is not None and hasattr(es, "append"):
+                preview = (request.content or "").strip()
+                source_dict = (
+                    request.source.to_dict()
+                    if hasattr(request.source, "to_dict")
+                    else None
+                )
+                es.append(
+                    {
+                        "type": "user_command",
+                        "org_id": request.org_id,
+                        "command_id": command_id,
+                        "node_id": root_node_id,
+                        "content": request.content,
+                        "content_preview": preview[:500],
+                        "source": source_dict,
+                        "origin_surface": request.origin_surface.value,
+                    }
+                )
+        except Exception:  # noqa: BLE001 (observability must never break submit)
+            pass
+
         run_request = OrgCommandRequest(
             org_id=request.org_id,
             content=run_content,
