@@ -55,10 +55,88 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping
+from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ._runtime_agent_host import NodeToolHost
+
+# ── Org-node write sandbox (isolation guard) ──────────────────────────────
+# Org node agents share the desktop Agent's FileTool, whose ``_resolve_path``
+# returns absolute paths verbatim and resolves relative paths under CWD (= the
+# repo root in a source run). A node that wrote a relative path such as
+# ``src/openakita/orgs/tool_handler.py`` therefore landed INSIDE the source
+# tree — exactly the "stray tool_handler.py" pollution incident. Deliverables
+# are already auto-persisted to ``data/orgs/<id>/artifacts/`` by the executor,
+# so org nodes never have a legitimate reason to write into the project's own
+# source/config tree. This guard rejects write-class tool calls whose target
+# resolves into the OpenAkita source tree (or the VCS dir), anchored on the
+# real package location so it holds regardless of CWD. It deliberately does
+# NOT restrict writes to ``data/`` or to user-chosen output paths.
+
+# tool_name -> list of arg keys that carry a writable destination path.
+_WRITE_PATH_KEYS: dict[str, tuple[str, ...]] = {
+    "write_file": ("path", "file_path"),
+    "edit_file": ("path", "file_path"),
+    "append_file": ("path", "file_path"),
+    "create_file": ("path", "file_path"),
+    "delete_file": ("path", "file_path"),
+    "move_file": ("src", "dst", "source", "destination", "dest"),
+    "copy_file": ("src", "dst", "source", "destination", "dest"),
+    "rename_file": ("src", "dst", "source", "destination", "dest"),
+    "create_directory": ("path", "dir_path"),
+}
+
+
+@lru_cache(maxsize=1)
+def _guarded_source_roots() -> tuple[Path, ...]:
+    """Absolute dirs an org node must never write into.
+
+    Anchored on ``openakita.__file__`` so the source tree is protected even
+    when the process CWD differs from the repo root.
+    """
+    try:
+        import openakita
+
+        pkg_dir = Path(openakita.__file__).resolve().parent  # .../src/openakita
+        src_dir = pkg_dir.parent  # .../src
+        repo_root = src_dir.parent  # repo root
+        roots = [pkg_dir, repo_root / ".git", repo_root / "apps", repo_root / "tests"]
+        return tuple(r for r in roots if r)
+    except Exception:  # noqa: BLE001 -- never let the guard import break a run
+        return ()
+
+
+def _guarded_write_violation(tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
+    """Return a rejection message if this write escapes into the source tree."""
+    keys = _WRITE_PATH_KEYS.get(tool_name)
+    if not keys or not isinstance(tool_input, Mapping):
+        return None
+    roots = _guarded_source_roots()
+    if not roots:
+        return None
+    base = Path.cwd()
+    for key in keys:
+        raw = tool_input.get(key)
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        try:
+            p = Path(raw)
+            resolved = (p if p.is_absolute() else base / p).resolve()
+        except Exception:  # noqa: BLE001 -- a malformed path can't be validated
+            continue
+        for root in roots:
+            try:
+                if resolved == root or resolved.is_relative_to(root):
+                    return (
+                        f"[拒绝写入：{tool_name} 的目标路径 '{raw}' 落在 OpenAkita 工程源码"
+                        f"目录内（{root.name}）。节点产出请写入 data/ 工作区或交付目录，"
+                        f"不要写入工程源码树。]"
+                    )
+            except Exception:  # noqa: BLE001 -- is_relative_to edge cases
+                continue
+    return None
 
 __all__ = [
     "MAX_TOOL_ROUNDS",
@@ -375,6 +453,29 @@ async def execute_node_tool(
             "args_preview": args_preview,
         },
     )
+
+    # Isolation guard: block write-class tools whose target escapes into the
+    # OpenAkita source tree (the "stray tool_handler.py" pollution incident).
+    violation = _guarded_write_violation(tool_name, tool_input)
+    if violation is not None:
+        await _safe_emit(
+            emit,
+            "node_tool_failed",
+            {
+                "org_id": org_id,
+                "node_id": node_id,
+                "command_id": command_id,
+                "tool_name": tool_name,
+                "reason": "write_path_blocked",
+            },
+        )
+        _LOGGER.warning(
+            "[node-tool] blocked source-tree write org=%s node=%s tool=%s",
+            org_id,
+            node_id,
+            tool_name,
+        )
+        return (violation, True)
 
     # Lazy import: the host module pulls a small graph but the
     # exception class is hashable so a late import keeps the orgs_v2
