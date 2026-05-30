@@ -195,6 +195,31 @@ def test_parse_top_level_array_raises() -> None:
         parse_progress_ledger_json(raw, turn_id=1)
 
 
+def test_parse_salvages_flattened_scalar_entry() -> None:
+    """A flaky model that flattens an entry to a bare scalar is salvaged.
+
+    Some providers intermittently emit ``"is_request_satisfied": false`` (or
+    ``"next_speaker": "writer-b"``) instead of the required
+    ``{"answer": ..., "reason": ...}`` object. Rather than burn all retries and
+    abort the command, the parser wraps the scalar as the answer with an empty
+    reason. The strict object shape is still preferred; a dict missing
+    ``answer``/``reason`` is still rejected (see
+    ``test_parse_entry_missing_reason_raises``).
+    """
+    raw = """
+    {
+      "is_request_satisfied":   false,
+      "is_progress_being_made": {"answer": true,  "reason": "x"},
+      "is_in_loop":             {"answer": false, "reason": "x"},
+      "instruction_or_question":{"answer": "y", "reason": "z"},
+      "next_speaker":           "writer-b"
+    }
+    """
+    pl = parse_progress_ledger_json(raw, turn_id=1)
+    assert pl.request_satisfied is False
+    assert pl.next_speaker_name == "writer-b"
+
+
 # ---------------------------------------------------------------------------
 # Boolean coercion
 # ---------------------------------------------------------------------------

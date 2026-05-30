@@ -284,9 +284,20 @@ def parse_progress_ledger_json(
     def _coerce_entry(key: str, *, kind: str) -> ProgressLedgerEntry:
         value = payload[key]
         if not isinstance(value, dict):
-            raise ProgressLedgerParseError(
-                f"{key!r} must be an object with 'answer' and 'reason'"
-            )
+            # Salvage a known flaky-model failure mode: some providers
+            # intermittently FLATTEN an entry to a bare scalar
+            # (e.g. ``"is_request_satisfied": false`` or
+            # ``"next_speaker": "writer-b"``) instead of the required
+            # ``{"answer": ..., "reason": ...}`` object. Previously this burned
+            # all 10 retries and failed the whole command with
+            # "must be an object with 'answer' and 'reason'", so a single bad
+            # turn aborted an otherwise-complete run (no final report -> UI
+            # issue #4). We wrap the scalar as the answer with an empty reason
+            # rather than fail. The object shape is still PREFERRED (the prompt
+            # asks for it); this is a last-resort coercion. A dict that is
+            # merely missing ``answer``/``reason`` is still rejected below, so
+            # the strict contract for malformed objects is unchanged.
+            value = {"answer": value, "reason": ""}
         if "answer" not in value or "reason" not in value:
             raise ProgressLedgerParseError(
                 f"{key!r} must have both 'answer' and 'reason'"
