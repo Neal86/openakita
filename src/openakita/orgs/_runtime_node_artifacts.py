@@ -213,11 +213,14 @@ def persist_node_artifact(
     cid_seg = safe_path_segment(command_id, fallback="cmd")
     node_seg = safe_path_segment(node_id, fallback="node")
     ts = _timestamp_for_filename()
+    # UI feedback (图5/图6): node deliverables are markdown-shaped prose, so we
+    # persist them as ``.md`` (was ``.txt``) — the command center / file card
+    # then renders them with proper markdown layout and offers a clean download.
     if parent_node_id:
         parent_seg = safe_path_segment(parent_node_id, fallback="parent")
-        filename = f"{cid_seg}_{parent_seg}_{node_seg}_{ts}.txt"
+        filename = f"{cid_seg}_{parent_seg}_{node_seg}_{ts}.md"
     else:
-        filename = f"{cid_seg}_{node_seg}_{ts}.txt"
+        filename = f"{cid_seg}_{node_seg}_{ts}.md"
     path = target_dir / filename
     try:
         path.write_text(output, encoding="utf-8", newline="")

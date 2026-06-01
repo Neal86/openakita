@@ -1479,8 +1479,114 @@ class OrgRuntime:
                         )
                     except Exception:  # noqa: BLE001
                         _LOGGER.debug("contract: blackboard publish failed", exc_info=True)
+                # 图5/图6: render the ROOT node (主编) deliverable to a PDF so the
+                # final report is delivered as a polished document, not just a
+                # raw .md. Best-effort + de-duped per command so we launch
+                # Chromium at most once per command.
+                if artifact_path and str(artifact_path).endswith(".md") and output_len > 120:
+                    try:
+                        await self._maybe_render_root_pdf(
+                            org_id=org_id,
+                            command_id=str(payload.get("command_id") or chain_id or ""),
+                            node_id=node_id,
+                            artifact_path=str(artifact_path),
+                            bb_registry=bb_registry,
+                        )
+                    except Exception:  # noqa: BLE001
+                        _LOGGER.debug("contract: root pdf render failed", exc_info=True)
         except Exception:  # noqa: BLE001 -- bridge must not poison dispatch
             _LOGGER.debug("OrgRuntime contract tap failed for %r", event_name, exc_info=True)
+
+    async def _maybe_render_root_pdf(
+        self,
+        *,
+        org_id: str,
+        command_id: str,
+        node_id: str,
+        artifact_path: str,
+        bb_registry: Any,
+    ) -> None:
+        """Render the root/主编 node's markdown deliverable to a PDF once.
+
+        Only fires for the org's level-0 root node, at most once per command
+        (so Chromium launches are bounded). Registers the PDF as a downloadable
+        blackboard resource and emits ``org:blackboard_update(resource)`` so the
+        command center shows a downloadable file card next to the .md.
+        """
+        # Resolve root-ness: only the level-0 node's own deliverable becomes the
+        # final PDF report.
+        try:
+            org = self.get_org(org_id)
+            node = org.get_node(node_id) if org is not None else None
+            if node is None or getattr(node, "level", None) != 0:
+                return
+        except Exception:  # noqa: BLE001
+            return
+        if not command_id:
+            return
+        done = getattr(self, "_final_pdf_commands", None)
+        if done is None:
+            done = set()
+            self._final_pdf_commands = done
+        if command_id in done:
+            return
+        from pathlib import Path as _Path
+
+        try:
+            md_body = _Path(artifact_path).read_text(encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            return
+        if not md_body.strip():
+            return
+        pdf_path = str(_Path(artifact_path).with_suffix(".pdf"))
+        from ._runtime_pdf import render_markdown_to_pdf
+
+        rendered = await render_markdown_to_pdf(
+            markdown_body=md_body,
+            out_path=pdf_path,
+            title="任务交付报告",
+            meta=f"由根节点 {node_id} 汇总交付 · OpenAkita 组织编排",
+        )
+        if not rendered:
+            return
+        done.add(command_id)
+        try:
+            size = _Path(rendered).stat().st_size
+        except OSError:
+            size = 0
+        name = _Path(rendered).name
+        if bb_registry is not None:
+            try:
+                bb_registry.publish(
+                    org_id,
+                    f"主编已汇总并交付最终报告（PDF）：{name}",
+                    source_node=node_id,
+                    tags=["deliverable", "final_report", "pdf"],
+                    attachments=[
+                        {
+                            "filename": name,
+                            "path": rendered,
+                            "file_path": rendered,
+                            "size_bytes": size,
+                            "file_size": size,
+                        }
+                    ],
+                )
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("contract: final pdf blackboard publish failed", exc_info=True)
+        await self._broadcast_ws_safe(
+            "org:blackboard_update",
+            {
+                "org_id": org_id,
+                "node_id": node_id,
+                "memory_type": "resource",
+                "filename": name,
+                "file_path": rendered,
+                "path": rendered,
+                "file_size": size,
+                "size": size,
+            },
+        )
 
 
 def get_runtime() -> OrgRuntime | None:

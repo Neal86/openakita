@@ -179,7 +179,7 @@ def test_persist_node_artifact_writes_file_and_returns_path(
     assert body == "producer LLM reply\n第二段中文内容"
     # Filename encodes command + node + timestamp.
     assert p.name.startswith("cmd_a_producer_")
-    assert p.suffix == ".txt"
+    assert p.suffix == ".md"
 
 
 def test_persist_node_artifact_encodes_parent_chain_in_filename(
