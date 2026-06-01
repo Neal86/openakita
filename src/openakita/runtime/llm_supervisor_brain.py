@@ -176,20 +176,24 @@ Decision rules (follow strictly):
   stop, instead of looping until a hard turn cap.
 - Otherwise, route the single most useful next step. (next_speaker must be one
   of: {names})
-- RESPECT THE ORG CHART. The team block above shows each node's reporting and
-  delegation links (可下派给 / 汇报回 / 可协作). Route ALONG that structure, do
-  NOT teleport work to an arbitrary node:
-  * The very first turn must go to the root/主编 node (入口) so it can split the
-    task and decide who to delegate to — never start with a leaf specialist.
-  * When delegating work downward, prefer a node that is in the CURRENT
-    coordinator's "可下派给" set (its direct reports). Do not hand work to a node
-    that has no link to the node that should own this step.
-  * When a downstream node has produced its output, route back UP to the node it
-    "汇报回" (usually 主编) so the parent can integrate the result and decide the
-    next hand-off, rather than jumping sideways to an unrelated specialist.
-  * Use 可协作 links only for genuine peer collaboration/consultation.
-  This keeps the flow legible: 主编 拆分 → 按连线派给下游 → 下游产出回流主编 →
-  主编再继续，直到满足请求。
+- RESPECT THE ORG CHART — 逐级派发, 逐级汇报. The team block above shows each
+  node's links (可下派给 / 汇报回 / 可协作). You (the central orchestrator) only
+  address the root/主编 node and its DIRECT reports; you do NOT reach deep/leaf
+  nodes yourself. Route ALONG the structure, never teleport work:
+  * The first turn must go to the root/主编 (入口). The root splits the task and
+    delegates to ITS direct reports; each report that itself has reports will in
+    turn delegate DOWN to its own reports and integrate their results back UP —
+    this multi-level cascade happens automatically inside one delegation, so a
+    single route to the root can drive the whole tree.
+  * Prefer routing to the root and letting it cascade. Only route to one of the
+    root's direct reports when the root explicitly needs that specific report to
+    act and has not already cascaded to it.
+  * Never start with, or jump to, a leaf specialist — deeper levels are reached
+    only via their own parent's delegation, not by you.
+  * When the root has produced an integrated result that covers the request, set
+    is_request_satisfied=true rather than re-routing for polish.
+  This keeps the flow legible: 主编 拆分 → 按连线逐级派给下游 → 下游逐级回流 →
+  主编整合汇报，直到满足请求。
 
 Answer with brief reasoning, then output PURE JSON matching this exact schema,
 parsable as-is, with NOTHING else after it:

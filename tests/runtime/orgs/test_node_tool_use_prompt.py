@@ -107,8 +107,9 @@ def test_persona_prompt_child_depth_still_gets_encouragement() -> None:
 
     prompt = _persona_system_prompt(_spec(), depth=1, has_tools=True)
     assert "Tool-use policy" in prompt
-    # And the depth-1 "stay in your lane" prelude is preserved.
-    assert "Reply directly" in prompt
+    # _spec() has no reports -> this depth-1 node is a leaf: the tool-use
+    # policy is additive on top of the leaf-worker instruction.
+    assert "leaf specialist" in prompt
 
 
 def test_persona_prompt_root_depth_with_tools_keeps_dispatch_block() -> None:
@@ -124,7 +125,7 @@ def test_persona_prompt_root_depth_with_tools_keeps_dispatch_block() -> None:
     )
     prompt = _persona_system_prompt(spec, depth=0, has_tools=True)
     assert "dispatch" in prompt.lower()
-    assert "Available child nodes" in prompt
+    assert "DIRECT reports" in prompt
     assert "Tool-use policy" in prompt
 
 

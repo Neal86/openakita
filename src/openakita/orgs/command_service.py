@@ -1410,6 +1410,26 @@ class OrgCommandService:
                         ),
                     )
                 )
+
+            # ★ Multi-level routing: the central supervisor must only
+            # connect the ROOT and the root's DIRECT reports ("supervisor
+            # 只对接根节点及其直属下游"). Deeper levels are reached by each
+            # coordinator dispatching DOWN its own edges (逐级下派) and
+            # bubbling results UP (逐级汇报) — not by the supervisor
+            # teleporting straight to a leaf. We therefore filter the brain
+            # directory to {root} ∪ {root's direct hierarchy children}.
+            # The kept descriptors retain their FULL topology (each L1
+            # node's own ``delegates_to`` still lists its L2 reports) so the
+            # supervisor can SEE the tree, but its selectable next_speaker
+            # set excludes deep leaves. Fallback: if no clear single root is
+            # identifiable, keep the full directory unchanged.
+            roots = [d for d in directory if d.is_root]
+            if len(roots) == 1:
+                root = roots[0]
+                allowed = {root.node_id, *root.delegates_to}
+                scoped = [d for d in directory if d.node_id in allowed]
+                if scoped:
+                    directory = scoped
             return directory or None
         except Exception:  # noqa: BLE001 -- directory is best-effort
             logger.debug(

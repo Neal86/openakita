@@ -179,37 +179,68 @@ class BuilderUnavailable(RuntimeError):
     """
 
 
-def _dispatch_instructions() -> str:
-    """Return the producer-level system-prompt tutorial for child dispatch.
+def _dispatch_instructions(*, is_root: bool) -> str:
+    """Return the coordinator system-prompt tutorial for child dispatch.
 
-    Kept as a single short paragraph so the per-node token budget stays
-    bounded. The format is intentionally rigid (XML attribute syntax,
-    one target per block) -- a relaxed format would let the LLM emit
-    ambiguous text that the regex either over-matches or under-matches.
-    The "do not nest" rule is enforced anyway by the depth gate; we
-    surface it in the prompt so the model does not waste tokens on a
-    nested ``<dispatch>`` the parent would just ignore.
+    ★ Multi-level routing: this tutorial is now given to EVERY node that
+    has direct reports (its ``delegates_to`` children), not just the root.
+    A middle node is a sub-coordinator: it splits the sub-task its parent
+    handed it and dispatches DOWN to its OWN direct reports, then
+    integrates their results back up. ``is_root`` only tweaks the framing
+    (the root owns the whole user request and is the entry; a middle node
+    owns the sub-task delegated to it).
+
+    Kept as a short paragraph so the per-node token budget stays bounded.
+    The XML syntax is rigid on purpose (one target per block) so the regex
+    parser neither over- nor under-matches.
+    """
+
+    who = (
+        "You are the ROOT coordinator (入口): you own the whole user "
+        "request. Split it and delegate to your DIRECT reports listed "
+        "below."
+        if is_root
+        else "You are a MIDDLE-LEVEL coordinator: your parent handed you a "
+        "sub-task. Decide yourself how to split it and delegate to YOUR "
+        "OWN direct reports listed below (逐级下派). You have real "
+        "autonomy here — do not bounce every decision back up."
+    )
+    return (
+        f"{who} To delegate, emit one or more dispatch blocks using EXACTLY "
+        'this XML syntax: <dispatch target="NODE_ID">instruction for that '
+        "node</dispatch>. The target MUST be one of YOUR direct reports "
+        "listed below — never a node that is not in that list (no skipping "
+        "levels, no inventing links). Emit at most "
+        f"{MAX_DISPATCH_BLOCKS} dispatch blocks. "
+        "Work in parallel: when several reports' subtasks are independent, "
+        "put ALL their dispatch blocks in THIS SAME reply — they run "
+        "concurrently. Only split across replies when a later subtask truly "
+        "depends on an earlier report's output. After the dispatch blocks "
+        "the orchestrator appends each report's output to your reply, so "
+        "your own text should (1) state who you delegated what and why, and "
+        "(2) after their results come back, integrate them into a coherent "
+        "result you hand back UP to your parent (逐级汇报). "
+        "If — and only if — you genuinely cannot decide how to proceed, or "
+        "the request falls outside your team's scope, do NOT guess: say so "
+        "plainly in your reply so your parent can re-route (逐级上报)."
+    )
+
+
+def _leaf_worker_instructions() -> str:
+    """Instruction for a leaf node (no direct reports): do the work itself.
+
+    A node with no ``delegates_to`` children cannot delegate further, so we
+    tell it to produce the deliverable directly and never pretend to
+    dispatch (the closed-list dispatch tutorial is not even shown to it).
     """
 
     return (
-        "If you need specialist nodes to handle parts of the task, you "
-        "may emit one or more dispatch blocks in your reply using EXACTLY "
-        "this XML syntax: <dispatch target=\"NODE_ID\">instruction for "
-        "that node</dispatch>. Use the literal node id (e.g. "
-        "'screenwriter', 'art-director'). Emit at most "
-        f"{MAX_DISPATCH_BLOCKS} dispatch blocks. "
-        "IMPORTANT — work in parallel: when several subtasks are "
-        "independent of each other (e.g. a long-form post, a short-video "
-        "script, a storyboard and an SEO title can all be drafted at the "
-        "same time), put ALL of their dispatch blocks in THIS SAME reply. "
-        "The orchestrator runs every dispatch block in the same reply "
-        "concurrently, so batching independent work is far faster than "
-        "handing it off one node at a time. Only split work across "
-        "separate replies when a later subtask truly depends on an "
-        "earlier node's output. Do not nest dispatch blocks. After the "
-        "dispatch blocks the orchestrator will append each child's output "
-        "to your reply, so your own text should focus on coordination "
-        "(which child does what and why)."
+        "You are a leaf specialist: you have no reports to delegate to. "
+        "Do the work yourself and produce the concrete deliverable for the "
+        "instruction below, focused on your role. Do NOT emit dispatch "
+        "blocks or pretend to hand work to other nodes — deeper "
+        "coordination is not yours to do. When you finish, your output "
+        "flows back UP to the node that delegated to you."
     )
 
 
@@ -227,13 +258,16 @@ def _available_nodes_block(spec: AgentSpec) -> str:
     constraint that would also raise the bar for legitimate creative
     coordination text.
 
-    Only emitted at depth 0; children get the classic "stay in your
-    lane" instruction.
+    ★ Multi-level routing: ``spec.available_nodes`` is now the node's
+    DIRECT reports only (see ``_available_nodes_for``), so this closed list
+    is shown to every coordinator (root or middle) and naturally enforces
+    "only delegate to your own reports". Leaf nodes have an empty list and
+    never see this block.
     """
 
     if not spec.available_nodes:
         return ""
-    lines = ["Available child nodes you may dispatch to (use the exact id):"]
+    lines = ["Your DIRECT reports you may delegate to (use the exact id):"]
     for node_id, label in spec.available_nodes:
         if label:
             lines.append(f"- {node_id}: {label}")
@@ -353,19 +387,20 @@ def _persona_system_prompt(
     ]
     if persona:
         parts.append(f"Persona: {persona}.")
-    if depth == 0:
-        parts.append(_dispatch_instructions())
+    # ★ Multi-level routing: a node is a coordinator iff it actually has
+    # direct reports (``available_nodes`` is now its delegates_to children,
+    # see ``_available_nodes_for``). Coordinators — at ANY depth, not just
+    # the root — get the dispatch tutorial + their closed child list so a
+    # middle node (策划编辑) delegates DOWN to its own reports (文案写手)
+    # instead of being told "stay in your lane". Leaf nodes do the work.
+    has_children = bool(spec.available_nodes)
+    if has_children:
+        parts.append(_dispatch_instructions(is_root=(depth == 0)))
         available_block = _available_nodes_block(spec)
         if available_block:
             parts.append(available_block)
     else:
-        parts.append(
-            "Reply directly to the user instruction below. Keep your "
-            "answer focused on the node's role; do not pretend to "
-            "dispatch sub-tasks to other nodes (multi-node coordination "
-            "is handled by the orchestrator at the entry level, not by "
-            "you)."
-        )
+        parts.append(_leaf_worker_instructions())
     if has_tools:
         parts.append(_tool_use_encouragement())
     parts.append(_language_consistency_rule())

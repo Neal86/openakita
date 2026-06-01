@@ -365,41 +365,37 @@ def test_dispatch_depth_gate_blocks_grandchildren(
 ) -> None:
     """case id: p0_1.recursion.depth_cap_enforced
 
-    With :data:`MAX_DISPATCH_DEPTH` = 3 the chain ``producer (depth 0)
-    -> screenwriter (depth 1) -> deepest (depth 2)`` is allowed; the
-    deepest agent runs (its own LLM is invoked), but **its**
-    ``<dispatch>`` blocks are ignored because the in-agent gate
-    (``depth >= MAX_DISPATCH_DEPTH - 1``) short-circuits the parser
-    before any callback fires. The dispatch_subtask gate is a defence
-    in depth that would also refuse depth-3 calls if the in-agent
-    gate ever fails open.
-
-    NB: this also pins that the **system prompt** at depth >= 1 omits
-    the dispatch tutorial, but we don't assert prompt text here (that's
-    a separate unit test in ``test_default_agent_builder.py``).
+    Generic over :data:`MAX_DISPATCH_DEPTH` (★ multi-level routing bumped
+    it from 3 to 6 so deep org charts can cascade). We build a linear
+    chain ``n0 -> n1 -> ... -> n{cap}`` where every node emits a dispatch
+    to the next. The in-agent gate (``depth >= MAX_DISPATCH_DEPTH - 1``)
+    must let nodes at depths 0..cap-1 run but suppress the dispatch the
+    deepest RUNNING node (depth cap-1) emits, so ``n{cap}`` never runs.
+    The ``dispatch_subtask`` gate is a defence in depth that would also
+    refuse a depth-``cap`` call if the in-agent gate ever failed open.
     """
 
     monkeypatch.setattr(
         dispatch_mod, "_resolve_delegation_log_dir", lambda: tmp_path
     )
 
+    cap = MAX_DISPATCH_DEPTH
+    chain = [f"n{i}" for i in range(cap + 1)]  # n0 .. n{cap}
     bus = _RecordingBus()
-    lookup = _Lookup(["producer", "screenwriter", "deepest", "way-too-deep"])
-    brain = _make_brain([
-        # producer (depth 0) -- emits depth-1 dispatch
-        "<dispatch target=\"screenwriter\">scene</dispatch>",
-        # screenwriter (depth 1) -- emits depth-2 dispatch (allowed)
-        "[draft]\n<dispatch target=\"deepest\">help me</dispatch>",
-        # deepest (depth 2) -- emits a would-be depth-3 dispatch
-        # which the agent-side gate must ignore.
-        "[final]\n<dispatch target=\"way-too-deep\">forbidden</dispatch>",
-    ])
+    lookup = _Lookup(chain)
+    # Each node body emits a dispatch to the next node in the chain.
+    replies = [
+        f"[body{i}]\n<dispatch target=\"{chain[i + 1]}\">go</dispatch>"
+        for i in range(len(chain) - 1)
+    ]
+    replies.append("[bodyN] leaf")  # n{cap} would-be body (never reached)
+    brain = _make_brain(replies)
     executor = _make_executor(bus=bus, lookup=lookup, brain=brain)
 
     result = asyncio.run(
         executor.activate_and_run(
             org_id="o1",
-            node_id="producer",
+            node_id="n0",
             content="kickoff",
             command_id="cmd_d",
         )
@@ -407,32 +403,27 @@ def test_dispatch_depth_gate_blocks_grandchildren(
 
     assert result["status"] == "ok"
     output = result["output"]
-    # All three LLM bodies surface in the aggregated tree.
-    assert "[draft]" in output
-    assert "[final]" in output
+    # Bodies of the deepest two RUNNING nodes surface in the tree.
+    assert f"[body{cap - 2}]" in output
+    assert f"[body{cap - 1}]" in output
 
-    # Three LLM calls (producer + screenwriter + deepest); the
-    # would-be fourth (way-too-deep) is short-circuited by the
-    # in-agent depth gate before the dispatch callback fires.
-    assert brain.messages_create_async.await_count == 3
+    # Exactly ``cap`` LLM calls: nodes at depths 0..cap-1 run; the node at
+    # depth cap-1 does NOT dispatch (gate), so n{cap} is never invoked.
+    assert brain.messages_create_async.await_count == cap
 
-    # Exactly two subtask_assigned events fired: producer ->
-    # screenwriter and screenwriter -> deepest. The deepest agent's
-    # ``<dispatch target="way-too-deep">`` was never forwarded to
-    # dispatch_subtask, so no third event exists.
+    # subtask_assigned fired once per successful hop: n0->n1 ...
+    # n{cap-2}->n{cap-1} == cap-1 hops. The deepest running node's
+    # dispatch to n{cap} is suppressed, so no n{cap} hop exists.
     subtasks = [
         (p["parent_node_id"], p["child_node_id"])
         for n, p in bus.events
         if n == "subtask_assigned"
     ]
-    assert subtasks == [
-        ("producer", "screenwriter"),
-        ("screenwriter", "deepest"),
-    ]
-    # The deepest agent's output still has the raw <dispatch> tag in
-    # it (proving the gate suppressed parsing rather than executing
-    # then hiding); the parent text was never stripped at depth 2.
-    assert "<dispatch target=\"way-too-deep\">" in output
+    assert subtasks == [(chain[i], chain[i + 1]) for i in range(cap - 1)]
+
+    # The deepest RUNNING node's output still has the raw <dispatch> tag
+    # (the gate suppressed parsing rather than executing then hiding).
+    assert f'<dispatch target="{chain[cap]}">' in output
 
 
 def test_dispatch_writes_child_delegation_log_line(
@@ -491,14 +482,14 @@ def test_dispatch_writes_child_delegation_log_line(
 def test_dispatch_max_depth_constant_matches_recursion_cap() -> None:
     """case id: p0_1.recursion.constant_invariant
 
-    Defensive pin: any future tweak of :data:`MAX_DISPATCH_DEPTH` must
-    keep the value at the documented "producer / mid-tier / leaf"
-    three-layer ceiling so the recursion analysis in
-    ``_v15_sprint4_p0_changelog.md`` and downstream exploratory tests
-    stays accurate.
+    Defensive pin on the recursion ceiling. ★ Multi-level routing raised
+    this from 3 to 6 so a deep org chart (主编 → 策划编辑 → 文案写手 → …)
+    can cascade level by level; the real terminator is topology
+    (``_available_nodes_for`` hands each node only its direct reports, so
+    leaves stop the recursion), and this cap is the runaway safety net.
     """
 
-    assert MAX_DISPATCH_DEPTH == 3
+    assert MAX_DISPATCH_DEPTH == 6
     assert MAX_DISPATCH_BLOCKS == 5
 
 

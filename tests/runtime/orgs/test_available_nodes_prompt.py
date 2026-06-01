@@ -46,39 +46,61 @@ def test_depth_zero_emits_available_nodes_block() -> None:
         )
     )
     prompt = _persona_system_prompt(spec, depth=0)
-    assert "Available child nodes" in prompt
+    assert "DIRECT reports" in prompt
     assert "screenwriter" in prompt
     assert "art-director" in prompt
     assert "wb-hh-image" in prompt
     assert "Do NOT invent new node ids" in prompt
 
 
-def test_subagent_depth_skips_block() -> None:
-    """case id: p05.ennum.depth1_no_list
+def test_middle_node_with_reports_emits_block_at_depth_one() -> None:
+    """case id: p05.ennum.mid_level_lists_reports
 
-    Sub-agents must not see the dispatch menu -- the orchestrator owns
-    the multi-node coordination at depth 0.
+    ★ Multi-level routing: a MIDDLE node (depth >= 1) that itself has
+    direct reports IS a sub-coordinator and MUST see its own dispatch
+    menu so it can delegate DOWN (逐级下派). Pre-fix this was suppressed
+    (only depth 0 got the menu), which flattened the org to two layers.
     """
 
     spec = _spec(
-        node_id="screenwriter",
-        role="screenwriter",
-        available_nodes=(("art-director", "art-director"),),
+        node_id="planner",
+        role="planner",
+        available_nodes=(("writer-a", "writer A"), ("writer-b", "writer B")),
     )
     prompt = _persona_system_prompt(spec, depth=1)
-    assert "Available child nodes" not in prompt
+    assert "DIRECT reports" in prompt
+    assert "writer-a" in prompt
+    assert "writer-b" in prompt
+    # Mid-level framing, not the root-only "you own the whole request".
+    assert "MIDDLE-LEVEL coordinator" in prompt
+
+
+def test_leaf_node_gets_worker_instructions_not_dispatch() -> None:
+    """case id: p05.ennum.leaf_no_menu
+
+    A node with NO direct reports (empty ``available_nodes``) is a leaf:
+    it must NOT see the dispatch menu and is told to do the work itself.
+    """
+
+    spec = _spec(
+        node_id="writer-a",
+        role="writer",
+        available_nodes=(),
+    )
+    prompt = _persona_system_prompt(spec, depth=2)
+    assert "DIRECT reports" not in prompt
+    assert "leaf specialist" in prompt
 
 
 def test_empty_available_nodes_skips_block() -> None:
     """case id: p05.ennum.no_nodes_no_block
 
     Legacy / single-node orgs leave ``available_nodes`` at its default
-    empty tuple. The prompt must look exactly like the Sprint-4
-    producer prompt for those (no orphan section header).
+    empty tuple -> no dispatch menu (leaf-worker instruction instead).
     """
 
     prompt = _persona_system_prompt(_spec(), depth=0)
-    assert "Available child nodes" not in prompt
+    assert "DIRECT reports" not in prompt
 
 
 def test_nodes_without_labels_still_listed_by_id() -> None:
@@ -88,3 +110,19 @@ def test_nodes_without_labels_still_listed_by_id() -> None:
     prompt = _persona_system_prompt(spec, depth=0)
     assert "- x1" in prompt
     assert "- x2" in prompt
+
+
+def test_subagent_depth_skips_block() -> None:
+    """case id: p05.ennum.depth1_leaf_no_list
+
+    A depth >= 1 node with NO reports is still a leaf and skips the menu
+    (the multi-level enablement keys on having reports, not on depth).
+    """
+
+    spec = _spec(
+        node_id="screenwriter",
+        role="screenwriter",
+        available_nodes=(),
+    )
+    prompt = _persona_system_prompt(spec, depth=1)
+    assert "DIRECT reports" not in prompt

@@ -59,10 +59,17 @@ ORG_STATE_PAUSED = "paused"
 # of the file. Putting them anywhere downstream would re-create the
 # ``_runtime_agent_pipeline`` <-> ``_runtime_agent_pipeline_executor``
 # import cycle that ADR-0014 explicitly carved out.
-MAX_DISPATCH_DEPTH = 3
-"""Hard cap on recursion depth: depth 0 = root, depth 1 = first-level
-children, depth 2 = grandchildren. ``dispatch_subtask`` refuses calls
-that would reach depth 3 to keep the recursion fan-out bounded."""
+MAX_DISPATCH_DEPTH = 6
+"""Hard cap on recursion depth: depth 0 = root, 1 = first-level reports,
+2 = their reports, ... ``dispatch_subtask`` refuses calls that would
+reach this depth so a hallucinated runaway can't fan out forever.
+
+★ Multi-level routing: bumped 3 -> 6 so deep org charts
+(主编 → 策划编辑 → 文案写手 → …) can cascade level by level. The real
+terminator is topology, not this cap: :meth:`_available_nodes_for` now
+hands each node ONLY its direct hierarchy children, so recursion stops
+naturally at leaves (which have no children). The cap is just a safety
+net against an org with an accidental cycle in its edges."""
 
 MAX_DISPATCH_BLOCKS = 5
 """Hard cap on dispatch blocks parsed per LLM reply, regardless of how
@@ -411,20 +418,38 @@ class ProfileResolver:
     def _available_nodes_for(
         org: Any, current_node_id: str
     ) -> tuple[tuple[str, str], ...]:
-        """Enumerate sibling node ids + role labels for prompt injection.
+        """Enumerate THIS node's DIRECT hierarchy children for dispatch.
 
-        Sprint-5 unexpected-finding #1 (audit v5 §4.2 + §5.3): v16 saw
-        the producer LLM invent a non-existent ``director`` node when
-        the spec only declared ``screenwriter`` + ``art-director``.
-        Listing the real node ids in the producer system prompt makes
-        invention measurably less likely (the LLM is given a closed
-        target set instead of having to guess).
+        ★ Multi-level routing fix (test6 越级 bug): the pre-fix version
+        listed EVERY other node in the org as a dispatch target. That let
+        the root (主编) dispatch straight to leaf writers, skipping the
+        middle 策划编辑 node entirely — a flat two-layer fan-out that
+        ignored the designed org chart. We now return ONLY the node's
+        direct hierarchy children (the ``source -> target`` ``hierarchy`` /
+        ``escalate`` edges where ``source == current_node_id``), so:
+
+        * a node can only hand work DOWN its own real edges (no 越级, no
+          凭空连线);
+        * a middle node (with children) becomes a sub-coordinator for its
+          own reports;
+        * a leaf node (no children) gets an empty list and is told to do
+          the work itself.
+
+        This is fully general — it reads whatever edges the org defines,
+        for any depth / topology — not hard-coded for one org. The label
+        is the child's role title so the dispatching LLM picks the right
+        report by name.
+
+        Sprint-5 finding #1 (invented ``director`` node) is subsumed: the
+        target set is now an even tighter closed list (direct children
+        only), so invention is structurally impossible.
         """
 
         nodes = getattr(org, "nodes", None)
         if nodes is None:
             return ()
-        pairs: list[tuple[str, str]] = []
+        # Index node_id -> label once.
+        labels: dict[str, str] = {}
         iter_nodes: Iterable[Any] = (
             nodes.values() if isinstance(nodes, Mapping) else nodes
         )
@@ -432,22 +457,33 @@ class ProfileResolver:
             node_id = getattr(node, "id", None) or getattr(node, "node_id", None)
             if not isinstance(node_id, str) or not node_id:
                 continue
-            if node_id == current_node_id:
-                # Skip the current node so the prompt does not invite
-                # self-dispatch loops. The depth gate would block them
-                # anyway, but suppressing them here saves token budget
-                # and reads more naturally.
-                continue
             label = (
                 getattr(node, "role_title", None)
                 or getattr(node, "label", None)
                 or getattr(node, "role", None)
                 or ""
             )
-            if not isinstance(label, str):
-                label = str(label)
-            pairs.append((node_id, label.strip()))
-        return tuple(pairs)
+            labels[node_id] = label.strip() if isinstance(label, str) else str(label)
+
+        # Direct hierarchy children = downstream targets of this node's
+        # hierarchy / escalate edges. Collaborate / consult edges are peer
+        # links and are deliberately NOT delegable targets.
+        children: list[str] = []
+        seen: set[str] = set()
+        for e in list(getattr(org, "edges", None) or []):
+            src = getattr(e, "source", "") or ""
+            tgt = getattr(e, "target", "") or ""
+            if src != current_node_id or not tgt or tgt == current_node_id:
+                continue
+            et = getattr(e, "edge_type", None)
+            et_val = getattr(et, "value", None) or str(et)
+            if et_val not in ("hierarchy", "escalate"):
+                continue
+            if tgt in seen:
+                continue
+            seen.add(tgt)
+            children.append(tgt)
+        return tuple((cid, labels.get(cid, "")) for cid in children)
 
 # P-RC-10 P10.5a re-export: keep the public import path stable.
 from ._runtime_agent_pipeline_executor import (  # noqa: E402
