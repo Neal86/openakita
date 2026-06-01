@@ -363,62 +363,54 @@ function activityItemsToMessages(
         timestamp: activityTs(cmdItem),
       });
     }
-    // UI feedback (图2): the user complained about a redundant "来自组织" bubble
-    // that duplicates the 编排过程 timeline. We drop the "📥 来自 组织 ·
-    // command_id=…" header entirely and frame this reconstructed group with the
-    // SAME "编排过程" label the live ProgressLedgerTimeline uses, so the live and
-    // reloaded views read as one consistent timeline instead of two formats.
-    const header = `🗂 **编排过程**`;
-    // 时间线内容：每条加上 hh:mm:ss 时间戳。A2 fix: 跳过无可读内容的事件，
-    // 并保持 item ↔ line 的对应关系（用于后续折叠时区分门面/细节）。
-    // UI issue #1: user_command 已单独渲染成右侧气泡，这里从活动流里剔除，
-    // 避免"🎯 用户指令"在系统卡里重复一遍。
-    const rendered = bucket
-      .filter(it => normalizeActivity(it).kind !== "user_command")
-      .map(it => ({ it, line: formatActivityLine(it, { nameFmt }) }))
-      .filter(r => r.line.trim().length > 0)
-      .map(r => ({ it: r.it, ln: `\`${fmtClock(activityTs(r.it))}\` ${r.line}` }));
-    // A2 fix: 整组都没有可读内容时，不要产出只有 "来自 组织 ?" 的空气泡。
-    if (rendered.length === 0) continue;
-    // 折叠：>5 条时把"工具进度细节"折叠，把 user_command/task_completed/task_cancelled
-    // 这些"门面事件"始终可见。
-    const isHeadline = (it: ActivityItem) => {
-      const k = normalizeActivity(it).kind;
-      return (
-        k === "user_command"
-        || k === "user_command_cancelled"
-        || k === "task_completed"
-        || k === "task_failed"
-        || k === "task_cancelled"
-        || k === "command"
-      );
-    };
-    let body: string;
-    if (rendered.length > 5) {
-      const headlineLines: string[] = [];
-      const detailLines: string[] = [];
-      rendered.forEach(({ it, ln }) => {
-        if (isHeadline(it)) headlineLines.push(ln);
-        else detailLines.push(ln);
-      });
-      body = [
-        ...headlineLines,
-        detailLines.length > 0
-          ? `<details>\n<summary>展开过程细节（${detailLines.length} 条）</summary>\n\n${detailLines.join("\n\n")}\n\n</details>`
-          : "",
-      ].filter(Boolean).join("\n\n");
-    } else {
-      body = rendered.map(r => r.ln).join("\n\n");
-    }
-    msgs.push({
-      id: `act-grp-${key}`,
-      role: "system",
-      kind: "activity",
-      content: `${header}\n\n${body}`,
-      timestamp: groupTs,
-    });
+    // 图1 fix: the reconstructed flat "🗂 编排过程" system bubble used to be
+    // pushed here as a chat message — which is the UPPER duplicate the user
+    // asked to delete (a flat "主编 任务完成（输出 N 字）" list living above the
+    // detailed live timeline). We no longer emit it. Instead the SAME activity
+    // is folded into the SINGLE bottom timeline via :func:`activityItemsToLedger`
+    // (seeded into ``v2LedgerEvents`` on load), so the command center shows ONE
+    // 编排过程 block. Only the user-command right-side bubble (pushed above) is
+    // reconstructed as a chat message here.
+    void groupTs;
   }
   return msgs;
+}
+
+/**
+ * 图1 fix: convert raw /activity items into the SAME
+ * :class:`ProgressLedgerEvent` shape the live bottom timeline consumes, so
+ * reloaded history and live SSE render as ONE unified 编排过程 timeline
+ * instead of a flat duplicate bubble + the live feed. Each item becomes one
+ * ledger entry whose ``next_speaker`` is the acting node and whose
+ * ``instruction_or_question`` is the human Chinese line (with 谁派给谁 + 内容
+ *摘要, reusing :func:`formatActivityLine`). Ids are stable (``act:<id>``) so a
+ * later merge dedups idempotently.
+ */
+function activityItemsToLedger(
+  items: ActivityItem[],
+  nameFmt?: (id: string) => string,
+): ProgressLedgerEvent[] {
+  if (!items || items.length === 0) return [];
+  const sorted = [...items].sort((a, b) => activityTs(a) - activityTs(b));
+  const out: ProgressLedgerEvent[] = [];
+  for (const it of sorted) {
+    const norm = normalizeActivity(it);
+    if (norm.kind === "user_command") continue; // shown as right-side bubble
+    const line = formatActivityLine(it, { nameFmt });
+    if (!line.trim()) continue;
+    const node = norm.from || norm.to || "";
+    const satisfied = norm.kind === "task_completed";
+    out.push({
+      id: `act:${it.id || `${activityTs(it)}:${norm.kind}:${node}`}`,
+      ts: String(activityTs(it) || ""),
+      is_request_satisfied: satisfied,
+      is_in_loop: false,
+      is_progress_being_made: norm.kind !== "task_failed",
+      next_speaker: node,
+      instruction_or_question: line,
+    });
+  }
+  return out;
 }
 
 function saveToLocalStorage(cid: string, msgs: ChatMsg[]): void {
@@ -776,6 +768,24 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
         );
         const j = await r.json();
         const arr = Array.isArray(j?.items) ? (j.items as ActivityItem[]) : [];
+        // 图1 fix: fold the reconstructed /activity history INTO the single
+        // bottom 编排过程 timeline (merge by id so we never double-count entries
+        // the live SSE already streamed). The flat duplicate bubble is gone;
+        // this is where the "有用内容" gets merged "进下方时间线".
+        if (runtime === "v2" && !cancelled) {
+          const seed = activityItemsToLedger(arr, nameFmt);
+          if (seed.length > 0) {
+            const tnum = (s: string) =>
+              /^\d+$/.test(s) ? Number(s) : Date.parse(s) || 0;
+            setV2LedgerEvents((prev) => {
+              const byId = new Map(prev.map((e) => [e.id, e]));
+              for (const e of seed) if (!byId.has(e.id)) byId.set(e.id, e);
+              return [...byId.values()].sort(
+                (a, b) => tnum(a.ts || "") - tnum(b.ts || ""),
+              );
+            });
+          }
+        }
         const [msgs, reports] = await Promise.all([
           Promise.resolve(activityItemsToMessages(arr, nameFmt)),
           fetchFinalReports(arr),
