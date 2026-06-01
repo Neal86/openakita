@@ -582,6 +582,9 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
       const outputLen = Number(p.output_len || 0);
       const artifact = (p.artifact_path as string) || "";
       const artifactName = artifact ? artifact.replace(/\\/g, "/").split("/").pop() : "";
+      const toolName = (p.tool_name as string) || "";
+      const argsPreview = (p.args_preview as string) || "";
+      const resultLen = Number(p.result_len || 0);
       let speaker = ""; let note = ""; let satisfied = false; let progress = true;
       switch (etype) {
         case "agent_run_started":
@@ -599,6 +602,23 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
         }
         case "agent_run_failed":
           speaker = nameOf(node); note = "执行失败"; progress = false; break;
+        // 任务1：把节点执行【过程中】实时产生的工具调用事件并入时间线，
+        // 让用户看到"开始执行"和"完成"之间的真实中间动作（调用了什么工具、
+        // 入参摘要、产出多少），而不是中间一片空白干等。这些事件本就经
+        // org_event_bus → SSE lifecycle 通道实时下发，过去前端 default 丢弃了。
+        case "node_tool_called":
+          speaker = nameOf(node);
+          note = `🛠 调用工具 \`${toolName || "?"}\`${argsPreview ? `：${argsPreview}` : ""}`;
+          break;
+        case "node_tool_completed":
+          speaker = nameOf(node);
+          note = `✓ 工具 \`${toolName || "?"}\` 完成${resultLen > 0 ? `（返回 ${resultLen} 字）` : ""}`;
+          break;
+        case "node_tool_failed":
+          speaker = nameOf(node);
+          note = `⚠ 工具 \`${toolName || "?"}\` 失败${p.reason ? `（${p.reason as string}）` : ""}`;
+          progress = false;
+          break;
         case "subtask_assigned":
         case "child_dispatch":
           speaker = nameOf(child || node);

@@ -1182,6 +1182,21 @@ class OrgRuntime:
                     await self._broadcast_ws_safe(
                         "org:task_complete", {"org_id": org_id, "node_id": node_id}
                     )
+                    # Audit fix: the node graph animates ``org:task_delivered``
+                    # (产出回流连线) but v2 never emitted it — only delegation
+                    # (org:task_delegated) lit up, so the "下游产出回流到上级"
+                    # half of the flow was invisible. When a child finishes, fire
+                    # a delivery animation back along its reporting edge to the
+                    # parent so the round-trip (派单→交付) is visible end to end.
+                    if parent:
+                        await self._broadcast_ws_safe(
+                            "org:task_delivered",
+                            {
+                                "org_id": org_id,
+                                "from_node": node_id,
+                                "to_node": parent,
+                            },
+                        )
             elif event_name == "subtask_assigned":
                 await self._broadcast_ws_safe(
                     "org:task_delegated",

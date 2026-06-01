@@ -2,9 +2,10 @@
  * Organization Monitor Panel — runtime monitoring for a selected node.
  * Manages its own data fetching (events, schedules, thinking, tasks).
  */
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { safeFetch } from "../providers";
+import { onWsEvent } from "../platform/websocket";
 import type { Node } from "@xyflow/react";
 import {
   fmtTime, fmtDateTime,
@@ -203,6 +204,11 @@ export function OrgMonitorPanel({ orgId, nodeId, apiBaseUrl, nodes, visible }: O
   const [nodeTasks, setNodeTasks] = useState<{ assigned: any[]; delegated: any[] } | null>(null);
   const [nodeActivePlan, setNodeActivePlan] = useState<any>(null);
   const [nodeTasksLoading, setNodeTasksLoading] = useState(false);
+  // 任务2：把两个数据拉取函数暴露给 WS 订阅，便于节点状态/任务/思维链一变化
+  // 就【即时】重拉，而不是干等 8s/10s 轮询。ref 保证 WS effect 不必随
+  // fetch 闭包变化而反复重订阅。
+  const fetchDetailRef = useRef<() => void>(() => {});
+  const fetchTasksRef = useRef<() => void>(() => {});
 
   const nodeNameMap = useMemo(
     () => new Map(nodes.map((n) => [n.id, (n.data as any)?.role_title || n.id])),
@@ -237,8 +243,10 @@ export function OrgMonitorPanel({ orgId, nodeId, apiBaseUrl, nodes, visible }: O
         console.error("Failed to fetch node detail:", e);
       }
     };
+    fetchDetailRef.current = fetchNodeDetail;
     fetchNodeDetail();
-    const interval = setInterval(fetchNodeDetail, 8000);
+    // 轮询仅作为 WS 漏推时的兜底，缩短到 4s（WS 即时推送是主路径）。
+    const interval = setInterval(fetchNodeDetail, 4000);
     return () => clearInterval(interval);
   }, [visible, nodeId, orgId, apiBaseUrl]);
 
@@ -275,10 +283,57 @@ export function OrgMonitorPanel({ orgId, nodeId, apiBaseUrl, nodes, visible }: O
         setNodeTasksLoading(false);
       }
     };
+    fetchTasksRef.current = fetchNodeTasks;
     fetchNodeTasks();
-    const interval = setInterval(fetchNodeTasks, 10000);
+    // 兜底轮询缩短到 5s；任务分配/委派变化主要靠下方 WS 即时重拉。
+    const interval = setInterval(fetchNodeTasks, 5000);
     return () => clearInterval(interval);
   }, [nodeId, orgId, apiBaseUrl]);
+
+  // 任务2：即时推送。订阅全局 WS，命中本组织且与本节点相关的事件时，
+  // 防抖后立刻重拉「分配/委派任务 + 最近活动 + 思维链」，让节点一开工、
+  // 状态/任务一变化就实时反映，而不是等轮询窗口。
+  useEffect(() => {
+    if (!visible || !nodeId || !orgId) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const kick = () => {
+      if (timer) return; // 300ms 合并窗口，避免事件风暴触发多次重拉
+      timer = setTimeout(() => {
+        timer = null;
+        try { fetchTasksRef.current(); } catch { /* noop */ }
+        try { fetchDetailRef.current(); } catch { /* noop */ }
+      }, 300);
+    };
+    const off = onWsEvent((ev, raw) => {
+      const d = (raw || {}) as Record<string, unknown>;
+      if (d.org_id && d.org_id !== orgId) return;
+      // 与本节点相关、或会影响本节点任务/活动/思维链的事件集合。
+      switch (ev) {
+        case "org:node_status":
+          if (d.node_id === nodeId) kick();
+          break;
+        case "org:task_delegated":
+          if (d.from_node === nodeId || d.to_node === nodeId) kick();
+          break;
+        case "org:task_complete":
+        case "org:task_cancelled":
+          if (!d.node_id || d.node_id === nodeId) kick();
+          break;
+        case "org:blackboard_update":
+          if (!d.node_id || d.node_id === nodeId) kick();
+          break;
+        case "org:command_done":
+          kick();
+          break;
+        default:
+          break;
+      }
+    });
+    return () => {
+      off();
+      if (timer) clearTimeout(timer);
+    };
+  }, [visible, nodeId, orgId]);
 
   if (!selectedNode) return null;
 
