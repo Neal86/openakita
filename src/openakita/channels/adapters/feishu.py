@@ -1075,7 +1075,20 @@ class FeishuAdapter(ChannelAdapter):
         return {}
 
     def _handle_security_decision(self, value: dict) -> dict:
-        """Handle security confirmation card button clicks."""
+        """Handle security confirmation card button clicks.
+
+        Called from two contexts:
+        1. WS mode (_on_card_action): runs in the Feishu WS thread — a foreign
+           thread with no running asyncio loop. We MUST dispatch to the main
+           event loop via run_coroutine_threadsafe so asyncio.Event.set() in
+           UIConfirmBus.resolve() reliably wakes the reasoning_engine waiter.
+        2. Webhook mode (_handle_card_action_webhook): runs inside the main
+           event loop thread (called from a sync FastAPI handler). We call
+           apply_resolution directly — already in the correct thread.
+
+        Detecting which case we're in: asyncio.get_running_loop() succeeds
+        when called from the event loop thread, raises RuntimeError otherwise.
+        """
         action = value.get("action", "")
         confirm_id = value.get("confirm_id", "")
         decision_map = {
@@ -1086,21 +1099,51 @@ class FeishuAdapter(ChannelAdapter):
             "security_allow_always": "allow_always",
         }
         decision = decision_map.get(action, "deny")
+        labels = {
+            "allow_once": "✅ 已允许",
+            "deny": "❌ 已拒绝",
+            "sandbox": "🔒 沙箱执行",
+            "allow_session": "✅ 会话允许",
+            "allow_always": "✅ 始终允许",
+        }
         try:
             from openakita.core.policy_v2 import apply_resolution
 
-            apply_resolution(confirm_id, decision)
-            labels = {
-                "allow_once": "✅ 已允许",
-                "deny": "❌ 已拒绝",
-                "sandbox": "🔒 沙箱执行",
-                "allow_session": "✅ 会话允许",
-                "allow_always": "✅ 始终允许",
-            }
+            try:
+                asyncio.get_running_loop()
+                in_event_loop = True
+            except RuntimeError:
+                in_event_loop = False
+
+            if in_event_loop:
+                apply_resolution(confirm_id, decision)
+            elif self._main_loop is not None and self._main_loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(
+                    self._apply_resolution_async(confirm_id, decision),
+                    self._main_loop,
+                )
+                future.result(timeout=2.5)
+            else:
+                apply_resolution(confirm_id, decision)
             return {"toast": {"type": "success", "content": labels.get(decision, decision)}}
+        except TimeoutError:
+            logger.warning(
+                "Feishu: security decision dispatch timed out "
+                "(confirm_id=%s, decision=%s)",
+                confirm_id,
+                decision,
+            )
+            return {"toast": {"type": "warning", "content": labels.get(decision, decision)}}
         except Exception as e:
             logger.warning(f"Feishu: security decision failed: {e}")
             return {"toast": {"type": "error", "content": "处理失败"}}
+
+    @staticmethod
+    async def _apply_resolution_async(confirm_id: str, decision: str) -> bool:
+        """Thin async wrapper so apply_resolution runs inside the event loop."""
+        from openakita.core.policy_v2 import apply_resolution
+
+        return apply_resolution(confirm_id, decision)
 
     def _handle_expand_folder(self, path: str) -> dict:
         """读取目录内容并返回包含文件树和展开按钮的更新卡片。"""

@@ -5076,6 +5076,7 @@ class MessageGateway:
     _SPLIT_SEND_INTERVAL: dict[str, float] = {
         "telegram": 0.5,
         "wechat": 2.5,
+        "feishu": 0.4,
     }
     _DEFAULT_SPLIT_INTERVAL = 0.15
 
@@ -5085,6 +5086,7 @@ class MessageGateway:
         "wechat": 12.0,
         "qqbot": 10.0,
         "onebot": 10.0,
+        "feishu": 3.0,
     }
 
     @staticmethod
