@@ -5978,6 +5978,7 @@ function MainApp() {
               visible={view === "chat"}
               multiAgentEnabled={multiAgentEnabled}
               currentWorkspaceId={currentWorkspaceId}
+              feedbackModalOpen={bugReportOpen}
               onStartService={async () => {
                 const effectiveWsId = currentWorkspaceId || workspaces[0]?.id || null;
                 if (!effectiveWsId) {

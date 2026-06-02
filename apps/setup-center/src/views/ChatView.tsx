@@ -136,6 +136,7 @@ export function ChatView({
   visible = true,
   multiAgentEnabled = false,
   currentWorkspaceId,
+  feedbackModalOpen = false,
 }: {
   serviceRunning: boolean;
   endpoints: EndpointSummary[];
@@ -144,10 +145,17 @@ export function ChatView({
   visible?: boolean;
   multiAgentEnabled?: boolean;
   currentWorkspaceId?: string | null;
+  feedbackModalOpen?: boolean;
 }) {
   // multiAgentEnabled is currently observed by App but not consumed inside ChatView
   // (single-agent only); accept the prop for forward compat to avoid runtime warnings.
   void multiAgentEnabled;
+
+  // Track feedbackModalOpen via ref so the Tauri drag-drop effect (deps=[]) can
+  // read the latest value without re-registering the webview listener.
+  const feedbackModalOpenRef = useRef(false);
+  useEffect(() => { feedbackModalOpenRef.current = feedbackModalOpen; }, [feedbackModalOpen]);
+
   const { t, i18n } = useTranslation();
   const mdModules = useMdModules();
 
@@ -4182,12 +4190,13 @@ export function ChatView({
     };
 
     onDragDrop({
-      onEnter: () => { if (!cancelled) setDragOver(true); },
-      onOver: () => { if (!cancelled) setDragOver(true); },
+      onEnter: () => { if (!cancelled && !feedbackModalOpenRef.current) setDragOver(true); },
+      onOver: () => { if (!cancelled && !feedbackModalOpenRef.current) setDragOver(true); },
       onLeave: () => { if (!cancelled) setDragOver(false); },
       onDrop: (paths) => {
         if (cancelled) return;
         setDragOver(false);
+        if (feedbackModalOpenRef.current) return;
         handleDroppedPaths(paths);
       },
     }).then((unsub) => { unlisten = unsub; });
