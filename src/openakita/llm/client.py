@@ -836,6 +836,7 @@ class LLMClient:
                     raise AllEndpointsFailedError(
                         f"Stream: content safety check failed. {hint} Last error: {e}",
                         is_structural=True,
+                        error_categories={"content_safety"},
                     ) from e
 
                 sc = e.status_code
@@ -951,9 +952,14 @@ class LLMClient:
             or "inappropriate content" in last_err_lower
             or "content_filter" in last_err_lower
         )
+        _cats = {
+            getattr(p, "error_category", "") for p in eligible if not p.is_healthy
+        }
+        _cats.discard("")
         raise AllEndpointsFailedError(
             f"Stream: all {len(eligible)} endpoints failed. {hint} Last error: {last_error}",
             is_structural=is_structural,
+            error_categories=_cats or None,
         )
 
     # ==================== 公共降级策略 ====================
@@ -1191,12 +1197,15 @@ class LLMClient:
                         f"All endpoints failed with structural errors "
                         f"(cooldown {min_cd}s). {hint} Last error: {last_err}",
                         is_structural=True,
+                        error_categories={"structural"},
                     )
 
                 # ── 全部是配额/认证错误，重试无意义 → 快速报错 ──
                 if quota_or_auth and len(quota_or_auth) == unhealthy_count:
                     last_err = quota_or_auth[0]._last_error or "unknown auth/quota error"
-                    categories = sorted({p.error_category for p in quota_or_auth})
+                    categories = sorted(
+                        {p.error_category for p in quota_or_auth if p.error_category}
+                    )
                     hint = _friendly_error_hint(quota_or_auth)
                     raise AllEndpointsFailedError(
                         f"All endpoints failed with {'/'.join(categories)} errors. "
@@ -1225,7 +1234,9 @@ class LLMClient:
 
             # 所有端点都是 quota/auth → 直接报错，不再送回 _try_endpoints 浪费 API 调用
             last_err = base_capability_matched[0]._last_error or "unknown error"
-            categories = sorted({p.error_category for p in base_capability_matched})
+            categories = sorted(
+                {p.error_category for p in base_capability_matched if p.error_category}
+            )
             hint = _friendly_error_hint(base_capability_matched)
             raise AllEndpointsFailedError(
                 f"All endpoints failed with {'/'.join(categories)} errors. "

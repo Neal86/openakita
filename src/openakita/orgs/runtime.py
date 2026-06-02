@@ -83,6 +83,24 @@ _LIM_LOG = 500
 _runtime_instance: OrgRuntime | None = None
 
 
+def _log_task_exception(task: asyncio.Task) -> None:  # type: ignore[type-arg]
+    """Done-callback that retrieves and logs unhandled exceptions from fire-and-forget tasks.
+
+    Without this, exceptions inside ``asyncio.create_task`` / ``ensure_future``
+    are silently swallowed until the Task object is garbage-collected, which
+    causes the "Task exception was never retrieved" warning and — more
+    critically — makes the owning operation appear "stuck" to the user.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "[OrgRuntime] fire-and-forget task %s raised: %s",
+            task.get_name(), exc, exc_info=exc,
+        )
+
+
 def get_runtime() -> OrgRuntime | None:
     """Return the active OrgRuntime singleton (set during __init__)."""
     return _runtime_instance
@@ -1868,7 +1886,8 @@ class OrgRuntime:
             # 非正常结束时不触发 post-task hook（避免把"部分/失败结果"再次下发下游）；
             # 软 verify_incomplete 也走 hook，让父级能 drain 子节点交付队列。
             if is_normal:
-                asyncio.ensure_future(self._post_task_hook(org, node))
+                _t = asyncio.ensure_future(self._post_task_hook(org, node))
+                _t.add_done_callback(_log_task_exception)
 
             return_payload: dict = {
                 "node_id": node.id,
@@ -1971,7 +1990,9 @@ class OrgRuntime:
         return any(kw in err_lower for kw in [
             "insufficient balance", "insufficient_balance", "quota",
             "billing", "(402)", "payment required",
-            "unauthorized", "authorization required",
+            "(401)", "unauthorized", "authorization required", "authentication",
+            "(403)", "forbidden",
+            "invalid api key", "invalid_api_key",
         ])
 
     async def _pause_org_for_quota(self, org: Organization, error: Exception) -> bool:
@@ -3017,6 +3038,7 @@ class OrgRuntime:
             task_key = f"{_nid}:{msg.id}"
             task = asyncio.create_task(self._on_node_message(_oid, _nid, msg))
             self._running_tasks.setdefault(_oid, {})[task_key] = task
+            task.add_done_callback(_log_task_exception)
             task.add_done_callback(
                 lambda _t, _o=_oid, _k=task_key: self._running_tasks.get(_o, {}).pop(_k, None)
             )
@@ -3369,10 +3391,7 @@ class OrgRuntime:
         messenger.set_deadlock_handler(_on_deadlock)
 
         task = asyncio.ensure_future(messenger.start_background_tasks())
-        task.add_done_callback(
-            lambda t: logger.error(f"[OrgRuntime] Messenger bg tasks failed: {t.exception()}")
-            if t.done() and not t.cancelled() and t.exception() else None
-        )
+        task.add_done_callback(_log_task_exception)
 
     async def _deactivate_org(self, org_id: str) -> None:
         messenger = self._messengers.get(org_id)
@@ -4368,13 +4387,14 @@ class OrgRuntime:
 
         # Actually wake the root for a summary ReAct.
         try:
-            asyncio.create_task(
+            _t = asyncio.create_task(
                 self._activate_and_run(
                     org, root, body,
                     activation_origin="delivery_followup",
                 ),
                 name=f"summary_followup:{tracker.org_id}:{tracker.root_node_id}",
             )
+            _t.add_done_callback(_log_task_exception)
         except RuntimeError:
             # No running loop — extremely unlikely in production but fall back
             # to direct completion to avoid hanging tests.
@@ -4998,12 +5018,13 @@ class OrgRuntime:
                                     "决定是否需要推进工作或分配新任务。"
                                 )
                                 self._heartbeat.record_activity(org_id)
-                                asyncio.ensure_future(
+                                _t = asyncio.ensure_future(
                                     self._activate_and_run(
                                         org, root, prompt,
                                         activation_origin="watchdog_kick",
                                     )
                                 )
+                                _t.add_done_callback(_log_task_exception)
 
             except asyncio.CancelledError:
                 break

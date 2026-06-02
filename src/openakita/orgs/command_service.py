@@ -11,6 +11,7 @@ import logging
 import threading
 import time
 import uuid
+from concurrent.futures import Future
 from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -22,6 +23,29 @@ from openakita.orgs.models import OrgStatus
 logger = logging.getLogger(__name__)
 
 _CMD_TTL = 3600
+
+
+def _log_task_exception(task: asyncio.Task) -> None:  # type: ignore[type-arg]
+    """Retrieve and log unhandled exceptions from fire-and-forget asyncio tasks."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "[CommandService] fire-and-forget task %s raised: %s",
+            task.get_name(), exc, exc_info=exc,
+        )
+
+
+def _log_future_exception(future: Future) -> None:  # type: ignore[type-arg]
+    """Retrieve and log unhandled exceptions from ``run_coroutine_threadsafe`` futures."""
+    if future.cancelled():
+        return
+    exc = future.exception()
+    if exc is not None:
+        logger.error(
+            "[CommandService] cross-thread future raised: %s", exc, exc_info=exc,
+        )
 _service_instance: OrgCommandService | None = None
 
 
@@ -523,9 +547,11 @@ class OrgCommandService:
 
         engine_loop = get_engine_loop()
         if engine_loop is not None:
-            asyncio.run_coroutine_threadsafe(_run(), engine_loop)
+            future = asyncio.run_coroutine_threadsafe(_run(), engine_loop)
+            future.add_done_callback(_log_future_exception)
         else:
-            asyncio.create_task(_run())
+            _t = asyncio.create_task(_run())
+            _t.add_done_callback(_log_task_exception)
 
     async def _broadcast_done(
         self,

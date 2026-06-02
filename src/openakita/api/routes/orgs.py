@@ -6,6 +6,7 @@ CRUD + 模板 + 节点管理 + 生命周期 + 命令 + 记忆 + 事件
 
 from __future__ import annotations
 
+import asyncio as _asyncio
 import hashlib
 import json
 import logging
@@ -38,6 +39,18 @@ router = APIRouter(prefix="/api/orgs", tags=["组织编排"])
 _LIM_API = 2000
 
 _VALID_DECISIONS = {"approve", "reject", "批准", "拒绝"}
+
+
+def _log_task_exception(task: _asyncio.Task) -> None:  # type: ignore[type-arg]
+    """Retrieve and log unhandled exceptions from fire-and-forget asyncio tasks."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "[OrgAPI] fire-and-forget task %s raised: %s",
+            task.get_name(), exc, exc_info=exc,
+        )
 
 def _safe_int(value: str | None, default: int) -> int:
     """Parse query param to int, returning *default* on failure."""
@@ -2198,9 +2211,10 @@ async def dispatch_task(request: Request, org_id: str, project_id: str, task_id:
 
     import asyncio
 
-    asyncio.ensure_future(
+    _t = asyncio.ensure_future(
         to_engine(runtime.send_command(org_id, target_node_id, prompt, chain_id=chain_id)),
     )
+    _t.add_done_callback(_log_task_exception)
 
     return {"ok": True, "task_id": task_id, "chain_id": chain_id, "dispatched": True}
 
