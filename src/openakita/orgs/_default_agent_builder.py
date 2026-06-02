@@ -900,6 +900,31 @@ class _BrainBackedNodeAgent:
         if not body:
             # Empty output is an unambiguous reject — no model call needed.
             return False, "下级未产出任何内容（空产出），需重做并给出完整成果。"
+        # 硬信号否决 (item 2, 2026-06): the model reviewer occasionally waves
+        # through a half-product (a ``thinking…`` leak / mid-iteration stub /
+        # empty body). Run the SAME objective gate the central deliverable
+        # check uses; when it flags the output as not-a-deliverable we HARD
+        # REJECT regardless of what the model would say, so a mid-layer parent
+        # can no longer accept a thinking-prefixed or stub deliverable. This
+        # only fires on objective signals (never on a real document), so it
+        # does not undermine the fail-open behaviour for "model echoed the
+        # option list" misjudgements. Toggle via env for tuning.
+        import os as _os
+
+        if _os.environ.get("OPENAKITA_ORG_REVIEW_HARD_GATE", "1").strip() != "0":
+            try:
+                from ._runtime_node_artifacts import classify_node_output
+
+                gate_status, gate_reason = classify_node_output(body)
+            except Exception:  # noqa: BLE001 -- gate must never crash review
+                gate_status, gate_reason = ("ok", "")
+            if gate_status != "ok":
+                human = {
+                    "thinking_leak": "下级产出只是思考过程（thinking 泄漏），不是成文成果",
+                    "mid_reasoning": "下级停在中途自述/反复检索，未给出完整成果",
+                    "empty_output": "下级无有效产出",
+                }.get(gate_reason, f"下级产出未通过完成度硬性校验（{gate_reason}）")
+                return False, f"{human}，请重做并产出完整、成文的成果。"
         role = (self._spec.role or "worker").strip()
         persona = (self._spec.persona or "").strip()
         # Truncate the reviewed output so review stays cheap on huge deliverables.

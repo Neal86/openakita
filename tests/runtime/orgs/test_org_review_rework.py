@@ -187,6 +187,97 @@ def test_parent_review_accepts_first_pass(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 # ---------------------------------------------------------------------------
+# item 2 (2026-06): hard-signal gate overrides a too-lenient model "通过"
+# ---------------------------------------------------------------------------
+
+
+def test_hard_gate_rejects_thinking_leak_even_if_model_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 'thinking…' leak must be HARD-rejected even when the reviewer model
+    says 通过 — the objective gate (same as the central deliverable check)
+    overrides a too-lenient model verdict, so a mid-layer parent can't accept
+    a half-product."""
+    monkeypatch.setenv("OPENAKITA_ORG_REVIEW_ENABLED", "1")
+    monkeypatch.setenv("OPENAKITA_ORG_REWORK_MAX", "1")
+    monkeypatch.setenv("OPENAKITA_ORG_NODE_TIMEOUT_S", "0")
+    monkeypatch.setenv("OPENAKITA_ORG_REVIEW_HARD_GATE", "1")
+    bus = _RecordingBus()
+    lookup = _Lookup(["n0", "n1"])
+
+    n1_runs = {"n": 0}
+
+    def _resolve(**kwargs: Any) -> SimpleNamespace:
+        if _is_review_call(kwargs):
+            # Model is lenient and would always pass — the hard gate must
+            # override the first (thinking-leak) attempt.
+            return _resp("裁决: 通过\n理由: 看起来还行")
+        user = str(kwargs.get("messages", [{}])[0].get("content", ""))
+        if "kickoff" in user:
+            return _resp('<dispatch target="n1">写一份完整方案</dispatch>')
+        n1_runs["n"] += 1
+        if n1_runs["n"] == 1:
+            # First attempt: a raw thinking leak (objective half-product).
+            return _resp("thinking 让我想想这个任务该怎么做，先搜索一下相关资料")
+        # Rework attempt: a real, headed deliverable.
+        return _resp("# 社区市集方案\n\n## 定位\n完整成文内容……\n\n## 流程\n详尽步骤。")
+
+    brain = SimpleNamespace(
+        messages_create_async=_AsyncFn(_resolve), set_trace_context=lambda _c: None
+    )
+    executor = _make_executor(bus=bus, lookup=lookup, brain=brain)
+
+    result = asyncio.run(
+        executor.activate_and_run(
+            org_id="o1", node_id="n0", content="kickoff", command_id="cmd_hg"
+        )
+    )
+    assert result["status"] == "ok"
+    names = _names(bus)
+    # The thinking leak was hard-rejected -> exactly one rework, then the
+    # real deliverable passed.
+    assert names.count("node_rework_requested") == 1
+    assert "node_review_passed" in names
+    n1_started = [p for n, p in bus.events if n == "agent_run_started" and p.get("node_id") == "n1"]
+    assert len(n1_started) == 2
+    assert "社区市集方案" in (result.get("output") or "")
+
+
+def test_hard_gate_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the hard gate OFF, a lenient model verdict is honoured (no rework)
+    — proves the override is gated by OPENAKITA_ORG_REVIEW_HARD_GATE."""
+    monkeypatch.setenv("OPENAKITA_ORG_REVIEW_ENABLED", "1")
+    monkeypatch.setenv("OPENAKITA_ORG_REWORK_MAX", "1")
+    monkeypatch.setenv("OPENAKITA_ORG_NODE_TIMEOUT_S", "0")
+    monkeypatch.setenv("OPENAKITA_ORG_REVIEW_HARD_GATE", "0")
+    bus = _RecordingBus()
+    lookup = _Lookup(["n0", "n1"])
+
+    def _resolve(**kwargs: Any) -> SimpleNamespace:
+        if _is_review_call(kwargs):
+            return _resp("裁决: 通过\n理由: 可以")
+        user = str(kwargs.get("messages", [{}])[0].get("content", ""))
+        if "kickoff" in user:
+            return _resp('<dispatch target="n1">写一份完整方案</dispatch>')
+        return _resp("thinking 让我想想，先搜索一下")
+
+    brain = SimpleNamespace(
+        messages_create_async=_AsyncFn(_resolve), set_trace_context=lambda _c: None
+    )
+    executor = _make_executor(bus=bus, lookup=lookup, brain=brain)
+
+    result = asyncio.run(
+        executor.activate_and_run(
+            org_id="o1", node_id="n0", content="kickoff", command_id="cmd_hgoff"
+        )
+    )
+    assert result["status"] == "ok"
+    names = _names(bus)
+    assert "node_rework_requested" not in names
+    assert "node_review_passed" in names
+
+
+# ---------------------------------------------------------------------------
 # 核心2: reject -> rework -> child re-enters 进行中 -> accept
 # ---------------------------------------------------------------------------
 
