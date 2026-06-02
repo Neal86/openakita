@@ -16,7 +16,7 @@ import {
   DropdownMenuSeparator, DropdownMenuItem,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { LogOut, ClipboardCopy, Compass } from "lucide-react";
+import { LogOut, Square, ClipboardCopy, Compass } from "lucide-react";
 import { toast } from "sonner";
 import { openExternalUrl } from "../platform";
 import { copyToClipboard } from "../utils/clipboard";
@@ -37,7 +37,7 @@ export type TopbarProps = {
   endpointCount: number;
   dataMode: "local" | "remote";
   busy: string | null;
-  onDisconnect: () => void;
+  onDisconnect: () => void | Promise<void>;
   onConnect: () => void;
   onStart: () => Promise<void>;
   onRefreshAll: () => Promise<void>;
@@ -320,10 +320,10 @@ export function Topbar({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button variant="ghost" size="icon-sm" onClick={onDisconnect} disabled={!!busy}>
-                  <LogOut size={16} />
+                  {dataMode === "remote" ? <LogOut size={16} /> : <Square size={14} />}
                 </Button>
               </TooltipTrigger>
-              <TooltipContent side="bottom">{t("topbar.disconnect")}</TooltipContent>
+              <TooltipContent side="bottom">{dataMode === "remote" ? t("topbar.disconnect") : t("topbar.stop")}</TooltipContent>
             </Tooltip>
           ) : (
             <>

@@ -2315,8 +2315,8 @@ export function ChatView({
               const baseMessages = isActiveRecovery ? prev : loadMessagesFromStorage(_recoverKey);
               const updated = baseMessages.map((m) => {
                 if (m.id !== _recoverMsgId) return m;
-                if (m.content && m.content.length >= contentLen) return m;
-                const patched: ChatMessage = { ...m, content: lastAssistant.content };
+                if (m.content && !m.streaming && m.content.length >= contentLen) return m;
+                const patched: ChatMessage = { ...m, content: lastAssistant.content, streaming: false, streamStatus: null };
                 if (
                   (!m.thinkingChain || m.thinkingChain.length === 0) &&
                   Array.isArray(lastAssistant.chain_summary) &&
@@ -3525,24 +3525,19 @@ export function ChatView({
           attemptRecovery(4000);
         }
       } else {
+        const emptyStream = !currentContent && !assistantMsg.askUser;
+        const canRecover = emptyStream && !!convId;
         updateMessages((prev) => prev.map((m) =>
           m.id === assistantMsg.id
             ? {
                 ...m,
-                content: m.content || (m.askUser ? "" : "未收到有效回复，请重试。"),
-                streaming: false,
-                streamStatus: null,
+                content: canRecover ? "" : (m.content || (m.askUser ? "" : "未收到有效回复，请重试。")),
+                streaming: canRecover,
+                streamStatus: canRecover ? t("chat.recovering", "正在恢复回复...") : null,
               }
             : m
         ));
 
-        // Crash diagnostics: final React state has been queued. If a native
-        // WebView2 crash happens during the subsequent paint, this breadcrumb
-        // is the last entry to land in frontend.log before the process dies.
-        // Force-flush is critical here: the next scheduled screen flush could be
-        // the moment the WebView2 process dies, so we must push the line to
-        // Rust IPC before then. tauriInvoke is fire-and-forget from JS side
-        // and the native side processes it on its own thread.
         logger.info("Chat", "task_completed", {
           convId,
           gracefulDone,
@@ -3554,8 +3549,27 @@ export function ChatView({
         });
         void logger.flush();
 
-        if (!gracefulDone && convId) {
-          // SSE 连接被中断（未收到 "done" 事件），后端可能仍在运行，启动持续轮询恢复
+        if (canRecover) {
+          attemptRecovery(2000);
+          const _fallbackMsgId = assistantMsg.id;
+          const _fallbackConvId = thisConvId;
+          const _fallbackStorageKey = STORAGE_KEY_MSGS_PREFIX + thisConvId;
+          setTimeout(() => {
+            setMessages((prev) => {
+              const isActive = activeConvIdRef.current === _fallbackConvId;
+              const base = isActive ? prev : loadMessagesFromStorage(_fallbackStorageKey);
+              const updated = base.map((m) => {
+                if (m.id !== _fallbackMsgId) return m;
+                if (m.content && !m.streaming) return m;
+                return { ...m, content: "未收到有效回复，请重试。", streaming: false, streamStatus: null };
+              });
+              const liveCtx = streamContexts.current.get(_fallbackConvId);
+              if (liveCtx) liveCtx.messages = updated;
+              try { saveMessagesToStorage(_fallbackStorageKey, updated); } catch { /* quota */ }
+              return isActive ? updated : prev;
+            });
+          }, 30_000);
+        } else if (!gracefulDone && convId) {
           attemptRecovery(3000);
         } else if (gracefulDone && convId) {
           // SSE 正常完成后也静默校验一次后端历史。桌面端恢复前台或

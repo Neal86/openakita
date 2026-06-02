@@ -849,6 +849,13 @@ async def _stream_chat(
                         evt, data_json=json.dumps(evt.payload, ensure_ascii=False)
                     )
 
+        # Yield an SSE comment keepalive before Agent resolution.
+        # Agent lazy-init (Brain/tools/memory/prompt) can take several
+        # seconds on cold start; sending an SSE comment immediately
+        # opens the HTTP chunked response so the client's fetch stream
+        # is activated and won't be treated as an empty response.
+        yield ":keepalive\n\n"
+
         actual_agent = _resolve_agent(agent)
         if actual_agent is None:
             yield _sse("error", {"message": "Agent not initialized"})

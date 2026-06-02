@@ -778,6 +778,7 @@ function MainApp() {
   const lastReadinessReadyRef = useRef<boolean | null>(null);
   const wsRefreshDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const backendStartupHoldUntilRef = useRef(IS_TAURI ? Date.now() + BACKEND_STARTUP_PROBE_HOLD_MS : 0);
+  const stopInProgressRef = useRef(false);
   const [pageVisible, setPageVisible] = useState(true);
   const visibilityGraceRef = useRef(false); // 休眠恢复宽限期
   const lastPluginAppsReadyEventRef = useRef(0);
@@ -1150,6 +1151,7 @@ function MainApp() {
     const timer = setInterval(async () => {
       // 自重启互锁：restartOverlay 期间暂停心跳
       if (restartOverlay) return;
+      if (stopInProgressRef.current) return;
 
       const effectiveBase = httpApiBase();
       try {
@@ -3067,9 +3069,10 @@ function MainApp() {
    */
   async function connectToExistingLocalService() {
     const ver = conflictDialog?.version || "";
+    const existingPid = conflictDialog?.pid ?? null;
     setDataMode("local");
     setApiBaseUrl("http://127.0.0.1:18900");
-    setServiceStatus({ running: true, pid: null, pidFile: "" });
+    setServiceStatus({ running: true, pid: existingPid, pidFile: "" });
     setConflictDialog(null);
     setPendingStartWsId(null);
     const _busyId = notifyLoading(t("connect.testing"));
@@ -5851,14 +5854,30 @@ function MainApp() {
           endpointCount={endpointSummary.length}
           dataMode={dataMode}
           busy={busy}
-          onDisconnect={() => {
-            clearBackendStartingHold();
-            setTauriRemoteMode(false);
-            setDataMode("local");
-            setApiBaseUrl(DEFAULT_LOCAL_API_BASE);
-            setServiceStatus({ running: false, pid: null, pidFile: "" });
-            resetEnvLoaded();
-            notifySuccess(t("topbar.disconnected"));
+          onDisconnect={async () => {
+            if (dataMode === "remote") {
+              clearBackendStartingHold();
+              setTauriRemoteMode(false);
+              setDataMode("local");
+              setApiBaseUrl(DEFAULT_LOCAL_API_BASE);
+              setServiceStatus({ running: false, pid: null, pidFile: "" });
+              resetEnvLoaded();
+              notifySuccess(t("topbar.disconnected"));
+            } else {
+              const wsId = currentWorkspaceId || workspaces[0]?.id || null;
+              if (!wsId) return;
+              const _busyId = notifyLoading(t("topbar.stopping"));
+              stopInProgressRef.current = true;
+              try {
+                await doStopService(wsId);
+                notifySuccess(t("topbar.stopped_toast"));
+              } catch (e) {
+                notifyError(String(e));
+              } finally {
+                stopInProgressRef.current = false;
+                dismissLoading(_busyId);
+              }
+            }
           }}
           onConnect={() => {
             setConnectAddress(apiBaseUrl.replace(/^https?:\/\//, ""));
