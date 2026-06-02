@@ -3522,6 +3522,12 @@ class MessageGateway:
             return False
         org_query, task = parsed
 
+        # 将已下载的文本文件内容拼接到 task，使组织根节点能看到文件内容。
+        # _preprocess_media 已在 _handle_message 中提前执行（媒体已下载到本地）。
+        file_supplement = self._extract_text_file_content(message)
+        if file_supplement:
+            task = task + file_supplement
+
         # 把用户输入的"组织名或 ID"解析为真实 ID。@组织/@org 简短形式时
         # ``_parse_org_command`` 已经返回 session 里 bound 好的真实 id，再走一遍解析
         # 仍然安全（id 精确匹配自身）。
@@ -3931,6 +3937,13 @@ class MessageGateway:
                 classify_entry(message.channel),
             )
 
+            # 1.5 媒体预处理（下载文件/图片/语音 + 语音 STT）。
+            # 必须在 org 命令路由之前执行，否则组织命令路径无法读取文件内容。
+            # 对纯文本消息是 no-op（无媒体时直接跳过）；内部有幂等保护，
+            # 后续正常路径即使再次调用也安全。
+            if message.content.has_media:
+                await self._preprocess_media(message)
+
             org_handled = await self._try_handle_org_command(message, session, user_text)
             if org_handled:
                 return
@@ -3949,7 +3962,7 @@ class MessageGateway:
                         f"[Gateway] Pre-process hook {hook.__qualname__} failed: {hook_err}"
                     )
 
-            # 4. 媒体预处理（下载图片、语音转文字）
+            # 4. 媒体预处理（幂等：已下载的文件不会重复下载）
             await self._preprocess_media(message)
 
             # 4.1 多Bot绑定：将 adapter 配置的 agent_profile_id 写入新 session
@@ -4458,6 +4471,84 @@ class MessageGateway:
                 logger.warning(f"[Interrupt] _build_pending_files failed for {fil.local_path}: {e}")
         return files_data
 
+    # Known text-file extensions for inline content injection.
+    # Shared by _extract_text_file_content and _call_agent.
+    _TEXT_FILE_EXTENSIONS = frozenset((
+        ".md", ".txt", ".csv", ".json", ".jsonl", ".xml",
+        ".yaml", ".yml", ".toml", ".ini", ".cfg", ".log",
+        ".py", ".js", ".ts", ".jsx", ".tsx",
+        ".html", ".htm", ".css", ".sql",
+        ".sh", ".bat", ".ps1",
+        ".java", ".c", ".cpp", ".h", ".hpp",
+        ".go", ".rs", ".rb", ".php", ".lua", ".r",
+        ".swift", ".kt", ".scala",
+        ".conf", ".env", ".gitignore", ".dockerfile", ".makefile",
+    ))
+
+    _TEXT_FILE_SIZE_LIMIT = 512 * 1024  # 512 KB
+
+    @staticmethod
+    def _extract_text_file_content(message: "UnifiedMessage") -> str:
+        """Extract readable text content from downloaded file attachments.
+
+        Returns a string with file contents (for known text extensions)
+        or path/failure notices for other file types.  Returns "" when
+        the message carries no file attachments or none could be read.
+
+        This is the single source of truth for text-file inlining —
+        used by both the normal agent path and the org-command path.
+        """
+        parts: list[str] = []
+        for fil in getattr(message.content, "files", []) or []:
+            if not fil.local_path or not Path(fil.local_path).exists():
+                continue
+            try:
+                mime = fil.mime_type or ""
+                suffix = Path(fil.local_path).suffix.lower()
+                _fname = fil.filename or Path(fil.local_path).name
+
+                if suffix in MessageGateway._TEXT_FILE_EXTENSIONS or mime.startswith("text/"):
+                    _fpath = Path(fil.local_path)
+                    if _fpath.stat().st_size <= MessageGateway._TEXT_FILE_SIZE_LIMIT:
+                        _content = _fpath.read_text(encoding="utf-8", errors="replace")
+                        parts.append(
+                            f"\n\n--- 文件: {_fname} ---\n{_content}\n--- 文件结束 ---"
+                        )
+                        logger.info(
+                            f"Text file injected: {fil.local_path} ({len(_content)} chars)"
+                        )
+                    else:
+                        parts.append(
+                            f"\n[附件: {_fname} ({mime or suffix}), "
+                            f"文件过大无法内联，本地路径: {fil.local_path}]"
+                        )
+                        logger.info(
+                            f"Text file too large for inline, path provided: {fil.local_path}"
+                        )
+                elif suffix == ".pdf" or "pdf" in mime:
+                    parts.append(
+                        f"\n[附件: {_fname} (PDF), 本地路径: {fil.local_path}]"
+                    )
+                else:
+                    parts.append(
+                        f"\n[附件: {_fname} ({mime or suffix}), 本地路径: {fil.local_path}]"
+                    )
+            except Exception as e:
+                logger.error(f"Failed to extract file content: {e}")
+
+        failed_files = [
+            fil for fil in (getattr(message.content, "files", []) or [])
+            if fil.status == MediaStatus.FAILED
+        ]
+        if failed_files:
+            reasons = "; ".join(fil.description or "未知原因" for fil in failed_files)
+            parts.append(
+                f"\n[用户发送了{len(failed_files)}个文件，但下载失败: {reasons}]"
+            )
+            logger.warning(f"File download failed, notifying agent: {reasons}")
+
+        return "".join(parts)
+
     async def _send_typing(self, message: UnifiedMessage) -> None:
         """发送正在输入状态"""
         adapter = self._adapters.get(message.channel)
@@ -4701,7 +4792,15 @@ class MessageGateway:
                     input_text = "[用户发送了视频]"
                 logger.info(f"Processing multimodal message with {len(videos_data)} videos")
 
-            # 处理文件 - PDF 等文档的多模态输入
+            # 处理文件 — 文本内联 + PDF/二进制多模态
+            # 文本文件内联使用共享 helper（与 org 命令路径一致）
+            file_text_supplement = self._extract_text_file_content(message)
+            if file_text_supplement:
+                input_text += file_text_supplement
+
+            # PDF 文件构建 pending_files（供 Agent DocumentBlock 多模态）。
+            # 文本文件已由 _extract_text_file_content 内联到 input_text，
+            # 不需要重复进入 pending_files。
             files_data = []
             for fil in message.content.files:
                 if fil.local_path and Path(fil.local_path).exists():
@@ -4710,9 +4809,9 @@ class MessageGateway:
                         suffix = Path(fil.local_path).suffix.lower()
                         _fname = fil.filename or Path(fil.local_path).name
                         if suffix == ".pdf" or "pdf" in mime:
-                            file_data = base64.b64encode(Path(fil.local_path).read_bytes()).decode(
-                                "utf-8"
-                            )
+                            file_data = base64.b64encode(
+                                Path(fil.local_path).read_bytes()
+                            ).decode("utf-8")
                             files_data.append(
                                 {
                                     "type": "document",
@@ -4726,89 +4825,8 @@ class MessageGateway:
                                 }
                             )
                             logger.info(f"PDF file encoded: {fil.local_path}")
-                        elif suffix in (
-                            ".md",
-                            ".txt",
-                            ".csv",
-                            ".json",
-                            ".jsonl",
-                            ".xml",
-                            ".yaml",
-                            ".yml",
-                            ".toml",
-                            ".ini",
-                            ".cfg",
-                            ".log",
-                            ".py",
-                            ".js",
-                            ".ts",
-                            ".jsx",
-                            ".tsx",
-                            ".html",
-                            ".htm",
-                            ".css",
-                            ".sql",
-                            ".sh",
-                            ".bat",
-                            ".ps1",
-                            ".java",
-                            ".c",
-                            ".cpp",
-                            ".h",
-                            ".hpp",
-                            ".go",
-                            ".rs",
-                            ".rb",
-                            ".php",
-                            ".lua",
-                            ".r",
-                            ".swift",
-                            ".kt",
-                            ".scala",
-                            ".conf",
-                            ".env",
-                            ".gitignore",
-                            ".dockerfile",
-                            ".makefile",
-                        ) or mime.startswith("text/"):
-                            _TEXT_FILE_SIZE_LIMIT = 512 * 1024  # 512KB
-                            _fpath = Path(fil.local_path)
-                            if _fpath.stat().st_size <= _TEXT_FILE_SIZE_LIMIT:
-                                _content = _fpath.read_text(
-                                    encoding="utf-8",
-                                    errors="replace",
-                                )
-                                input_text += (
-                                    f"\n\n--- 文件: {_fname} ---\n{_content}\n--- 文件结束 ---"
-                                )
-                                logger.info(
-                                    f"Text file injected: {fil.local_path} ({len(_content)} chars)"
-                                )
-                            else:
-                                input_text += (
-                                    f"\n[附件: {_fname} ({mime or suffix}), "
-                                    f"文件过大无法内联，本地路径: {fil.local_path}]"
-                                )
-                                logger.info(
-                                    f"Text file too large for inline, "
-                                    f"path provided: {fil.local_path}"
-                                )
-                        else:
-                            input_text += (
-                                f"\n[附件: {_fname} ({mime or suffix}), 本地路径: {fil.local_path}]"
-                            )
                     except Exception as e:
-                        logger.error(f"Failed to process file: {e}")
-
-            # 检查文件下载失败
-            failed_files = [
-                fil for fil in message.content.files if fil.status == MediaStatus.FAILED
-            ]
-            if failed_files:
-                reasons = "; ".join(fil.description or "未知原因" for fil in failed_files)
-                notice = f"[用户发送了{len(failed_files)}个文件，但下载失败: {reasons}]"
-                input_text = f"{input_text}\n\n{notice}" if input_text.strip() else notice
-                logger.warning(f"File download failed, notifying agent: {reasons}")
+                        logger.error(f"Failed to process file for pending_files: {e}")
 
             if files_data:
                 session.set_metadata("pending_files", files_data)

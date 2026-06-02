@@ -1593,6 +1593,60 @@ def _org_file_attachments_to_chat_attachments(attachments: list[dict]) -> list[d
     return converted
 
 
+def _enrich_org_content_with_attachments(
+    content: str, attachments: list | None
+) -> str:
+    """Read text file content from desktop attachments and append to org content.
+
+    Mirrors the gateway's ``_extract_text_file_content`` logic for the desktop
+    API path so that org commands submitted from the setup-center can include
+    file contents inline.
+    """
+    if not attachments:
+        return content
+
+    from pathlib import Path
+
+    from openakita.channels.gateway import MessageGateway
+
+    parts: list[str] = []
+    for att in attachments:
+        local_path = getattr(att, "local_path", None) or ""
+        if not local_path:
+            continue
+        fpath = Path(local_path)
+        if not fpath.exists():
+            continue
+        name = getattr(att, "name", None) or fpath.name
+        suffix = fpath.suffix.lower()
+        mime = getattr(att, "mime_type", None) or ""
+        try:
+            if suffix in MessageGateway._TEXT_FILE_EXTENSIONS or (
+                mime and mime.startswith("text/")
+            ):
+                if fpath.stat().st_size <= MessageGateway._TEXT_FILE_SIZE_LIMIT:
+                    file_content = fpath.read_text(encoding="utf-8", errors="replace")
+                    parts.append(
+                        f"\n\n--- 文件: {name} ---\n{file_content}\n--- 文件结束 ---"
+                    )
+                else:
+                    parts.append(
+                        f"\n[附件: {name} ({mime or suffix}), "
+                        f"文件过大无法内联，本地路径: {local_path}]"
+                    )
+            elif suffix == ".pdf" or (mime and "pdf" in mime):
+                parts.append(f"\n[附件: {name} (PDF), 本地路径: {local_path}]")
+            else:
+                parts.append(
+                    f"\n[附件: {name} ({mime or suffix}), 本地路径: {local_path}]"
+                )
+        except Exception:
+            logger.warning(f"Failed to read attachment for org content: {local_path}")
+    if parts:
+        return content + "".join(parts)
+    return content
+
+
 async def _stream_org_command_chat(
     chat_request: ChatRequest,
     *,
@@ -1650,11 +1704,18 @@ async def _stream_org_command_chat(
             default_scope_for_surface,
         )
 
+        # Enrich org content with text from uploaded file attachments
+        org_content = chat_request.message or ""
+        if chat_request.attachments:
+            org_content = _enrich_org_content_with_attachments(
+                org_content, chat_request.attachments
+            )
+
         try:
             started = svc.submit(
                 OrgCommandRequest(
                     org_id=org_id,
-                    content=chat_request.message or "",
+                    content=org_content,
                     target_node_id=target_node_id,
                     source=OrgCommandSource(
                         channel="desktop",
