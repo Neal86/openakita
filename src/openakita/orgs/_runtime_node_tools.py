@@ -685,6 +685,11 @@ async def execute_node_tool(
         return (f"[tool {tool_name} failed: {exc}]", True)
 
     text = result if isinstance(result, str) else str(result)
+    # UI 留痕: carry a bounded preview of the tool RESULT (not just the char
+    # count) so the command center can let the user expand "返回 N 字" into an
+    # actual content summary. Collapse whitespace + cap so the event stays
+    # small on the SSE/WS channel.
+    result_preview = " ".join(text.split())[:500]
     await _safe_emit(
         emit,
         "node_tool_completed",
@@ -694,6 +699,7 @@ async def execute_node_tool(
             "command_id": command_id,
             "tool_name": tool_name,
             "result_len": len(text),
+            "result_preview": result_preview,
         },
     )
     return (text, False)

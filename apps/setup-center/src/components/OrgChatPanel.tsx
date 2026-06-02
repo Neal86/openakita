@@ -664,6 +664,7 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
       const toolName = (p.tool_name as string) || "";
       const argsPreview = (p.args_preview as string) || "";
       const resultLen = Number(p.result_len || 0);
+      const resultPreview = (p.result_preview as string) || "";
       const streamText = (p.text as string) || "";
       let speaker = ""; let note = ""; let satisfied = false; let progress = true;
       // 图3: lifecycle phase so the timeline can converge a node's status
@@ -738,11 +739,17 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
           note = `🛠 调用工具 \`${toolName || "?"}\`${argsPreview ? `：${argsPreview}` : ""}`;
           phase = "active";
           break;
-        case "node_tool_completed":
+        case "node_tool_completed": {
           speaker = nameOf(node);
-          note = `✓ 工具 \`${toolName || "?"}\` 完成${resultLen > 0 ? `（返回 ${resultLen} 字）` : ""}`;
+          const head = `✓ 工具 \`${toolName || "?"}\` 完成${resultLen > 0 ? `（返回 ${resultLen} 字）` : ""}`;
+          // 其余 UI: 在字数之外附上返回内容摘要，至少知道返回了什么（整段过程
+          // 在节点完成后由 segment 折叠收起，展开即可逐行查看）。
+          note = resultPreview
+            ? `${head}\n   ↳ 返回摘要：${resultPreview}${resultLen > resultPreview.length ? "…" : ""}`
+            : head;
           phase = "active";
           break;
+        }
         case "node_tool_failed":
           speaker = nameOf(node);
           note = `⚠ 工具 \`${toolName || "?"}\` 失败${p.reason ? `（${p.reason as string}）` : ""}`;
