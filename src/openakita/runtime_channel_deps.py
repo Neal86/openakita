@@ -175,6 +175,46 @@ def _purge_incompatible_websockets(target_dir: Path) -> list[str]:
     return removed
 
 
+def _purge_broken_crypto(target_dir: Path) -> list[str]:
+    """清理 channel-deps 里残留的不完整 ``pycryptodome`` (Crypto/) 安装。
+
+    当 ``pip install --target`` 安装 ``lark-oapi`` 时，pip 可能发现
+    pycryptodome 已在主 venv 里，从而跳过向 target 目录安装。但如果
+    target 目录里残留了旧的/不完整的 ``Crypto/`` 目录（缺少 ``__init__.py``
+    或 C 扩展 ABI 不兼容），Python 会将其识别为命名空间包，导致
+    ``from Crypto.Cipher import AES`` 报 ``(unknown location)`` 失败。
+
+    本函数删除 channel-deps 里的 ``Crypto/`` 及其 dist-info，使得
+    后续显式安装能得到一份干净的 pycryptodome。
+    """
+    if not target_dir.is_dir():
+        return []
+
+    import shutil
+
+    removed: list[str] = []
+    for entry in target_dir.iterdir():
+        name_lower = entry.name.lower()
+        if name_lower in ("crypto", "cryptodome") or (
+            name_lower.startswith("pycryptodome") and name_lower.endswith(".dist-info")
+        ):
+            try:
+                if entry.is_dir():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
+                removed.append(entry.name)
+            except Exception as exc:
+                logger.warning("Failed to purge stale Crypto entry %s: %s", entry.name, exc)
+
+    if removed:
+        logger.info(
+            "Purged %d stale pycryptodome entries from channel-deps: %s",
+            len(removed), ", ".join(removed),
+        )
+    return removed
+
+
 def _select_pip_python() -> str | None:
     py = get_app_python_executable() or get_python_executable()
     if not py or (IS_FROZEN and py == sys.executable):
@@ -238,6 +278,19 @@ def ensure_channel_dependencies(
                         continue
                     except Exception:
                         pass
+                exc_str = str(exc)
+                if (
+                    import_name == "lark_oapi"
+                    and ("Crypto" in exc_str or "AES" in exc_str)
+                    and "pycryptodome" not in missing
+                ):
+                    logger.info(
+                        "lark_oapi import failed due to pycryptodome issue (%s), "
+                        "adding pycryptodome to explicit install list",
+                        exc_str,
+                    )
+                    missing.append("pycryptodome")
+                    failed_import_names.append("Crypto")
                 if pip_name not in missing:
                     missing.append(pip_name)
                 failed_import_names.append(import_name)
@@ -314,6 +367,17 @@ def ensure_channel_dependencies(
             f"[yellow]⚙[/yellow] 清理 channel-deps 残留的不兼容 websockets dist-info"
             f"（共 {len(purged)} 项），避免阻塞 lark-oapi 安装"
         )
+
+    # 如果 pycryptodome 在本轮需要显式安装（因 lark_oapi 的 Crypto 导入失败），
+    # 先清理 channel-deps 里残留的不完整 Crypto/ 目录，否则 pip --target 可能
+    # 认为它已存在而跳过安装。
+    if "pycryptodome" in missing:
+        crypto_purged = _purge_broken_crypto(target_dir)
+        if crypto_purged and print_fn:
+            print_fn(
+                f"[yellow]⚙[/yellow] 清理 channel-deps 残留的不完整 pycryptodome"
+                f"（共 {len(crypto_purged)} 项），准备重新安装"
+            )
 
     # 子进程超时：lark-oapi 间接拉 httpx/pycryptodome/qrcode/anyio 等近 30MB，
     # 国内镜像首次下载可能 >120s。统一抬到 600s（10 分钟）足够覆盖最坏情况，

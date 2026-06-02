@@ -113,10 +113,18 @@ def _import_lark():
             lark_oapi = lark
         except ImportError as exc:
             logger.error("lark_oapi import failed: %s", exc, exc_info=True)
-            if "JSONDecodeError" in str(exc) and "simplejson" in str(exc):
+            exc_str = str(exc)
+            if "JSONDecodeError" in exc_str and "simplejson" in exc_str:
                 raise ImportError(
                     "飞书 SDK 依赖冲突：simplejson 缺少 JSONDecodeError。"
                     "请前往「设置中心 → Python 环境」执行一键修复后重启。"
+                ) from exc
+            if "Crypto" in exc_str or "AES" in exc_str:
+                from openakita.tools._import_helper import import_or_hint
+
+                raise ImportError(
+                    import_or_hint("Crypto")
+                    or "缺少依赖: pip install pycryptodome"
                 ) from exc
             from openakita.tools._import_helper import import_or_hint
 
