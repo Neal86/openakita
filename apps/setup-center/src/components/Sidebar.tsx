@@ -32,6 +32,7 @@ export type SidebarProps = {
   mobileOpen?: boolean;
   httpApiBase?: string;
   unreadFeedbackCount?: number;
+  pendingApprovalsCount?: number;
 };
 
 const stepIcons: Partial<Record<StepId, React.ReactNode>> = {
@@ -93,7 +94,7 @@ export function Sidebar({
   storeVisible,
   desktopVersion, backendVersion, serviceRunning,
   onRefreshStatus, isWeb, mobileOpen, httpApiBase,
-  unreadFeedbackCount,
+  unreadFeedbackCount, pendingApprovalsCount,
 }: SidebarProps) {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
@@ -184,7 +185,7 @@ export function Sidebar({
   }, [httpApiBase, serviceRunning]);
 
   const capViews: ViewId[] = ["skills", "mcp", "plugins", "memory", "scheduler"];
-  const monViews: ViewId[] = ["token_stats", "security"];
+  const monViews: ViewId[] = ["token_stats", "security", "pending_approvals"];
   const maViews: ViewId[] = ["dashboard", "org_editor", "pixel_office", "agent_manager"];
   const stViews: ViewId[] = ["agent_store", "skill_store"];
 
@@ -311,6 +312,17 @@ export function Sidebar({
             </div>
             <div className={`navItem ${view === "security" ? "navItemActive" : ""}`} onClick={() => onViewChange("security")} role="button" tabIndex={0} title={t("sidebar.security")}>
               <IconShield size={16} /> {!collapsed && <span>{t("sidebar.security")}</span>}
+            </div>
+            <div className={`navItem ${view === "pending_approvals" ? "navItemActive" : ""}`} onClick={() => onViewChange("pending_approvals")} role="button" tabIndex={0} title={t("sidebar.pendingApprovals")} style={{ position: "relative" }}>
+              <IconFingerprint size={16} /> {!collapsed && <span>{t("sidebar.pendingApprovals")}</span>}
+              {(pendingApprovalsCount ?? 0) > 0 && (
+                <span style={{
+                  position: "absolute", top: 4, left: collapsed ? 22 : undefined, right: collapsed ? undefined : 8,
+                  minWidth: 16, height: 16, borderRadius: 8,
+                  background: "#ef4444", color: "#fff", fontSize: 10, fontWeight: 600,
+                  display: "flex", alignItems: "center", justifyContent: "center", padding: "0 4px",
+                }}>{pendingApprovalsCount}</span>
+              )}
             </div>
           </div>
         )}

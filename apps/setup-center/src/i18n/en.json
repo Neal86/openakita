@@ -30,7 +30,8 @@
     "groupMultiAgent": "Agents",
     "groupStore": "Store",
     "plugins": "Plugins",
-    "pixelOffice": "Pixel Office"
+    "pixelOffice": "Pixel Office",
+    "pendingApprovals": "Approvals"
   },
   "topbar": {
     "workspace": "Workspace",
@@ -3592,5 +3593,39 @@
     "restartNow": "Restart now",
     "openMemoryRepair": "Open memory repair tool",
     "wideImpactWarning": "Quarantining this resets agent.db — token usage history and legacy stats will be cleared."
+  },
+  "pendingApprovals": {
+    "title": "Pending Approvals",
+    "subtitle": "Tool calls from unattended tasks awaiting owner approval",
+    "serviceNotRunning": "Service not running, cannot view pending approvals",
+    "noEntries": "No pending approvals",
+    "filterActive": "Active",
+    "filterAll": "All",
+    "approve": "Approve",
+    "deny": "Deny",
+    "approved": "Approved — task will resume automatically",
+    "denied": "Denied",
+    "taskResumed": "Associated task rescheduled, will execute in seconds",
+    "resolveFailed": "Failed to resolve approval",
+    "statusPending": "Pending",
+    "statusApproved": "Approved",
+    "statusDenied": "Denied",
+    "statusExpired": "Expired",
+    "stat_pending": "Pending",
+    "stat_approved": "Approved",
+    "stat_denied": "Denied",
+    "stat_expired": "Expired",
+    "createdAt": "Created",
+    "expiresAt": "Expires at: {{time}}",
+    "strategy": "Strategy",
+    "taskId": "Task ID",
+    "sessionId": "Session ID",
+    "approvalClass": "Approval class",
+    "resolvedAt": "Resolved at",
+    "resolvedBy": "Resolved by",
+    "note": "Note",
+    "viewParams": "View tool parameters",
+    "notePlaceholder": "Optional: add a note...",
+    "expired": "Expired"
   }
 }

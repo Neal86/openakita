@@ -26,6 +26,7 @@ const PixelOfficeView = lazy(() => import("./views/PixelOfficeView").then(m => (
 const AgentStoreView = lazy(() => import("./views/AgentStoreView").then(m => ({ default: m.AgentStoreView })));
 const SkillStoreView = lazy(() => import("./views/SkillStoreView").then(m => ({ default: m.SkillStoreView })));
 const SecurityView = lazy(() => import("./views/SecurityView"));
+const PendingApprovalsView = lazy(() => import("./views/PendingApprovalsView").then(m => ({ default: m.PendingApprovalsView })));
 const PetView = lazy(() => import("./views/PetView").then(m => ({ default: m.PetView })));
 
 import { FeedbackModal, type FeedbackPrefill } from "./views/FeedbackModal";
@@ -140,7 +141,8 @@ const _HASH_TO_VIEW: Record<string, ViewId> = {
   "pixel-office": "pixel_office",
   "agent-manager": "agent_manager", "agent-store": "agent_store",
   "skill-store": "skill_store", "wizard": "wizard", "docs": "docs",
-  "security": "security", "plugins": "plugins", "my_feedback": "my_feedback",
+  "security": "security", "pending-approvals": "pending_approvals",
+  "plugins": "plugins", "my_feedback": "my_feedback",
 };
 
 const _VIEW_TO_HASH: Record<string, string> = Object.fromEntries(
@@ -457,6 +459,7 @@ function MainApp() {
   const [feedbackPrefill, setFeedbackPrefill] = useState<FeedbackPrefill | null>(null);
   const [feedbackRefreshKey, setFeedbackRefreshKey] = useState(0);
   const [unreadFeedbackCount, setUnreadFeedbackCount] = useState(0);
+  const [pendingApprovalsCount, setPendingApprovalsCount] = useState(0);
   const [disabledViews, setDisabledViews] = useState<string[]>([]);
   const multiAgentEnabled = true;
   const [storeVisible, setStoreVisible] = useState(() => localStorage.getItem("openakita_storeVisible") === "true");
@@ -2107,6 +2110,24 @@ function MainApp() {
     poll();
     const timer = setInterval(poll, 5 * 60 * 1000);
     return () => clearInterval(timer);
+  }, [serviceStatus?.running, dataMode, apiBaseUrl]);
+
+  // ── Pending approvals count polling + WebSocket instant refresh ──
+  useEffect(() => {
+    if (!serviceStatus?.running) { setPendingApprovalsCount(0); return; }
+    const poll = async () => {
+      try {
+        const res = await safeFetch(`${httpApiBase()}/api/pending_approvals/stats`, { signal: AbortSignal.timeout(5000) });
+        const data = await res.json();
+        setPendingApprovalsCount(data.pending ?? 0);
+      } catch { /* ignore */ }
+    };
+    poll();
+    const timer = setInterval(poll, 60_000);
+    const unsub = IS_WEB ? onWsEvent((event) => {
+      if (event === "pending_approval_created" || event === "pending_approval_resolved") poll();
+    }) : undefined;
+    return () => { clearInterval(timer); unsub?.(); };
   }, [serviceStatus?.running, dataMode, apiBaseUrl]);
 
   const toggleViewDisabled = useCallback(async (viewName: string) => {
@@ -5579,6 +5600,16 @@ function MainApp() {
         </ErrorBoundary>
       );
     }
+    if (view === "pending_approvals") {
+      return (
+        <ErrorBoundary>
+          <PendingApprovalsView
+            apiBaseUrl={apiBaseUrl}
+            serviceRunning={serviceStatus?.running ?? false}
+          />
+        </ErrorBoundary>
+      );
+    }
     if (view.startsWith("plugin_app:")) {
       const pluginId = view.slice("plugin_app:".length);
       return (
@@ -5797,6 +5828,7 @@ function MainApp() {
         isWeb={IS_WEB}
         httpApiBase={httpApiBase()}
         unreadFeedbackCount={unreadFeedbackCount}
+        pendingApprovalsCount={pendingApprovalsCount}
       />
 
       <main className="main">

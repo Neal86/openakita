@@ -30,7 +30,8 @@
     "groupMultiAgent": "Agents",
     "groupStore": "市场",
     "plugins": "工作台",
-    "pixelOffice": "像素办公室"
+    "pixelOffice": "像素办公室",
+    "pendingApprovals": "待审批"
   },
   "topbar": {
     "workspace": "工作区",
@@ -3607,5 +3608,39 @@
     "restartNow": "立即重启",
     "openMemoryRepair": "打开记忆修复工具",
     "wideImpactWarning": "执行隔离会重置 agent.db — token 用量历史与旧版统计将被清空。"
+  },
+  "pendingApprovals": {
+    "title": "待审批",
+    "subtitle": "无人值守任务中需要 owner 审批的工具调用",
+    "serviceNotRunning": "服务未运行，无法查看待审批记录",
+    "noEntries": "暂无待审批记录",
+    "filterActive": "待处理",
+    "filterAll": "全部",
+    "approve": "批准",
+    "deny": "拒绝",
+    "approved": "已批准，任务将自动恢复",
+    "denied": "已拒绝",
+    "taskResumed": "关联任务已重新调度，将在数秒后执行",
+    "resolveFailed": "审批操作失败",
+    "statusPending": "待审批",
+    "statusApproved": "已批准",
+    "statusDenied": "已拒绝",
+    "statusExpired": "已过期",
+    "stat_pending": "待处理",
+    "stat_approved": "已批准",
+    "stat_denied": "已拒绝",
+    "stat_expired": "已过期",
+    "createdAt": "创建时间",
+    "expiresAt": "过期时间：{{time}}",
+    "strategy": "策略",
+    "taskId": "任务 ID",
+    "sessionId": "会话 ID",
+    "approvalClass": "审批类别",
+    "resolvedAt": "处理时间",
+    "resolvedBy": "处理人",
+    "note": "备注",
+    "viewParams": "查看工具参数",
+    "notePlaceholder": "可选：添加审批备注...",
+    "expired": "已过期"
   }
 }
