@@ -119,6 +119,7 @@ Forks may change product branding for their own distribution, but they must pres
 - **Body explains why; the diff explains what.** State the motivation, the alternative considered, the trade-off accepted, the regression risk addressed, or the bug class being prevented. Skip narration of which lines moved.
 - **One logical change per commit.** A rename, a behaviour change, and a new test are three commits unless they are genuinely inseparable. If a subject needs the word `and` to describe its scope, consider splitting.
 - **No subject length limit.** Prefer a long, precise subject over a short, cryptic one. A reader scanning `git log` should be able to tell what shipped without opening the diff.
+- **No AI co-author trailers.** Do NOT append `Co-authored-by: Cursor <cursoragent@cursor.com>` or any similar AI co-author line to commit messages. The commit author (from git config) is the sole attribution.
 
 Examples:
 

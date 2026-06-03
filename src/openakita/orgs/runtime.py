@@ -572,11 +572,20 @@ class OrgRuntime:
         if mode == "autonomous":
             if org.core_business and org.core_business.strip():
                 asyncio.ensure_future(self._auto_kickoff(org))
+            old_idle = self._idle_tasks.pop(org_id, None)
+            if old_idle and not old_idle.done():
+                old_idle.cancel()
             self._idle_tasks[org_id] = asyncio.ensure_future(self._idle_probe_loop(org_id))
         else:
+            old_idle = self._idle_tasks.pop(org_id, None)
+            if old_idle and not old_idle.done():
+                old_idle.cancel()
             self._idle_tasks[org_id] = asyncio.ensure_future(self._health_check_loop(org_id))
 
         if getattr(org, "watchdog_enabled", False):
+            old_wd = self._watchdog_tasks.pop(org_id, None)
+            if old_wd and not old_wd.done():
+                old_wd.cancel()
             self._watchdog_tasks[org_id] = asyncio.ensure_future(self._watchdog_loop(org_id))
 
         return org
