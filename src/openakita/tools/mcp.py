@@ -494,7 +494,7 @@ class MCPClient:
 
         return (py, ["-m", config.args[1], *config.args[2:]])
 
-    _CONNECT_TIMEOUT: int = 30
+    _CONNECT_TIMEOUT: int = 60
     _CALL_TIMEOUT: int = 0
 
     def _load_timeouts(self) -> None:

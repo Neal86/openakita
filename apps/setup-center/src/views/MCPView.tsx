@@ -62,6 +62,16 @@ type AddServerForm = {
   auto_connect: boolean;
 };
 
+// MCP connect / add / test-connect can take noticeably longer than the default
+// safeFetch 10s budget: stdio servers launched via `npx -y pkg@latest` need to
+// download the package on first run, and even cached runs include node startup
+// + JSON-RPC `initialize` handshake. The backend caps a single connect attempt
+// at `mcp_connect_timeout` (60s by default), so the frontend signal has to be
+// strictly larger than that plus IPC / proxy round-trip overhead, otherwise
+// the user sees a misleading "signal timed out" while the backend is still
+// working and would have eventually returned a clean error or success.
+const MCP_CONNECT_TIMEOUT_MS = 120_000;
+
 const emptyForm: AddServerForm = {
   name: "",
   transport: "stdio",
@@ -256,7 +266,7 @@ function MCPConfigForm({
       const res = await safeFetch(`${apiBaseUrl}/api/mcp/connect`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        signal: AbortSignal.timeout(60_000),
+        signal: AbortSignal.timeout(MCP_CONNECT_TIMEOUT_MS),
         body: JSON.stringify({ server_name: serverName }),
       });
       const data = await res.json();
@@ -559,6 +569,7 @@ export function MCPView({
       const res = await safeFetch(`${apiBaseUrl}/api/mcp/connect`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(MCP_CONNECT_TIMEOUT_MS),
         body: JSON.stringify({ server_name: name }),
       });
       const data = await res.json();
@@ -659,6 +670,7 @@ export function MCPView({
       const res = await safeFetch(`${apiBaseUrl}/api/mcp/servers/add`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(MCP_CONNECT_TIMEOUT_MS),
         body: JSON.stringify({
           name,
           transport: form.transport,

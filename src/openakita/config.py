@@ -453,7 +453,13 @@ class Settings(BaseSettings):
         description="MCP 工具/资源/提示词调用超时时间（秒），0=不限制；连接超时单独由 mcp_connect_timeout 控制",
     )
     mcp_connect_timeout: int = Field(
-        default=30, description="MCP 服务器连接超时时间（秒），默认 30 秒"
+        default=60,
+        description=(
+            "MCP 服务器连接超时时间（秒），默认 60 秒。"
+            "stdio 服务器（如 chrome-devtools-mcp 通过 npx 启动）首次连接需要"
+            "下载 npm 包并完成 JSON-RPC initialize 握手，过短的超时会导致用户"
+            "在慢网络下看到误导性的连接失败。"
+        ),
     )
     mcp_auto_connect: bool = Field(default=False, description="启动时是否自动连接所有 MCP 服务器")
 
