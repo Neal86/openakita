@@ -249,7 +249,6 @@ export function AgentSystemView(props: AgentSystemViewProps) {
         {/* ── 核心参数 ── */}
         <Section title={t("config.agentCore")} subtitle={t("config.agentCoreSub")} className="mt-2">
           <div className="grid3">
-            {FT({ k: "AGENT_NAME", label: t("config.agentName"), placeholder: "OpenAkita" })}
             {FT({ k: "MAX_ITERATIONS", label: t("config.agentMaxIter"), placeholder: "300", help: t("config.agentMaxIterHelp") })}
             {FS({ k: "THINKING_MODE", label: t("config.agentThinking"), options: [
               { value: "auto", label: t("config.agentThinkingAuto") },

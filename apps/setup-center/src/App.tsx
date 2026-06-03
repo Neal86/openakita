@@ -2424,7 +2424,7 @@ function MainApp() {
         ];
       case "agent":
         return [
-          "AGENT_NAME", "MAX_ITERATIONS", "SELFCHECK_AUTOFIX",
+          "MAX_ITERATIONS", "SELFCHECK_AUTOFIX",
           "THINKING_MODE",
           "PROGRESS_TIMEOUT_SECONDS", "HARD_TIMEOUT_SECONDS",
           "MEMORY_MODE",
@@ -3774,7 +3774,6 @@ function MainApp() {
       "ALL_PROXY",
       "FORCE_IPV4",
       // agent (基础)
-      "AGENT_NAME",
       "MAX_ITERATIONS",
       "THINKING_MODE",
       "TOOL_MAX_PARALLEL",
@@ -4231,7 +4230,6 @@ function MainApp() {
             <details open>
               <summary style={{ cursor: "pointer", fontWeight: 800, padding: "8px 0" }}>基础</summary>
               <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 10 }}>
-                {FT({ k: "AGENT_NAME", label: "Agent 名称", placeholder: "OpenAkita" })}
                 {FT({ k: "MAX_ITERATIONS", label: "最大迭代次数", placeholder: "300" })}
                 {FS({ k: "THINKING_MODE", label: t("config.agentThinking"), options: [
                   { value: "auto", label: t("config.agentThinkingAuto") },
