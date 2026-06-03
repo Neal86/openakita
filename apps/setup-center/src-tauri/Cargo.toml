@@ -85,9 +85,15 @@ windows-sys = { version = "0.59", features = [
 # the resulting *.pdb alongside the .exe so future user crash dumps can be
 # analysed offline even after the CI runner is recycled.
 [patch.crates-io]
-# Patch tao to not panic on state transitions from Destroyed (tao#1180).
-# Based on tao 0.34.8 with only runner.rs L371 changed:
-#   panic!("cannot move state from Destroyed") → debug!("…")
+# Patch tao to prevent UB after event loop enters Destroyed state (tao#1180).
+# Two changes to runner.rs:
+#   1. move_state_to(Destroyed → *): panic → debug log + state restore
+#   2. All public entry points (poll, send_event, main_events_cleared,
+#      redraw_events_cleared, dispatch_buffered_events) early-return when
+#      is_destroyed() is true — prevents callers from continuing to process
+#      events with freed resources after the transition is silently rejected.
+# Without (2), the panic-to-log fix alone caused heap corruption manifesting
+# as ud2 (ILLEGAL_INSTRUCTION) in tauri_runtime_wry::clone after idle periods.
 # Upstream PR: https://github.com/tauri-apps/tao/pull/1188
 tao = { git = "https://github.com/SimYng/tao.git", branch = "fix/no-panic-destroyed-0.34.8" }
 

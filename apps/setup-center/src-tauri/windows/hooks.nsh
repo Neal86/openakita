@@ -75,9 +75,10 @@ Var LegacyMigrated
   FileWrite $R9 "            Set-ItemProperty -LiteralPath $$RegPath -Name 'Path' -Value $$BinDir -Type ExpandString$\r$\n"
   FileWrite $R9 "        } else {$\r$\n"
   FileWrite $R9 "            $$entries = $$cur -split ';'$\r$\n"
-  FileWrite $R9 "            $$found = $$entries | Where-Object { $$_.TrimEnd([char]92) -ieq $$bn }$\r$\n"
-  FileWrite $R9 "            if (-not $$found) {$\r$\n"
-  FileWrite $R9 '                $$np = "$$cur;$$BinDir"$\r$\n'
+  FileWrite $R9 "            $$cleaned = $$entries | Where-Object { $$_ -and -not ($$_ -imatch '[\\/](OpenAkita Desktop|OpenAkitaDesktop)[\\/]bin[\\/]?$$') }$\r$\n"
+  FileWrite $R9 "            $$cleaned += $$BinDir$\r$\n"
+  FileWrite $R9 "            $$np = ($$cleaned | Where-Object { $$_ }) -join ';'$\r$\n"
+  FileWrite $R9 "            if ($$np -cne $$cur) {$\r$\n"
   FileWrite $R9 "                Set-ItemProperty -LiteralPath $$RegPath -Name 'Path' -Value $$np -Type ExpandString$\r$\n"
   FileWrite $R9 "            }$\r$\n"
   FileWrite $R9 "        }$\r$\n"

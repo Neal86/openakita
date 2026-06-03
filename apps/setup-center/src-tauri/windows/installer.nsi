@@ -1013,16 +1013,29 @@ Section Install
   ${EndIf}
 
   ; 添加到 PATH（通过 PowerShell 安全操作，避免 NSIS 字符串截断和类型变更问题）
+  ; add 动作内部已集成"扫除所有旧 OpenAkita bin 条目"逻辑，
+  ; 一步完成清理+添加，解决多次换目录安装导致 PATH 堆积的 bug。
   ${If} $R3 = ${BST_CHECKED}
    !insertmacro _OpenAkita_WritePathHelper
+   ; 清理+添加：同时操作两个 hive，确保不论之前是 perMachine 还是 currentUser 都能清理
+   nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\_oa_pathhelper.ps1" -Action add -BinDir "$INSTDIR\bin" -RegPath "HKCU:\Environment"'
+   Pop $R9
    !if "${INSTALLMODE}" == "perMachine"
     nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\_oa_pathhelper.ps1" -Action add -BinDir "$INSTDIR\bin" -RegPath "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"'
     Pop $R9
-   !else
-    nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\_oa_pathhelper.ps1" -Action add -BinDir "$INSTDIR\bin" -RegPath "HKCU:\Environment"'
-    Pop $R9
    !endif
    SendMessage ${HWND_BROADCAST} ${WM_SETTINGCHANGE} 0 "STR:Environment" /TIMEOUT=5000
+  ${Else}
+   ; 用户取消了 PATH 勾选：仍需扫除旧条目（通过 remove 动作）
+   ReadRegStr $R6 HKCU "Software\OpenAkita\CLI" "binDir"
+   ${If} $R6 != ""
+    !insertmacro _OpenAkita_WritePathHelper
+    nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\_oa_pathhelper.ps1" -Action remove -BinDir "$R6" -RegPath "HKCU:\Environment"'
+    Pop $R9
+    nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\_oa_pathhelper.ps1" -Action remove -BinDir "$R6" -RegPath "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"'
+    Pop $R9
+    SendMessage ${HWND_BROADCAST} ${WM_SETTINGCHANGE} 0 "STR:Environment" /TIMEOUT=5000
+   ${EndIf}
   ${EndIf}
 
   ; 保存 INSTDIR 到注册表（卸载时需要知道 bin 目录位置）

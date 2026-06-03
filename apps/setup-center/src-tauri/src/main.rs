@@ -5697,8 +5697,9 @@ fn main() {
             // already checks SHUTDOWN every 1s in its own loop (line
             // ~5400) and before each emit, so it will stop on its own.
             // Even if a straggler emit slips through, the tao patch
-            // (Cargo.toml [patch.crates-io]) turns the panic into a
-            // harmless debug log.
+            // (Cargo.toml [patch.crates-io]) guards all runner entry
+            // points with is_destroyed() checks — silently dropping
+            // events instead of processing them against freed state.
             clear_frontend_session_marker();
             // Safety-net: clean up backend processes on ANY exit path
             // (SIGTERM, system shutdown, unexpected termination, etc.)
