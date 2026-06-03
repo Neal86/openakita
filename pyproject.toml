@@ -273,6 +273,38 @@ packages = ["src/openakita"]
 "skills/superpowers-writing-plans" = "openakita/builtin_skills/external/superpowers-writing-plans"
 "skills/superpowers-writing-skills" = "openakita/builtin_skills/external/superpowers-writing-skills"
 
+# Identity templates: shipped as bundled examples so the setup wizard can
+# seed the user-customizable identity/*.md files on first install. The
+# wizard's `_resolve_identity_template` looks up these paths under the
+# installed `openakita` package directory when no repo checkout is on the
+# Python path (i.e. for `pip install openakita` users). Without this
+# block, wheel-installed users would fall through to the prompt builder's
+# 5-line `_STATIC_FALLBACKS["identity_core"]` template instead of the
+# full SOUL.md / AGENT.md / persona library shipped with the project.
+#
+# User-customizable runtime state (SOUL.md, AGENT.md, USER.md, MEMORY.md,
+# identity/runtime/**, identity/personas/user_custom.md) is intentionally
+# NOT packaged: those files are gitignored and live in the user's project
+# directory; the wizard copies these *.example/*.template files there on
+# first run.
+"identity/SOUL.md.example" = "openakita/identity/SOUL.md.example"
+"identity/AGENT.md.example" = "openakita/identity/AGENT.md.example"
+"identity/USER.md.example" = "openakita/identity/USER.md.example"
+"identity/MEMORY.md.example" = "openakita/identity/MEMORY.md.example"
+"identity/POLICIES.yaml" = "openakita/identity/POLICIES.yaml"
+"identity/CREDITS.md" = "openakita/identity/CREDITS.md"
+"identity/SYSTEM_TASKS.yaml.template" = "openakita/identity/SYSTEM_TASKS.yaml.template"
+"identity/personas/boyfriend.md" = "openakita/identity/personas/boyfriend.md"
+"identity/personas/business.md" = "openakita/identity/personas/business.md"
+"identity/personas/butler.md" = "openakita/identity/personas/butler.md"
+"identity/personas/default.md" = "openakita/identity/personas/default.md"
+"identity/personas/family.md" = "openakita/identity/personas/family.md"
+"identity/personas/girlfriend.md" = "openakita/identity/personas/girlfriend.md"
+"identity/personas/jarvis.md" = "openakita/identity/personas/jarvis.md"
+"identity/personas/tech_expert.md" = "openakita/identity/personas/tech_expert.md"
+"identity/personas/user_custom.md.example" = "openakita/identity/personas/user_custom.md.example"
+"identity/prompts/policies.md" = "openakita/identity/prompts/policies.md"
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
