@@ -546,6 +546,22 @@ def create_app(
             logger.debug("[Startup] Memory recovery pending cleanup skipped: %s", e)
 
     @app.on_event("startup")
+    async def _cleanup_expired_resume_state():
+        """Issue #608: drop crash-leftover cancel-resume snapshots in
+        ``data/working_messages/`` so a process that died mid-turn doesn't
+        keep re-injecting yesterday's half-finished tool state on resume."""
+        try:
+            from openakita.core.cancel_cleanup import cleanup_expired_working_messages
+
+            removed = await asyncio.to_thread(
+                cleanup_expired_working_messages, base_dir=data_dir
+            )
+            if removed:
+                logger.info("[Startup] Removed %d expired cancel-resume snapshot(s)", removed)
+        except Exception as e:
+            logger.debug("[Startup] Cancel-resume snapshot cleanup skipped: %s", e)
+
+    @app.on_event("startup")
     async def _wire_pending_approvals_sse():
         """C9c-2: bridge PendingApprovalsStore events to WebSocket broadcast.
 

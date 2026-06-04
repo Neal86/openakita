@@ -40,7 +40,16 @@ from .agent_state import (
     TaskState,
     TaskStatus,
 )
-from .cancel_cleanup import synthesize_tool_results_for_orphans
+from .cancel_cleanup import (
+    DEFAULT_TTL_SECONDS,
+    RESUME_HINT_FRESHNESS_SECONDS,
+    clear_persisted_working_messages,
+    has_tool_blocks,
+    load_persisted_working_messages,
+    persist_working_messages,
+    persisted_age_seconds,
+    synthesize_tool_results_for_orphans,
+)
 from .context_manager import ContextManager
 from .context_manager import _CancelledError as _CtxCancelledError
 from .errors import UserCancelledError
@@ -1969,6 +1978,11 @@ class ReasoningEngine:
                     if st.abort_root.parent is _parent:
                         st.abort_root.parent = None
 
+            # Issue #608: clear stale resume snapshot on non-cancel exit (cancel
+            # exits keep the file the funnel just persisted). Mirrors the
+            # reason_stream impl finally for the non-stream / IM path.
+            self._maybe_clear_resume_state(conversation_id, is_sub_agent, st)
+
     async def _run_impl(
         self,
         messages: list[dict],
@@ -2051,6 +2065,11 @@ class ReasoningEngine:
             state.cancel_reason = ""
             state.cancel_event = asyncio.Event()
 
+        # Issue #608: tag the task so the cancel funnel can skip persisting a
+        # resumable snapshot for delegated sub-agents (they share the parent
+        # conversation_id and would otherwise clobber the parent's resume state).
+        state.is_sub_agent = is_sub_agent
+
         # v1.27.14 (plan: conversation concurrency v1.28, S1.5):
         # 通知 outer wrapper 把这个 state 捕获，wrapper finally 才能精确
         # mark_settled 这个具体的 state（避免 self._state.current_task
@@ -2103,7 +2122,13 @@ class ReasoningEngine:
         # 保存原始用户消息（用于模型切换时重置上下文）
         state.original_user_messages = [msg for msg in messages if self._is_human_user_message(msg)]
 
-        working_messages = list(messages)
+        # Issue #608: if the previous turn was cancelled mid-tool, resume its
+        # persisted structured working_messages instead of re-running from the
+        # flattened text history.  Falls back to text history when none exists.
+        _resumed_wm = self._maybe_load_resume_working_messages(
+            messages, conversation_id, is_sub_agent
+        )
+        working_messages = _resumed_wm if _resumed_wm is not None else list(messages)
 
         # v1.28 S3 (plan: conversation concurrency v1.28): repair orphan
         # ``tool_use`` blocks at turn start.  If the previous turn was cancelled
@@ -4049,6 +4074,11 @@ class ReasoningEngine:
             state.cancel_reason = ""
             state.cancel_event = asyncio.Event()
 
+        # Issue #608: tag the task so the cancel funnel can skip persisting a
+        # resumable snapshot for delegated sub-agents (they share the parent
+        # conversation_id and would otherwise clobber the parent's resume state).
+        state.is_sub_agent = is_sub_agent
+
         # v1.27.14 (plan: conversation concurrency v1.28, S1.5):
         # 通知 outer wrapper 把这个 state 捕获，wrapper finally 才能精确
         # mark_settled 这个具体的 state（避免 self._state.current_task
@@ -4164,7 +4194,13 @@ class ReasoningEngine:
             )
             self._max_iterations_override = None  # consume once
             self._empty_content_retries = 0
-            working_messages = list(messages)
+
+            # Issue #608: resume persisted structured working_messages from a
+            # prior cancelled turn (see ``_run_impl`` seed for full rationale).
+            _resumed_wm_s = self._maybe_load_resume_working_messages(
+                messages, conversation_id, is_sub_agent
+            )
+            working_messages = _resumed_wm_s if _resumed_wm_s is not None else list(messages)
 
             # v1.28 S3 (plan: conversation concurrency v1.28): mirror of the
             # repair in ``_run_inner``.  Streaming entry point sees the same
@@ -6829,6 +6865,13 @@ class ReasoningEngine:
                     except Exception:
                         pass
 
+            # Issue #608: on any non-cancel exit, drop a stale resume snapshot so
+            # the next turn doesn't reload a finished task's working_messages.
+            # Cancel exits skip this (the funnel just persisted for resume).
+            self._maybe_clear_resume_state(
+                conversation_id, is_sub_agent, locals().get("state")
+            )
+
     # ==================== Unified Async Generator Interface ====================
 
     async def run_stream(
@@ -7273,6 +7316,160 @@ class ReasoningEngine:
 
         return result
 
+    # ==================== 取消恢复持久化（Issue #608） ====================
+
+    @staticmethod
+    def _resume_eligible(conversation_id: str | None, is_sub_agent: bool) -> bool:
+        """是否对该会话启用"取消后续聊恢复"旁路文件。
+
+        排除：falsy conversation_id（无 key 无法续聊）、sub-agent（与父任务共享
+        conversation_id，持久化会互相覆盖）、合成的 ``_run_xxx`` ephemeral id
+        （一次性运行，无续聊价值）。
+        """
+        if not conversation_id or is_sub_agent:
+            return False
+        return not str(conversation_id).startswith("_run_")
+
+    def _maybe_persist_cancelled_working_messages(
+        self,
+        working_messages: list[dict],
+        state: "TaskState | None",
+        current_model: str,
+    ) -> None:
+        """取消收尾时持久化完整 working_messages，供下一轮续聊恢复（Issue #608）。
+
+        key 用 ``state.session_id``（在两个 loop 入口处恒等于 conversation_id）。
+        仅当含真实工具块时才落盘，避免无意义旁路文件。任何异常都吞掉——持久化
+        失败不应影响取消收尾本身。
+        """
+        try:
+            conversation_id = getattr(state, "session_id", "") if state else ""
+            is_sub_agent = bool(getattr(state, "is_sub_agent", False)) if state else False
+            if not self._resume_eligible(conversation_id, is_sub_agent):
+                return
+            if not working_messages or not has_tool_blocks(working_messages):
+                return
+            written = persist_working_messages(
+                conversation_id,
+                working_messages,
+                base_dir=settings.data_dir,
+                metadata={
+                    "cancel_reason": (getattr(state, "cancel_reason", "") if state else ""),
+                    "model": current_model or "",
+                },
+            )
+            # Mark on the state object that this turn just wrote a resume
+            # snapshot.  The finally-stage clear keys off this flag (not off an
+            # inferred ``cancelled`` read) so it can never delete a file we just
+            # persisted, even on a future cancel path where ``cancelled`` is not
+            # set the way we expect.
+            if written is not None and state is not None:
+                try:
+                    state._resume_persisted = True
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.debug("[CancelResume] persist skipped: %s", exc)
+
+    def _maybe_clear_resume_state(
+        self,
+        conversation_id: str | None,
+        is_sub_agent: bool,
+        state: "TaskState | None",
+    ) -> None:
+        """正常（非取消）退出时清除旁路文件，避免下一轮误加载已完成任务的旧状态。
+
+        取消退出时**不清**——funnel 刚 persist 的文件要留给续聊。在 reason_stream
+        impl 的 finally 与 run() wrapper 的 finally 集中调用，覆盖所有 return 分支。
+        """
+        try:
+            if not self._resume_eligible(conversation_id, is_sub_agent):
+                return
+            # Preserve a snapshot this turn just persisted for resume. We check
+            # an explicit per-turn flag set by the persist funnel rather than
+            # re-inferring ``cancelled`` here — bulletproof against any cancel
+            # path that doesn't leave ``cancelled`` True at finally time.
+            if state is not None and (
+                getattr(state, "_resume_persisted", False)
+                or getattr(state, "cancelled", False)
+            ):
+                return
+            clear_persisted_working_messages(conversation_id, base_dir=settings.data_dir)
+        except Exception as exc:
+            logger.debug("[CancelResume] clear skipped: %s", exc)
+
+    def _maybe_load_resume_working_messages(
+        self,
+        messages: list[dict],
+        conversation_id: str | None,
+        is_sub_agent: bool,
+    ) -> list[dict] | None:
+        """续聊入口尝试恢复上一轮取消时持久化的 working_messages（Issue #608）。
+
+        返回 merge 后的 working_messages（已完成结构化工具块 + 本轮新 user 消息 +
+        续聊提示），无可恢复状态时返回 None（调用方回退到文本历史重建）。
+
+        merge 语义：保留 loaded 的结构化工具块，把 ``messages`` 尾部"最后一条人类
+        user 消息及其后续"拼到其后（系统提示等附着在新一轮的块随之带入）。
+        """
+        try:
+            if not self._resume_eligible(conversation_id, is_sub_agent):
+                return None
+            # Peek age before the consuming load so we can decide whether the
+            # turn is still "fresh" enough to inject a continue-nudge.  The load
+            # itself uses the 24h hygiene window (DEFAULT_TTL_SECONDS): a snapshot
+            # is ALWAYS restored if it survived the startup janitor, so completed
+            # tools are never re-run just because the user came back later.
+            age = persisted_age_seconds(conversation_id, base_dir=settings.data_dir)
+            loaded = load_persisted_working_messages(
+                conversation_id,
+                base_dir=settings.data_dir,
+                ttl_seconds=DEFAULT_TTL_SECONDS,
+                consume=True,
+            )
+            if not loaded:
+                return None
+
+            tail_idx: int | None = None
+            for i in range(len(messages) - 1, -1, -1):
+                if self._is_human_user_message(messages[i]):
+                    tail_idx = i
+                    break
+            new_tail = list(messages[tail_idx:]) if tail_idx is not None else []
+            merged = list(loaded) + new_tail
+            # Hint freshness is separate from load: past the freshness window we
+            # still feed completed tool results back (no redo) but stop actively
+            # telling the model to continue, since a long-stale resume is more
+            # likely a topic change.  age is None only if the file vanished
+            # between peek and load (race) — treat as fresh.
+            inject_hint = age is None or age <= RESUME_HINT_FRESHNESS_SECONDS
+            if inject_hint:
+                merged.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "[系统提示] 上一轮任务被中断，以上工具调用与结果是上一轮已真实"
+                            "执行完成的进度（尚未写入可见对话）。如果当前消息是要继续该任务，"
+                            "请直接复用这些已完成的结果，不要重复执行；如果是新的请求，正常处理即可。"
+                        ),
+                    }
+                )
+            logger.info(
+                "[CancelResume] resumed working_messages: conv=%s, loaded=%d, new_tail=%d, "
+                "age=%.0fs, hint=%s",
+                conversation_id,
+                len(loaded),
+                len(new_tail),
+                (age if age is not None else -1.0),
+                inject_hint,
+            )
+            return merged
+        except Exception as exc:
+            logger.warning(
+                "[CancelResume] load/merge failed, falling back to text history: %s", exc
+            )
+            return None
+
     async def _cancel_farewell(
         self,
         working_messages: list[dict],
@@ -7282,6 +7479,10 @@ class ReasoningEngine:
     ) -> str:
         """非流式场景下的取消收尾：立即返回默认文本，后台异步发起 LLM 收尾。"""
         self._yield_missing_tool_results(working_messages)
+
+        # Issue #608: persist the (orphan-repaired) working_messages so the
+        # next turn resumes completed tool work instead of re-running it.
+        self._maybe_persist_cancelled_working_messages(working_messages, state, current_model)
 
         cancel_reason = (state.cancel_reason if state else "") or "用户请求停止"
         logger.info(
@@ -7314,6 +7515,10 @@ class ReasoningEngine:
             {"type": "user_insert", ...} 和 {"type": "text_delta", ...} 事件
         """
         self._yield_missing_tool_results(working_messages)
+
+        # Issue #608: persist the (orphan-repaired) working_messages so the
+        # next turn resumes completed tool work instead of re-running it.
+        self._maybe_persist_cancelled_working_messages(working_messages, state, current_model)
 
         cancel_reason = (state.cancel_reason if state else "") or "用户请求停止"
         logger.info(
