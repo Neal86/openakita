@@ -654,7 +654,8 @@ fn setup_logs_dir() -> PathBuf {
 
 /// 进程内 minidump 落地目录：~/.openakita/crashdumps/
 /// 由 crash_handler 在启动时 ensure dir 并安装 SEH filter；
-/// build_feedback_zip 会把这个目录里的 *.dmp 自动打包进反馈包。
+/// build_feedback_zip 会把这个目录整体打包进反馈包（含 *.dmp 及其
+/// 同名 *.events.txt 崩溃前事件轨迹）。
 fn crashdumps_dir() -> PathBuf {
     openakita_root_dir().join("crashdumps")
 }

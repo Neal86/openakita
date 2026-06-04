@@ -299,12 +299,18 @@ def _add_windows_crash_artifacts(zf: zipfile.ZipFile) -> None:
     if platform.system() != "Windows":
         return
 
+    # Ship both the binary minidump and its sibling *.events.txt trail. The
+    # crash handler writes <pid>-<tick>.events.txt next to every SEH dump with
+    # the last ~64 diagnostic events (what the user did right before the
+    # crash); without it every dump arrives as a bare faulting address with no
+    # context. They are a few KB each, so they never meaningfully compete with
+    # the .dmp files for the byte budget.
     _add_dir_recent(
         zf,
         _resolve_openakita_home_dir() / "crashdumps",
         "crashdumps",
         days=30,
-        patterns=("*.dmp",),
+        patterns=("*.dmp", "*.events.txt"),
         max_total_bytes=CRASHDUMP_MAX_BYTES,
     )
 
