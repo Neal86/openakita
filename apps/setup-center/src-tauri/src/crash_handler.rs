@@ -84,7 +84,19 @@ static EVENTS_RING: Lazy<Mutex<VecDeque<String>>> =
 /// produce the kind of hang we're trying to diagnose.
 pub fn record_event(msg: &str) {
     let body = if msg.len() > EVENT_MAX_LEN {
-        format!("{}\u{2026}[+{} bytes]", &msg[..EVENT_MAX_LEN], msg.len() - EVENT_MAX_LEN)
+        // `msg.len()` is a BYTE count; slicing `&msg[..EVENT_MAX_LEN]` panics
+        // if that byte falls inside a multi-byte UTF-8 char (the common case
+        // for CJK log content). Back off to the nearest char boundary at or
+        // below the limit. This must never panic: `record_event` is forwarded
+        // every `log_to_file` line and runs inside UI / IPC / tray callbacks,
+        // where a panic can unwind across an `extern "system"` FFI frame and
+        // abort the whole process — the exact crash class this module exists
+        // to diagnose, not cause.
+        let mut end = EVENT_MAX_LEN;
+        while end > 0 && !msg.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}\u{2026}[+{} bytes]", &msg[..end], msg.len() - end)
     } else {
         msg.to_string()
     };
