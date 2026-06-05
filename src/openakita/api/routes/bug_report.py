@@ -307,23 +307,35 @@ def _add_windows_crash_artifacts(zf: zipfile.ZipFile) -> None:
     # crash); without it every dump arrives as a bare faulting address with no
     # context. They are a few KB each, so they never meaningfully compete with
     # the .dmp files for the byte budget.
-    _add_dir_recent(
-        zf,
-        _resolve_openakita_home_dir() / "crashdumps",
-        "crashdumps",
-        days=30,
-        patterns=("*.dmp", "*.events.txt"),
-        max_total_bytes=CRASHDUMP_MAX_BYTES,
-    )
+    # Each collector is independently guarded: crash evidence is best-effort
+    # and one inaccessible source (ACL-protected WER dir, antivirus lock, a
+    # racing delete, …) must never abort the whole feedback bundle.
+    try:
+        _add_dir_recent(
+            zf,
+            _resolve_openakita_home_dir() / "crashdumps",
+            "crashdumps",
+            days=30,
+            patterns=("*.dmp", "*.events.txt"),
+            max_total_bytes=CRASHDUMP_MAX_BYTES,
+        )
+    except Exception:
+        pass
 
-    _add_wer_reports(zf)
-    _add_webview2_crashpad(zf)
-    event_log = _collect_windows_event_log()
-    if event_log:
-        try:
+    try:
+        _add_wer_reports(zf)
+    except Exception:
+        pass
+    try:
+        _add_webview2_crashpad(zf)
+    except Exception:
+        pass
+    try:
+        event_log = _collect_windows_event_log()
+        if event_log:
             zf.writestr("wer/event_log_recent.txt", event_log)
-        except Exception:
-            pass
+    except Exception:
+        pass
 
 
 def _wer_roots() -> list[Path]:
@@ -374,34 +386,46 @@ def _add_wer_reports(zf: zipfile.ZipFile) -> None:
             continue
 
         for report_dir in candidates:
-            report_wer = report_dir / "Report.wer"
-            if not report_wer.is_file():
-                continue
-            matched = "openakita" in report_dir.name.lower()
-            if not matched:
-                try:
-                    sample = report_wer.read_bytes()[:64 * 1024]
-                    matched = "openakita" in sample.decode("utf-8", "ignore").lower()
-                except Exception:
-                    matched = False
-            if not matched:
-                continue
-            # A queued report is moved to the archive later, so the same
-            # directory name can appear under both roots; de-dup by name.
-            if report_dir.name in seen:
-                continue
-            seen.add(report_dir.name)
-            label = f"{root.name}-{report_dir.name}"
-            _add_file(zf, report_wer, f"wer/{label}-Report.wer")
-            for dump in list(report_dir.glob("*.dmp")) + list(report_dir.glob("*.mdmp")):
-                try:
-                    sz = dump.stat().st_size
-                except OSError:
+            # The whole per-report body is wrapped: the machine-wide root
+            # ``C:\ProgramData\Microsoft\Windows\WER\ReportArchive`` is not
+            # readable by a standard (non-elevated) user, and Python's
+            # ``Path.is_file()`` / ``Path.exists()`` *re-raise* PermissionError
+            # (WinError 5) instead of returning False the way they do for a
+            # missing path. An unguarded probe there would abort the entire
+            # feedback bundle, so a report we cannot touch is simply skipped.
+            try:
+                report_wer = report_dir / "Report.wer"
+                if not report_wer.is_file():
                     continue
-                if sz > dump_budget:
+                matched = "openakita" in report_dir.name.lower()
+                if not matched:
+                    try:
+                        sample = report_wer.read_bytes()[:64 * 1024]
+                        matched = "openakita" in sample.decode("utf-8", "ignore").lower()
+                    except Exception:
+                        matched = False
+                if not matched:
                     continue
-                _add_file(zf, dump, f"wer/{label}-{dump.name}")
-                dump_budget -= sz
+                # A queued report is moved to the archive later, so the same
+                # directory name can appear under both roots; de-dup by name.
+                if report_dir.name in seen:
+                    continue
+                seen.add(report_dir.name)
+                label = f"{root.name}-{report_dir.name}"
+                _add_file(zf, report_wer, f"wer/{label}-Report.wer")
+                for dump in list(report_dir.glob("*.dmp")) + list(report_dir.glob("*.mdmp")):
+                    try:
+                        sz = dump.stat().st_size
+                    except OSError:
+                        continue
+                    if sz > dump_budget:
+                        continue
+                    _add_file(zf, dump, f"wer/{label}-{dump.name}")
+                    dump_budget -= sz
+            except Exception:
+                # PermissionError on a machine-wide report, a racing delete by
+                # the WER service, etc. — skip this report, never the bundle.
+                continue
 
 
 def _add_webview2_crashpad(zf: zipfile.ZipFile) -> None:
@@ -529,12 +553,19 @@ def _add_dir_recent(
 
 
 def _add_file(zf: zipfile.ZipFile, path: Path, zip_name: str) -> None:
-    """Add a single file to the zip if it exists."""
-    if path.exists() and path.is_file():
-        try:
+    """Add a single file to the zip if it exists.
+
+    The whole body — including the ``exists()`` / ``is_file()`` probes — is
+    guarded: on Windows those stat the path and *re-raise* PermissionError
+    (WinError 5) for ACL-protected locations (e.g. machine-wide WER reports),
+    rather than returning False as they do for a missing path. A file we
+    cannot read is silently skipped.
+    """
+    try:
+        if path.exists() and path.is_file():
             zf.write(path, zip_name)
-        except Exception:
-            pass
+    except Exception:
+        pass
 
 
 _SENSITIVE_KEY_RE = None
