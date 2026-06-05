@@ -10129,6 +10129,22 @@ fn build_feedback_zip(
         25 * 1024 * 1024,
     );
 
+    // ── WebView2 (Edge/Chromium) Crashpad dumps ──
+    // A crash inside the WebView2 process (a separate msedgewebview2.exe)
+    // never reaches our SetUnhandledExceptionFilter and is not reported to
+    // WER under our exe name; Edge captures it itself via Crashpad under the
+    // WebView2 user-data folder, which Tauri 2 defaults to
+    // %LOCALAPPDATA%\<bundle-identifier>\EBWebView. Skipped automatically on
+    // non-Windows (no LOCALAPPDATA) and when the folder is absent.
+    if let Some(local_appdata) = std::env::var_os("LOCALAPPDATA") {
+        let crashpad = PathBuf::from(local_appdata)
+            .join("com.openakita.setupcenter")
+            .join("EBWebView")
+            .join("Crashpad")
+            .join("reports");
+        zip_add_dir_capped(&mut zw, &crashpad, "webview2_crashpad", opts, 6 * 1024 * 1024);
+    }
+
     // ── Windows Error Reporting metadata + system event log ──
     // Only available on Windows; on macOS / Linux these calls are no-ops
     // and contribute nothing to the zip.
@@ -10153,74 +10169,132 @@ fn collect_windows_crash_artifacts(
     zw: &mut zip::ZipWriter<fs::File>,
     opts: zip::write::SimpleFileOptions,
 ) {
-    let local_appdata = match std::env::var_os("LOCALAPPDATA") {
-        Some(v) => PathBuf::from(v),
-        None => return,
-    };
-    let wer_archive = local_appdata
-        .join("Microsoft")
-        .join("Windows")
-        .join("WER")
-        .join("ReportArchive");
+    // WER stages a crash under `ReportQueue` first and only moves it to
+    // `ReportArchive` once the WER service finishes processing it. A feedback
+    // bundle submitted minutes after a crash is therefore frequently still in
+    // `ReportQueue`, so scanning `ReportArchive` alone misses fresh crashes
+    // (issue #606). Fast-fail terminations (heap corruption 0xC0000374 /
+    // __fastfail) bypass our in-process SEH filter entirely, which makes WER
+    // the only place their faulting-module evidence ever lands — so we scan
+    // both queue + archive under the per-user and machine-wide WER roots.
+    let mut wer_roots: Vec<PathBuf> = Vec::new();
+    for base in [
+        std::env::var_os("LOCALAPPDATA"),
+        std::env::var_os("ProgramData"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let wer = PathBuf::from(base)
+            .join("Microsoft")
+            .join("Windows")
+            .join("WER");
+        wer_roots.push(wer.join("ReportQueue"));
+        wer_roots.push(wer.join("ReportArchive"));
+    }
+    if wer_roots.is_empty() {
+        return;
+    }
 
     // WER report directories aren't reliably named: some are
     // `AppCrash_openakita-setup-center.exe_<hash>`, others are just
     // `Report.<hash>`. The exe name is always present in the Report.wer
     // body though, so we filter by (a) dir-name fast path first, (b)
     // fall back to reading the (small, <30 KB) Report.wer text. Limit
-    // the candidate set to the 30 most recently modified directories so
-    // even a heavily-crashed host doesn't spend minutes scanning.
+    // the candidate set to the 30 most recently modified directories per
+    // root so even a heavily-crashed host doesn't spend minutes scanning.
     let needle = "openakita";
-    let mut candidates: Vec<(PathBuf, std::time::SystemTime)> = fs::read_dir(&wer_archive)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| {
-            let p = e.path();
-            if !p.is_dir() {
-                return None;
-            }
-            let m = fs::metadata(&p).and_then(|md| md.modified()).ok()?;
-            Some((p, m))
-        })
-        .collect();
-    candidates.sort_by(|a, b| b.1.cmp(&a.1));
-    candidates.truncate(30);
+    let mut wer_dump_budget: u64 = 8 * 1024 * 1024;
+    let mut seen_reports: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for (report_dir, _) in candidates {
-        let report_wer = report_dir.join("Report.wer");
-        if !report_wer.is_file() {
-            continue;
-        }
-        let dir_name_lower = report_dir
+    for root in &wer_roots {
+        let root_name = root
             .file_name()
             .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let matched = if dir_name_lower.contains(needle) {
-            true
-        } else {
-            // Body match: Report.wer is a tiny INI-like text file with
-            // AppName / AppPath / FaultingModule keys. Read at most
-            // 64 KB to bound worst-case I/O.
-            match fs::read(&report_wer) {
-                Ok(bytes) => {
-                    let scan_len = bytes.len().min(64 * 1024);
-                    let s = String::from_utf8_lossy(&bytes[..scan_len]);
-                    s.to_ascii_lowercase().contains(needle)
+            .unwrap_or("WER")
+            .to_string();
+        let mut candidates: Vec<(PathBuf, std::time::SystemTime)> = fs::read_dir(root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                if !p.is_dir() {
+                    return None;
                 }
-                Err(_) => false,
+                let m = fs::metadata(&p).and_then(|md| md.modified()).ok()?;
+                Some((p, m))
+            })
+            .collect();
+        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+        candidates.truncate(30);
+
+        for (report_dir, _) in candidates {
+            let report_wer = report_dir.join("Report.wer");
+            if !report_wer.is_file() {
+                continue;
             }
-        };
-        if !matched {
-            continue;
-        }
-        let zip_name = format!(
-            "wer/{}-Report.wer",
-            report_dir.file_name().unwrap_or_default().to_string_lossy()
-        );
-        if zw.start_file(&zip_name, opts).is_ok() {
-            let _ = zw.write_all(&fs::read(&report_wer).unwrap_or_default());
+            let dir_name = report_dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let matched = if dir_name.to_ascii_lowercase().contains(needle) {
+                true
+            } else {
+                // Body match: Report.wer is a tiny INI-like text file with
+                // AppName / AppPath / FaultingModule keys. Read at most
+                // 64 KB to bound worst-case I/O.
+                match fs::read(&report_wer) {
+                    Ok(bytes) => {
+                        let scan_len = bytes.len().min(64 * 1024);
+                        let s = String::from_utf8_lossy(&bytes[..scan_len]);
+                        s.to_ascii_lowercase().contains(needle)
+                    }
+                    Err(_) => false,
+                }
+            };
+            if !matched {
+                continue;
+            }
+            // The same report dir migrates queue -> archive over time, so it
+            // can appear under both roots; de-dup by name.
+            if !seen_reports.insert(dir_name.clone()) {
+                continue;
+            }
+            let zip_name = format!("wer/{root_name}-{dir_name}-Report.wer");
+            if zw.start_file(&zip_name, opts).is_ok() {
+                let _ = zw.write_all(&fs::read(&report_wer).unwrap_or_default());
+            }
+            // Ship any bounded-size minidumps WER captured next to the
+            // report (.dmp / .mdmp); skip the full-heap .hdmp which can be
+            // hundreds of MB.
+            if let Ok(rd) = fs::read_dir(&report_dir) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    let ext_ok = p
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.eq_ignore_ascii_case("dmp") || s.eq_ignore_ascii_case("mdmp"))
+                        .unwrap_or(false);
+                    if !ext_ok {
+                        continue;
+                    }
+                    let sz = match fs::metadata(&p).map(|m| m.len()) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    if sz > wer_dump_budget {
+                        continue;
+                    }
+                    let fname = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let zip_name = format!("wer/{root_name}-{dir_name}-{fname}");
+                    if zw.start_file(&zip_name, opts).is_ok() {
+                        let _ = zw.write_all(&fs::read(&p).unwrap_or_default());
+                        wer_dump_budget = wer_dump_budget.saturating_sub(sz);
+                    }
+                }
+            }
         }
     }
 

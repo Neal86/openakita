@@ -1,7 +1,22 @@
 //! Native crash handler that captures minidumps for SEH exceptions
-//! (0xc0000005 access violation / 0xc0000374 heap corruption /
-//! 0xc000001d illegal instruction / etc.) which `std::panic::set_hook`
-//! cannot see.
+//! (0xc0000005 access violation / 0xc000001d illegal instruction / etc.)
+//! which `std::panic::set_hook` cannot see.
+//!
+//! ## What this handler does NOT catch
+//!
+//! `SetUnhandledExceptionFilter` only runs for exceptions dispatched
+//! through normal SEH. **Fast-fail terminations bypass it entirely**:
+//! heap-corruption detection (0xc0000374), `/GS` stack-cookie failures,
+//! and Control Flow Guard violations all funnel through
+//! `__fastfail` / `RtlFailFast`, which raises a non-continuable,
+//! non-dispatchable exception (int 0x29) that skips both vectored handlers
+//! and this top-level filter and goes straight to Windows Error Reporting.
+//! So a heap-corruption crash produces **no** `*.dmp` here — its evidence
+//! lands in WER instead, which is why the feedback bundle separately
+//! collects WER `Report.wer` / minidumps (from both `ReportQueue` and
+//! `ReportArchive`) and WebView2's own Crashpad dumps. Likewise a crash
+//! inside the WebView2 process is in a different process and is captured by
+//! Edge's Crashpad, not by this filter.
 //!
 //! Design notes:
 //!
