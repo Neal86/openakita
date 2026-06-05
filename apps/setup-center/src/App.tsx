@@ -1,6 +1,6 @@
 import { createContext, useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense, startTransition } from "react";
 import { useTranslation } from "react-i18next";
-import { invoke, listen, IS_TAURI, IS_WEB, IS_CAPACITOR, IS_LOCAL_WEB, getAppVersion, onWsEvent, reconnectWsNow, setWsApiBaseUrl, logger, registerGlobalShortcut } from "./platform";
+import { invoke, listen, IS_TAURI, IS_WEB, IS_CAPACITOR, IS_LOCAL_WEB, getAppVersion, onWsEvent, reconnectWsNow, setWsApiBaseUrl, logger } from "./platform";
 import { getActiveServer, getActiveServerId } from "./platform/servers";
 import { checkAuth, installFetchInterceptor, AUTH_EXPIRED_EVENT, isPasswordUserSet, clearAccessToken, setTauriRemoteMode, isTauriRemoteMode } from "./platform/auth";
 import { LoginView } from "./views/LoginView";
@@ -1326,23 +1326,6 @@ function MainApp() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentWorkspaceId, venvDir]);
-
-  // ── Global shortcut: Ctrl+Shift+A to summon window ──
-  useEffect(() => {
-    if (!IS_TAURI) return;
-    let unregister: (() => void) | null = null;
-    (async () => {
-      try {
-        const { getCurrentWindow } = await import("@tauri-apps/api/window");
-        const win = getCurrentWindow();
-        unregister = await registerGlobalShortcut("CmdOrCtrl+Shift+A", () => {
-          win.show().catch(() => {});
-          win.setFocus().catch(() => {});
-        });
-      } catch { /* global-shortcut not available */ }
-    })();
-    return () => { if (unregister) unregister(); };
-  }, []);
 
   // streaming pip logs (install step)
   useEffect(() => {
