@@ -5314,7 +5314,7 @@ class OrgRuntime:
 
         def _patched_check_permission(
             tool_name: str, tool_input: dict,
-        ) -> "PermissionDecision":
+        ) -> _PermissionDecision:
             if tool_name.startswith("org_"):
                 return _PermissionDecision(
                     behavior="allow",
@@ -6407,4 +6407,3 @@ class OrgRuntime:
             return _json.dumps(payload, ensure_ascii=False)
         except Exception:
             return None
-
