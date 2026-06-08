@@ -1162,11 +1162,19 @@ async def search_marketplace(q: str = "agent"):
 
 
 def _broadcast_ws_event(action: str) -> None:
-    """WebSocket 广播（fire-and-forget）。"""
-    try:
-        from openakita.api.routes.websocket import broadcast_event
+    """WebSocket 广播 ``skills:changed``（fire-and-forget，跨线程/跨事件循环安全）。
 
-        asyncio.ensure_future(broadcast_event("skills:changed", {"action": action}))
+    ``propagate_skill_change`` 经由 ``asyncio.to_thread`` 在工作线程内触发本回调，
+    而工作线程没有 running loop。旧实现用 ``asyncio.ensure_future`` 在该线程里会
+    直接抛 ``RuntimeError`` 并被吞掉，导致安装 / 卸载 / reload 后 WS ``skills:changed``
+    事件从不送达——仅靠该事件实时刷新的面板（OrgEditorView / SkillConflictsPanel）
+    因此收不到更新。``fire_event`` 通过 engine_bridge 把广播调度回 API 事件循环，
+    从任意线程调用都安全，且无可达 loop 时会优雅丢弃而非报错。
+    """
+    try:
+        from openakita.api.routes.websocket import fire_event
+
+        fire_event("skills:changed", {"action": action})
     except Exception:
         pass
 
