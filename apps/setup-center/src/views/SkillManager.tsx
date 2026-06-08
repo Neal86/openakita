@@ -1333,45 +1333,85 @@ export function SkillManager({
   const [installStatus, setInstallStatus] = useState<string>("");
   const [uninstallConfirm, setUninstallConfirm] = useState<SkillInfo | null>(null);
   const marketRequestId = useRef(0);
+  // 已安装技能加载的请求时序守卫：并发的 loadSkills 中只有"最新"那次允许写入
+  // 状态，避免较早发出的请求晚到后用旧/坏数据覆盖较新成功结果（last-write-wins 倒灌）。
+  const skillsRequestId = useRef(0);
   const detailRequestNameRef = useRef<string | null>(null);
   const { t } = useTranslation();
 
   // ── 加载已安装技能（返回 true 表示成功，false 表示出错） ──
+  //
+  // 失败语义（修复 #614“导入后列表空白”）：
+  //   - 只有当数据源**明确成功**返回 `{skills: [...]}`（数组）时才覆盖列表；
+  //     合法的空数组（res.ok 且 skills=[]）按真·空渲染。
+  //   - 任何**尝试过但失败**的情况（非 2xx、错误体、响应结构异常、网络/超时）
+  //     都只 setError，**不清空**已有列表——避免一次瞬时故障把整页清成空白
+  //     （此前 `data = await res.json()` 不查 res.ok，500 错误体会被当成空列表）。
+  //   - 完全没有可用数据源时（既无服务也非 Tauri 本地模式）才视为真·空。
+  // 并发语义：用 skillsRequestId 做时序守卫，只有最新一次请求允许写状态。
   const loadSkills = useCallback(async (): Promise<boolean> => {
+    const seq = ++skillsRequestId.current;
+    const isLatest = () => seq === skillsRequestId.current;
     setLoading(true);
     setError(null);
     try {
-      let data: { skills: Record<string, unknown>[] } | null = null;
-
-      let httpError: string | null = null;
+      let data: { skills?: Record<string, unknown>[] } | null = null;
+      let loadError: string | null = null;
+      let attempted = false;
 
       // 优先从运行中的服务 HTTP API 获取（远程模式或本地服务运行时）
       if (serviceRunning && apiBaseUrl != null) {
+        attempted = true;
         try {
           const res = await safeFetch(`${apiBaseUrl}/api/skills`, { signal: AbortSignal.timeout(15_000), cache: "no-store" });
-          data = await res.json();
+          let parsed: { skills?: Record<string, unknown>[]; error?: string; detail?: string } | null = null;
+          try {
+            parsed = await res.json();
+          } catch {
+            parsed = null;
+          }
+          if (!res.ok || parsed?.error) {
+            loadError = String(parsed?.error || parsed?.detail || `HTTP ${res.status}`);
+          } else if (parsed && Array.isArray(parsed.skills)) {
+            data = parsed;
+          } else {
+            // 2xx 但响应结构异常：当作软失败处理，不清空现有列表
+            loadError = "unexpected response shape from /api/skills";
+          }
         } catch (e) {
-          httpError = String(e);
+          loadError = String(e);
         }
       }
 
       // Fallback: Tauri 本地命令（仅本地模式，且 HTTP 未成功时）
       if (!data && IS_TAURI && dataMode !== "remote" && venvDir && currentWorkspaceId) {
+        attempted = true;
         try {
           const raw = await invoke<string>("openakita_list_skills", { venvDir, workspaceId: currentWorkspaceId });
-          data = JSON.parse(raw);
-        } catch {
-          // Tauri 也失败了——如果 HTTP 也失败了，显示错误
-          if (httpError) {
-            setError(friendlyError(httpError, t, "load"));
-            return false;
+          const parsed = JSON.parse(raw);
+          if (parsed && Array.isArray(parsed.skills)) {
+            data = parsed;
+            loadError = null;  // Tauri 兜底成功，清掉 HTTP 阶段的错误
+          } else if (!loadError) {
+            loadError = "unexpected response shape from openakita_list_skills";
           }
+        } catch (e) {
+          if (!loadError) loadError = String(e);
         }
       }
 
+      // 时序守卫：较早发出的请求若已被更新的请求取代，则放弃写入。
+      if (!isLatest()) return false;
+
       if (!data) {
-        setSkills([]);
-        return !httpError;
+        if (loadError) {
+          // 尝试过但失败：保留现有列表，仅提示错误，绝不清空。
+          setError(friendlyError(loadError, t, "load"));
+          return false;
+        }
+        // 没有任何可用数据源（既未尝试 HTTP 也未尝试 Tauri）：真·空。
+        if (attempted === false) setSkills([]);
+        return true;
       }
 
       const list: SkillInfo[] = (data.skills || []).map((s: Record<string, unknown>) => ({
@@ -1390,6 +1430,7 @@ export function SkillManager({
         configComplete: true,  // 由 useMemo 动态计算，这里先占位
       }));
       setSkills(list);
+      setError(null);
       // 同步 enabledDraft 到后端最新状态
       const draft: Record<string, boolean> = {};
       for (const s of list) draft[s.skillId] = s.enabled !== false;
@@ -1397,12 +1438,12 @@ export function SkillManager({
       setEnabledDirty(false);
       return true;
     } catch (e) {
-      setError(friendlyError(e, t, "load"));
+      if (isLatest()) setError(friendlyError(e, t, "load"));
       return false;
     } finally {
-      setLoading(false);
+      if (isLatest()) setLoading(false);
     }
-  }, [venvDir, currentWorkspaceId, serviceRunning, apiBaseUrl, dataMode]);
+  }, [venvDir, currentWorkspaceId, serviceRunning, apiBaseUrl, dataMode, t]);
 
   const reloadRuntimeAfterLocalInstall = useCallback(async () => {
     if (!serviceRunning || apiBaseUrl == null) return true;
