@@ -46,17 +46,45 @@ export function useSmoothReveal(text: string, isRunning: boolean): string {
       const dt = now - lastTickRef.current;
       lastTickRef.current = now;
 
-      const remaining = targetRef.current.length - shownRef.current.length;
+      const target = targetRef.current;
+      const start = shownRef.current.length;
+      const remaining = target.length - start;
       const add = Math.min(
         remaining,
         REVEAL_MAX_CHARS_PER_FRAME,
         Math.max(1, Math.ceil((remaining * dt) / REVEAL_DRAIN_MS)),
       );
-      shownRef.current = targetRef.current.slice(0, shownRef.current.length + add);
+
+      // 标签感知：揭示边界绝不能落在原始 HTML 标签 `<...>` 内部。上游内容
+      // 经 formatSourceTags 注入过 <span class="srcBadge"> 之类的完整标签，
+      // 而管线里的 rehype-raw 会解析它们——若把切片停在半截标签里，HTML
+      // 解析器会把后续内容误当属性吞掉，导致引用角标闪烁错乱。这里把边界
+      // 规整为：要么停在标签之前、要么整段越过该标签。
+      let end = start + add;
+      const head = target.slice(0, end);
+      const lastOpen = head.lastIndexOf("<");
+      if (lastOpen > head.lastIndexOf(">")) {
+        const close = target.indexOf(">", end);
+        // 标签已完整到达 → 整段越过；否则（仍在流入）退回到 `<` 之前等待。
+        end = close === -1 ? lastOpen : close + 1;
+      }
+      // 边界紧贴标签起始（下一字符就是 `<`）时无法推进：标签已收齐就整段
+      // 越过；否则暂停揭示（targetRef 下次更新会经 effect 重新启动），不空转。
+      if (end <= start && start < target.length) {
+        const close = target.indexOf(">", start);
+        if (close !== -1) {
+          end = close + 1;
+        } else {
+          frameRef.current = null;
+          return;
+        }
+      }
+
+      shownRef.current = target.slice(0, end);
       setDisplayed(shownRef.current);
 
       frameRef.current =
-        shownRef.current.length < targetRef.current.length ? requestAnimationFrame(tick) : null;
+        shownRef.current.length < target.length ? requestAnimationFrame(tick) : null;
     };
 
     frameRef.current = requestAnimationFrame(tick);
