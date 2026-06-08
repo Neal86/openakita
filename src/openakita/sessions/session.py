@@ -608,7 +608,12 @@ class Session:
             key += f":{self.thread_id}"
         return key
 
-    # 重型元数据键（思考链、工具摘要、代码产物），对旧消息裁剪以控制体积
+    # 重型元数据键（思考链、工具摘要、代码产物），对旧消息裁剪以控制体积。
+    #
+    # ``todo`` 计划快照刻意 *不* 列入：它体积很小（id + summary + steps），且是
+    # 计划卡跨重载/多窗口回显（#615）的持久来源，裁掉会让老消息的计划卡再次消失。
+    # ``parts`` 也不在此：它是由扁平字段派生的渲染投影（见 api/message_parts.py），
+    # 从不入库，故不会撑大 sessions.json，也无需裁剪。
     _HEAVY_METADATA_KEYS = ("chain_summary", "tool_summary", "artifacts")
     # 保留最近 N 条消息的完整元数据（前端展示思考链等），更早的仅保留 base content
     _METADATA_PRESERVE_WINDOW = 50

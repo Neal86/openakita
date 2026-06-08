@@ -2,18 +2,12 @@ import { memo } from "react";
 import { useTranslation } from "react-i18next";
 import type { ChatMessage, MdModules } from "../utils/chatTypes";
 import { stripLegacySummary } from "../utils/chatHelpers";
+import { resolveMessageParts } from "../utils/messageParts";
 import { formatTime } from "../../../utils";
-import { ThinkingChain, ThinkingBlock, ToolCallsGroup } from "./ThinkingChain";
-import { ArtifactList } from "./Artifacts";
-import { OrgTimelineCard } from "./OrgTimeline";
-import { AskUserBlock } from "./AskUser";
-import { ErrorCard } from "./ErrorCard";
 import { AttachmentPreview } from "./AttachmentPreview";
 import { SpinnerTipDisplay } from "./SpinnerTipDisplay";
-import { SourceStrip } from "./SourceStrip";
-import { PlanCard } from "./PlanCard";
-import { MCPCallStrip } from "./MCPCallStrip";
 import { MarkdownContent } from "./MarkdownContent";
+import { MessageParts } from "./MessageParts";
 import { useSourceTagFormatter, extractTrailingSourceTag, SourceBadge } from "./SourceBadge";
 import { IconClipboard, IconEdit, IconRefresh, IconRewind } from "../../../icons";
 
@@ -103,28 +97,26 @@ export const FlatMessageItem = memo(function FlatMessageItem({
             </div>
           )}
 
-          {msg.thinkingChain && msg.thinkingChain.length > 0 && (
-            <ThinkingChain chain={msg.thinkingChain} streaming={!!msg.streaming} showChain={showChain} onSkipStep={onSkipStep} />
-          )}
-
-          {msg.orgTimeline && msg.orgTimeline.length > 0 && (
-            <OrgTimelineCard entries={msg.orgTimeline} streaming={!!msg.streaming} />
-          )}
-
           {msg.streaming && !msg.content && msg.streamStatus && msg.thinkingChain && msg.thinkingChain.length > 0 && (
             <SpinnerTipDisplay statusText={msg.streamStatus} />
           )}
 
-          {msg.thinking && (!msg.thinkingChain || msg.thinkingChain.length === 0) && (
-            <ThinkingBlock content={msg.thinking} />
-          )}
-
-          <SourceStrip sources={msg.sources} conversationId={conversationId} httpApiBase={httpApiBase} />
-          <MCPCallStrip calls={msg.mcpCalls} />
-
-          {msg.todo && msg.todo.steps?.length > 0 && (
-            <PlanCard plan={msg.todo} onStepAction={onPlanStepAction} />
-          )}
+          <MessageParts
+            msg={msg}
+            parts={resolveMessageParts(msg)}
+            bodyContent={bodyContent}
+            formatSourceTags={formatSourceTags}
+            mdModules={mdModules}
+            showChain={showChain}
+            onSkipStep={onSkipStep}
+            onImagePreview={onImagePreview}
+            onAskAnswer={onAskAnswer}
+            onPlanStepAction={onPlanStepAction}
+            onRetry={onRetry}
+            apiBaseUrl={apiBaseUrl}
+            conversationId={conversationId}
+            httpApiBase={httpApiBase}
+          />
 
           {msg.streaming && !msg.content && (!msg.thinkingChain || msg.thinkingChain.length === 0) && (
             <div style={{ padding: "4px 0" }}>
@@ -135,34 +127,6 @@ export const FlatMessageItem = memo(function FlatMessageItem({
               </div>
               <SpinnerTipDisplay statusText={msg.streamStatus} />
             </div>
-          )}
-
-          {bodyContent && (
-            <MarkdownContent
-              content={formatSourceTags(bodyContent)}
-              mdModules={mdModules}
-              className="chatMdContent"
-              streaming={!!msg.streaming}
-            />
-          )}
-
-          {msg.toolCalls && msg.toolCalls.length > 0 && (!msg.thinkingChain || msg.thinkingChain.length === 0) && (
-            <ToolCallsGroup toolCalls={msg.toolCalls} />
-          )}
-
-          {msg.artifacts && msg.artifacts.length > 0 && (
-            <ArtifactList artifacts={msg.artifacts} apiBaseUrl={apiBaseUrl} onImagePreview={onImagePreview} />
-          )}
-
-          {msg.askUser && (
-            <AskUserBlock
-              ask={msg.askUser}
-              onAnswer={(ans) => onAskAnswer?.(msg.id, ans)}
-            />
-          )}
-
-          {msg.errorInfo && (
-            <ErrorCard error={msg.errorInfo} onRetry={onRetry ? () => onRetry(msg.id) : undefined} />
           )}
         </>
       )}

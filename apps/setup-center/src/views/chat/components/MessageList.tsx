@@ -26,7 +26,7 @@ function estimateUnknownChars(value: unknown, limit: number, depth = 0): number 
   }
 
   const record = value as Record<string, unknown>;
-  for (const key of ["content", "thinking", "thinkingChain", "toolCalls", "todo", "artifacts", "sources", "mcpCalls", "result", "args", "entries"] as const) {
+  for (const key of ["content", "thinking", "thinkingChain", "toolCalls", "todo", "artifacts", "sources", "mcpCalls", "parts", "result", "args", "entries"] as const) {
     chars = cappedAdd(chars, estimateUnknownChars(record[key], limit - chars, depth + 1), limit);
     if (chars >= limit) break;
   }

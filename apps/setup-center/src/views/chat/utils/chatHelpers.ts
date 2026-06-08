@@ -6,6 +6,8 @@ import type {
   ChatAskQuestion,
   ChatErrorInfo,
   ChatArtifact,
+  ChatTodo,
+  MessagePart,
   ChainGroup,
   ChainEntry,
   ChainToolCall,
@@ -119,7 +121,7 @@ export function exportConversation(msgs: ChatMessage[], title: string, format: "
   let mimeType: string;
   let ext: string;
   if (format === "json") {
-    content = JSON.stringify(msgs.map(({ streaming, streamStatus, ...rest }) => rest), null, 2);
+    content = JSON.stringify(msgs.map(({ streaming, streamStatus, streamFallback, ...rest }) => rest), null, 2);
     mimeType = "application/json";
     ext = "json";
   } else {
@@ -187,8 +189,21 @@ export function sanitizeStoredMessages(raw: unknown): ChatMessage[] {
     if (typeof m.timestamp !== "number") return false;
     return true;
   }).map((m) => {
+    // NOTE: streamFallback is intentionally preserved here (unlike streaming /
+    // streamStatus). It marks a finalized-but-provisional bubble whose text came
+    // from an interrupted stream; it must survive reload / window switch so the
+    // next backend reconciliation can replace the text and clear it. It is a
+    // tiny boolean and self-clears on the first successful patch.
     const cleaned = { ...m, streaming: undefined, streamStatus: undefined };
-    if (m.role === "assistant" && (!m.content || m.content.trim() === "") && !m.toolCalls?.length && !m.todo) {
+    if (
+      m.role === "assistant" &&
+      (!m.content || m.content.trim() === "") &&
+      !m.toolCalls?.length &&
+      !m.todo &&
+      !m.askUser &&
+      !m.artifacts?.length &&
+      !m.parts?.length
+    ) {
       return null;
     }
     return cleaned;
@@ -208,6 +223,8 @@ export function loadMessagesFromStorage(key: string): ChatMessage[] {
 
 export function saveMessagesToStorage(key: string, msgs: ChatMessage[], maxMessages = STORED_MESSAGE_WINDOW): boolean {
   const windowed = maxMessages > 0 && msgs.length > maxMessages ? msgs.slice(-maxMessages) : msgs;
+  // streamFallback is kept on purpose (see sanitizeStoredMessages) so an
+  // interrupted bubble stays flagged across reloads until reconciled.
   const base = windowed.map(({ streaming, streamStatus, ...rest }) => rest);
   try {
     localStorage.setItem(key, JSON.stringify(base));
@@ -405,6 +422,9 @@ type BackendHistoryMessage = {
   chain_summary?: ChainSummaryItem[];
   artifacts?: ChatArtifact[] | null;
   usage?: ChatMessage["usage"];
+  todo?: ChatTodo | null;
+  ask_user?: ChatAskUser | null;
+  parts?: MessagePart[] | null;
 };
 
 export type BackendPatchStats = {
@@ -484,8 +504,19 @@ export function patchMessagesWithBackendDetailed(
 
     const patches: Partial<ChatMessage> = {};
 
-    if (backend.content && !m.askUser && (!m.content || m.content.length < backend.content.length)) {
+    // Content replacement. Normally we only upgrade to the backend copy when it
+    // is *longer* (the local stream got cut off). But a message flagged
+    // `streamFallback` was finalized from an interrupted / recovering stream, so
+    // its text is untrustworthy — adopt the authoritative persisted answer even
+    // when the backend copy is shorter (e.g. trace markers stripped on save),
+    // then clear the flag so it isn't force-replaced again.
+    if (
+      backend.content &&
+      !m.askUser &&
+      (m.streamFallback || !m.content || m.content.length < backend.content.length)
+    ) {
       patches.content = backend.content;
+      if (m.streamFallback) patches.streamFallback = undefined;
     }
 
     const hasBrokenChain = m.thinkingChain?.some((g: ChainGroup) => !g.entries.length && !g.durationMs);
@@ -506,6 +537,25 @@ export function patchMessagesWithBackendDetailed(
 
     if (!m.usage && backend.usage) {
       patches.usage = backend.usage;
+    }
+
+    // Persisted plan snapshot — restore the plan card when the local message
+    // never captured it (e.g. hydrated after a crash / in another window).
+    if (!m.todo?.steps?.length && backend.todo?.steps?.length) {
+      patches.todo = backend.todo;
+    }
+
+    // Persisted answered ask_user — keep a resolved prompt resolved on reload
+    // instead of re-rendering it as freshly clickable.
+    if (backend.ask_user?.answered && !m.askUser?.answered) {
+      patches.askUser = m.askUser
+        ? { ...m.askUser, answered: true, answer: backend.ask_user.answer }
+        : backend.ask_user;
+    }
+
+    // Authoritative ordered parts projection from the backend.
+    if (!m.parts?.length && backend.parts?.length) {
+      patches.parts = backend.parts;
     }
 
     if (Object.keys(patches).length > 0) {
