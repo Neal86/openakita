@@ -1748,6 +1748,8 @@ fn apply_runtime_env_builder(
     cmd.env("OPENAKITA_ENV_PURPOSE", purpose.as_str());
     cmd.env("OPENAKITA_ENV_TRUST_SOURCE", "host-runtime");
     cmd.env("PYTHONNOUSERSITE", "1");
+    cmd.env("PYTHONUTF8", "1");
+    cmd.env("PYTHONIOENCODING", "utf-8");
 
     let effective_pip_index;
     let pip_index = match pip_index {

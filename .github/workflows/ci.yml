@@ -445,8 +445,7 @@ jobs:
         working-directory: apps/setup-center
         env:
           NO_STRIP: true
-          APPIMAGE_EXTRACT_AND_RUN: 1
-        run: npx tauri build --bundles "deb,appimage"
+        run: npx tauri build --bundles "deb"
 
       - name: Verify bundle exists
         run: |
@@ -539,6 +538,8 @@ jobs:
         shell: bash
         env:
           UNICODE_STAGE: ${{ env.UNICODE_STAGE }}
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
         run: |
           set -euo pipefail
           if [ "${{ runner.os }}" = "Windows" ]; then
@@ -555,6 +556,8 @@ jobs:
         shell: bash
         env:
           UNICODE_STAGE: ${{ env.UNICODE_STAGE }}
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
         run: |
           set -euo pipefail
           if [ "${{ runner.os }}" = "Windows" ]; then

@@ -637,6 +637,9 @@ def _smoke_test_seed(seed_python: Path) -> None:
     result = subprocess.run(
         [str(seed_python), "-c", code],
         capture_output=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+        errors="replace",
         text=True,
         timeout=30,
     )
