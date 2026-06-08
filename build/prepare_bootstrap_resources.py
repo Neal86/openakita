@@ -34,6 +34,20 @@ DEFAULT_OUTPUT_ROOT = ROOT / "build" / "bootstrap-output"
 WEB_ASSETS_DIR = ROOT / "apps" / "setup-center" / "dist-web"
 DOCS_ASSETS_DIR = ROOT / "docs-site" / ".vitepress" / "dist"
 
+
+def configure_utf8_stdio() -> None:
+    """Keep CI logs writable when paths contain non-ASCII characters."""
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+            except OSError:
+                pass
+
+
+configure_utf8_stdio()
+
 # uv release pin —— **必须**显式版本号，禁止 `latest`。
 # 原因：CI 缓存 key 需要 uv 版本作为锚点；`latest` 滚动会出现"key 不动、内容变"，
 # 让缓存命中老版本但代码已经升级。升级 uv 时改这里的常量并跑全平台 release-dryrun。
@@ -315,11 +329,22 @@ def build_wheel() -> Path:
     out_dir = BUILD_BOOTSTRAP_WHEELS
     shutil.rmtree(out_dir, ignore_errors=True)
     out_dir.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [sys.executable, "-m", "build", "--wheel", "--outdir", str(out_dir)],
-        cwd=ROOT,
-        check=True,
-    )
+    with tempfile.TemporaryDirectory(prefix="openakita-wheel-build-") as tmp:
+        # Running `python -m build` from repo root imports the local build/
+        # script directory instead of PyPA's build package.
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "build",
+                "--wheel",
+                "--outdir",
+                str(out_dir),
+                str(ROOT),
+            ],
+            cwd=tmp,
+            check=True,
+        )
     wheels = sorted(out_dir.glob("openakita-*.whl"), key=lambda item: item.stat().st_mtime)
     if not wheels:
         raise RuntimeError("python -m build --wheel completed but no openakita wheel was found")
