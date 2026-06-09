@@ -140,6 +140,16 @@ fn take_startup_recovery_notice() -> Option<serde_json::Value> {
     STARTUP_RECOVERY_NOTICE.lock().ok().and_then(|mut guard| guard.take())
 }
 
+/// 前端在调用 `@tauri-apps/plugin-process` 的 `relaunch()`（更新后重启）**之前**
+/// 必须先调本命令。原因：Tauri 的 `app.restart()` 走 `std::process::exit(0)`
+/// 直接退出，**不会触发 `RunEvent::Exit`**，因此那条路径不会写 exit-handled 标记，
+/// 看门狗会把这次"主动重启"误判为硬崩溃而再拉起一个实例（虽被 single-instance
+/// 去重，但更新时 exe 正在被替换，时序很脏）。先打标记即可让看门狗安静放行。
+#[tauri::command]
+fn prepare_relaunch() {
+    mark_exit_handled();
+}
+
 fn record_frontend_session_marker(app_version: &str) {
     let marker = serde_json::json!({
         "ts": now_epoch_secs(),
@@ -185,6 +195,11 @@ const SELF_HEAL_COOLDOWN_MS: u64 = 30_000;
 
 fn try_self_heal_relaunch(panic_msg: &str) {
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    // 标记退出已被本路径处理：panic hook 这就要自己拉起新实例了，看门狗看到此
+    // 标记便不会重复再起一个（即便本函数因冷却而跳过 relaunch，也算"已处理"——
+    // 那意味着是快速 panic 风暴，应让用户察觉而非两条路径都狂拉）。
+    mark_exit_handled();
 
     // 写 marker（携带 ts/panic_brief/上次 workspace 等供前端恢复使用）
     let ts = SystemTime::now()
@@ -238,6 +253,189 @@ fn try_self_heal_relaunch(panic_msg: &str) {
             )),
             Err(e) => log_to_file(&format!("[self-heal] relaunch FAILED: {e}")),
         }
+    }
+}
+
+/// 看门狗：exit-handled 标记文件路径（`~/.openakita/exit-handled.marker`）。
+///
+/// 主进程"已正常处理过退出"时写入：优雅退出（RunEvent::Exit）或 panic hook
+/// 已自行自愈重启。看门狗据此区分父进程消失的性质：
+///   * 有标记（pid 匹配）→ 优雅退出 / 已自愈 → 不动。
+///   * 无标记 → 未被任何上层处理的硬崩溃（SEH 访问违例 / ud2 非法指令 /
+///     fast-fail 堆损坏）→ 需要外部把 GUI 自动拉起。
+/// 本次运行期间该文件应不存在（启动时清掉），所以"无标记"天然等价于"在跑时崩了"。
+fn exit_handled_marker_path() -> PathBuf {
+    let base = home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".openakita");
+    let _ = fs::create_dir_all(&base);
+    base.join("exit-handled.marker")
+}
+
+/// 标记"本进程的退出已被上层处理"，供看门狗判断不要再拉起。
+fn mark_exit_handled() {
+    let _ = fs::write(exit_handled_marker_path(), std::process::id().to_string());
+}
+
+/// 启动时清除上一次会话遗留的 exit-handled 标记。
+fn clear_exit_handled_marker() {
+    let _ = fs::remove_file(exit_handled_marker_path());
+}
+
+/// 看门狗断路器标记（`~/.openakita/watchdog-relaunch.marker`）：每行存一次
+/// 自动拉起的 epoch 秒。用于在"启动即崩 / 确定性崩溃循环"时彻底停手，而不是
+/// 无限把崩溃窗口拉起来骚扰用户。
+#[cfg(windows)]
+fn watchdog_relaunch_marker_path() -> PathBuf {
+    let base = home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".openakita");
+    let _ = fs::create_dir_all(&base);
+    base.join("watchdog-relaunch.marker")
+}
+
+/// 断路器：滑动窗口长度（秒）与窗口内允许的最大自动拉起次数。
+///
+/// 实测真实崩溃间隔在 10 分钟量级，所以 3 分钟窗口内正常最多出现 1 次崩溃，
+/// 偶发崩溃永远不会触发断路器。一旦 3 分钟内连续自动拉起达到 3 次，说明这是
+/// 启动即崩 / 确定性崩溃循环——再拉起也只会立刻再崩，唯一效果是无限弹窗，
+/// 此时彻底放弃、等用户手动启动。窗口随时间自然滑出：循环停止超过窗口后，
+/// 历史时间戳被剔除，日后偶发的新崩溃仍会被正常恢复，不会被永久锁死。
+#[cfg(windows)]
+const WATCHDOG_BREAKER_WINDOW_SECS: u64 = 180;
+#[cfg(windows)]
+const WATCHDOG_BREAKER_MAX_RELAUNCHES: usize = 3;
+
+/// 启动看门狗子进程（仅 Windows）。
+///
+/// 背景：tao/wry 事件循环在 WebView2 重入下的 ud2 / 堆损坏崩溃，既不走 Rust
+/// panic hook，（fast-fail 时）也不走 SEH 顶层过滤器——进程直接被内核终止。
+/// 只有一个**独立进程**才能可靠地把 GUI 重新拉起。看门狗运行在健康进程里，
+/// 绝不触碰崩溃进程那已损坏的堆，因此能安全覆盖 panic / ud2 / fast-fail 全部
+/// 崩溃类型。该函数在 Tauri `setup`（只在主实例运行，single-instance 插件会让
+/// 第二实例在更早的插件 setup 阶段就退出）中调用，所以不会被瞬时第二实例误起。
+#[cfg(windows)]
+fn spawn_watchdog() {
+    // 仅在 release（已安装）构建启用。dev 构建（`tauri dev`）里用 Ctrl+C 杀
+    // dev 进程不会触发 RunEvent::Exit，会被看门狗误判为崩溃而把 debug exe 拉起，
+    // 弹出游离窗口干扰开发。崩溃韧性只对最终用户的发行版有意义。
+    if cfg!(debug_assertions) {
+        return;
+    }
+    use std::os::windows::process::CommandExt as _;
+    const DETACHED_PROCESS: u32 = 0x00000008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            log_to_file(&format!("[watchdog] current_exe failed: {e}"));
+            return;
+        }
+    };
+    let mut cmd = Command::new(&exe);
+    cmd.arg("--watchdog").arg(std::process::id().to_string());
+    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    match cmd.spawn() {
+        Ok(child) => log_to_file(&format!(
+            "[watchdog] spawned (pid={}) watching parent {}",
+            child.id(),
+            std::process::id()
+        )),
+        Err(e) => log_to_file(&format!("[watchdog] spawn failed: {e}")),
+    }
+}
+
+#[cfg(not(windows))]
+fn spawn_watchdog() {}
+
+/// 看门狗主循环：被 `--watchdog <parent_pid>` 调起，运行在独立进程，不构建 GUI。
+///
+/// 等待父进程退出，再据 exit-handled 标记决定是否自动拉起新实例。
+#[cfg(windows)]
+fn run_watchdog(parent_pid: u32) {
+    // 用进程句柄阻塞等待，而不是轮询 PID：
+    //   1. `OpenProcess` 一拿到句柄就锁定了**那个具体的进程内核对象**，即使父进程
+    //      退出后系统把同一个 PID 复用给别的进程，我们等的也还是原来那个——彻底
+    //      规避 PID 复用导致"看门狗误以为父进程还活着、永不重启"的经典 bug。
+    //   2. `WaitForSingleObject` 阻塞到对象 signaled（进程结束），全程 0 CPU，
+    //      比 750ms 轮询更准更省。
+    // 若 OpenProcess 失败（父进程已经先一步退出/PID 非法），退回到一次性判定。
+    let handle = unsafe { win::OpenProcess(win::SYNCHRONIZE, 0, parent_pid) };
+    if !handle.is_null() {
+        unsafe {
+            win::WaitForSingleObject(handle, win::INFINITE);
+            win::CloseHandle(handle);
+        }
+    } else {
+        log_to_file(&format!(
+            "[watchdog] OpenProcess({parent_pid}) failed; parent likely already gone"
+        ));
+    }
+
+    // 父进程已退出。判断是否优雅退出 / 已自愈（exit-handled 标记 pid 匹配）。
+    let handled = fs::read_to_string(exit_handled_marker_path())
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .map(|pid| pid == parent_pid)
+        .unwrap_or(false);
+    if handled {
+        log_to_file("[watchdog] parent exited cleanly or self-healed; no relaunch");
+        return;
+    }
+
+    // 断路器：滑动窗口内自动拉起达到上限就彻底停手，拦住"启动即崩 / 确定性
+    // 崩溃循环"。marker 每行存一次拉起的 epoch 秒；每次写回都把窗口外的旧条目
+    // 剔除，文件自然保持精简、循环平息后自动复位。
+    let now = now_epoch_secs();
+    let window_start = now.saturating_sub(WATCHDOG_BREAKER_WINDOW_SECS);
+    let mut recent: Vec<u64> = fs::read_to_string(watchdog_relaunch_marker_path())
+        .ok()
+        .map(|s| {
+            s.lines()
+                .filter_map(|l| l.trim().parse::<u64>().ok())
+                // 只数窗口内、且不在未来（防时钟回拨）的拉起记录。
+                .filter(|&t| t <= now && t >= window_start)
+                .collect()
+        })
+        .unwrap_or_default();
+    if recent.len() >= WATCHDOG_BREAKER_MAX_RELAUNCHES {
+        log_to_file(&format!(
+            "[watchdog] circuit breaker tripped: {} relaunches within {}s; \
+             giving up to avoid a crash-loop relaunch storm (user must launch manually)",
+            recent.len(),
+            WATCHDOG_BREAKER_WINDOW_SECS
+        ));
+        return;
+    }
+
+    // 拉起新实例。`--auto-restarted` 让新实例 sleep 1500ms 等旧 single-instance
+    // 锁释放，并触发前端"已自动恢复"提示。父进程已确认退出（轮询出口），锁通常
+    // 已释放；万一仍有实例存活，single-instance 插件会把这次启动去重为"聚焦已有
+    // 窗口"，不会产生重复实例。
+    recent.push(now);
+    let _ = fs::write(
+        watchdog_relaunch_marker_path(),
+        recent
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    match std::env::current_exe() {
+        Ok(exe) => {
+            use std::os::windows::process::CommandExt as _;
+            const DETACHED_PROCESS: u32 = 0x00000008;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+            let mut cmd = Command::new(&exe);
+            cmd.arg("--auto-restarted");
+            cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+            match cmd.spawn() {
+                Ok(_) => log_to_file("[watchdog] relaunched app after hard crash"),
+                Err(e) => log_to_file(&format!("[watchdog] relaunch failed: {e}")),
+            }
+        }
+        Err(e) => log_to_file(&format!("[watchdog] relaunch current_exe failed: {e}")),
     }
 }
 
@@ -320,9 +518,8 @@ fn collect_machine_info() -> String {
             lines.push(format!("windows_ver: {}", s.replace(['\r', '\n'], " "))); // single line
         }
         // Detailed product / display version / build.UBR via registry. Read
-        // through PowerShell so we don't have to thread a `winreg` call into
-        // the diagnostic path (winreg is already a dep but the simpler API
-        // surface keeps this snapshot path self-contained).
+        // through PowerShell to keep this snapshot path self-contained without
+        // pulling in a registry crate.
         if let Some(s) = run_capture_diag(
             "powershell.exe",
             &[
@@ -655,7 +852,8 @@ fn setup_logs_dir() -> PathBuf {
 
 /// 进程内 minidump 落地目录：~/.openakita/crashdumps/
 /// 由 crash_handler 在启动时 ensure dir 并安装 SEH filter；
-/// build_feedback_zip 会把这个目录里的 *.dmp 自动打包进反馈包。
+/// build_feedback_zip 会把这个目录整体打包进反馈包（含 *.dmp 及其
+/// 同名 *.events.txt 崩溃前事件轨迹）。
 fn crashdumps_dir() -> PathBuf {
     openakita_root_dir().join("crashdumps")
 }
@@ -1550,6 +1748,8 @@ fn apply_runtime_env_builder(
     cmd.env("OPENAKITA_ENV_PURPOSE", purpose.as_str());
     cmd.env("OPENAKITA_ENV_TRUST_SOURCE", "host-runtime");
     cmd.env("PYTHONNOUSERSITE", "1");
+    cmd.env("PYTHONUTF8", "1");
+    cmd.env("PYTHONIOENCODING", "utf-8");
 
     let effective_pip_index;
     let pip_index = match pip_index {
@@ -3836,9 +4036,14 @@ mod win {
         pub fn Process32FirstW(hSnapshot: *mut std::ffi::c_void, lppe: *mut PROCESSENTRY32W)
             -> i32;
         pub fn Process32NextW(hSnapshot: *mut std::ffi::c_void, lppe: *mut PROCESSENTRY32W) -> i32;
+        pub fn WaitForSingleObject(hHandle: *mut std::ffi::c_void, dwMilliseconds: u32) -> u32;
     }
     pub const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     pub const PROCESS_TERMINATE: u32 = 0x0001;
+    /// Right to wait on the process object (for `WaitForSingleObject`).
+    pub const SYNCHRONIZE: u32 = 0x0010_0000;
+    /// Block indefinitely in `WaitForSingleObject`.
+    pub const INFINITE: u32 = 0xFFFF_FFFF;
     pub const TH32CS_SNAPPROCESS: u32 = 0x00000002;
     pub const INVALID_HANDLE_VALUE: *mut std::ffi::c_void = -1_isize as *mut std::ffi::c_void;
 
@@ -5073,6 +5278,24 @@ fn show_main_window_now(app: &tauri::AppHandle, reason: &str, open_status: bool)
 }
 
 fn main() {
+    // 看门狗模式：仅监视父进程、在硬崩溃时自动拉起 GUI，本身不构建任何窗口/运行时。
+    // 必须在最顶部短路返回——看门狗进程绝不能装 crash handler、起 Tauri 或抢
+    // single-instance 锁。
+    #[cfg(windows)]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if let Some(pos) = args.iter().position(|a| a == "--watchdog") {
+            let parent_pid = args
+                .get(pos + 1)
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0);
+            if parent_pid != 0 {
+                run_watchdog(parent_pid);
+            }
+            return;
+        }
+    }
+
     // 自愈接力进程的启动时序兜底：
     // panic hook 在 spawn 新实例时旧进程还没真正退出，
     // tauri-plugin-single-instance 会让新实例的 callback 在旧进程里触发
@@ -5215,8 +5438,6 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_http::init())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let result: Result<(), Box<dyn std::error::Error>> = (|| {
             // ── NSIS 安装后以当前用户执行清理（解决“以管理员运行安装程序”时清错目录的问题） ──
@@ -5288,6 +5509,13 @@ fn main() {
                 set_startup_recovery_notice(payload);
             }
             record_frontend_session_marker(&app_version);
+
+            // ── 崩溃自动恢复看门狗 ──
+            // 清掉上一次会话遗留的 exit-handled 标记（本次运行期间"无标记=在跑"），
+            // 然后拉起看门狗子进程监视本进程。本块只在主实例执行：single-instance
+            // 插件会让第二实例在更早的插件 setup 阶段退出，到不了这里。
+            clear_exit_handled_marker();
+            spawn_watchdog();
 
             // ── 自愈恢复：检查上次崩溃留下的 restart.marker ──
             // 由 panic hook 在命中 tao#1180 特征时写入；这里读出后立刻删除
@@ -5384,7 +5612,14 @@ fn main() {
             // 旧实现仅依赖 startup_version_check 一次性探测，进程死后用户要等
             // 60+ 分钟才能在 autostart.log 里看到下一次探测。
             {
-                let app_handle = app.handle().clone();
+                // NOTE: this loop intentionally does NOT emit backend:status /
+                // backend:back / backend:lost to the webview. The frontend runs
+                // its own /api/health poll (App.tsx, with its own alive/suspect/
+                // degraded/dead state machine and tray updates), so those events
+                // had no listener — they were dead cross-thread emits that only
+                // added to the long-lived WebView2 event-loop traffic implicated
+                // in the idle/teardown crashes. The loop's real job is backend
+                // health monitoring + auto-restart, which needs no AppHandle.
                 let app_version_for_hb = app_version.clone();
                 std::thread::spawn(move || {
                     let mut consecutive_failures: u32 = 0;
@@ -5392,11 +5627,11 @@ fn main() {
                     let mut last_starting_log_at: u64 = 0;
                     loop {
                         // Sleep 5s in 1s increments and bail at the first
-                        // shutdown signal. Without this, the thread spends
-                        // up to 5s mid-sleep while the Tauri runtime is
-                        // being torn down by `app.exit()`, then wakes and
-                        // calls `app_handle.emit(...)` against half-dropped
-                        // state — the issue #591 SEH access violation.
+                        // shutdown signal so the thread exits promptly when the
+                        // Tauri runtime is being torn down by `app.exit()`
+                        // instead of waking mid-sleep and doing backend
+                        // spawn/health work against a half-dropped runtime
+                        // (the issue #591 teardown race).
                         for _ in 0..5 {
                             std::thread::sleep(std::time::Duration::from_secs(1));
                             if SHUTDOWN.load(Ordering::SeqCst) {
@@ -5404,8 +5639,8 @@ fn main() {
                                 return;
                             }
                         }
-                        // Also check before any AppHandle::emit so we cannot
-                        // touch the runtime after RunEvent::Exit fires
+                        // Re-check before doing any monitoring/spawn work so we
+                        // never act on the runtime after RunEvent::Exit fires
                         // mid-iteration.
                         if SHUTDOWN.load(Ordering::SeqCst) {
                             return;
@@ -5419,27 +5654,15 @@ fn main() {
                         let healthy = is_backend_http_healthy(Some(port));
                         // Re-check after the potentially slow HTTP call
                         // (2s timeout) to close the TOCTOU window between
-                        // the top-of-loop SHUTDOWN check and the emit calls
-                        // below. Without this, a stale emit could touch the
-                        // runtime after RunEvent::Exit has already fired.
+                        // the top-of-loop SHUTDOWN check and the spawn/monitor
+                        // work below, so we never auto-spawn a backend after
+                        // RunEvent::Exit has already fired.
                         if SHUTDOWN.load(Ordering::SeqCst) {
                             return;
                         }
                         if healthy {
                             consecutive_failures = 0;
-                            if last_status_was_healthy != Some(true) {
-                                let _ = app_handle.emit(
-                                    "backend:status",
-                                    serde_json::json!({"healthy": true, "port": port}),
-                                );
-                                if last_status_was_healthy == Some(false) {
-                                    let _ = app_handle.emit(
-                                        "backend:back",
-                                        serde_json::json!({"port": port}),
-                                    );
-                                }
-                                last_status_was_healthy = Some(true);
-                            }
+                            last_status_was_healthy = Some(true);
                             continue;
                         }
 
@@ -5449,21 +5672,17 @@ fn main() {
                         // 心跳 5s × 3 次失败 = 15s 就报 down 完全不合理：那时后端
                         // 才刚开始加载 skills，HTTP 还没绑定端口。
                         // 在宽限期内：
-                        //   - emit `backend:status starting=true` 让 UI 显示"正在启动"
-                        //   - 不发 backend:lost，不触发 auto-spawn
+                        //   - 不报 down、不触发 auto-spawn
                         //   - 不累加 consecutive_failures
+                        // （前端 /api/health 轮询自行显示"正在启动"，这里不再 emit）
                         if backend_in_boot_grace(&ws_id) {
                             let now = now_epoch_secs();
-                            // 最多每 30 秒打一条 log + emit，避免刷屏
+                            // 最多每 30 秒打一条 log，避免刷屏
                             if now.saturating_sub(last_starting_log_at) >= 30 {
                                 log_to_file(&format!(
                                     "[heartbeat] backend in boot-grace (port={}) — skipping down/spawn",
                                     port
                                 ));
-                                let _ = app_handle.emit(
-                                    "backend:status",
-                                    serde_json::json!({"healthy": false, "starting": true, "port": port}),
-                                );
                                 last_starting_log_at = now;
                             }
                             consecutive_failures = 0;
@@ -5474,7 +5693,7 @@ fn main() {
                         if consecutive_failures < 3 {
                             continue;
                         }
-                        // PID check BEFORE emitting backend:lost — if the
+                        // PID check before declaring the backend down — if the
                         // process is still alive, health failures are likely
                         // caused by a busy single-worker uvicorn, not a crash.
                         if let Some(pid_data) = read_pid_file(&ws_id) {
@@ -5483,22 +5702,11 @@ fn main() {
                                     "[heartbeat] backend PID {} still alive — skipping down/spawn (health may be blocked by long request)",
                                     pid_data.pid
                                 ));
-                                let _ = app_handle.emit(
-                                    "backend:status",
-                                    serde_json::json!({"healthy": false, "pid_alive": true, "port": port}),
-                                );
                                 consecutive_failures = 0;
                                 continue;
                             }
                         }
                         if last_status_was_healthy != Some(false) {
-                            let _ = app_handle.emit(
-                                "backend:lost",
-                                serde_json::json!({
-                                    "port": port,
-                                    "consecutive_failures": consecutive_failures,
-                                }),
-                            );
                             log_to_file(&format!(
                                 "[heartbeat] backend down for {}s, attempting auto spawn (port={})",
                                 consecutive_failures * 5,
@@ -5648,10 +5856,8 @@ fn main() {
             append_onboarding_log_lines,
             append_frontend_log,
             take_startup_recovery_notice,
+            prepare_relaunch,
             save_log_export,
-            register_cli,
-            unregister_cli,
-            get_cli_status,
             start_dragging
         ])
         .build(tauri::generate_context!())
@@ -5661,6 +5867,9 @@ fn main() {
             let msg = format!("Tauri build failed: {e}");
             eprintln!("{msg}");
             write_crash_log(&msg, true);
+            // setup() 可能已经起了看门狗才走到 build 失败这步；标记一下，避免看门狗
+            // 把这个"必然失败的启动"反复拉起（30s 冷却也只是减速，不如直接放行）。
+            mark_exit_handled();
             std::process::exit(1);
         }
     };
@@ -5688,6 +5897,9 @@ fn main() {
             // violation — exactly the pattern observed in issue #591. The
             // flag is cheap (one AtomicBool::store) and idempotent.
             SHUTDOWN.store(true, Ordering::SeqCst);
+            // 告知看门狗：这是一次"被处理过"的优雅退出（托盘退出 / 系统关机 /
+            // app.exit 等都会触发 RunEvent::Exit），不要把它当成硬崩溃去自动拉起。
+            mark_exit_handled();
             // Do NOT sleep here. The 1200ms blocking sleep we had before
             // (v1.27.14) stalled the tao event loop on the main thread,
             // causing Windows messages to pile up for 1.2 seconds. When
@@ -5697,8 +5909,9 @@ fn main() {
             // already checks SHUTDOWN every 1s in its own loop (line
             // ~5400) and before each emit, so it will stop on its own.
             // Even if a straggler emit slips through, the tao patch
-            // (Cargo.toml [patch.crates-io]) turns the panic into a
-            // harmless debug log.
+            // (Cargo.toml [patch.crates-io]) guards all runner entry
+            // points with is_destroyed() checks — silently dropping
+            // events instead of processing them against freed state.
             clear_frontend_session_marker();
             // Safety-net: clean up backend processes on ANY exit path
             // (SIGTERM, system shutdown, unexpected termination, etc.)
@@ -8119,12 +8332,24 @@ async fn pip_install(
             let tx1 = tx.clone();
             let h1 = thread::spawn(move || {
                 let mut buf = [0u8; 4096];
+                // Same UTF-8-boundary carryover as the chat stream: a 4 KiB
+                // read can split a multi-byte char (Chinese pip error text,
+                // progress glyphs) so we hold the incomplete tail back.
+                let mut pending: Vec<u8> = Vec::new();
                 loop {
                     match stdout.read(&mut buf) {
-                        Ok(0) => break,
+                        Ok(0) => {
+                            if !pending.is_empty() {
+                                let _ = tx1.send((false, String::from_utf8_lossy(&pending).to_string()));
+                            }
+                            break;
+                        }
                         Ok(n) => {
-                            let s = String::from_utf8_lossy(&buf[..n]).to_string();
-                            let _ = tx1.send((false, s));
+                            pending.extend_from_slice(&buf[..n]);
+                            let s = take_valid_utf8_prefix(&mut pending);
+                            if !s.is_empty() {
+                                let _ = tx1.send((false, s));
+                            }
                         }
                         Err(_) => break,
                     }
@@ -8133,12 +8358,21 @@ async fn pip_install(
             let tx2 = tx.clone();
             let h2 = thread::spawn(move || {
                 let mut buf = [0u8; 4096];
+                let mut pending: Vec<u8> = Vec::new();
                 loop {
                     match stderr.read(&mut buf) {
-                        Ok(0) => break,
+                        Ok(0) => {
+                            if !pending.is_empty() {
+                                let _ = tx2.send((true, String::from_utf8_lossy(&pending).to_string()));
+                            }
+                            break;
+                        }
                         Ok(n) => {
-                            let s = String::from_utf8_lossy(&buf[..n]).to_string();
-                            let _ = tx2.send((true, s));
+                            pending.extend_from_slice(&buf[..n]);
+                            let s = take_valid_utf8_prefix(&mut pending);
+                            if !s.is_empty() {
+                                let _ = tx2.send((true, s));
+                            }
                         }
                         Err(_) => break,
                     }
@@ -8942,6 +9176,56 @@ enum BackendFetchEvent {
     Error { message: String },
 }
 
+/// Decode and drain the longest valid UTF-8 prefix from `buf`, leaving any
+/// trailing bytes that form an *incomplete* multi-byte sequence in the buffer
+/// so the next network chunk can complete them.
+///
+/// `reqwest`'s `response.chunk()` splits the SSE body at arbitrary byte
+/// offsets dictated by TCP, with no regard for character boundaries. A single
+/// CJK glyph or emoji occupies 3-4 UTF-8 bytes, so a glyph straddling a chunk
+/// boundary used to be decoded as two independent halves via
+/// `String::from_utf8_lossy`, turning e.g. "什" (E4 BB 80) into "\u{FFFD}\u{FFFD}"
+/// — the black-diamond (黑色菱形块) corruption reported in the chat view.
+///
+/// Holding the incomplete tail back until its continuation bytes arrive fixes
+/// that without altering the streamed text in any other way. Genuinely invalid
+/// bytes mid-buffer (which should never occur for a well-formed UTF-8 stream)
+/// are still emitted as a single replacement char so the loop can never wedge.
+fn take_valid_utf8_prefix(buf: &mut Vec<u8>) -> String {
+    let mut out = String::new();
+    loop {
+        match std::str::from_utf8(buf) {
+            Ok(s) => {
+                out.push_str(s);
+                buf.clear();
+                break;
+            }
+            Err(e) => {
+                let valid_up_to = e.valid_up_to();
+                if valid_up_to > 0 {
+                    if let Ok(s) = std::str::from_utf8(&buf[..valid_up_to]) {
+                        out.push_str(s);
+                    }
+                }
+                match e.error_len() {
+                    // Incomplete trailing sequence: keep it for the next chunk.
+                    None => {
+                        buf.drain(..valid_up_to);
+                        break;
+                    }
+                    // Invalid bytes mid-buffer: emit one replacement char,
+                    // skip the offending bytes, keep scanning the remainder.
+                    Some(bad) => {
+                        out.push('\u{FFFD}');
+                        buf.drain(..valid_up_to + bad);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Active streaming fetches keyed by the frontend-supplied `fetch_id`.
 ///
 /// When the JS-side `ReadableStream.cancel()` fires (user closes a chat
@@ -9088,6 +9372,10 @@ async fn backend_fetch(
         // backend session history.
         const CHUNK_INACTIVITY_TIMEOUT: std::time::Duration =
             std::time::Duration::from_secs(90);
+        // Carries the incomplete tail of a multi-byte UTF-8 sequence whose
+        // bytes were split across two `response.chunk()` reads, so it can be
+        // completed by the next chunk instead of being mangled into U+FFFD.
+        let mut pending: Vec<u8> = Vec::new();
         loop {
             if cancel.load(Ordering::SeqCst) {
                 // Drop happens implicitly on loop exit; explicit log here
@@ -9126,12 +9414,23 @@ async fn backend_fetch(
             };
             match chunk_res {
                 Ok(Some(chunk)) => {
-                    let text = String::from_utf8_lossy(&chunk).to_string();
-                    if on_event.send(BackendFetchEvent::Chunk { text }).is_err() {
+                    pending.extend_from_slice(&chunk);
+                    let text = take_valid_utf8_prefix(&mut pending);
+                    if !text.is_empty()
+                        && on_event.send(BackendFetchEvent::Chunk { text }).is_err()
+                    {
                         break;
                     }
                 }
                 Ok(None) => {
+                    // Stream ended. Flush any leftover bytes — a non-empty
+                    // `pending` here means the upstream was genuinely truncated
+                    // mid-character, so lossy-decode the tail rather than drop it.
+                    if !pending.is_empty() {
+                        let text = String::from_utf8_lossy(&pending).to_string();
+                        pending.clear();
+                        let _ = on_event.send(BackendFetchEvent::Chunk { text });
+                    }
                     let _ = on_event.send(BackendFetchEvent::Done);
                     break;
                 }
@@ -10151,6 +10450,22 @@ fn build_feedback_zip(
         25 * 1024 * 1024,
     );
 
+    // ── WebView2 (Edge/Chromium) Crashpad dumps ──
+    // A crash inside the WebView2 process (a separate msedgewebview2.exe)
+    // never reaches our SetUnhandledExceptionFilter and is not reported to
+    // WER under our exe name; Edge captures it itself via Crashpad under the
+    // WebView2 user-data folder, which Tauri 2 defaults to
+    // %LOCALAPPDATA%\<bundle-identifier>\EBWebView. Skipped automatically on
+    // non-Windows (no LOCALAPPDATA) and when the folder is absent.
+    if let Some(local_appdata) = std::env::var_os("LOCALAPPDATA") {
+        let crashpad = PathBuf::from(local_appdata)
+            .join("com.openakita.setupcenter")
+            .join("EBWebView")
+            .join("Crashpad")
+            .join("reports");
+        zip_add_dir_capped(&mut zw, &crashpad, "webview2_crashpad", opts, 6 * 1024 * 1024);
+    }
+
     // ── Windows Error Reporting metadata + system event log ──
     // Only available on Windows; on macOS / Linux these calls are no-ops
     // and contribute nothing to the zip.
@@ -10175,74 +10490,132 @@ fn collect_windows_crash_artifacts(
     zw: &mut zip::ZipWriter<fs::File>,
     opts: zip::write::SimpleFileOptions,
 ) {
-    let local_appdata = match std::env::var_os("LOCALAPPDATA") {
-        Some(v) => PathBuf::from(v),
-        None => return,
-    };
-    let wer_archive = local_appdata
-        .join("Microsoft")
-        .join("Windows")
-        .join("WER")
-        .join("ReportArchive");
+    // WER stages a crash under `ReportQueue` first and only moves it to
+    // `ReportArchive` once the WER service finishes processing it. A feedback
+    // bundle submitted minutes after a crash is therefore frequently still in
+    // `ReportQueue`, so scanning `ReportArchive` alone misses fresh crashes
+    // (issue #606). Fast-fail terminations (heap corruption 0xC0000374 /
+    // __fastfail) bypass our in-process SEH filter entirely, which makes WER
+    // the only place their faulting-module evidence ever lands — so we scan
+    // both queue + archive under the per-user and machine-wide WER roots.
+    let mut wer_roots: Vec<PathBuf> = Vec::new();
+    for base in [
+        std::env::var_os("LOCALAPPDATA"),
+        std::env::var_os("ProgramData"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let wer = PathBuf::from(base)
+            .join("Microsoft")
+            .join("Windows")
+            .join("WER");
+        wer_roots.push(wer.join("ReportQueue"));
+        wer_roots.push(wer.join("ReportArchive"));
+    }
+    if wer_roots.is_empty() {
+        return;
+    }
 
     // WER report directories aren't reliably named: some are
     // `AppCrash_openakita-setup-center.exe_<hash>`, others are just
     // `Report.<hash>`. The exe name is always present in the Report.wer
     // body though, so we filter by (a) dir-name fast path first, (b)
     // fall back to reading the (small, <30 KB) Report.wer text. Limit
-    // the candidate set to the 30 most recently modified directories so
-    // even a heavily-crashed host doesn't spend minutes scanning.
+    // the candidate set to the 30 most recently modified directories per
+    // root so even a heavily-crashed host doesn't spend minutes scanning.
     let needle = "openakita";
-    let mut candidates: Vec<(PathBuf, std::time::SystemTime)> = fs::read_dir(&wer_archive)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| {
-            let p = e.path();
-            if !p.is_dir() {
-                return None;
-            }
-            let m = fs::metadata(&p).and_then(|md| md.modified()).ok()?;
-            Some((p, m))
-        })
-        .collect();
-    candidates.sort_by(|a, b| b.1.cmp(&a.1));
-    candidates.truncate(30);
+    let mut wer_dump_budget: u64 = 8 * 1024 * 1024;
+    let mut seen_reports: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for (report_dir, _) in candidates {
-        let report_wer = report_dir.join("Report.wer");
-        if !report_wer.is_file() {
-            continue;
-        }
-        let dir_name_lower = report_dir
+    for root in &wer_roots {
+        let root_name = root
             .file_name()
             .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let matched = if dir_name_lower.contains(needle) {
-            true
-        } else {
-            // Body match: Report.wer is a tiny INI-like text file with
-            // AppName / AppPath / FaultingModule keys. Read at most
-            // 64 KB to bound worst-case I/O.
-            match fs::read(&report_wer) {
-                Ok(bytes) => {
-                    let scan_len = bytes.len().min(64 * 1024);
-                    let s = String::from_utf8_lossy(&bytes[..scan_len]);
-                    s.to_ascii_lowercase().contains(needle)
+            .unwrap_or("WER")
+            .to_string();
+        let mut candidates: Vec<(PathBuf, std::time::SystemTime)> = fs::read_dir(root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                if !p.is_dir() {
+                    return None;
                 }
-                Err(_) => false,
+                let m = fs::metadata(&p).and_then(|md| md.modified()).ok()?;
+                Some((p, m))
+            })
+            .collect();
+        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+        candidates.truncate(30);
+
+        for (report_dir, _) in candidates {
+            let report_wer = report_dir.join("Report.wer");
+            if !report_wer.is_file() {
+                continue;
             }
-        };
-        if !matched {
-            continue;
-        }
-        let zip_name = format!(
-            "wer/{}-Report.wer",
-            report_dir.file_name().unwrap_or_default().to_string_lossy()
-        );
-        if zw.start_file(&zip_name, opts).is_ok() {
-            let _ = zw.write_all(&fs::read(&report_wer).unwrap_or_default());
+            let dir_name = report_dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let matched = if dir_name.to_ascii_lowercase().contains(needle) {
+                true
+            } else {
+                // Body match: Report.wer is a tiny INI-like text file with
+                // AppName / AppPath / FaultingModule keys. Read at most
+                // 64 KB to bound worst-case I/O.
+                match fs::read(&report_wer) {
+                    Ok(bytes) => {
+                        let scan_len = bytes.len().min(64 * 1024);
+                        let s = String::from_utf8_lossy(&bytes[..scan_len]);
+                        s.to_ascii_lowercase().contains(needle)
+                    }
+                    Err(_) => false,
+                }
+            };
+            if !matched {
+                continue;
+            }
+            // The same report dir migrates queue -> archive over time, so it
+            // can appear under both roots; de-dup by name.
+            if !seen_reports.insert(dir_name.clone()) {
+                continue;
+            }
+            let zip_name = format!("wer/{root_name}-{dir_name}-Report.wer");
+            if zw.start_file(&zip_name, opts).is_ok() {
+                let _ = zw.write_all(&fs::read(&report_wer).unwrap_or_default());
+            }
+            // Ship any bounded-size minidumps WER captured next to the
+            // report (.dmp / .mdmp); skip the full-heap .hdmp which can be
+            // hundreds of MB.
+            if let Ok(rd) = fs::read_dir(&report_dir) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    let ext_ok = p
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.eq_ignore_ascii_case("dmp") || s.eq_ignore_ascii_case("mdmp"))
+                        .unwrap_or(false);
+                    if !ext_ok {
+                        continue;
+                    }
+                    let sz = match fs::metadata(&p).map(|m| m.len()) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    if sz > wer_dump_budget {
+                        continue;
+                    }
+                    let fname = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let zip_name = format!("wer/{root_name}-{dir_name}-{fname}");
+                    if zw.start_file(&zip_name, opts).is_ok() {
+                        let _ = zw.write_all(&fs::read(&p).unwrap_or_default());
+                        wer_dump_budget = wer_dump_budget.saturating_sub(sz);
+                    }
+                }
+            }
         }
     }
 
@@ -10549,643 +10922,6 @@ fn open_external_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// CLI 命令注册（跨平台）
-// ═══════════════════════════════════════════════════════════════════════
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct CliConfig {
-    commands: Vec<String>,
-    add_to_path: bool,
-    bin_dir: String,
-    installed_at: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct CliStatus {
-    registered_commands: Vec<String>,
-    in_path: bool,
-    bin_dir: String,
-}
-
-/// 获取 CLI bin 目录路径
-fn cli_bin_dir() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        // Windows: 使用安装目录下的 bin/ 子目录
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from("."));
-        exe_dir.join("bin")
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        // macOS / Linux: 使用 ~/.openakita/bin/
-        openakita_root_dir().join("bin")
-    }
-}
-
-/// 获取后端可执行文件的绝对路径
-fn cli_backend_exe_path() -> Result<PathBuf, String> {
-    let bundled_dir = bundled_backend_dir();
-    let exe = if cfg!(windows) {
-        bundled_dir.join("openakita-server.exe")
-    } else {
-        bundled_dir.join("openakita-server")
-    };
-    if exe.exists() {
-        return Ok(exe);
-    }
-    // 降级：尝试 venv 模式（开发环境），先 python3 再 python
-    let venv_base = openakita_root_dir().join("venv");
-    let venv_py = if cfg!(windows) {
-        venv_base.join("Scripts").join("python.exe")
-    } else {
-        let py3 = venv_base.join("bin").join("python3");
-        if py3.exists() {
-            py3
-        } else {
-            venv_base.join("bin").join("python")
-        }
-    };
-    if venv_py.exists() {
-        return Ok(venv_py);
-    }
-    eprintln!(
-        "[cli_backend_exe_path] not found. checked:\n  bundled: {}\n  venv: {}",
-        exe.display(),
-        venv_py.display(),
-    );
-    Err(format!(
-        "未找到后端可执行文件（openakita-server 或 venv python）\n\
-         已检查: {} | {}",
-        exe.display(),
-        venv_py.display(),
-    ))
-}
-
-/// 读取 CLI 配置文件
-fn read_cli_config() -> Option<CliConfig> {
-    let path = openakita_root_dir().join("cli.json");
-    if !path.exists() {
-        return None;
-    }
-    let content = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&content).ok()
-}
-
-/// 写入 CLI 配置文件
-fn write_cli_config(config: &CliConfig) -> Result<(), String> {
-    let path = openakita_root_dir().join("cli.json");
-    let content =
-        serde_json::to_string_pretty(config).map_err(|e| format!("序列化 CLI 配置失败: {e}"))?;
-    std::fs::write(&path, content).map_err(|e| format!("写入 cli.json 失败: {e}"))?;
-    Ok(())
-}
-
-/// 生成 wrapper 脚本内容
-fn generate_wrapper_content(backend_exe: &Path) -> String {
-    #[cfg(target_os = "windows")]
-    {
-        let _ = backend_exe; // Windows 使用相对路径，不需要绝对路径
-        format!(
-            "@echo off\r\n\"%~dp0..\\resources\\openakita-server\\openakita-server.exe\" %*\r\n"
-        )
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let exe_path = backend_exe.to_string_lossy();
-        format!(
-            "#!/bin/sh\n# OpenAkita CLI wrapper - managed by OpenAkita Desktop\nexec \"{}\" \"$@\"\n",
-            exe_path
-        )
-    }
-}
-
-/// 创建 wrapper 脚本文件
-fn create_wrapper_script(bin_dir: &Path, cmd_name: &str, backend_exe: &Path) -> Result<(), String> {
-    let content = generate_wrapper_content(backend_exe);
-
-    #[cfg(target_os = "windows")]
-    let file_path = bin_dir.join(format!("{}.cmd", cmd_name));
-    #[cfg(not(target_os = "windows"))]
-    let file_path = bin_dir.join(cmd_name);
-
-    std::fs::write(&file_path, &content)
-        .map_err(|e| format!("写入 {} 失败: {e}", file_path.display()))?;
-
-    // macOS / Linux: 设置可执行权限
-    #[cfg(not(target_os = "windows"))]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o755);
-        std::fs::set_permissions(&file_path, perms)
-            .map_err(|e| format!("chmod {} 失败: {e}", file_path.display()))?;
-    }
-
-    Ok(())
-}
-
-/// 删除 wrapper 脚本文件
-fn remove_wrapper_script(bin_dir: &Path, cmd_name: &str) {
-    #[cfg(target_os = "windows")]
-    let file_path = bin_dir.join(format!("{}.cmd", cmd_name));
-    #[cfg(not(target_os = "windows"))]
-    let file_path = bin_dir.join(cmd_name);
-
-    let _ = std::fs::remove_file(&file_path);
-}
-
-// ── PATH 操作：Windows ──
-
-#[cfg(target_os = "windows")]
-fn windows_add_to_path(bin_dir: &Path) -> Result<(), String> {
-    use winreg::enums::*;
-    use winreg::RegKey;
-
-    let bin_str = bin_dir.to_string_lossy().to_string();
-    let bin_norm = bin_str.trim_end_matches('\\');
-
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let key = hkcu
-        .open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)
-        .map_err(|e| format!("无法打开用户环境变量注册表: {e}"))?;
-
-    let current_path = read_path_value(&key)?;
-
-    if current_path
-        .split(';')
-        .any(|p| p.trim_end_matches('\\').eq_ignore_ascii_case(bin_norm))
-    {
-        return Ok(());
-    }
-
-    let new_path = if current_path.is_empty() {
-        bin_str
-    } else {
-        format!("{};{}", current_path, bin_str)
-    };
-    if new_path.len() > 2047 {
-        return Err("PATH 环境变量已接近长度限制 (2048)，无法追加".into());
-    }
-
-    write_path_value(&key, &new_path)?;
-    windows_broadcast_env_change();
-
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn windows_remove_from_path(bin_dir: &Path) -> Result<(), String> {
-    use winreg::enums::*;
-    use winreg::RegKey;
-
-    let bin_str = bin_dir.to_string_lossy().to_string();
-    let bin_norm = bin_str.trim_end_matches('\\');
-    let mut modified = false;
-
-    for (hive_predef, subkey_path) in [
-        (
-            HKEY_LOCAL_MACHINE,
-            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
-        ),
-        (HKEY_CURRENT_USER, "Environment"),
-    ] {
-        let hive = RegKey::predef(hive_predef);
-        if let Ok(key) = hive.open_subkey_with_flags(subkey_path, KEY_READ | KEY_WRITE) {
-            let current_path = read_path_value(&key).unwrap_or_default();
-            if current_path.is_empty() {
-                continue;
-            }
-            let new_paths: Vec<&str> = current_path
-                .split(';')
-                .filter(|p| !p.trim_end_matches('\\').eq_ignore_ascii_case(bin_norm))
-                .collect();
-            let new_path = new_paths.join(";");
-            if new_path != current_path {
-                let _ = write_path_value(&key, &new_path);
-                modified = true;
-            }
-        }
-    }
-
-    if modified {
-        windows_broadcast_env_change();
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn windows_is_in_path(bin_dir: &Path) -> bool {
-    use winreg::enums::*;
-    use winreg::RegKey;
-
-    let bin_str = bin_dir.to_string_lossy().to_string();
-    let bin_norm = bin_str.trim_end_matches('\\');
-
-    for (hive_predef, subkey_path) in [
-        (
-            HKEY_LOCAL_MACHINE,
-            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
-        ),
-        (HKEY_CURRENT_USER, "Environment"),
-    ] {
-        let hive = RegKey::predef(hive_predef);
-        if let Ok(key) = hive.open_subkey_with_flags(subkey_path, KEY_READ) {
-            if let Ok(current_path) = read_path_value(&key) {
-                if current_path
-                    .split(';')
-                    .any(|p| p.trim_end_matches('\\').eq_ignore_ascii_case(bin_norm))
-                {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-#[cfg(target_os = "windows")]
-fn windows_broadcast_env_change() {
-    use std::ffi::CString;
-    // SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment", ...)
-    #[link(name = "user32")]
-    extern "system" {
-        fn SendMessageTimeoutA(
-            hwnd: isize,
-            msg: u32,
-            w_param: usize,
-            l_param: *const u8,
-            fu_flags: u32,
-            u_timeout: u32,
-            lpdw_result: *mut usize,
-        ) -> isize;
-    }
-    let env_str = CString::new("Environment").unwrap();
-    unsafe {
-        let mut result: usize = 0;
-        // HWND_BROADCAST = 0xFFFF, WM_SETTINGCHANGE = 0x001A, SMTO_ABORTIFHUNG = 0x0002
-        SendMessageTimeoutA(
-            0xFFFF_isize,
-            0x001A,
-            0,
-            env_str.as_ptr() as *const u8,
-            0x0002,
-            5000,
-            &mut result,
-        );
-    }
-}
-
-/// 从注册表中读取 PATH 值的原始内容（不展开 %...% 环境变量引用）
-#[cfg(target_os = "windows")]
-fn read_path_value(key: &winreg::RegKey) -> Result<String, String> {
-    use winreg::enums::RegType;
-    match key.get_raw_value("Path") {
-        Ok(raw) => {
-            if raw.vtype != RegType::REG_SZ && raw.vtype != RegType::REG_EXPAND_SZ {
-                return Err(format!("PATH 注册表值类型异常: {:?}", raw.vtype));
-            }
-            let wide: Vec<u16> = raw
-                .bytes
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                .collect();
-            Ok(String::from_utf16_lossy(&wide)
-                .trim_end_matches('\0')
-                .to_string())
-        }
-        Err(_) => Ok(String::new()),
-    }
-}
-
-/// 将 PATH 值以 REG_EXPAND_SZ 类型写入注册表（保留 %...% 环境变量引用能力）
-#[cfg(target_os = "windows")]
-fn write_path_value(key: &winreg::RegKey, value: &str) -> Result<(), String> {
-    use winreg::enums::RegType;
-    use winreg::RegValue;
-    let wide: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
-    let bytes: Vec<u8> = wide.iter().flat_map(|&w| w.to_le_bytes()).collect();
-    key.set_raw_value(
-        "Path",
-        &RegValue {
-            bytes,
-            vtype: RegType::REG_EXPAND_SZ,
-        },
-    )
-    .map_err(|e| format!("写入 PATH 注册表失败: {e}"))
-}
-
-// ── PATH 操作：macOS / Linux ──
-
-#[cfg(not(target_os = "windows"))]
-fn unix_add_to_path(bin_dir: &Path) -> Result<(), String> {
-    let bin_str = bin_dir.to_string_lossy().to_string();
-    let marker_start = "# >>> openakita cli >>>";
-    let marker_end = "# <<< openakita cli <<<";
-    let block = format!(
-        "{}\nexport PATH=\"{}:$PATH\"\n{}\n",
-        marker_start, bin_str, marker_end
-    );
-
-    // 确定要写入的 shell profile 文件
-    let home = home_dir().ok_or("无法获取 HOME 目录")?;
-    let profiles = get_shell_profiles(&home);
-
-    for profile in &profiles {
-        // 读取现有内容，检查是否已存在标记
-        let existing = std::fs::read_to_string(profile).unwrap_or_default();
-        if existing.contains(marker_start) {
-            // 已有标记，替换旧的 block
-            let lines: Vec<&str> = existing.lines().collect();
-            let mut new_lines: Vec<&str> = Vec::new();
-            let mut in_block = false;
-            for line in &lines {
-                if line.contains(marker_start) {
-                    in_block = true;
-                    continue;
-                }
-                if line.contains(marker_end) {
-                    in_block = false;
-                    continue;
-                }
-                if !in_block {
-                    new_lines.push(line);
-                }
-            }
-            let mut content = new_lines.join("\n");
-            if !content.ends_with('\n') {
-                content.push('\n');
-            }
-            content.push_str(&block);
-            std::fs::write(profile, content)
-                .map_err(|e| format!("写入 {} 失败: {e}", profile.display()))?;
-        } else {
-            // 追加到文件末尾
-            let mut content = existing;
-            if !content.is_empty() && !content.ends_with('\n') {
-                content.push('\n');
-            }
-            content.push_str(&block);
-            std::fs::write(profile, content)
-                .map_err(|e| format!("写入 {} 失败: {e}", profile.display()))?;
-        }
-    }
-
-    // Linux: 额外尝试在 ~/.local/bin/ 创建 symlink
-    #[cfg(target_os = "linux")]
-    {
-        let local_bin = home.join(".local").join("bin");
-        if local_bin.exists() || std::fs::create_dir_all(&local_bin).is_ok() {
-            // 读取 CLI 配置，为每个注册的命令创建 symlink
-            if let Some(config) = read_cli_config() {
-                for cmd in &config.commands {
-                    let src = bin_dir.join(cmd);
-                    let dst = local_bin.join(cmd);
-                    let _ = std::fs::remove_file(&dst); // 先删除旧的
-                    let _ = std::os::unix::fs::symlink(&src, &dst);
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(not(target_os = "windows"))]
-fn unix_remove_from_path(_bin_dir: &Path) -> Result<(), String> {
-    let marker_start = "# >>> openakita cli >>>";
-    let marker_end = "# <<< openakita cli <<<";
-
-    let home = home_dir().ok_or("无法获取 HOME 目录")?;
-    let profiles = get_shell_profiles(&home);
-
-    for profile in &profiles {
-        if !profile.exists() {
-            continue;
-        }
-        let existing = std::fs::read_to_string(profile).unwrap_or_default();
-        if !existing.contains(marker_start) {
-            continue;
-        }
-        let lines: Vec<&str> = existing.lines().collect();
-        let mut new_lines: Vec<&str> = Vec::new();
-        let mut in_block = false;
-        for line in &lines {
-            if line.contains(marker_start) {
-                in_block = true;
-                continue;
-            }
-            if line.contains(marker_end) {
-                in_block = false;
-                continue;
-            }
-            if !in_block {
-                new_lines.push(line);
-            }
-        }
-        let content = new_lines.join("\n");
-        let _ = std::fs::write(profile, content);
-    }
-
-    // Linux: 清理 ~/.local/bin/ 中的 symlink
-    #[cfg(target_os = "linux")]
-    {
-        let local_bin = home.join(".local").join("bin");
-        if let Some(config) = read_cli_config() {
-            for cmd in &config.commands {
-                let dst = local_bin.join(cmd);
-                let _ = std::fs::remove_file(&dst);
-            }
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(not(target_os = "windows"))]
-fn unix_is_in_path(bin_dir: &Path) -> bool {
-    let marker_start = "# >>> openakita cli >>>";
-    let home = match home_dir() {
-        Some(h) => h,
-        None => return false,
-    };
-    let profiles = get_shell_profiles(&home);
-    for profile in &profiles {
-        if let Ok(content) = std::fs::read_to_string(profile) {
-            if content.contains(marker_start) {
-                return true;
-            }
-        }
-    }
-    // 也检查当前运行时的 PATH
-    if let Ok(path) = std::env::var("PATH") {
-        let bin_str = bin_dir.to_string_lossy();
-        if path.split(':').any(|p| p == bin_str.as_ref()) {
-            return true;
-        }
-    }
-    false
-}
-
-#[cfg(not(target_os = "windows"))]
-fn get_shell_profiles(home: &Path) -> Vec<PathBuf> {
-    let mut profiles = Vec::new();
-    // zsh (macOS default, also common on Linux)
-    let zshrc = home.join(".zshrc");
-    profiles.push(zshrc);
-    // bash
-    #[cfg(target_os = "macos")]
-    {
-        profiles.push(home.join(".bash_profile"));
-    }
-    #[cfg(target_os = "linux")]
-    {
-        profiles.push(home.join(".bashrc"));
-    }
-    profiles
-}
-
-// ── Tauri 命令 ──
-
-#[tauri::command]
-fn register_cli(commands: Vec<String>, add_to_path: bool) -> Result<String, String> {
-    if commands.is_empty() {
-        return Err("至少需要选择一个命令名称".into());
-    }
-
-    // 验证命令名仅包含合法字符
-    for cmd in &commands {
-        if !cmd
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            return Err(format!("命令名 '{}' 包含非法字符", cmd));
-        }
-    }
-
-    let bin_dir = cli_bin_dir();
-    std::fs::create_dir_all(&bin_dir).map_err(|e| format!("创建 bin 目录失败: {e}"))?;
-
-    // 获取后端可执行文件路径
-    let backend_exe = cli_backend_exe_path()?;
-
-    // 生成 wrapper 脚本
-    for cmd_name in &commands {
-        create_wrapper_script(&bin_dir, cmd_name, &backend_exe)?;
-    }
-
-    // PATH 注入
-    if add_to_path {
-        #[cfg(target_os = "windows")]
-        windows_add_to_path(&bin_dir)?;
-
-        #[cfg(not(target_os = "windows"))]
-        unix_add_to_path(&bin_dir)?;
-    }
-
-    // 保存配置
-    let config = CliConfig {
-        commands: commands.clone(),
-        add_to_path,
-        bin_dir: bin_dir.to_string_lossy().to_string(),
-        installed_at: {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            format!("{}", now)
-        },
-    };
-    write_cli_config(&config)?;
-
-    Ok(format!(
-        "CLI 命令已注册: {}{}",
-        commands.join(", "),
-        if add_to_path {
-            " (已添加到 PATH)"
-        } else {
-            ""
-        }
-    ))
-}
-
-#[tauri::command]
-fn unregister_cli() -> Result<String, String> {
-    let config = read_cli_config().ok_or("未找到 CLI 配置")?;
-    let bin_dir = PathBuf::from(&config.bin_dir);
-
-    // 删除 wrapper 脚本
-    for cmd_name in &config.commands {
-        remove_wrapper_script(&bin_dir, cmd_name);
-    }
-
-    // 从 PATH 移除
-    if config.add_to_path {
-        #[cfg(target_os = "windows")]
-        windows_remove_from_path(&bin_dir)?;
-
-        #[cfg(not(target_os = "windows"))]
-        unix_remove_from_path(&bin_dir)?;
-    }
-
-    // 清理 bin 目录（如果为空）
-    let _ = std::fs::remove_dir(&bin_dir);
-
-    // 删除配置文件
-    let config_path = openakita_root_dir().join("cli.json");
-    let _ = std::fs::remove_file(&config_path);
-
-    Ok("CLI 命令已注销".into())
-}
-
-#[tauri::command]
-fn get_cli_status() -> Result<CliStatus, String> {
-    let bin_dir = cli_bin_dir();
-
-    if let Some(config) = read_cli_config() {
-        // 验证 wrapper 脚本是否实际存在
-        let existing_commands: Vec<String> = config
-            .commands
-            .iter()
-            .filter(|cmd| {
-                #[cfg(target_os = "windows")]
-                let path = PathBuf::from(&config.bin_dir).join(format!("{}.cmd", cmd));
-                #[cfg(not(target_os = "windows"))]
-                let path = PathBuf::from(&config.bin_dir).join(cmd.as_str());
-                path.exists()
-            })
-            .cloned()
-            .collect();
-
-        let in_path = {
-            #[cfg(target_os = "windows")]
-            {
-                windows_is_in_path(&PathBuf::from(&config.bin_dir))
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                unix_is_in_path(&PathBuf::from(&config.bin_dir))
-            }
-        };
-
-        Ok(CliStatus {
-            registered_commands: existing_commands,
-            in_path,
-            bin_dir: config.bin_dir,
-        })
-    } else {
-        Ok(CliStatus {
-            registered_commands: vec![],
-            in_path: false,
-            bin_dir: bin_dir.to_string_lossy().to_string(),
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11280,13 +11016,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_backend_exe_path_does_not_panic() {
-        let result = cli_backend_exe_path();
-        // In dev environment, may or may not find a backend
-        assert!(result.is_ok() || result.is_err());
-    }
-
-    #[test]
     fn test_openakita_root_dir_is_valid() {
         let root = openakita_root_dir();
         assert!(!root.to_string_lossy().is_empty());
@@ -11330,13 +11059,55 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_bin_dir_is_valid() {
-        let dir = cli_bin_dir();
-        assert!(!dir.to_string_lossy().is_empty());
-        if cfg!(windows) {
-            assert!(dir.to_string_lossy().contains("bin"));
-        } else {
-            assert!(dir.to_string_lossy().contains("bin"));
-        }
+    fn test_utf8_prefix_passes_through_complete_text() {
+        let mut buf = "你好，world！".as_bytes().to_vec();
+        let out = take_valid_utf8_prefix(&mut buf);
+        assert_eq!(out, "你好，world！");
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_utf8_prefix_holds_back_split_multibyte_char() {
+        // "什" is E4 BB 80. Simulate the network splitting it across two
+        // chunks: first chunk ends after "有" + the first 2 bytes of "什".
+        let full = "有什么".as_bytes().to_vec(); // E6 9C 89 | E4 BB 80 | E4 B9 88
+        let split = 3 + 2; // "有" (3) + first two bytes of "什"
+        let (first, second) = full.split_at(split);
+
+        let mut buf = first.to_vec();
+        let out1 = take_valid_utf8_prefix(&mut buf);
+        // Only "有" is complete; the 2 dangling bytes of "什" are retained.
+        assert_eq!(out1, "有");
+        assert_eq!(buf.len(), 2, "incomplete tail must be carried over");
+
+        buf.extend_from_slice(second);
+        let out2 = take_valid_utf8_prefix(&mut buf);
+        assert_eq!(out2, "什么");
+        assert!(buf.is_empty());
+        // The crux: reassembled text has no U+FFFD black-diamond corruption.
+        assert!(!format!("{out1}{out2}").contains('\u{FFFD}'));
+        assert_eq!(format!("{out1}{out2}"), "有什么");
+    }
+
+    #[test]
+    fn test_utf8_prefix_splits_emoji_four_byte() {
+        // "🎉" is F0 9F 8E 89 (4 bytes). Split after 1 byte.
+        let bytes = "🎉".as_bytes().to_vec();
+        let mut buf = bytes[..1].to_vec();
+        assert_eq!(take_valid_utf8_prefix(&mut buf), "");
+        assert_eq!(buf.len(), 1);
+        buf.extend_from_slice(&bytes[1..]);
+        assert_eq!(take_valid_utf8_prefix(&mut buf), "🎉");
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_utf8_prefix_skips_genuinely_invalid_bytes() {
+        // A stray 0xFF that can never be valid UTF-8 must not wedge the loop:
+        // it is emitted as one replacement char and scanning continues.
+        let mut buf = vec![b'a', 0xFF, b'b'];
+        let out = take_valid_utf8_prefix(&mut buf);
+        assert_eq!(out, "a\u{FFFD}b");
+        assert!(buf.is_empty());
     }
 }

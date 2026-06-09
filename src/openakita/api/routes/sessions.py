@@ -267,6 +267,19 @@ def _history_entry(session, conversation_id: str, original_idx: int, msg: dict) 
     usage = msg.get("usage")
     if isinstance(usage, dict) and (usage.get("input_tokens") or usage.get("output_tokens")):
         entry["usage"] = usage
+
+    # Plan snapshot + ordered parts projection — lets rich cards (plan,
+    # answered ask_user, attachments) re-display losslessly after reload /
+    # multi-window switch. ``parts`` is derived, never stored, so it cannot
+    # bloat sessions.json. See openakita.api.message_parts.
+    from openakita.api.message_parts import build_message_parts, normalize_chat_todo
+
+    todo_norm = normalize_chat_todo(msg.get("todo")) if msg.get("todo") else None
+    if todo_norm and todo_norm.get("steps"):
+        entry["todo"] = todo_norm
+    parts = build_message_parts({**msg, "content": content}, todo=todo_norm)
+    if parts:
+        entry["parts"] = parts
     return entry
 
 
@@ -431,12 +444,30 @@ async def get_session_history(
     start_index = page[0][0] if page else None
     end_index = page[-1][0] if page else None
 
+    # A plan that is still executing has not been finalized into history yet,
+    # so a passive re-hydration (window switch / reload) would otherwise lose
+    # the live plan card (#615). Surface the in-flight plan snapshot so the
+    # frontend can re-attach it to the latest assistant message.
+    active_todo = None
+    try:
+        from ...tools.handlers.plan import get_todo_handler_for_session, has_active_todo
+        from ..message_parts import serialize_plan_to_chat_todo
+
+        if has_active_todo(conversation_id):
+            _h = get_todo_handler_for_session(conversation_id)
+            _p = _h.get_plan_for(conversation_id) if _h else None
+            if isinstance(_p, dict) and _p.get("status") == "in_progress":
+                active_todo = serialize_plan_to_chat_todo(_p)
+    except Exception:
+        active_todo = None
+
     return {
         "messages": result,
         "total": len(_visible_history_messages(session)),
         "start_index": start_index,
         "end_index": end_index,
         "has_more_before": bool(page and any(idx < page[0][0] for idx, _ in visible)),
+        "active_todo": active_todo,
     }
 
 

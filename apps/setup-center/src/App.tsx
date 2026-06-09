@@ -1,6 +1,6 @@
 import { createContext, useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense, startTransition } from "react";
 import { useTranslation } from "react-i18next";
-import { invoke, listen, IS_TAURI, IS_WEB, IS_CAPACITOR, IS_LOCAL_WEB, getAppVersion, onWsEvent, reconnectWsNow, setWsApiBaseUrl, logger, registerGlobalShortcut } from "./platform";
+import { invoke, listen, IS_TAURI, IS_WEB, IS_CAPACITOR, IS_LOCAL_WEB, getAppVersion, onWsEvent, reconnectWsNow, setWsApiBaseUrl, logger } from "./platform";
 import { getActiveServer, getActiveServerId } from "./platform/servers";
 import { checkAuth, installFetchInterceptor, AUTH_EXPIRED_EVENT, isPasswordUserSet, clearAccessToken, setTauriRemoteMode, isTauriRemoteMode } from "./platform/auth";
 import { LoginView } from "./views/LoginView";
@@ -79,7 +79,6 @@ import {
 //   1. Onboarding（打包模式）：NSIS → onboarding wizard → 写本地 → 启动服务 → HTTP API
 //   2. Wizard Full（开发者模式）：选工作区 → 装 venv → 配置端点(本地) → 启动服务 → HTTP API
 // ═══════════════════════════════════════════════════════════════════════
-import { CliManager } from "./components/CliManager";
 import { WebPasswordManager } from "./components/WebPasswordManager";
 import { FieldText, FieldBool, FieldSelect, FieldCombo, FieldSlider, TelegramPairingCodeHint } from "./components/EnvFields";
 import { ConfirmDialog } from "./components/ConfirmDialog";
@@ -562,7 +561,7 @@ function MainApp() {
   }, [stepId]);
 
   // ── Onboarding Wizard (首次安装引导) ──
-  type OnboardingStep = "ob-welcome" | "ob-agreement" | "ob-llm" | "ob-im" | "ob-cli" | "ob-progress" | "ob-done";
+  type OnboardingStep = "ob-welcome" | "ob-agreement" | "ob-llm" | "ob-im" | "ob-finish" | "ob-progress" | "ob-done";
   const [obStep, setObStep] = useState<OnboardingStep>("ob-welcome");
   const [obInstallLog, setObInstallLog] = useState<string[]>([]);
   const [obInstalling, setObInstalling] = useState(false);
@@ -596,10 +595,6 @@ function MainApp() {
     return () => window.clearInterval(timer);
   }, [obBackendStartup.phase, obBackendStartup.startedAt]);
 
-  // CLI 命令注册状态
-  const [obCliOpenakita, setObCliOpenakita] = useState(true);
-  const [obCliOa, setObCliOa] = useState(true);
-  const [obCliAddToPath, setObCliAddToPath] = useState(true);
   const [obAutostart, setObAutostart] = useState(true); // 开机自启，默认勾选
   const [obAgreementInput, setObAgreementInput] = useState("");
 
@@ -1338,23 +1333,6 @@ function MainApp() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentWorkspaceId, venvDir]);
-
-  // ── Global shortcut: Ctrl+Shift+A to summon window ──
-  useEffect(() => {
-    if (!IS_TAURI) return;
-    let unregister: (() => void) | null = null;
-    (async () => {
-      try {
-        const { getCurrentWindow } = await import("@tauri-apps/api/window");
-        const win = getCurrentWindow();
-        unregister = await registerGlobalShortcut("CmdOrCtrl+Shift+A", () => {
-          win.show().catch(() => {});
-          win.setFocus().catch(() => {});
-        });
-      } catch { /* global-shortcut not available */ }
-    })();
-    return () => { if (unregister) unregister(); };
-  }, []);
 
   // streaming pip logs (install step)
   useEffect(() => {
@@ -3795,20 +3773,9 @@ function MainApp() {
           {/* ── Skills toggle (moved below, no longer here) ── */}
 
         </div>
-
-        {/* ── CLI 命令行工具管理 (desktop only) ── */}
-        {IS_TAURI && (
-        <div className="card" style={{ marginTop: 16 }}>
-          <h3 className="text-base font-bold tracking-tight">{t("config.cliTitle")}</h3>
-          <p className="text-sm text-muted-foreground mt-1 mb-3">{t("config.cliDesc")}</p>
-          <CliManager />
-        </div>
-        )}
       </>
     );
   }
-
-  // CliManager -> ./components/CliManager.tsx
 
   function renderAgentSystem() {
     return <AgentSystemView {..._configViewProps} serviceRunning={!!serviceStatus?.running} apiBaseUrl={apiBaseUrl} />;
@@ -4489,12 +4456,6 @@ function MainApp() {
       { id: "workspace", label: "准备工作区", status: "pending" },
     ];
     taskDefs.push({ id: "backend-check", label: "检查后端环境", status: "pending" });
-    const cliCommands: string[] = [];
-    if (obCliOpenakita) cliCommands.push("openakita");
-    if (obCliOa) cliCommands.push("oa");
-    if (cliCommands.length > 0) {
-      taskDefs.push({ id: "cli", label: `注册 CLI 命令 (${cliCommands.join(", ")})`, status: "pending" });
-    }
     if (obAutostart) {
       taskDefs.push({ id: "autostart", label: t("onboarding.autostart.taskLabel"), status: "pending" });
     }
@@ -4590,26 +4551,6 @@ function MainApp() {
         log(`[!] 后端环境检查失败: ${String(e)}`);
         updateTask("backend-check", { status: "error", detail: String(e).slice(0, 120) });
         logTask("检查后端环境", "error", String(e));
-      }
-
-      // ── STEP: cli ──
-      if (cliCommands.length > 0) {
-        updateTask("cli", { status: "running" });
-        logTask(`注册 CLI 命令 (${cliCommands.join(", ")})`, "running");
-        log("注册 CLI 命令...");
-        try {
-          const result = await invoke<string>("register_cli", {
-            commands: cliCommands,
-            addToPath: obCliAddToPath,
-          });
-          log(`[OK] ${result}`);
-          updateTask("cli", { status: "done" });
-          logTask(`注册 CLI 命令 (${cliCommands.join(", ")})`, "done", result);
-        } catch (e) {
-          log(`[!] CLI 命令注册失败: ${String(e)}`);
-          updateTask("cli", { status: "error", detail: String(e) });
-          logTask(`注册 CLI 命令 (${cliCommands.join(", ")})`, "error", String(e));
-        }
       }
 
       // ── STEP: autostart ──
@@ -4834,7 +4775,7 @@ function MainApp() {
 
   function renderOnboarding() {
     // Progress/done are transitional states and should not create extra indicator dots.
-    const obStepDots = ["ob-welcome", "ob-agreement", "ob-llm", "ob-im", "ob-cli"] as OnboardingStep[];
+    const obStepDots = ["ob-welcome", "ob-agreement", "ob-llm", "ob-im", "ob-finish"] as OnboardingStep[];
     const obCurrentIdxRaw = obStepDots.indexOf(obStep);
     const obCurrentIdx = obCurrentIdxRaw >= 0 ? obCurrentIdxRaw : obStepDots.length - 1;
 
@@ -4843,7 +4784,7 @@ function MainApp() {
       "ob-agreement": t("onboarding.step.agreement", "协议"),
       "ob-llm": t("onboarding.step.llm", "模型"),
       "ob-im": t("onboarding.step.im", "通讯"),
-      "ob-cli": t("onboarding.step.cli", "完成"),
+      "ob-finish": t("onboarding.step.finish", "完成"),
     };
 
     const stepIndicator = (
@@ -5275,13 +5216,13 @@ function MainApp() {
               {stepIndicator}
               <div className="obFooterBtns">
                 <Button variant="outline" onClick={() => setObStep("ob-llm")}>{t("config.prev")}</Button>
-                <Button onClick={() => setObStep("ob-cli")}>{t("config.next")}</Button>
+                <Button onClick={() => setObStep("ob-finish")}>{t("config.next")}</Button>
               </div>
             </div>
           </div>
         );
 
-      case "ob-cli":
+      case "ob-finish":
         return (
           <div className="obPage">
             <div className="obContent">
@@ -5292,33 +5233,6 @@ function MainApp() {
               {backendStartupNotice}
 
               <div className="flex flex-col gap-2">
-                <label className="obModuleItem" data-checked={obCliOpenakita || undefined}>
-                  <Checkbox checked={obCliOpenakita} onCheckedChange={() => setObCliOpenakita(!obCliOpenakita)} />
-                  <div className="obModuleInfo">
-                    <strong style={{ fontFamily: "monospace", fontSize: 15 }}>openakita</strong>
-                    <span className="obModuleDesc">{t("onboarding.system.cmdFull")}</span>
-                  </div>
-                </label>
-
-                <label className="obModuleItem" data-checked={obCliOa || undefined}>
-                  <Checkbox checked={obCliOa} onCheckedChange={() => setObCliOa(!obCliOa)} />
-                  <div className="obModuleInfo">
-                    <strong style={{ fontFamily: "monospace", fontSize: 15 }}>oa</strong>
-                    <span className="obModuleDesc">{t("onboarding.system.cmdShort")}</span>
-                  </div>
-                  <Badge variant="secondary" className="obModuleBadge obModuleBadgeRec">{t("onboarding.system.recommended")}</Badge>
-                </label>
-
-                <label className="obModuleItem" data-checked={obCliAddToPath || undefined}>
-                  <Checkbox checked={obCliAddToPath} onCheckedChange={() => setObCliAddToPath(!obCliAddToPath)} />
-                  <div className="obModuleInfo">
-                    <strong>{t("onboarding.system.addToPath")}</strong>
-                    <span className="obModuleDesc">{t("onboarding.system.addToPathDesc")}</span>
-                  </div>
-                </label>
-
-                <div style={{ borderTop: "1px solid var(--line)", margin: "8px 0" }} />
-
                 <label className="obModuleItem" data-checked={obAutostart || undefined}>
                   <Checkbox checked={obAutostart} onCheckedChange={() => setObAutostart(!obAutostart)} />
                   <div className="obModuleInfo">
@@ -5328,26 +5242,6 @@ function MainApp() {
                   <Badge variant="secondary" className="obModuleBadge obModuleBadgeRec">{t("onboarding.autostart.recommended")}</Badge>
                 </label>
               </div>
-
-              {(obCliOpenakita || obCliOa) && (
-                <Card className="mt-4">
-                  <CardContent className="py-4 px-5 space-y-2.5">
-                    <p className="text-[13px] font-semibold text-muted-foreground">{t("onboarding.system.cmdExamples")}</p>
-                    <div className="bg-slate-900 rounded-lg px-4 py-3.5 font-mono text-[13px] leading-[1.9] text-slate-200 overflow-x-auto">
-                      {obCliOa && <>
-                        <div><span className="text-slate-400">$</span> <span className="text-blue-300">oa</span> serve <span className="text-slate-400 ml-6">{t("onboarding.system.commentServe")}</span></div>
-                        <div><span className="text-slate-400">$</span> <span className="text-blue-300">oa</span> status <span className="text-slate-400 ml-4">{t("onboarding.system.commentStatus")}</span></div>
-                        <div><span className="text-slate-400">$</span> <span className="text-blue-300">oa</span> run <span className="text-slate-400 ml-9">{t("onboarding.system.commentRun")}</span></div>
-                      </>}
-                      {obCliOa && obCliOpenakita && <div className="h-1" />}
-                      {obCliOpenakita && <>
-                        <div><span className="text-slate-400">$</span> <span className="text-indigo-300">openakita</span> init <span className="text-slate-400 ml-2">{t("onboarding.system.commentInit")}</span></div>
-                        <div><span className="text-slate-400">$</span> <span className="text-indigo-300">openakita</span> serve <span className="text-slate-400">{t("onboarding.system.commentServe")}</span></div>
-                      </>}
-                    </div>
-                  </CardContent>
-                </Card>
-              )}
             </div>
             <div className="obFooter">
               {stepIndicator}

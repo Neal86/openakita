@@ -38,6 +38,7 @@ import type {
   ChatDisplayMode,
   PlanApprovalEvent,
   OrgTimelineEntry,
+  MessagePart,
 } from "../types";
 import { genId, formatTime, formatDate, timeAgo } from "../utils";
 import { notifyError } from "../utils/notify";
@@ -77,7 +78,7 @@ import { useSecurityPolicy } from "./chat/hooks/useSecurityPolicy";
 import {
   SpinnerTipDisplay, AttachmentPreview, ErrorCard,
   ThinkingBlock, ToolCallDetail, ToolCallsGroup, ThinkingChain,
-  FloatingPlanBar, AskUserBlock, ArtifactList, PlanApprovalPanel,
+  FloatingPlanBar, PlanApprovalPanel,
   SlashCommandPanel, RenderIcon, SubAgentCards,
   SecurityConfirmModal, ContextMenuInner, LightboxOverlay,
   MessageBubble, FlatMessageItem,
@@ -833,7 +834,7 @@ export function ChatView({
   const hydrateSeqRef = useRef(0);
 
   const mapBackendHistoryToMessages = useCallback(
-    (rows: { id: string; index?: number; role: string; content: string; timestamp: number; chain_summary?: ChainSummaryItem[]; artifacts?: ChatArtifact[]; attachments?: ChatAttachment[]; org_timeline?: OrgTimelineEntry[]; ask_user?: { question: string; options?: { id: string; label: string }[]; questions?: ChatAskQuestion[] }; usage?: ChatMessage["usage"] }[]): ChatMessage[] => {
+    (rows: { id: string; index?: number; role: string; content: string; timestamp: number; chain_summary?: ChainSummaryItem[]; artifacts?: ChatArtifact[]; attachments?: ChatAttachment[]; org_timeline?: OrgTimelineEntry[]; ask_user?: ChatAskUser; todo?: ChatTodo; parts?: MessagePart[]; usage?: ChatMessage["usage"] }[]): ChatMessage[] => {
       return rows.map((m) => ({
         id: m.id,
         ...(typeof m.index === "number" ? { historyIndex: m.index } : {}),
@@ -844,9 +845,31 @@ export function ChatView({
         ...(m.artifacts?.length ? { artifacts: m.artifacts } : {}),
         ...(m.attachments?.length ? { attachments: m.attachments } : {}),
         ...(m.org_timeline?.length ? { orgTimeline: m.org_timeline } : {}),
+        ...(m.todo?.steps?.length ? { todo: m.todo } : {}),
         ...(m.ask_user ? { askUser: m.ask_user, content: "" } : {}),
+        ...(m.parts?.length ? { parts: m.parts } : {}),
         ...(m.usage ? { usage: m.usage } : {}),
       }));
+    },
+    [],
+  );
+
+  // Re-attach a still-executing plan (not yet finalized into history) to the
+  // latest assistant message so switching windows / reloading mid-run does not
+  // drop the live plan card (#615).
+  const mergeActiveTodo = useCallback(
+    (msgs: ChatMessage[], activeTodo: ChatTodo | null | undefined): ChatMessage[] => {
+      if (!activeTodo || !activeTodo.steps?.length) return msgs;
+      let lastAssistant = -1;
+      for (let i = msgs.length - 1; i >= 0; i -= 1) {
+        if (msgs[i].role === "assistant") { lastAssistant = i; break; }
+      }
+      if (lastAssistant < 0) return msgs;
+      const target = msgs[lastAssistant];
+      if (target.todo && target.todo.id === activeTodo.id) return msgs;
+      const next = msgs.slice();
+      next[lastAssistant] = { ...target, todo: activeTodo };
+      return next;
     },
     [],
   );
@@ -880,7 +903,7 @@ export function ChatView({
       const data = await res.json();
       const backendMsgs = Array.isArray(data?.messages) ? mapBackendHistoryToMessages(data.messages) : [];
 
-      const chosen = backendMsgs.length > 0 ? backendMsgs : localMsgs;
+      const chosen = mergeActiveTodo(backendMsgs.length > 0 ? backendMsgs : localMsgs, data?.active_todo);
       if (seq === hydrateSeqRef.current) {
         setMessages(chosen);
         setHistoryPage({
@@ -907,7 +930,7 @@ export function ChatView({
         setHydrating(false);
       }
     }
-  }, [serviceRunning, apiBaseUrl, mapBackendHistoryToMessages, STORAGE_KEY_MSGS_PREFIX]);
+  }, [serviceRunning, apiBaseUrl, mapBackendHistoryToMessages, mergeActiveTodo, STORAGE_KEY_MSGS_PREFIX]);
 
   const loadOlderMessages = useCallback(async () => {
     const convId = activeConvIdRef.current;
@@ -2274,6 +2297,15 @@ export function ChatView({
       const _recoverMsgId = assistantMsg.id;
       const _recoverUserTs = userMsg.timestamp;
       const _recoverKey = STORAGE_KEY_MSGS_PREFIX + thisConvId;
+      // Recovery only fires when the stream was interrupted / incomplete, so the
+      // local bubble's text is suspect. Flag it as a stream fallback up front:
+      // any backend reconciliation that follows (recovery poll, cross-window
+      // history patch, idle re-sync) will then prefer the persisted answer over
+      // this partial copy, even if the backend text is shorter. See
+      // ChatMessage.streamFallback and patchMessagesWithBackendDetailed.
+      updateMessages((prev) =>
+        prev.map((m) => (m.id === _recoverMsgId && !m.streamFallback ? { ...m, streamFallback: true } : m)),
+      );
       let attempts = 0;
       const maxAttempts = 40;
       const basePollInterval = 3000;
@@ -2323,8 +2355,13 @@ export function ChatView({
               const baseMessages = isActiveRecovery ? prev : loadMessagesFromStorage(_recoverKey);
               const updated = baseMessages.map((m) => {
                 if (m.id !== _recoverMsgId) return m;
-                if (m.content && !m.streaming && m.content.length >= contentLen) return m;
-                const patched: ChatMessage = { ...m, content: lastAssistant.content, streaming: false, streamStatus: null };
+                // A stream-fallback bubble holds untrustworthy text (e.g. a
+                // "connection failed" notice that may be *longer* than the real
+                // answer), so the length guard would wrongly keep it. Adopt the
+                // backend copy regardless of length and clear the flag; the guard
+                // still applies once the bubble is reconciled.
+                if (!m.streamFallback && m.content && !m.streaming && m.content.length >= contentLen) return m;
+                const patched: ChatMessage = { ...m, content: lastAssistant.content, streaming: false, streamStatus: null, streamFallback: undefined };
                 if (
                   (!m.thinkingChain || m.thinkingChain.length === 0) &&
                   Array.isArray(lastAssistant.chain_summary) &&

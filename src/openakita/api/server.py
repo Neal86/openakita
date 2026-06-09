@@ -165,14 +165,99 @@ def _find_docs_dist() -> Path | None:
     return None
 
 
+def _docs_version_matches_bundled(bundled: Path, version_dir: Path) -> bool:
+    """Return True when the deployed docs look current enough to reuse."""
+    if not version_dir.is_dir():
+        return False
+
+    try:
+        bundled_files = {path.relative_to(bundled) for path in bundled.rglob("*") if path.is_file()}
+        deployed_files = {path.relative_to(version_dir) for path in version_dir.rglob("*") if path.is_file()}
+        if bundled_files != deployed_files:
+            return False
+
+        for relative_path in bundled_files:
+            source_path = bundled / relative_path
+            deployed_path = version_dir / relative_path
+            if not deployed_path.is_file():
+                return False
+            source_stat = source_path.stat()
+            deployed_stat = deployed_path.stat()
+            if source_stat.st_size != deployed_stat.st_size:
+                return False
+            if source_stat.st_mtime_ns == deployed_stat.st_mtime_ns:
+                continue
+            if source_path.read_bytes() != deployed_path.read_bytes():
+                return False
+
+        for relative_name in ("index.html", "hashmap.json", "versions.html"):
+            source_path = bundled / relative_name
+            deployed_path = version_dir / relative_name
+            if source_path.is_file():
+                if not deployed_path.is_file():
+                    return False
+                if source_path.read_bytes() != deployed_path.read_bytes():
+                    return False
+    except OSError:
+        return False
+
+    return True
+
+
+def _sync_docs_tree(bundled: Path, version_dir: Path) -> None:
+    import shutil
+
+    version_dir.mkdir(parents=True, exist_ok=True)
+    bundled_files: set[Path] = set()
+    bundled_dirs: set[Path] = set()
+
+    for source_path in bundled.rglob("*"):
+        relative_path = source_path.relative_to(bundled)
+        if source_path.is_dir():
+            bundled_dirs.add(relative_path)
+            (version_dir / relative_path).mkdir(parents=True, exist_ok=True)
+            continue
+        if source_path.is_file():
+            bundled_files.add(relative_path)
+            deployed_path = version_dir / relative_path
+            deployed_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, deployed_path)
+
+    deployed_files = [path for path in version_dir.rglob("*") if path.is_file()]
+    for deployed_path in deployed_files:
+        if deployed_path.relative_to(version_dir) not in bundled_files:
+            deployed_path.unlink()
+
+    deployed_dirs = sorted(
+        (path for path in version_dir.rglob("*") if path.is_dir()),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for deployed_path in deployed_dirs:
+        if deployed_path.relative_to(version_dir) not in bundled_dirs:
+            deployed_path.rmdir()
+
+
+def _record_docs_version(docs_root: Path, version_clean: str) -> None:
+    import json
+
+    versions_file = docs_root / "versions.json"
+    try:
+        versions = json.loads(versions_file.read_text("utf-8")) if versions_file.exists() else []
+        if not isinstance(versions, list):
+            versions = []
+        if version_clean not in versions:
+            versions.insert(0, version_clean)
+            versions_file.write_text(json.dumps(versions, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"Could not update docs versions index: {e}")
+
+
 def _deploy_docs(data_dir: Path, app_version: str) -> Path | None:
     """Deploy bundled docs to data/docs/v{version}/ and refresh same-version assets.
 
     Historical versions are never deleted so users can switch between them.
     """
-    import json
-    import shutil
-
     bundled = _find_docs_dist()
     if not bundled:
         return None
@@ -180,25 +265,23 @@ def _deploy_docs(data_dir: Path, app_version: str) -> Path | None:
     docs_root = data_dir / "docs"
     version_clean = app_version.split("+")[0]
     version_dir = docs_root / f"v{version_clean}"
-    tmp_dir = docs_root / f".v{version_clean}.tmp"
 
     docs_root.mkdir(parents=True, exist_ok=True)
-    if tmp_dir.exists():
-        shutil.rmtree(tmp_dir)
-    shutil.copytree(bundled, tmp_dir)
-    if version_dir.exists():
-        shutil.rmtree(version_dir)
-    tmp_dir.replace(version_dir)
-    logger.info(f"Deployed user docs v{version_clean} → {version_dir}")
+    if _docs_version_matches_bundled(bundled, version_dir):
+        _record_docs_version(docs_root, version_clean)
+        return docs_root
 
-    versions_file = docs_root / "versions.json"
     try:
-        versions = json.loads(versions_file.read_text("utf-8")) if versions_file.exists() else []
-    except Exception:
-        versions = []
-    if version_clean not in versions:
-        versions.insert(0, version_clean)
-        versions_file.write_text(json.dumps(versions, indent=2), encoding="utf-8")
+        _sync_docs_tree(bundled, version_dir)
+    except Exception as e:
+        logger.warning(f"Could not deploy user docs v{version_clean}: {e}")
+        if version_dir.exists():
+            _record_docs_version(docs_root, version_clean)
+            return docs_root
+        return None
+
+    logger.info(f"Deployed user docs v{version_clean} → {version_dir}")
+    _record_docs_version(docs_root, version_clean)
 
     return docs_root
 
@@ -233,6 +316,10 @@ def _mount_web_frontend(app: FastAPI) -> None:
 
     logger.info(f"Mounting web frontend from {web_dist}")
     app.mount("/web", StaticFiles(directory=str(web_dist), html=True), name="web-frontend")
+
+
+def _has_web_frontend_mount(app: FastAPI) -> bool:
+    return any(getattr(route, "name", None) == "web-frontend" for route in app.routes)
 
 
 def create_app(
@@ -441,7 +528,7 @@ def create_app(
     async def root():
         # If web frontend is available, redirect to it
         web_dist = _find_web_dist()
-        if web_dist:
+        if web_dist or _has_web_frontend_mount(app):
             from fastapi.responses import RedirectResponse
 
             return RedirectResponse(url="/web/")
@@ -547,6 +634,22 @@ def create_app(
             await asyncio.to_thread(_cleanup_old_recovery_pending)
         except Exception as e:
             logger.debug("[Startup] Memory recovery pending cleanup skipped: %s", e)
+
+    @app.on_event("startup")
+    async def _cleanup_expired_resume_state():
+        """Issue #608: drop crash-leftover cancel-resume snapshots in
+        ``data/working_messages/`` so a process that died mid-turn doesn't
+        keep re-injecting yesterday's half-finished tool state on resume."""
+        try:
+            from openakita.core.cancel_cleanup import cleanup_expired_working_messages
+
+            removed = await asyncio.to_thread(
+                cleanup_expired_working_messages, base_dir=data_dir
+            )
+            if removed:
+                logger.info("[Startup] Removed %d expired cancel-resume snapshot(s)", removed)
+        except Exception as e:
+            logger.debug("[Startup] Cancel-resume snapshot cleanup skipped: %s", e)
 
     @app.on_event("startup")
     async def _wire_pending_approvals_sse():

@@ -40,7 +40,54 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 DEFAULT_TTL_SECONDS: int = 86400  # 24h
+# Issue #608 — two *separate* time windows, deliberately decoupled (this mirrors
+# how claude-code / hermes / openclaw / QwenPaw behave: none of them discard the
+# completed tool work by age):
+#
+#   * LOAD window == DEFAULT_TTL_SECONDS (24h): a persisted snapshot is always
+#     restored if it still exists, so the model never re-runs already-completed
+#     tools just because the user came back a few hours later.  The 24h bound is
+#     pure hygiene, matching the startup janitor — anything older was a crash
+#     leftover the janitor should already have swept.
+#   * HINT freshness (1h): only gates whether we inject the "上一轮被中断…接着干"
+#     nudge.  Past this window we still feed the completed tool results back
+#     (no redo) but stop actively telling the model to continue — a long-stale
+#     resume is more likely a topic change.  Aligns with hermes' 3600s
+#     gateway auto-continue freshness.
+RESUME_HINT_FRESHNESS_SECONDS: int = 3600  # 1h
 DEFAULT_INTERRUPT_TEXT: str = "[Tool call interrupted by user/system before completion.]"
+
+
+def persisted_age_seconds(conversation_id: str, *, base_dir: str | os.PathLike) -> float | None:
+    """Age (seconds) of the persisted snapshot for ``conversation_id`` based on
+    its file mtime, or None if no file exists.  Read-only: does NOT consume the
+    file, so callers can peek freshness before a consuming load.  Never raises.
+    """
+    if not conversation_id:
+        return None
+    target = _wm_path(conversation_id, base_dir)
+    try:
+        if not target.exists():
+            return None
+        return max(0.0, time.time() - target.stat().st_mtime)
+    except OSError:
+        return None
+
+
+def has_tool_blocks(working_messages: list[dict] | None) -> bool:
+    """True if any message carries a structured ``tool_use`` / ``tool_result``
+    block.  Used to decide whether a cancelled turn is worth persisting for
+    resume — a turn that never reached a tool call has nothing to carry
+    forward and would just bloat ``data/working_messages/``.
+    """
+    for msg in working_messages or []:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") in ("tool_use", "tool_result"):
+                return True
+    return False
 
 
 def find_orphan_tool_uses(working_messages: list[dict]) -> list[dict[str, str]]:

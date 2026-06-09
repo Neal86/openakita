@@ -419,6 +419,7 @@ class MCPClient:
     @staticmethod
     def _resolve_command(config: MCPServerConfig) -> str | None:
         """在子进程实际使用的 PATH / cwd 下查找命令，避免误判 'not found'。"""
+        from ..runtime_manager import resolve_toolchain_command
         from ..utils.path_helper import which_command
 
         cmd = config.command
@@ -434,11 +435,23 @@ class MCPClient:
         if config.env:
             search_path = config.env.get("PATH") or config.env.get("Path")
 
-        found = which_command(cmd, extra_path=search_path)
+        if search_path:
+            found = which_command(cmd, extra_path=search_path)
+            if found:
+                return found
+
+        # 3) OpenAkita-managed Node/npm/npx should satisfy built-in MCP servers
+        # even when the host system PATH does not expose those commands.
+        found = resolve_toolchain_command(cmd)
         if found:
             return found
 
-        # 3) 如果有 cwd，也在 cwd 下做一次绝对搜索
+        # 4) Host command lookup, including macOS login-shell PATH fallback.
+        found = which_command(cmd)
+        if found:
+            return found
+
+        # 5) 如果有 cwd，也在 cwd 下做一次绝对搜索
         if config.cwd:
             candidate = Path(config.cwd) / cmd
             if candidate.is_file():
@@ -481,7 +494,7 @@ class MCPClient:
 
         return (py, ["-m", config.args[1], *config.args[2:]])
 
-    _CONNECT_TIMEOUT: int = 30
+    _CONNECT_TIMEOUT: int = 60
     _CALL_TIMEOUT: int = 0
 
     def _load_timeouts(self) -> None:
@@ -518,7 +531,7 @@ class MCPClient:
                 " ".join(args),
             )
         else:
-            command = config.command
+            command = self._resolve_command(config) or config.command
             args = list(config.args)
             # 连接前二次解析：如果 args 中有相对路径且 cwd 已知，尝试解析
             if config.cwd:

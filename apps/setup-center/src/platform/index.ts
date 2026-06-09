@@ -408,6 +408,17 @@ export async function relaunchApp(): Promise<void> {
     window.location.reload();
     return;
   }
+  // Tell the native shell this is an intentional restart BEFORE asking the
+  // process plugin to relaunch. `app.restart()` exits via process::exit and
+  // never fires RunEvent::Exit, so without this the crash-recovery watchdog
+  // would mistake the update restart for a hard crash and spawn a duplicate.
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("prepare_relaunch");
+  } catch {
+    // Non-fatal: worst case the watchdog spawns a duplicate that
+    // single-instance immediately dedups to "focus existing window".
+  }
   const { relaunch } = await import("@tauri-apps/plugin-process");
   await relaunch();
 }
@@ -474,58 +485,6 @@ export async function openPopupWindow(
 /** Whether popup windows are available on the current platform. */
 export function canOpenPopupWindow(): boolean {
   return !IS_CAPACITOR;
-}
-
-// ---------------------------------------------------------------------------
-// Global Shortcut
-// ---------------------------------------------------------------------------
-
-/**
- * Register a global shortcut (desktop only).
- * Returns an unregister function. No-op in web mode.
- */
-export async function registerGlobalShortcut(
-  shortcut: string,
-  handler: () => void,
-): Promise<() => void> {
-  if (!IS_TAURI) return () => {};
-  try {
-    const mod = await import("@tauri-apps/plugin-global-shortcut");
-    await mod.register(shortcut, handler);
-    return () => { mod.unregister(shortcut).catch(() => {}); };
-  } catch (e) {
-    console.warn("[GlobalShortcut] Failed to register:", e);
-    return () => {};
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Notification
-// ---------------------------------------------------------------------------
-
-/**
- * Send a desktop notification (Tauri plugin-notification).
- * No-op in web mode.
- */
-export async function sendNotification(options: {
-  title: string;
-  body?: string;
-  icon?: string;
-}): Promise<void> {
-  if (!IS_TAURI) return;
-  try {
-    const mod = await import("@tauri-apps/plugin-notification");
-    let granted = await mod.isPermissionGranted();
-    if (!granted) {
-      const perm = await mod.requestPermission();
-      granted = perm === "granted";
-    }
-    if (granted) {
-      mod.sendNotification(options);
-    }
-  } catch (e) {
-    console.warn("[Notification] Failed:", e);
-  }
 }
 
 // ---------------------------------------------------------------------------

@@ -50,6 +50,8 @@ MAX_ZIP_SIZE = 30 * 1024 * 1024  # 30 MB
 RECENT_DAYS = 3  # how far back to collect dated files
 DIR_MAX_BYTES = 5 * 1024 * 1024  # default per-directory byte budget
 CRASHDUMP_MAX_BYTES = 12 * 1024 * 1024  # keep room under MAX_ZIP_SIZE
+WER_DUMP_MAX_BYTES = 8 * 1024 * 1024  # budget for WER-captured minidumps
+WEBVIEW2_CRASHPAD_MAX_BYTES = 6 * 1024 * 1024  # budget for EBWebView crashpad dumps
 
 
 def _get_bug_report_endpoint() -> str:
@@ -299,56 +301,162 @@ def _add_windows_crash_artifacts(zf: zipfile.ZipFile) -> None:
     if platform.system() != "Windows":
         return
 
-    _add_dir_recent(
-        zf,
-        _resolve_openakita_home_dir() / "crashdumps",
-        "crashdumps",
-        days=30,
-        patterns=("*.dmp",),
-        max_total_bytes=CRASHDUMP_MAX_BYTES,
-    )
+    # Ship both the binary minidump and its sibling *.events.txt trail. The
+    # crash handler writes <pid>-<tick>.events.txt next to every SEH dump with
+    # the last ~64 diagnostic events (what the user did right before the
+    # crash); without it every dump arrives as a bare faulting address with no
+    # context. They are a few KB each, so they never meaningfully compete with
+    # the .dmp files for the byte budget.
+    # Each collector is independently guarded: crash evidence is best-effort
+    # and one inaccessible source (ACL-protected WER dir, antivirus lock, a
+    # racing delete, …) must never abort the whole feedback bundle.
+    try:
+        _add_dir_recent(
+            zf,
+            _resolve_openakita_home_dir() / "crashdumps",
+            "crashdumps",
+            days=30,
+            patterns=("*.dmp", "*.events.txt"),
+            max_total_bytes=CRASHDUMP_MAX_BYTES,
+        )
+    except Exception:
+        pass
 
-    _add_wer_reports(zf)
-    event_log = _collect_windows_event_log()
-    if event_log:
-        try:
+    try:
+        _add_wer_reports(zf)
+    except Exception:
+        pass
+    try:
+        _add_webview2_crashpad(zf)
+    except Exception:
+        pass
+    try:
+        event_log = _collect_windows_event_log()
+        if event_log:
             zf.writestr("wer/event_log_recent.txt", event_log)
-        except Exception:
-            pass
+    except Exception:
+        pass
+
+
+def _wer_roots() -> list[Path]:
+    """Candidate Windows Error Reporting roots, per-user and machine-wide.
+
+    WER first stages a crash under ``ReportQueue`` and only moves it to
+    ``ReportArchive`` after the WER service finishes processing it. A report
+    submitted within minutes of a crash is therefore frequently still sitting
+    in ``ReportQueue`` — scanning ``ReportArchive`` alone misses fresh crashes
+    (the exact reason issue #606's fast-fail crash arrived with no WER data).
+    Fast-fail terminations (heap corruption ``0xC0000374``, ``__fastfail``)
+    bypass our in-process SEH filter entirely, so WER is the only place their
+    faulting-module evidence ever lands.
+    """
+    import os
+
+    roots: list[Path] = []
+    for base_env in ("LOCALAPPDATA", "ProgramData"):
+        base = os.environ.get(base_env, "").strip()
+        if not base:
+            continue
+        wer = Path(base) / "Microsoft" / "Windows" / "WER"
+        roots.append(wer / "ReportQueue")
+        roots.append(wer / "ReportArchive")
+    return roots
 
 
 def _add_wer_reports(zf: zipfile.ZipFile) -> None:
-    """Add recent WER Report.wer files that mention OpenAkita."""
+    """Add recent WER reports (and any captured minidumps) for OpenAkita.
+
+    Scans ``ReportQueue`` and ``ReportArchive`` under both the per-user and
+    machine-wide WER roots. For each matching report directory we always ship
+    the tiny ``Report.wer`` metadata (faulting module + version + offset +
+    exception code) and, within a bounded budget, any WER-captured minidumps
+    (``*.dmp`` / ``*.mdmp``). The full-heap ``*.hdmp`` is deliberately skipped
+    because it can be hundreds of MB.
+    """
+    seen: set[str] = set()
+    dump_budget = WER_DUMP_MAX_BYTES
+    for root in _wer_roots():
+        if not root.exists():
+            continue
+        try:
+            dirs = [p for p in root.iterdir() if p.is_dir()]
+            dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            candidates = dirs[:30]
+        except Exception:
+            continue
+
+        for report_dir in candidates:
+            # The whole per-report body is wrapped: the machine-wide root
+            # ``C:\ProgramData\Microsoft\Windows\WER\ReportArchive`` is not
+            # readable by a standard (non-elevated) user, and Python's
+            # ``Path.is_file()`` / ``Path.exists()`` *re-raise* PermissionError
+            # (WinError 5) instead of returning False the way they do for a
+            # missing path. An unguarded probe there would abort the entire
+            # feedback bundle, so a report we cannot touch is simply skipped.
+            try:
+                report_wer = report_dir / "Report.wer"
+                if not report_wer.is_file():
+                    continue
+                matched = "openakita" in report_dir.name.lower()
+                if not matched:
+                    try:
+                        sample = report_wer.read_bytes()[:64 * 1024]
+                        matched = "openakita" in sample.decode("utf-8", "ignore").lower()
+                    except Exception:
+                        matched = False
+                if not matched:
+                    continue
+                # A queued report is moved to the archive later, so the same
+                # directory name can appear under both roots; de-dup by name.
+                if report_dir.name in seen:
+                    continue
+                seen.add(report_dir.name)
+                label = f"{root.name}-{report_dir.name}"
+                _add_file(zf, report_wer, f"wer/{label}-Report.wer")
+                for dump in list(report_dir.glob("*.dmp")) + list(report_dir.glob("*.mdmp")):
+                    try:
+                        sz = dump.stat().st_size
+                    except OSError:
+                        continue
+                    if sz > dump_budget:
+                        continue
+                    _add_file(zf, dump, f"wer/{label}-{dump.name}")
+                    dump_budget -= sz
+            except Exception:
+                # PermissionError on a machine-wide report, a racing delete by
+                # the WER service, etc. — skip this report, never the bundle.
+                continue
+
+
+def _add_webview2_crashpad(zf: zipfile.ZipFile) -> None:
+    """Add recent WebView2 (Edge/Chromium) Crashpad dumps.
+
+    A crash *inside the WebView2 process* never reaches our in-process SEH
+    filter (it lives in a separate ``msedgewebview2.exe`` process) and is not
+    reported to WER under our exe name. Edge captures it itself via Crashpad
+    under the app's WebView2 user-data folder, which Tauri 2 defaults to
+    ``%LOCALAPPDATA%\\<bundle-identifier>\\EBWebView``.
+    """
     import os
 
     local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
     if not local_appdata:
         return
-    wer_archive = Path(local_appdata) / "Microsoft" / "Windows" / "WER" / "ReportArchive"
-    if not wer_archive.exists():
-        return
-
-    candidates: list[Path] = []
-    try:
-        dirs = [p for p in wer_archive.iterdir() if p.is_dir()]
-        dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        candidates = dirs[:30]
-    except Exception:
-        return
-
-    for report_dir in candidates:
-        report_wer = report_dir / "Report.wer"
-        if not report_wer.is_file():
-            continue
-        matched = "openakita" in report_dir.name.lower()
-        if not matched:
-            try:
-                sample = report_wer.read_bytes()[:64 * 1024]
-                matched = "openakita" in sample.decode("utf-8", "ignore").lower()
-            except Exception:
-                matched = False
-        if matched:
-            _add_file(zf, report_wer, f"wer/{report_dir.name}-Report.wer")
+    reports = (
+        Path(local_appdata)
+        / "com.openakita.setupcenter"
+        / "EBWebView"
+        / "Crashpad"
+        / "reports"
+    )
+    _add_dir_recent(
+        zf,
+        reports,
+        "webview2_crashpad",
+        days=30,
+        patterns=("*.dmp",),
+        max_total_bytes=WEBVIEW2_CRASHPAD_MAX_BYTES,
+    )
 
 
 def _collect_windows_event_log() -> bytes:
@@ -445,12 +553,19 @@ def _add_dir_recent(
 
 
 def _add_file(zf: zipfile.ZipFile, path: Path, zip_name: str) -> None:
-    """Add a single file to the zip if it exists."""
-    if path.exists() and path.is_file():
-        try:
+    """Add a single file to the zip if it exists.
+
+    The whole body — including the ``exists()`` / ``is_file()`` probes — is
+    guarded: on Windows those stat the path and *re-raise* PermissionError
+    (WinError 5) for ACL-protected locations (e.g. machine-wide WER reports),
+    rather than returning False as they do for a missing path. A file we
+    cannot read is silently skipped.
+    """
+    try:
+        if path.exists() and path.is_file():
             zf.write(path, zip_name)
-        except Exception:
-            pass
+    except Exception:
+        pass
 
 
 _SENSITIVE_KEY_RE = None

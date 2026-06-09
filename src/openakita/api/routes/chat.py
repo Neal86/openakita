@@ -354,6 +354,39 @@ async def list_commands():
     ]
 
 
+def _backfill_ask_user_answer(session, answer_text: str) -> None:
+    """Persist an ask_user answer onto the assistant message that raised it.
+
+    A user's reply to an ask_user prompt is sent as a normal follow-up message
+    (it starts a new turn). The frontend already marks the prompt answered
+    locally, but that state was never persisted, so a reload / second window
+    re-rendered the prompt as freshly clickable. ask_user ends the turn, so the
+    answer is the message immediately following the assistant turn that owns
+    the prompt — reliable within a conversation even under the per-conversation
+    busy lock. We mark only the most-recent unanswered ask_user.
+    """
+    if not answer_text:
+        return
+    try:
+        msgs = session.context.messages
+    except Exception:
+        return
+    if not msgs:
+        return
+    for m in reversed(msgs):
+        role = m.get("role")
+        if role == "user":
+            # Skip the just-added answer (and any other trailing user turns).
+            continue
+        if role == "assistant":
+            au = m.get("ask_user")
+            if isinstance(au, dict) and not au.get("answered"):
+                au["answered"] = True
+                au["answer"] = answer_text
+        # Only the immediately preceding assistant turn can own the prompt.
+        return
+
+
 @router.post("/api/chat/clear")
 async def clear_chat(request: Request):
     """Clear session context for a conversation."""
@@ -728,6 +761,11 @@ async def _stream_chat(
     _ask_user_options: list[dict] = []
     _ask_user_questions: list[dict] = []
     _collected_artifacts: list[dict] = []
+    # Latest plan snapshot observed on the SSE stream this turn. Captured here
+    # (mirroring the frontend's ``currentPlan``) so the *final* state survives —
+    # ``auto_close_todo`` unregisters the plan before the assistant message is
+    # saved, so a save-time registry lookup would miss completed plans (#615).
+    _last_todo_snapshot: dict | None = None
 
     async def _check_disconnected() -> bool:
         nonlocal _client_disconnected
@@ -922,6 +960,7 @@ async def _stream_chat(
 
                     if chat_request.message:
                         session.add_message("user", chat_request.message)
+                        _backfill_ask_user_answer(session, chat_request.message)
                     session_messages_history = (
                         list(session.context.messages) if hasattr(session, "context") else []
                     )
@@ -1169,6 +1208,32 @@ async def _stream_chat(
                 yield _sse("mcp_call", _mcp_call)
                 _last_emit_ts = time.time()
 
+            # Track the plan as it streams so we can persist the final snapshot
+            # onto the assistant message (the registry is cleared by auto-close
+            # before the save runs). Mirrors ChatView's currentPlan assembly.
+            if event_type == "todo_created":
+                _plan_evt = event.get("plan")
+                if isinstance(_plan_evt, dict):
+                    import copy as _copy
+
+                    _last_todo_snapshot = _copy.deepcopy(_plan_evt)
+            elif event_type == "todo_step_updated" and isinstance(_last_todo_snapshot, dict):
+                _step_id = event.get("stepId") or event.get("step_id")
+                _step_idx = event.get("stepIdx")
+                _new_status = event.get("status")
+                _steps = _last_todo_snapshot.get("steps") or []
+                for _i, _s in enumerate(_steps):
+                    if (_step_id and _s.get("id") == _step_id) or (
+                        isinstance(_step_idx, int) and _i == _step_idx
+                    ):
+                        if _new_status:
+                            _s["status"] = _new_status
+                        break
+            elif event_type == "todo_completed" and isinstance(_last_todo_snapshot, dict):
+                _last_todo_snapshot["status"] = "completed"
+            elif event_type == "todo_cancelled" and isinstance(_last_todo_snapshot, dict):
+                _last_todo_snapshot["status"] = "cancelled"
+
             # deliver_artifacts / send_sticker 都可能返回带 receipts 的 JSON
             _artifact_tools = ("deliver_artifacts", "send_sticker")
             if event_type == "tool_call_end" and event.get("tool") in _artifact_tools:
@@ -1397,6 +1462,36 @@ async def _stream_chat(
                     if _ask_user_questions:
                         _ask_user_data["questions"] = _ask_user_questions
                     _msg_meta["ask_user"] = _ask_user_data
+                # Snapshot the plan onto the assistant message so the plan card
+                # survives reload / multi-window switch (#615). Prefer the
+                # snapshot captured from the live SSE stream (which retains the
+                # *final* state even after auto_close unregisters the plan);
+                # fall back to the registry for an in-progress plan that emitted
+                # no events this turn. The shape matches the ``todo_created`` SSE.
+                try:
+                    from ..message_parts import serialize_plan_to_chat_todo
+
+                    _todo_snapshot = None
+                    if isinstance(_last_todo_snapshot, dict):
+                        _todo_snapshot = serialize_plan_to_chat_todo(_last_todo_snapshot)
+                    if not (_todo_snapshot and _todo_snapshot.get("steps")):
+                        from ...tools.handlers.plan import (
+                            get_todo_handler_for_session,
+                            has_active_todo,
+                        )
+
+                        if conversation_id and has_active_todo(conversation_id):
+                            _todo_handler = get_todo_handler_for_session(conversation_id)
+                            _todo_plan = (
+                                _todo_handler.get_plan_for(conversation_id)
+                                if _todo_handler
+                                else None
+                            )
+                            _todo_snapshot = serialize_plan_to_chat_todo(_todo_plan)
+                    if _todo_snapshot and _todo_snapshot.get("steps"):
+                        _msg_meta["todo"] = _todo_snapshot
+                except Exception:
+                    pass
                 if _agent_errored:
                     _msg_meta["is_truncated"] = True
                     _msg_meta["truncation_reason"] = "mid_stream_failure"
@@ -2600,6 +2695,7 @@ async def chat_sync(request: Request, body: ChatRequest):
                 if session is not None:
                     apply_classification_to_session(session, classify_entry("api-sync"))
                     session.add_message("user", body.message or "")
+                    _backfill_ask_user_answer(session, body.message or "")
                     session_messages_history = session.context.get_messages()
             except Exception as exc:
                 logger.warning(

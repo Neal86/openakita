@@ -138,6 +138,13 @@ class TaskState:
     conversation_id: str = ""
     status: TaskStatus = TaskStatus.IDLE
 
+    # Issue #608: whether this task belongs to a delegated sub-agent.  Set by
+    # the reasoning engine right after the TaskState is resolved.  The cancel
+    # funnel reads it to decide whether to persist a resumable working_messages
+    # snapshot — sub-agents share the parent conversation_id, so persisting on
+    # a sub-agent cancel would clobber the parent turn's resume state.
+    is_sub_agent: bool = False
+
     # 任务定义（来自 Prompt Compiler）
     task_definition: str = ""
     task_query: str = ""

@@ -249,7 +249,55 @@ export type ChatMessage = {
   streaming?: boolean;
   /** Ephemeral UI-only status while an SSE stream is alive; never persisted as message content. */
   streamStatus?: string | null;
+  /**
+   * Set when this assistant bubble was finalized from an interrupted /
+   * recovering stream, so its content may be partial or polluted. Backend
+   * reconciliation (`patchMessagesWithBackendDetailed`) then replaces the text
+   * with the authoritative persisted answer even when the backend copy is
+   * *shorter* (e.g. trace markers stripped), and clears this flag. Transient —
+   * not persisted to localStorage.
+   */
+  streamFallback?: boolean;
+  /**
+   * Ordered, structured render model for an assistant message.
+   *
+   * This is the single source of truth for how the rich cards (reasoning,
+   * plan, text, tools, attachments, answered ask_user, …) are laid out and
+   * re-displayed after a reload / window switch. It is normally a
+   * deterministic projection of the flat fields above (see
+   * `views/chat/utils/messageParts.ts#deriveMessageParts`), and may also be
+   * supplied authoritatively by the backend history projection
+   * (`/api/sessions/{id}/history` → `parts`). When absent it is derived on
+   * the fly, so old sessions / localStorage payloads keep rendering.
+   *
+   * Kept out of localStorage and out of the LLM transcript on purpose: it is
+   * a view concern, not stored message content.
+   */
+  parts?: MessagePart[] | null;
 };
+
+/**
+ * One ordered block inside an assistant message.
+ *
+ * Heavy text blocks (`text`, `reasoning`, `thinking`) are markers — the
+ * renderer pulls their payload from the corresponding flat field on the
+ * message — so the projection stays small when it travels over the wire from
+ * the backend history endpoint. The remaining (small) blocks inline their
+ * data so a single part is self-describing. The client-side
+ * `deriveMessageParts` builds the same shape from flat fields.
+ */
+export type MessagePart =
+  | { kind: "reasoning"; id: string }
+  | { kind: "thinking"; id: string }
+  | { kind: "org_timeline"; id: string }
+  | { kind: "sources"; id: string }
+  | { kind: "mcp"; id: string }
+  | { kind: "plan"; id: string; todo?: ChatTodo }
+  | { kind: "text"; id: string }
+  | { kind: "tools"; id: string }
+  | { kind: "attachment"; id: string; artifact?: ChatArtifact }
+  | { kind: "ask_user"; id: string; ask?: ChatAskUser }
+  | { kind: "error"; id: string };
 
 // ─── 思维链 (Thinking Chain) 类型 ───
 
