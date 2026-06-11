@@ -28,6 +28,7 @@ const SkillStoreView = lazy(() => import("./views/SkillStoreView").then(m => ({ 
 const SecurityView = lazy(() => import("./views/SecurityView"));
 const PendingApprovalsView = lazy(() => import("./views/PendingApprovalsView").then(m => ({ default: m.PendingApprovalsView })));
 const PetView = lazy(() => import("./views/PetView").then(m => ({ default: m.PetView })));
+const InboxView = lazy(() => import("./views/InboxView").then(m => ({ default: m.InboxView })));
 
 import { FeedbackModal, type FeedbackPrefill } from "./views/FeedbackModal";
 import { IMConfigView } from "./views/IMConfigView";
@@ -50,6 +51,7 @@ import { ChevronRight, Loader2, AlertTriangle, CheckCircle2 } from "lucide-react
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -91,6 +93,8 @@ import { useExpandPanel } from "./hooks/useExpandPanel";
 import { AdvancedView } from "./views/AdvancedView";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import WebSearchProviderPanel from "./components/WebSearchProviderPanel";
+import { INBOX_REFRESH_EVENT, INBOX_UNREAD_CHANGED_EVENT } from "./components/InboxBadge";
+import { isHighPriorityInbox, type InboxUpdatePayload, type InboxWsMessagePayload } from "./inboxTypes";
 
 /** Health-check timeout for recurring monitoring (heartbeat + refreshStatus).
  *  Startup/one-shot probes keep their own shorter timeouts.
@@ -443,6 +447,9 @@ function MainApp() {
   const [bugReportOpen, setBugReportOpen] = useState(false);
   const [feedbackPrefill, setFeedbackPrefill] = useState<FeedbackPrefill | null>(null);
   const [feedbackRefreshKey, setFeedbackRefreshKey] = useState(0);
+  const [inboxRefreshKey, setInboxRefreshKey] = useState(0);
+  const [inboxDialogOpen, setInboxDialogOpen] = useState(false);
+  const [inboxUnreadCount, setInboxUnreadCount] = useState(0);
   const [unreadFeedbackCount, setUnreadFeedbackCount] = useState(0);
   const [pendingApprovalsCount, setPendingApprovalsCount] = useState(0);
   const [disabledViews, setDisabledViews] = useState<string[]>([]);
@@ -1351,6 +1358,32 @@ function MainApp() {
     };
   }, []);
 
+  const fetchInboxUnreadCount = useCallback(async () => {
+    if (!shouldUseHttpApi()) {
+      setInboxUnreadCount(0);
+      return;
+    }
+    try {
+      const resp = await safeFetch(`${httpApiBase()}/api/inbox/unread-count`, {
+        signal: AbortSignal.timeout(3_000),
+      });
+      const data = await resp.json();
+      const next = Math.max(0, Number(data?.unread_count || 0));
+      setInboxUnreadCount(next);
+      window.dispatchEvent(
+        new CustomEvent(INBOX_UNREAD_CHANGED_EVENT, {
+          detail: { unreadCount: next },
+        }),
+      );
+    } catch {
+      // Inbox is optional on older backend builds.
+    }
+  }, [serviceStatus?.running, dataMode, apiBaseUrl]);
+
+  useEffect(() => {
+    void fetchInboxUnreadCount();
+  }, [fetchInboxUnreadCount]);
+
   // ── Backend WebSocket events: keep derived status fresh across Web/Tauri ──
   // IM channels intentionally start after the HTTP API so the desktop can connect early.
   // On Tauri, relying only on the first /api/im/channels fetch leaves the StatusView stuck
@@ -1379,6 +1412,47 @@ function MainApp() {
           refreshStatus().catch(() => {});
         }, 2_000);
       }
+      if (event === "inbox:unread_changed") {
+        const next = Math.max(0, Number(p.unread_count || 0));
+        setInboxUnreadCount(next);
+        setInboxRefreshKey((value) => value + 1);
+        window.dispatchEvent(
+          new CustomEvent(INBOX_UNREAD_CHANGED_EVENT, {
+            detail: { unreadCount: next },
+          }),
+        );
+      }
+      if (event === "inbox:new_message") {
+        const payload = p as InboxWsMessagePayload;
+        setInboxRefreshKey((value) => value + 1);
+        void fetchInboxUnreadCount();
+        window.dispatchEvent(new CustomEvent(INBOX_REFRESH_EVENT));
+        if (isHighPriorityInbox(payload.priority)) {
+          const messageTitle = String(payload.title || t("inbox.newMessageFallback"));
+          toast.warning(messageTitle, {
+            description: t("inbox.newImportantMessage"),
+            action: {
+              label: t("inbox.openInbox"),
+              onClick: () => setInboxDialogOpen(true),
+            },
+          });
+        }
+      }
+      if (event === "inbox:update_available") {
+        const payload = p as InboxUpdatePayload;
+        setInboxRefreshKey((value) => value + 1);
+        void fetchInboxUnreadCount();
+        toast.info(String(payload.title || t("inbox.updateAvailable")), {
+          description: payload.version
+            ? t("inbox.updateAvailableVersion", { version: payload.version })
+            : t("inbox.updateAvailableHint"),
+          action: {
+            label: t("version.updateNow"),
+            onClick: () => { void checkForAppUpdate(); },
+          },
+        });
+        void checkForAppUpdate();
+      }
       // 桥接技能变更：把 WS 'skills:changed' 转成全局 window CustomEvent，
       // 各组件（SkillManager / OrgEditorView 等）可以监听同一事件实现实时刷新，
       // 无需让 App 知道具体组件存在。``action`` 透传给监听方按需做差异化处理。
@@ -1393,7 +1467,7 @@ function MainApp() {
       }
     });
     return unsub;
-  }, [webAuthed]);
+  }, [webAuthed, fetchInboxUnreadCount, checkForAppUpdate, t]);
 
   // Keep preset <-> index-url consistent
   useEffect(() => {
@@ -4959,6 +5033,8 @@ function MainApp() {
           restartService={restartService}
           askConfirm={askConfirm}
           setView={navigateToView}
+          inboxUnreadCount={inboxUnreadCount}
+          onOpenInbox={() => setInboxDialogOpen(true)}
         />
 
         {showPwBanner && (
@@ -5251,6 +5327,22 @@ function MainApp() {
         )}
 
         <ConfirmDialog dialog={confirmDialog} onClose={() => setConfirmDialog(null)} />
+        <Dialog open={inboxDialogOpen} onOpenChange={setInboxDialogOpen}>
+          <DialogContent className="inboxDialogContent">
+            <DialogHeader className="sr-only">
+              <DialogTitle>{t("inbox.title")}</DialogTitle>
+              <DialogDescription>{t("inbox.description")}</DialogDescription>
+            </DialogHeader>
+            <Suspense fallback={<div className="inboxDialogFallback"><div className="spinner" style={{ width: 24, height: 24 }} /></div>}>
+              <InboxView
+                serviceRunning={serviceStatus?.running ?? false}
+                apiBaseUrl={httpApiBase()}
+                refreshKey={inboxRefreshKey}
+                onUnreadChange={setInboxUnreadCount}
+              />
+            </Suspense>
+          </DialogContent>
+        </Dialog>
         <RuntimeEnvironmentDialog
           open={runtimeDialogOpen}
           onOpenChange={setRuntimeDialogOpen}
@@ -5310,5 +5402,3 @@ function MainApp() {
     </EnvFieldContext.Provider>
   );
 }
-
-

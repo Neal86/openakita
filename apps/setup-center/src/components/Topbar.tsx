@@ -7,7 +7,7 @@ import {
   DotGreen, DotGray,
   IconLink, IconPower, IconRefresh,
   IconLaptop, IconMoon, IconSun, IconGlobe, IconClipboard,
-  IconCheck,
+  IconCheck, IconInbox,
 } from "../icons";
 import { Button } from "@/components/ui/button";
 import {
@@ -21,6 +21,7 @@ import { toast } from "sonner";
 import { openExternalUrl } from "../platform";
 import { copyToClipboard } from "../utils/clipboard";
 import { RemoteAccessDialog } from "./RemoteAccessDialog";
+import { InboxBadge } from "./InboxBadge";
 
 export type TopbarProps = {
   wsDropdownOpen: boolean;
@@ -56,6 +57,8 @@ export type TopbarProps = {
   restartService?: () => Promise<void>;
   askConfirm?: (msg: string, onConfirm: () => void) => void;
   setView?: (view: ViewId) => void;
+  inboxUnreadCount?: number;
+  onOpenInbox?: () => void;
 };
 
 export function Topbar({
@@ -70,6 +73,7 @@ export function Topbar({
   onSetTheme, themePrefState, isWeb, onLogout, webAccessUrl, apiBaseUrl,
   onToggleMobileSidebar, serverName, onServerManager,
   envDraft, setEnvDraft, restartService, askConfirm,
+  inboxUnreadCount, onOpenInbox,
 }: TopbarProps) {
   const { t } = useTranslation();
   const [remoteCopyState, setRemoteCopyState] = useState<"idle" | "copied" | "no_ip">("idle");
@@ -349,6 +353,30 @@ export function Topbar({
           )}
 
           <div className="h-4 w-px bg-border" />
+
+          {onOpenInbox && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  className="topbarInboxButton"
+                  onClick={onOpenInbox}
+                  aria-label={t("inbox.openInbox")}
+                >
+                  <IconInbox size={16} />
+                  <InboxBadge
+                    apiBaseUrl={apiBaseUrl || "http://127.0.0.1:18900"}
+                    serviceRunning={serviceRunning}
+                    countOverride={inboxUnreadCount}
+                  />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">{t("inbox.openInbox")}</TooltipContent>
+            </Tooltip>
+          )}
+
+          {onOpenInbox && <div className="h-4 w-px bg-border" />}
 
           <Tooltip>
             <TooltipTrigger asChild>

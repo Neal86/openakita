@@ -13,18 +13,36 @@ let _loading: Promise<MdModules | null> | null = null;
 // 一个跨端（桌面 / Web / Capacitor）通用的 XSS 注入面。
 //
 // 修复：在 ``rehype-raw`` 之后串接 ``rehype-sanitize``，按 GitHub 白名单
-// （默认 schema）清洗 DOM；同时显式允许 ``code/pre`` 上的 ``className``
-// 属性，让 ``rehype-highlight`` 添加的高亮 class（``hljs language-xxx``）
-// 不被 sanitizer 误删。任何不在白名单中的元素 / 属性会被静默丢弃，原
-// 文本仍然可见，但不再具备执行能力。
+// （默认 schema）清洗 DOM；同时保留默认 schema 中用于 fenced code 的
+// ``language-*`` 正则规则，否则 ``rehype-highlight`` 无法识别代码语言。
+// 任何不在白名单中的元素 / 属性会被静默丢弃，原文本仍然可见，但不再
+// 具备执行能力。
+function cloneSanitizeSchemaValue(value: any): any {
+  if (value instanceof RegExp) return value;
+  if (Array.isArray(value)) return value.map(cloneSanitizeSchemaValue);
+  if (value && typeof value === "object") {
+    const copy: Record<string, any> = {};
+    for (const key of Object.keys(value)) {
+      copy[key] = cloneSanitizeSchemaValue(value[key]);
+    }
+    return copy;
+  }
+  return value;
+}
+
 function buildSanitizeSchema(defaultSchema: any) {
-  const schema = JSON.parse(JSON.stringify(defaultSchema || {}));
+  const schema = cloneSanitizeSchemaValue(defaultSchema || {});
   schema.attributes = schema.attributes || {};
 
   function ensureAttr(tag: string, attr: string) {
     const list = (schema.attributes[tag] || []).slice();
     if (!list.includes(attr)) list.push(attr);
     schema.attributes[tag] = list;
+  }
+  function ensureTag(tag: string) {
+    const list = (schema.tagNames || []).slice();
+    if (!list.includes(tag)) list.push(tag);
+    schema.tagNames = list;
   }
   function ensureClassName(tag: string) {
     const list = schema.attributes[tag] || [];
@@ -41,6 +59,9 @@ function buildSanitizeSchema(defaultSchema: any) {
   // 默认 GitHub schema 只放行 <a>/<img> 的 title，<span> 上的 title 会被剥掉
   // 导致 tooltip 失效。这里显式放行 span+title。
   ensureAttr("span", "title");
+  // GitHub schema does not include <mark>, but it is inert and useful for
+  // markdown notification bodies.
+  ensureTag("mark");
 
   // ── 数学占位 class 放行（issue #580）─────────────────────────────
   // GitHub 默认 schema 里 code 的 className 形如 [["className", {}]]，那个

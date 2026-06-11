@@ -714,6 +714,49 @@ class Settings(BaseSettings):
         description="阿里云人机验证 2.0 prefix 身份标（公开标识，下发到前端）。",
     )
 
+    # === Inbox / Update Push 配置 ===
+    inbox_enabled: bool = Field(
+        default=True,
+        description="是否启用站内信拉取与本地缓存。关闭后不拉取、不注册客户端 token、不上报交互。",
+    )
+    inbox_broadcast_url: str = Field(
+        default="https://dl-openakita.fzstack.com/inbox/broadcast.json",
+        description="站内信 L0 公开广播 JSON URL。",
+    )
+    inbox_api_url: str = Field(
+        default="https://openakita-admin-api.fzstack.com",
+        description="OpenAkita Platform L1 客户端 API base URL。",
+    )
+    inbox_poll_interval_sec: int = Field(
+        default=1800,
+        ge=60,
+        description="站内信后台拉取间隔（秒）。",
+    )
+    inbox_register_enabled: bool = Field(
+        default=True,
+        description="是否启用 L1 challenge/register/renew/poll/ack；关闭后只走 L0 广播。",
+    )
+    inbox_channel: str = Field(
+        default="release",
+        description="站内信与升级策略使用的客户端渠道。",
+    )
+    inbox_minisign_public_key: str = Field(
+        default="",
+        description="站内信 L0 broadcast.json minisign 公钥。留空表示跳过验签。",
+    )
+    inbox_minisign_executable: str = Field(
+        default="minisign",
+        description="用于验证站内信广播签名的 minisign 可执行文件。",
+    )
+    telemetry_enabled: bool = Field(
+        default=True,
+        description="是否允许匿名遥测/升级事件上报。当前站内信 ack 仍受 inbox_* 开关控制。",
+    )
+    updater_policy_endpoint: str = Field(
+        default="https://openakita-admin-api.fzstack.com/updater",
+        description="在线升级策略层 endpoint base URL，setup-center/updater 可按需使用。",
+    )
+
     # === OpenAkita Platform (Agent Hub / Skill Store) ===
     hub_enabled: bool = Field(
         default=False,

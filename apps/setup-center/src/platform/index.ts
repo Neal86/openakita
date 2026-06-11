@@ -314,11 +314,17 @@ export type UpdateInfo = {
   ) => Promise<void>;
 };
 
-export async function checkForUpdate(): Promise<UpdateInfo | null> {
+export async function checkForUpdate(options?: {
+  apiBaseUrl?: string;
+  channel?: string;
+}): Promise<UpdateInfo | null> {
   if (!IS_TAURI) return null;
   try {
     const { check } = await import("@tauri-apps/plugin-updater");
-    const update = await check();
+    const headers = await buildUpdaterHeaders(options?.apiBaseUrl);
+    if (options?.channel) headers.set("X-OpenAkita-Channel", options.channel);
+    const hasHeaders = Array.from(headers.keys()).length > 0;
+    const update = await check(hasHeaders ? { headers } : undefined);
     if (!update) return null;
     return {
       version: update.version,
@@ -328,6 +334,27 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
   } catch {
     return null;
   }
+}
+
+async function buildUpdaterHeaders(apiBaseUrl?: string): Promise<Headers> {
+  const headers = new Headers();
+  const base = apiBaseUrl || "http://127.0.0.1:18900";
+  try {
+    const res = await fetch(`${base}/api/inbox/diagnostics`, {
+      signal: AbortSignal.timeout(2_000),
+    });
+    if (!res.ok) return headers;
+    const data = await res.json();
+    if (typeof data.install_id_hash === "string" && data.install_id_hash) {
+      headers.set("X-Client-ID", data.install_id_hash);
+    }
+    if (typeof data.channel === "string" && data.channel) {
+      headers.set("X-OpenAkita-Channel", data.channel);
+    }
+  } catch {
+    // The updater can still fall back to the public CDN manifest.
+  }
+  return headers;
 }
 
 // ---------------------------------------------------------------------------

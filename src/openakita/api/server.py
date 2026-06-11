@@ -43,6 +43,7 @@ from .routes import (
     hub,
     identity,
     im,
+    inbox,
     logs,
     mcp,
     memory,
@@ -347,6 +348,7 @@ def create_app(
         {"name": "身份", "description": "AI 身份定义文件管理"},
         {"name": "定时任务", "description": "计划任务调度"},
         {"name": "即时通讯", "description": "IM 渠道与消息"},
+        {"name": "站内信", "description": "客户端站内信、升级公告与未读状态"},
         {"name": "Hub", "description": "Agent/Skill 导入导出与市场"},
         {"name": "工作区", "description": "备份、导入导出"},
         {"name": "健康检查", "description": "服务健康、诊断、调试"},
@@ -499,6 +501,7 @@ def create_app(
     app.include_router(files.router, tags=["文件"])
     app.include_router(health.router, tags=["健康检查"])
     app.include_router(im.router, tags=["即时通讯"])
+    app.include_router(inbox.router, tags=["站内信"])
     app.include_router(logs.router, tags=["日志"])
     app.include_router(mcp.router, tags=["MCP"])
     app.include_router(memory.router, tags=["记忆"])
@@ -728,6 +731,26 @@ def create_app(
             return {"status": "shutting_down"}
         logger.warning("No shutdown_event available, shutdown request ignored")
         return {"status": "error", "message": "shutdown not available in this mode"}
+
+    @app.on_event("startup")
+    async def _start_inbox_service():
+        try:
+            from openakita.config import settings
+            from openakita.inbox import get_inbox_service
+
+            if settings.inbox_enabled:
+                await get_inbox_service().start()
+        except Exception as e:
+            logger.warning("[Startup] Inbox service startup skipped: %s", e)
+
+    @app.on_event("shutdown")
+    async def _stop_inbox_service():
+        try:
+            from openakita.inbox import get_inbox_service
+
+            await get_inbox_service().stop()
+        except Exception as e:
+            logger.debug("[Shutdown] Inbox service stop skipped: %s", e)
 
     @app.on_event("startup")
     async def _startup_org_runtime():
