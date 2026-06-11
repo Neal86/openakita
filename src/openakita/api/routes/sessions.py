@@ -85,6 +85,32 @@ def _visible_history_messages(session) -> list[tuple[int, dict]]:
     return visible
 
 
+def _last_activity_ms(session, visible_msgs: list[dict]) -> int:
+    """Conversation 在列表里的"最后活动时间"（毫秒）。
+
+    以**最后一条真实消息**的时间戳为准，回退到 ``last_active`` 再回退到
+    ``created_at``。这样既能修正 issue #628（``last_active`` 曾被纯读取
+    访问刷成"刚活跃"），也能在不做数据迁移的前提下，让历史里已被污染的
+    ``last_active`` 在展示层自愈。
+    """
+    from datetime import datetime
+
+    for msg in reversed(visible_msgs):
+        ts = msg.get("timestamp")
+        if not ts:
+            continue
+        try:
+            return int(datetime.fromisoformat(ts).timestamp() * 1000)
+        except (ValueError, TypeError):
+            continue
+
+    base = getattr(session, "last_active", None) or getattr(session, "created_at", None)
+    try:
+        return int(base.timestamp() * 1000)
+    except Exception:
+        return 0
+
+
 _BACKFILL_DONE_FLAG = "_history_backfilled"
 
 
@@ -304,11 +330,17 @@ async def list_sessions(request: Request, channel: str = "desktop"):
     sessions = session_manager.list_sessions(channel=channel)
     # org_* sessions belong to OrgChatPanel (指挥台), not the main chat UI.
     sessions = [s for s in sessions if not s.chat_id.startswith("org_")]
-    sessions.sort(key=lambda s: s.last_active, reverse=True)
 
-    result = []
+    # 先算出每个会话的可见消息与"最后活动时间"，再按真实活动时间排序。
+    # 不能直接用 s.last_active 排序：它会被纯读取访问污染（issue #628）。
+    prepared = []
     for s in sessions:
         visible_msgs = [m for _, m in _visible_history_messages(s)]
+        prepared.append((s, visible_msgs, _last_activity_ms(s, visible_msgs)))
+    prepared.sort(key=lambda item: item[2], reverse=True)
+
+    result = []
+    for s, visible_msgs, last_ms in prepared:
         user_msgs = [m for m in visible_msgs if m.get("role") == "user"]
         first_user = user_msgs[0] if user_msgs else None
         title = ""
@@ -335,7 +367,7 @@ async def list_sessions(request: Request, channel: str = "desktop"):
                 "id": s.chat_id,
                 "title": title or "对话",
                 "lastMessage": last_msg_content,
-                "timestamp": int(s.last_active.timestamp() * 1000),
+                "timestamp": last_ms,
                 "messageCount": len(visible_msgs),
                 "agentProfileId": getattr(s.context, "agent_profile_id", "default"),
                 "endpointId": selected_endpoint or None,

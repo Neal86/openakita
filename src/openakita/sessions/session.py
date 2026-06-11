@@ -509,8 +509,25 @@ class Session:
         )
 
     def touch(self) -> None:
-        """更新活跃时间"""
+        """更新活跃时间
+
+        仅在**真实会话活动**（新增消息等）时调用，使 ``last_active`` 反映
+        用户最后一次交互的时间。纯读取/查询（拉历史、仪表盘轮询、改 UI
+        配置）不得调用本方法，否则 ``last_active`` 会被刷成"刚被访问"的时间，
+        导致会话列表时间与排序失真（见 issue #628）。读取场景请用
+        :meth:`reactivate`。
+        """
         self.last_active = datetime.now()
+        if self.state == SessionState.IDLE:
+            self.state = SessionState.ACTIVE
+
+    def reactivate(self) -> None:
+        """把空闲会话标回活跃，但**不**改动 ``last_active``。
+
+        供 ``get_session`` 等查询路径使用：被访问的会话可以从 IDLE 恢复成
+        ACTIVE，但"被访问"本身不算一次新的会话活动，不应改写它在会话列表
+        里的时间与排序位置。
+        """
         if self.state == SessionState.IDLE:
             self.state = SessionState.ACTIVE
 
