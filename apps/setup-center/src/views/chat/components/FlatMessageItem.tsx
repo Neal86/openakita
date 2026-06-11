@@ -1,15 +1,15 @@
-import { memo } from "react";
+import { memo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ChatMessage, MdModules } from "../utils/chatTypes";
 import { stripLegacySummary } from "../utils/chatHelpers";
-import { resolveMessageParts } from "../utils/messageParts";
+import { resolveMessageParts, hasRenderableBody } from "../utils/messageParts";
 import { formatTime } from "../../../utils";
 import { AttachmentPreview } from "./AttachmentPreview";
 import { SpinnerTipDisplay } from "./SpinnerTipDisplay";
 import { MarkdownContent } from "./MarkdownContent";
 import { MessageParts } from "./MessageParts";
 import { useSourceTagFormatter, extractTrailingSourceTag, SourceBadge } from "./SourceBadge";
-import { IconClipboard, IconEdit, IconRefresh, IconRewind } from "../../../icons";
+import { IconClipboard, IconEdit, IconRefresh, IconRewind, IconChevronRight } from "../../../icons";
 
 export const FlatMessageItem = memo(function FlatMessageItem({
   msg,
@@ -46,6 +46,7 @@ export const FlatMessageItem = memo(function FlatMessageItem({
 }) {
   const { t } = useTranslation();
   const formatSourceTags = useSourceTagFormatter();
+  const [revealChain, setRevealChain] = useState(false);
   const isUser = msg.role === "user";
   const isAssistant = msg.role === "assistant";
   const isSystem = msg.role === "system";
@@ -68,6 +69,22 @@ export const FlatMessageItem = memo(function FlatMessageItem({
       </div>
     );
   }
+
+  const parts = isAssistant ? resolveMessageParts(msg) : [];
+  // Local "view process" reveal can override the global hide-chain toggle for
+  // this one bubble.
+  const effShowChain = showChain || revealChain;
+  // Keep the streaming loading indicator up only while nothing else renders, so
+  // it never double-stacks under a plan / ask_user / artifact card and never
+  // lingers as a fake spinner when the chain is hidden (showChain=off).
+  const hasBody = isAssistant && hasRenderableBody(msg, parts, effShowChain, bodyContent);
+  // Avoid a blank completed bubble when the only thing produced was a chain the
+  // user chose to hide — surface a plain one-line handle into the process. Gate
+  // it on the chain actually being revealable (non-empty AND carried by a
+  // `reasoning` part) so the handle never becomes a dead click.
+  const canRevealChain =
+    !!msg.thinkingChain && msg.thinkingChain.length > 0 && parts.some((p) => p.kind === "reasoning");
+  const showRevealHandle = isAssistant && !msg.streaming && !hasBody && canRevealChain;
 
   return (
     <div className={`flatMessage flatMsgItem ${isUser ? "flatMsgUser" : "flatMsgAssistant"}`}>
@@ -97,17 +114,18 @@ export const FlatMessageItem = memo(function FlatMessageItem({
             </div>
           )}
 
-          {msg.streaming && !msg.content && msg.streamStatus && msg.thinkingChain && msg.thinkingChain.length > 0 && (
+          {msg.streaming && !msg.content && showChain && msg.streamStatus && msg.thinkingChain && msg.thinkingChain.length > 0 && (
             <SpinnerTipDisplay statusText={msg.streamStatus} />
           )}
 
           <MessageParts
             msg={msg}
-            parts={resolveMessageParts(msg)}
+            parts={parts}
             bodyContent={bodyContent}
             formatSourceTags={formatSourceTags}
             mdModules={mdModules}
-            showChain={showChain}
+            showChain={effShowChain}
+            forceExpandChain={revealChain}
             onSkipStep={onSkipStep}
             onImagePreview={onImagePreview}
             onAskAnswer={onAskAnswer}
@@ -118,7 +136,7 @@ export const FlatMessageItem = memo(function FlatMessageItem({
             httpApiBase={httpApiBase}
           />
 
-          {msg.streaming && !msg.content && (!msg.thinkingChain || msg.thinkingChain.length === 0) && (
+          {msg.streaming && !hasBody && (
             <div style={{ padding: "4px 0" }}>
               <div style={{ display: "flex", gap: 4 }}>
                 <span className="dotBounce" style={{ animationDelay: "0s" }} />
@@ -126,6 +144,17 @@ export const FlatMessageItem = memo(function FlatMessageItem({
                 <span className="dotBounce" style={{ animationDelay: "0.3s" }} />
               </div>
               <SpinnerTipDisplay statusText={msg.streamStatus} />
+            </div>
+          )}
+
+          {showRevealHandle && (
+            <div
+              className="chainCollapsedSummary"
+              onClick={() => setRevealChain(true)}
+              role="button"
+            >
+              <IconChevronRight size={11} />
+              <span>{t("chat.noBodyReveal")}</span>
             </div>
           )}
         </>

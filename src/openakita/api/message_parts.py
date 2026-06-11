@@ -66,7 +66,7 @@ def build_message_parts(msg: dict, *, todo: dict | None = None) -> list[dict]:
 
     parts: list[dict] = []
 
-    if msg.get("chain_summary"):
+    if msg.get("chain_summary") or msg.get("chain_timeline"):
         parts.append({"kind": "reasoning", "id": "reasoning"})
     if msg.get("org_timeline"):
         parts.append({"kind": "org_timeline", "id": "org_timeline"})

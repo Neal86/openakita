@@ -288,6 +288,7 @@
     "chainSummary": "思维过程",
     "explored": "处理了 {{desc}}",
     "chainCollapsed": "{{count}} 步推理过程",
+    "noBodyReveal": "本轮无正文回复 · 查看过程",
     "contextCompressed": "上下文压缩: {{before}}K → {{after}}K tokens",
     "processing": "处理中...",
     "processed": "已处理 ({{seconds}}s)",

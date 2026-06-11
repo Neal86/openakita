@@ -12,6 +12,7 @@ import type {
   ChainEntry,
   ChainToolCall,
   ChainSummaryItem,
+  ChainTimelineGroup,
 } from "./chatTypes";
 import { IS_TAURI } from "../../../platform";
 import { getAccessToken } from "../../../platform/auth";
@@ -326,6 +327,106 @@ export function buildChainFromSummary(summary: ChainSummaryItem[]): ChainGroup[]
   });
 }
 
+/**
+ * Restore the causal reasoning chain from the backend's persisted
+ * ``chain_timeline`` (the server mirror of the live ``ChainGroup.entries``
+ * assembly). Preferred over ``buildChainFromSummary`` because it preserves
+ * narration text, tool arguments, and the true text/tool ordering — the
+ * detail the lossy summary drops. Entries are coerced defensively since they
+ * arrive as untyped JSON.
+ */
+export function buildChainFromTimeline(timeline: ChainTimelineGroup[]): ChainGroup[] {
+  return timeline.map((g, gi) => {
+    const entries = coerceTimelineEntries((g as { entries?: unknown }).entries);
+    return {
+      iteration: typeof g.iteration === "number" ? g.iteration : gi,
+      entries,
+      ...(typeof g.durationMs === "number" ? { durationMs: g.durationMs } : {}),
+      hasThinking: entries.some((e) => e.kind === "thinking"),
+      collapsed: true,
+      toolCalls: toolCallsFromChainEntries(entries),
+    };
+  });
+}
+
+function coerceTimelineEntries(raw: unknown): ChainEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ChainEntry[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const kind = (item as { kind?: unknown }).kind;
+    const r = item as Record<string, unknown>;
+    switch (kind) {
+      case "thinking":
+        out.push({ kind: "thinking", content: String(r.content ?? "") });
+        break;
+      case "text":
+        out.push({ kind: "text", content: String(r.content ?? ""), ...(r.icon ? { icon: String(r.icon) } : {}) });
+        break;
+      case "tool_start":
+        out.push({
+          kind: "tool_start",
+          toolId: String(r.toolId ?? ""),
+          tool: String(r.tool ?? ""),
+          args: r.args && typeof r.args === "object" ? (r.args as Record<string, unknown>) : {},
+          description: String(r.description ?? ""),
+          status: r.status === "done" || r.status === "error" ? r.status : "running",
+        });
+        break;
+      case "tool_end":
+        out.push({
+          kind: "tool_end",
+          toolId: String(r.toolId ?? ""),
+          tool: String(r.tool ?? ""),
+          result: String(r.result ?? ""),
+          status: r.status === "error" ? "error" : "done",
+        });
+        break;
+      case "compressed":
+        out.push({
+          kind: "compressed",
+          beforeTokens: Number(r.beforeTokens ?? 0),
+          afterTokens: Number(r.afterTokens ?? 0),
+        });
+        break;
+      default:
+        break;
+    }
+  }
+  return out;
+}
+
+/** Derive the backward-compat ChainToolCall[] (IM views etc.) from chain entries. */
+function toolCallsFromChainEntries(entries: ChainEntry[]): ChainToolCall[] {
+  const byId = new Map<string, ChainToolCall>();
+  const order: string[] = [];
+  for (const e of entries) {
+    if (e.kind === "tool_start") {
+      const key = e.toolId || `${e.tool}-${order.length}`;
+      if (!byId.has(key)) order.push(key);
+      byId.set(key, {
+        toolId: e.toolId,
+        tool: e.tool,
+        args: e.args,
+        status: e.status === "done" || e.status === "error" ? e.status : "running",
+        description: e.description,
+      });
+    } else if (e.kind === "tool_end") {
+      const key = e.toolId || order[order.length - 1];
+      const prev = key ? byId.get(key) : undefined;
+      if (prev) {
+        prev.result = e.result;
+        prev.status = e.status;
+      } else {
+        const k = e.toolId || `${e.tool}-${order.length}`;
+        order.push(k);
+        byId.set(k, { toolId: e.toolId, tool: e.tool, args: {}, result: e.result, status: e.status, description: "" });
+      }
+    }
+  }
+  return order.map((k) => byId.get(k)).filter((x): x is ChainToolCall => !!x);
+}
+
 export function basename(path: string): string {
   if (!path) return "";
   return path.replace(/\\/g, "/").split("/").pop() || path;
@@ -420,6 +521,7 @@ type BackendHistoryMessage = {
   role: string;
   content: string;
   chain_summary?: ChainSummaryItem[];
+  chain_timeline?: ChainTimelineGroup[];
   artifacts?: ChatArtifact[] | null;
   usage?: ChatMessage["usage"];
   todo?: ChatTodo | null;
@@ -520,8 +622,14 @@ export function patchMessagesWithBackendDetailed(
     }
 
     const hasBrokenChain = m.thinkingChain?.some((g: ChainGroup) => !g.entries.length && !g.durationMs);
-    if (backend.chain_summary?.length && (!m.thinkingChain?.length || hasBrokenChain)) {
-      patches.thinkingChain = buildChainFromSummary(backend.chain_summary);
+    if (!m.thinkingChain?.length || hasBrokenChain) {
+      // Prefer the faithful timeline; fall back to the lossy summary for
+      // messages persisted before chain_timeline existed.
+      if (backend.chain_timeline?.length) {
+        patches.thinkingChain = buildChainFromTimeline(backend.chain_timeline);
+      } else if (backend.chain_summary?.length) {
+        patches.thinkingChain = buildChainFromSummary(backend.chain_summary);
+      }
     }
 
     if (m.thinkingChain && !patches.thinkingChain) {

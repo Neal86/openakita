@@ -27,6 +27,7 @@ export function MessageParts({
   formatSourceTags,
   mdModules,
   showChain = true,
+  forceExpandChain = false,
   onSkipStep,
   onImagePreview,
   onAskAnswer,
@@ -43,6 +44,8 @@ export function MessageParts({
   formatSourceTags: (text: string) => string;
   mdModules?: MdModules | null;
   showChain?: boolean;
+  /** Force the reasoning chain open in a single click (empty-bubble reveal). */
+  forceExpandChain?: boolean;
   onSkipStep?: () => void;
   onImagePreview?: (displayUrl: string, downloadUrl: string, name: string) => void;
   onAskAnswer?: (msgId: string, answer: string) => void;
@@ -59,7 +62,7 @@ export function MessageParts({
         switch (part.kind) {
           case "reasoning":
             return msg.thinkingChain && msg.thinkingChain.length > 0 ? (
-              <ThinkingChain key={part.id} chain={msg.thinkingChain} streaming={streaming} showChain={showChain} onSkipStep={onSkipStep} />
+              <ThinkingChain key={part.id} chain={msg.thinkingChain} streaming={streaming} showChain={showChain} forceExpand={forceExpandChain} onSkipStep={onSkipStep} />
             ) : null;
           case "thinking":
             return msg.thinking ? <ThinkingBlock key={part.id} content={msg.thinking} /> : null;

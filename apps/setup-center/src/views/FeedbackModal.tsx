@@ -59,7 +59,7 @@ export function FeedbackModal({ open, onClose, apiBase, initialMode = "bug", pre
   const [steps, setSteps] = useState("");
   const [uploadLogs, setUploadLogs] = useState(true);
   const [uploadDebug, setUploadDebug] = useState(true);
-  const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
+  const [, setSystemInfo] = useState<SystemInfo | null>(null);
 
   const [contactEmail, setContactEmail] = useState("");
   const [contactWechat, setContactWechat] = useState("");

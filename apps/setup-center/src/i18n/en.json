@@ -288,6 +288,7 @@
     "chainSummary": "Thinking process",
     "explored": "Explored {{desc}}",
     "chainCollapsed": "{{count}} reasoning steps",
+    "noBodyReveal": "No written reply this turn · view process",
     "contextCompressed": "Context compressed: {{before}}K → {{after}}K tokens",
     "processing": "Processing...",
     "processed": "Processed ({{seconds}}s)",

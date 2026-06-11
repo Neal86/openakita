@@ -1,15 +1,15 @@
-import { memo } from "react";
+import { memo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ChatMessage, ChatAttachment, MdModules } from "../utils/chatTypes";
 import { stripLegacySummary } from "../utils/chatHelpers";
-import { resolveMessageParts } from "../utils/messageParts";
+import { resolveMessageParts, hasRenderableBody } from "../utils/messageParts";
 import { formatTime } from "../../../utils";
 import { AttachmentPreview } from "./AttachmentPreview";
 import { SpinnerTipDisplay } from "./SpinnerTipDisplay";
 import { MarkdownContent } from "./MarkdownContent";
 import { MessageParts } from "./MessageParts";
 import { useSourceTagFormatter, extractTrailingSourceTag, SourceBadge } from "./SourceBadge";
-import { IconClipboard, IconEdit, IconRefresh, IconRewind } from "../../../icons";
+import { IconClipboard, IconEdit, IconRefresh, IconRewind, IconChevronRight } from "../../../icons";
 
 export const MessageBubble = memo(function MessageBubble({
   msg,
@@ -46,6 +46,7 @@ export const MessageBubble = memo(function MessageBubble({
 }) {
   const { t } = useTranslation();
   const formatSourceTags = useSourceTagFormatter();
+  const [revealChain, setRevealChain] = useState(false);
   const isUser = msg.role === "user";
   const isAssistant = msg.role === "assistant";
   const usageTotal = msg.usage
@@ -60,6 +61,25 @@ export const MessageBubble = memo(function MessageBubble({
   const rawBody = isUser ? msg.content : stripLegacySummary(msg.content || "");
   const { stripped: bodyContent, trailingType: footerSourceType } =
     isUser ? { stripped: rawBody, trailingType: null } : extractTrailingSourceTag(rawBody);
+
+  const parts = isAssistant ? resolveMessageParts(msg) : [];
+  // The local "view process" reveal can override the global hide-chain toggle
+  // for this one bubble, so the effective value drives both rendering and the
+  // emptiness check.
+  const effShowChain = showChain || revealChain;
+  // Drives the streaming loading indicator: keep it visible only while the
+  // bubble has nothing else to render (covers showChain=off where the chain is
+  // hidden, without double-stacking under a plan / ask_user / artifact card).
+  const hasBody = isAssistant && hasRenderableBody(msg, parts, effShowChain, bodyContent);
+  // A finished assistant turn that renders nothing visible yet still hides a
+  // reasoning chain (global toggle off) would otherwise be a blank bubble —
+  // offer a plain one-line handle into the process instead. Only when revealing
+  // will actually surface the chain: the chain must be non-empty AND carried by
+  // a `reasoning` part (the only part `showChain` gates), so the handle can
+  // never become a dead click that leaves the bubble blank.
+  const canRevealChain =
+    !!msg.thinkingChain && msg.thinkingChain.length > 0 && parts.some((p) => p.kind === "reasoning");
+  const showRevealHandle = isAssistant && !msg.streaming && !hasBody && canRevealChain;
 
   return (
     <div className="msgBubbleWrap" style={{ display: "flex", flexDirection: "column", alignItems: isUser ? "flex-end" : "flex-start", marginBottom: 16, position: "relative" }}>
@@ -92,17 +112,18 @@ export const MessageBubble = memo(function MessageBubble({
 
         {isAssistant ? (
           <>
-            {msg.streaming && !msg.content && msg.streamStatus && msg.thinkingChain && msg.thinkingChain.length > 0 && (
+            {msg.streaming && !msg.content && showChain && msg.streamStatus && msg.thinkingChain && msg.thinkingChain.length > 0 && (
               <SpinnerTipDisplay statusText={msg.streamStatus} />
             )}
 
             <MessageParts
               msg={msg}
-              parts={resolveMessageParts(msg)}
+              parts={parts}
               bodyContent={bodyContent}
               formatSourceTags={formatSourceTags}
               mdModules={mdModules}
-              showChain={showChain}
+              showChain={effShowChain}
+              forceExpandChain={revealChain}
               onSkipStep={onSkipStep}
               onImagePreview={onImagePreview}
               onAskAnswer={onAskAnswer}
@@ -113,7 +134,7 @@ export const MessageBubble = memo(function MessageBubble({
               httpApiBase={httpApiBase}
             />
 
-            {msg.streaming && !msg.content && (!msg.thinkingChain || msg.thinkingChain.length === 0) && (
+            {msg.streaming && !hasBody && (
               <div style={{ padding: "4px 0" }}>
                 <div style={{ display: "flex", gap: 4 }}>
                   <span className="dotBounce" style={{ animationDelay: "0s" }} />
@@ -121,6 +142,17 @@ export const MessageBubble = memo(function MessageBubble({
                   <span className="dotBounce" style={{ animationDelay: "0.3s" }} />
                 </div>
                 <SpinnerTipDisplay statusText={msg.streamStatus} />
+              </div>
+            )}
+
+            {showRevealHandle && (
+              <div
+                className="chainCollapsedSummary"
+                onClick={() => setRevealChain(true)}
+                role="button"
+              >
+                <IconChevronRight size={11} />
+                <span>{t("chat.noBodyReveal")}</span>
               </div>
             )}
           </>

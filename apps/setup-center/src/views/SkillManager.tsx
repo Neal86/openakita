@@ -6,12 +6,12 @@ import { invoke, IS_TAURI } from "../platform";
 import { useTranslation } from "react-i18next";
 import type { SkillInfo, SkillConfigField, MarketplaceSkill, EnvMap } from "../types";
 import { envGet, envSet } from "../utils";
-import { IconGear, IconZap, IconPackage, IconStar, IconCheck, IconX, IconDownload, IconSearch, IconConfig, IconFolderOpen, IconEdit, IconTrash, IconEye } from "../icons";
+import { IconGear, IconZap, IconPackage, IconStar, IconCheck, IconX, IconDownload, IconSearch, IconFolderOpen, IconEdit, IconTrash, IconEye } from "../icons";
 import { Loader2, ChevronDown, ChevronRight } from "lucide-react";
 import { safeFetch } from "../providers";
 import { toast } from "sonner";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -2621,7 +2621,6 @@ export function SkillManager({
                   const readonly = meta?.system_readonly ?? false;
                   const total = items.length;
                   const enabled = items.filter(s => s.enabled).length;
-                  const busy = categoryBusy === catName;
                   const collapsed = !expandedCategories.has(catName);
                   const toggleCollapse = () => setExpandedCategories(prev => {
                     const next = new Set(prev);

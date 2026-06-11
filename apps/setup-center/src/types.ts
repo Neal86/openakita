@@ -366,6 +366,20 @@ export type ChainToolCall = {
   description: string;
 };
 
+/**
+ * Persisted causal reasoning-chain timeline (the server mirrors the browser's
+ * ``ChainGroup.entries`` assembly and stores it as ``chain_timeline``). The
+ * client restores it with ``buildChainFromTimeline`` so the reasoning chain
+ * re-displays faithfully after reload / multi-window switch, instead of the
+ * lossy ``chain_summary`` rebuild. Entries reuse the live ``ChainEntry`` shape
+ * (minus ``config_hint``, which is not persisted).
+ */
+export type ChainTimelineGroup = {
+  iteration: number;
+  entries: ChainEntry[];
+  durationMs?: number;
+};
+
 /** IM 消息中的思维链摘要项 */
 export type ChainSummaryItem = {
   iteration: number;

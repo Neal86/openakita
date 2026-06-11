@@ -167,7 +167,7 @@ export function OrgDashboard({ orgId, apiBaseUrl, orgName, onNodeClick }: OrgDas
   const { t } = useTranslation();
   const [stats, setStats] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-  const [tick, setTick] = useState(0);
+  const [, setTick] = useState(0);
   const mdModules = useMdModules();
   const formatSourceTags = useSourceTagFormatter();
 

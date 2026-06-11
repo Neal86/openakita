@@ -766,6 +766,13 @@ async def _stream_chat(
     # ``auto_close_todo`` unregisters the plan before the assistant message is
     # saved, so a save-time registry lookup would miss completed plans (#615).
     _last_todo_snapshot: dict | None = None
+    # Server-side mirror of the browser's reasoning-chain assembly. Built from
+    # the same SSE events so the persisted history can restore the causal
+    # timeline (thinking / narration / tool args / results, in order) instead of
+    # the lossy chain_summary on cross-window / cross-device reload.
+    from ..chain_timeline import ChainTimelineBuilder
+
+    _chain_timeline_builder = ChainTimelineBuilder()
 
     async def _check_disconnected() -> bool:
         nonlocal _client_disconnected
@@ -1142,6 +1149,10 @@ async def _stream_chat(
 
             event_type = event.get("type", "")
 
+            # Observe every raw event (before coalescing / disconnect gating) so
+            # the persisted timeline is complete regardless of wire state.
+            _chain_timeline_builder.observe(event)
+
             if event_type == "__agent_error__":
                 _agent_errored = True
                 _agent_error_msg = event.get("__exc_msg__") or "Unknown error"
@@ -1447,6 +1458,9 @@ async def _stream_chat(
                 _msg_meta: dict = {}
                 if _chain_summary:
                     _msg_meta["chain_summary"] = _chain_summary
+                _chain_timeline = _chain_timeline_builder.build()
+                if _chain_timeline:
+                    _msg_meta["chain_timeline"] = _chain_timeline
                 if _tool_summary:
                     _msg_meta["tool_summary"] = _tool_summary
                 if _collected_artifacts:
@@ -1575,6 +1589,7 @@ async def _stream_chat(
                     if ev is None or ev.get("type") == "__agent_error__":
                         break
                     et = ev.get("type", "")
+                    _chain_timeline_builder.observe(ev)
                     if et != "done":
                         _sse(et, {k: v for k, v in ev.items() if k != "type"})
             except Exception:
@@ -1586,6 +1601,9 @@ async def _stream_chat(
                     _deferred_meta: dict = {}
                     if _collected_artifacts:
                         _deferred_meta["artifacts"] = _collected_artifacts
+                    _deferred_timeline = _chain_timeline_builder.build()
+                    if _deferred_timeline:
+                        _deferred_meta["chain_timeline"] = _deferred_timeline
                     session.add_message("assistant", _deferred_text, **_deferred_meta)
                     if session_manager:
                         session_manager.persist()

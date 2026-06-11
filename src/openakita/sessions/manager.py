@@ -354,7 +354,10 @@ class SessionManager:
             if session_key in self._sessions:
                 session = self._sessions[session_key]
                 self._attach_manager(session)
-                session.touch()
+                # 纯查询不改 last_active：真实活动由 add_message → touch 记账。
+                # 否则仪表盘轮询 / 拉历史等读取会把会话刷到"刚活跃"，导致
+                # 会话列表时间与排序失真（issue #628）。
+                session.reactivate()
                 return session
 
         # 磁盘恢复在锁外执行，避免 IO 阻塞其他线程
@@ -365,13 +368,13 @@ class SessionManager:
             if session_key in self._sessions:
                 session = self._sessions[session_key]
                 self._attach_manager(session)
-                session.touch()
+                session.reactivate()
                 return session
 
             if recovered is not None:
                 self._sessions[session_key] = recovered
                 self._attach_manager(recovered)
-                recovered.touch()
+                recovered.reactivate()
                 logger.info(
                     f"Recovered session from disk: {session_key} "
                     f"({len(recovered.context.messages)} messages)"

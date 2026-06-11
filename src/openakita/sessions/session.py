@@ -509,8 +509,25 @@ class Session:
         )
 
     def touch(self) -> None:
-        """更新活跃时间"""
+        """更新活跃时间
+
+        仅在**真实会话活动**（新增消息等）时调用，使 ``last_active`` 反映
+        用户最后一次交互的时间。纯读取/查询（拉历史、仪表盘轮询、改 UI
+        配置）不得调用本方法，否则 ``last_active`` 会被刷成"刚被访问"的时间，
+        导致会话列表时间与排序失真（见 issue #628）。读取场景请用
+        :meth:`reactivate`。
+        """
         self.last_active = datetime.now()
+        if self.state == SessionState.IDLE:
+            self.state = SessionState.ACTIVE
+
+    def reactivate(self) -> None:
+        """把空闲会话标回活跃，但**不**改动 ``last_active``。
+
+        供 ``get_session`` 等查询路径使用：被访问的会话可以从 IDLE 恢复成
+        ACTIVE，但"被访问"本身不算一次新的会话活动，不应改写它在会话列表
+        里的时间与排序位置。
+        """
         if self.state == SessionState.IDLE:
             self.state = SessionState.ACTIVE
 
@@ -614,7 +631,7 @@ class Session:
     # 计划卡跨重载/多窗口回显（#615）的持久来源，裁掉会让老消息的计划卡再次消失。
     # ``parts`` 也不在此：它是由扁平字段派生的渲染投影（见 api/message_parts.py），
     # 从不入库，故不会撑大 sessions.json，也无需裁剪。
-    _HEAVY_METADATA_KEYS = ("chain_summary", "tool_summary", "artifacts")
+    _HEAVY_METADATA_KEYS = ("chain_summary", "tool_summary", "artifacts", "chain_timeline")
     # 保留最近 N 条消息的完整元数据（前端展示思考链等），更早的仅保留 base content
     _METADATA_PRESERVE_WINDOW = 50
 

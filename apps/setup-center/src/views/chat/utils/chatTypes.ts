@@ -24,6 +24,7 @@ import type {
   ChainToolCall,
   ChainEntry,
   ChainSummaryItem,
+  ChainTimelineGroup,
 } from "../../../types";
 
 export type {
@@ -49,6 +50,7 @@ export type {
   ChainToolCall,
   ChainEntry,
   ChainSummaryItem,
+  ChainTimelineGroup,
 };
 
 /** Lazy-loaded markdown rendering modules */

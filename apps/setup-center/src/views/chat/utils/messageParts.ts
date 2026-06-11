@@ -129,6 +129,58 @@ export function coerceMessageParts(raw: unknown, msg: ChatMessage): MessagePart[
  * persisted) `parts`, otherwise derive from flat fields. Always self-heals
  * attachment/plan/ask payloads from flat fields when the marker omitted them.
  */
+/**
+ * Does this assistant message currently have at least one part that will
+ * actually render something visible, given the chosen `showChain` mode and the
+ * already-stripped `bodyContent`?
+ *
+ * This is the single source of truth for "is the bubble empty?" — used by the
+ * renderers to decide whether to keep the streaming loading indicator visible.
+ * Looking only at `msg.content` is wrong: a turn can surface a plan card,
+ * ask_user prompt, artifact, sources, etc. with empty answer text, and the
+ * reasoning chain itself is hidden when `showChain` is off. Each branch MUST
+ * mirror the render guard of the matching `case` in `MessageParts.tsx`; if a
+ * new part kind is added there, add it here too (the default stays false, which
+ * only over-reports emptiness and is the safe failure mode).
+ */
+export function hasRenderableBody(
+  msg: ChatMessage,
+  parts: MessagePart[],
+  showChain: boolean,
+  bodyContent: string,
+): boolean {
+  return parts.some((part) => {
+    switch (part.kind) {
+      case "reasoning":
+        return showChain && !!msg.thinkingChain && msg.thinkingChain.length > 0;
+      case "thinking":
+        return !!msg.thinking;
+      case "org_timeline":
+        return !!msg.orgTimeline && msg.orgTimeline.length > 0;
+      case "sources":
+        return !!msg.sources && msg.sources.length > 0;
+      case "mcp":
+        return !!msg.mcpCalls && msg.mcpCalls.length > 0;
+      case "plan": {
+        const todo = part.todo || msg.todo;
+        return !!todo && !!todo.steps && todo.steps.length > 0;
+      }
+      case "text":
+        return !!bodyContent;
+      case "tools":
+        return !!msg.toolCalls && msg.toolCalls.length > 0;
+      case "attachment":
+        return !!part.artifact;
+      case "ask_user":
+        return !!(part.ask || msg.askUser);
+      case "error":
+        return !!msg.errorInfo;
+      default:
+        return false;
+    }
+  });
+}
+
 export function resolveMessageParts(msg: ChatMessage): MessagePart[] {
   const explicit = coerceMessageParts(msg.parts, msg);
   if (explicit) {

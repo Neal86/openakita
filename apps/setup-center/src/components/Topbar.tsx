@@ -5,7 +5,7 @@ import type { Theme } from "../theme";
 import { setLanguage, getLanguagePref } from "../i18n";
 import {
   DotGreen, DotGray,
-  IconX, IconLink, IconPower, IconRefresh,
+  IconLink, IconPower, IconRefresh,
   IconLaptop, IconMoon, IconSun, IconGlobe, IconClipboard,
   IconCheck, IconInbox,
 } from "../icons";
@@ -75,7 +75,7 @@ export function Topbar({
   envDraft, setEnvDraft, restartService, askConfirm,
   inboxUnreadCount, onOpenInbox,
 }: TopbarProps) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const [remoteCopyState, setRemoteCopyState] = useState<"idle" | "copied" | "no_ip">("idle");
   const [remoteDialogOpen, setRemoteDialogOpen] = useState(false);
 

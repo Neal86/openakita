@@ -2,7 +2,7 @@ import { createContext, useCallback, useEffect, useMemo, useRef, useState, lazy,
 import { useTranslation } from "react-i18next";
 import { invoke, listen, IS_TAURI, IS_WEB, IS_CAPACITOR, IS_LOCAL_WEB, getAppVersion, onWsEvent, reconnectWsNow, setWsApiBaseUrl, logger } from "./platform";
 import { getActiveServer, getActiveServerId } from "./platform/servers";
-import { checkAuth, installFetchInterceptor, AUTH_EXPIRED_EVENT, isPasswordUserSet, clearAccessToken, setTauriRemoteMode, isTauriRemoteMode } from "./platform/auth";
+import { checkAuth, installFetchInterceptor, AUTH_EXPIRED_EVENT, clearAccessToken, setTauriRemoteMode, isTauriRemoteMode } from "./platform/auth";
 import { LoginView } from "./views/LoginView";
 import { SetupView } from "./views/SetupView";
 import { ServerManagerView } from "./views/ServerManagerView";
@@ -40,12 +40,12 @@ import { RuntimeEnvironmentDialog, type RuntimeDiagnostics } from "./components/
 import type {
   EndpointSummary as EndpointSummaryType,
   PlatformInfo, WorkspaceSummary, ProviderInfo,
-  EndpointDraft, PythonCandidate, BundledPythonInstallResult, InstallSource,
+  EndpointDraft,
   EnvMap, StepId, Step, ViewId,
 } from "./types";
 import {
   IconCheckCircle, IconXCircle, IconInfo,
-  IconLightbulb, IconAlertCircle, IconCheck, IconPartyPopper,
+  IconAlertCircle, IconCheck, IconPartyPopper,
 } from "./icons";
 import { ChevronRight, Loader2, AlertTriangle, CheckCircle2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -55,7 +55,6 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import logoUrl from "./assets/logo.png";
 import "highlight.js/styles/github.css";
 import { getThemePref, setThemePref, THEME_CHANGE_EVENT, type Theme } from "./theme";
@@ -63,8 +62,7 @@ import { copyToClipboard } from "./utils/clipboard";
 import { BUILTIN_PROVIDERS, PIP_INDEX_PRESETS } from "./constants";
 import { safeFetch } from "./providers";
 import {
-  joinPath, toFileUrl,
-  envGet, envSet,
+  joinPath,
 } from "./utils";
 // ═══════════════════════════════════════════════════════════════════════
 // 前后端交互路由原则（全局适用）：
@@ -79,8 +77,7 @@ import {
 //   1. Onboarding（打包模式）：NSIS → onboarding wizard → 写本地 → 启动服务 → HTTP API
 //   2. Wizard Full（开发者模式）：选工作区 → 装 venv → 配置端点(本地) → 启动服务 → HTTP API
 // ═══════════════════════════════════════════════════════════════════════
-import { WebPasswordManager } from "./components/WebPasswordManager";
-import { FieldText, FieldBool, FieldSelect, FieldCombo, FieldSlider, TelegramPairingCodeHint } from "./components/EnvFields";
+import { FieldText, FieldBool, FieldSelect } from "./components/EnvFields";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { DegradedBanner } from "./components/DegradedBanner";
 import { ModalOverlay } from "./components/ModalOverlay";
@@ -98,15 +95,6 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import WebSearchProviderPanel from "./components/WebSearchProviderPanel";
 import { INBOX_REFRESH_EVENT, INBOX_UNREAD_CHANGED_EVENT } from "./components/InboxBadge";
 import { isHighPriorityInbox, type InboxUpdatePayload, type InboxWsMessagePayload } from "./inboxTypes";
-
-const THEME_I18N_KEYS: Record<Theme, string> = {
-  system: "topbar.themeSystem",
-  dark: "topbar.themeDark",
-  light: "topbar.themeLight",
-  "daltonized-light": "topbar.themeDaltonizedLight",
-  "daltonized-dark": "topbar.themeDaltonizedDark",
-  "high-contrast": "topbar.themeHighContrast",
-};
 
 /** Health-check timeout for recurring monitoring (heartbeat + refreshStatus).
  *  Startup/one-shot probes keep their own shorter timeouts.
@@ -244,7 +232,7 @@ function UserDocsFrame({
 }
 
 function MainApp() {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
 
   // ── Web / Capacitor auth gate ──
   // IS_LOCAL_WEB: hostname is 127.0.0.1/localhost/::1 — backend authenticates
@@ -375,8 +363,6 @@ function MainApp() {
   const [currentWorkspaceId, setCurrentWorkspaceId] = useState<string | null>(null);
   const { confirmDialog, setConfirmDialog, askConfirm } = useNotifications();
   const busy: string | null = null;
-  const [dangerAck, setDangerAck] = useState(false);
-
   // ── Restart overlay state ──
   const [restartOverlay, setRestartOverlay] = useState<{
     phase: "saving" | "restarting" | "waiting" | "done" | "fail" | "notRunning";
@@ -543,8 +529,6 @@ function MainApp() {
       history.replaceState(null, "", window.location.pathname + window.location.search);
     }
   }, [isMobile]);
-  const currentStepIdxRaw = useMemo(() => steps.findIndex((s) => s.id === stepId), [steps, stepId]);
-  const currentStepIdx = currentStepIdxRaw < 0 ? 0 : currentStepIdxRaw;
 
   useEffect(() => {
     if (stepId === "workspace") {
@@ -563,7 +547,7 @@ function MainApp() {
   // ── Onboarding Wizard (首次安装引导) ──
   type OnboardingStep = "ob-welcome" | "ob-agreement" | "ob-llm" | "ob-im" | "ob-finish" | "ob-progress" | "ob-done";
   const [obStep, setObStep] = useState<OnboardingStep>("ob-welcome");
-  const [obInstallLog, setObInstallLog] = useState<string[]>([]);
+  const [, setObInstallLog] = useState<string[]>([]);
   const [obInstalling, setObInstalling] = useState(false);
   const [obEnvCheck, setObEnvCheck] = useState<{
     openakitaRoot: string;
@@ -707,26 +691,15 @@ function MainApp() {
   // workspace quick-create name is managed by Topbar via wsQuickName state
 
   // python / venv / install
-  const [pythonCandidates, setPythonCandidates] = useState<PythonCandidate[]>([]);
-  const [selectedPythonIdx, setSelectedPythonIdx] = useState<number>(-1);
   const [venvStatus, setVenvStatus] = useState<string>("");
-  const [installLog, setInstallLog] = useState<string>("");
   const [installLiveLog, setInstallLiveLog] = useState<string>("");
   const [installProgress, setInstallProgress] = useState<{ stage: string; percent: number } | null>(null);
-  const [extras, setExtras] = useState<string>("all");
   const [indexUrl, setIndexUrl] = useState<string>("https://mirrors.aliyun.com/pypi/simple/");
-  const [pipIndexPresetId, setPipIndexPresetId] = useState<"official" | "tuna" | "ustc" | "aliyun" | "custom">("aliyun");
+  const [pipIndexPresetId] = useState<"official" | "tuna" | "ustc" | "aliyun" | "custom">("aliyun");
   const [customIndexUrl, setCustomIndexUrl] = useState<string>("");
-  const [venvReady, setVenvReady] = useState(false);
+  const [, setVenvReady] = useState(false);
   const [openakitaInstalled, setOpenakitaInstalled] = useState(false);
-  const [installSource, setInstallSource] = useState<InstallSource>("pypi");
-  const [githubRepo, setGithubRepo] = useState<string>("openakita/openakita");
-  const [githubRefType, setGithubRefType] = useState<"branch" | "tag">("branch");
-  const [githubRef, setGithubRef] = useState<string>("main");
-  const [localSourcePath, setLocalSourcePath] = useState<string>("");
-  const [pypiVersions, setPypiVersions] = useState<string[]>([]);
-  const [pypiVersionsLoading, setPypiVersionsLoading] = useState(false);
-  const [selectedPypiVersion, setSelectedPypiVersion] = useState<string>(""); // "" = 推荐同版本
+  const [, setSelectedPypiVersion] = useState<string>(""); // "" = 推荐同版本
   const [runtimeDiag, setRuntimeDiag] = useState<RuntimeDiagnostics | null>(null);
   const [runtimeDiagChecking, setRuntimeDiagChecking] = useState(false);
   const [runtimeDialogOpen, setRuntimeDialogOpen] = useState(false);
@@ -738,8 +711,8 @@ function MainApp() {
   const [savedSttEndpoints, setSavedSttEndpoints] = useState<EndpointDraft[]>([]);
 
   // status panel data
-  const [statusLoading, setStatusLoading] = useState(false);
-  const [statusError, setStatusError] = useState<string | null>(null);
+  const [, setStatusLoading] = useState(false);
+  const [, setStatusError] = useState<string | null>(null);
   const [endpointSummary, setEndpointSummary] = useState<
     { name: string; provider: string; apiType: string; baseUrl: string; model: string; keyEnv: string; keyPresent: boolean; enabled?: boolean }[]
   >([]);
@@ -816,11 +789,11 @@ function MainApp() {
   }, []);
   const [detectedProcesses, setDetectedProcesses] = useState<Array<{ pid: number; cmd: string }>>([]);
   const [serviceLog, setServiceLog] = useState<{ path: string; content: string; truncated: boolean } | null>(null);
-  const [serviceLogError, setServiceLogError] = useState<string | null>(null);
+  const [, setServiceLogError] = useState<string | null>(null);
   const serviceLogRef = useRef<HTMLPreElement>(null);
   const logAtBottomRef = useRef(true);
-  const [appVersion, setAppVersion] = useState<string>("");
-  const [openakitaVersion, setOpenakitaVersion] = useState<string>("");
+  const [, setAppVersion] = useState<string>("");
+  const [, setOpenakitaVersion] = useState<string>("");
 
   // Health check state
   const [endpointHealth, setEndpointHealth] = useState<Record<string, {
@@ -1496,11 +1469,6 @@ function MainApp() {
     return unsub;
   }, [webAuthed, fetchInboxUnreadCount, checkForAppUpdate, t]);
 
-  const canUsePython = useMemo(() => {
-    if (selectedPythonIdx < 0) return false;
-    return pythonCandidates[selectedPythonIdx]?.isUsable ?? false;
-  }, [pythonCandidates, selectedPythonIdx]);
-
   // Keep preset <-> index-url consistent
   useEffect(() => {
     const t = indexUrl.trim();
@@ -1736,208 +1704,6 @@ function MainApp() {
         message: t("topbar.switchWorkspaceConfirmMsg", { name: displayName }),
         performSwitch: () => invoke("set_current_workspace", { id }),
       });
-    }
-  }
-
-  async function doDetectPython() {
-    const _busyId = notifyLoading("检测项目 Python 环境...");
-    try {
-      const cands = await invoke<PythonCandidate[]>("detect_python");
-      setPythonCandidates(cands);
-      const firstUsable = cands.findIndex((c) => c.isUsable);
-      setSelectedPythonIdx(firstUsable);
-      notifySuccess(firstUsable >= 0 ? "已找到可用 Python（3.11+）" : "未找到可用内置 Python（请检查安装包完整性）");
-    } catch (e) {
-      notifyError(String(e));
-    } finally {
-      dismissLoading(_busyId);
-    }
-  }
-
-  async function doInstallEmbeddedPython() {
-    const _busyId = notifyLoading("检查内置 Python...");
-    try {
-      setVenvStatus("检查内置 Python 中...");
-      const r = await invoke<BundledPythonInstallResult>("install_bundled_python", { pythonSeries: "3.11" });
-      const cand: PythonCandidate = {
-        command: r.pythonCommand,
-        versionText: `bundled (${r.tag}): ${r.assetName}`,
-        isUsable: true,
-      };
-      setPythonCandidates((prev) => [cand, ...prev.filter((p) => p.command.join(" ") !== cand.command.join(" "))]);
-      setSelectedPythonIdx(0);
-      setVenvStatus(`内置 Python 就绪：${r.pythonPath}`);
-      notifySuccess("内置 Python 可用，可以继续创建 venv");
-    } catch (e) {
-      notifyError(String(e));
-      setVenvStatus(`内置 Python 不可用：${String(e)}`);
-    } finally {
-      dismissLoading(_busyId);
-    }
-  }
-
-  async function doCreateVenv() {
-    if (!canUsePython) return;
-    const _busyId = notifyLoading("创建 venv...");
-    try {
-      setVenvStatus("创建 venv 中...");
-      const py = pythonCandidates[selectedPythonIdx].command;
-      await invoke<string>("create_venv", { pythonCommand: py, venvDir });
-      setVenvStatus(`venv 就绪：${venvDir}`);
-      setVenvReady(true);
-      setOpenakitaInstalled(false);
-      notifySuccess("venv 已准备好，可以安装 openakita");
-      await persistPythonEnvConfig(venvDir);
-    } catch (e) {
-      notifyError(String(e));
-      setVenvStatus(`创建 venv 失败：${String(e)}`);
-    } finally {
-      dismissLoading(_busyId);
-    }
-  }
-
-  async function persistPythonEnvConfig(venvPath: string) {
-    if (!currentWorkspaceId || !IS_TAURI) return;
-    try {
-      const entries: { key: string; value: string }[] = [
-        { key: "PYTHON_VENV_PATH", value: venvPath },
-      ];
-      await invoke("workspace_update_env", { workspaceId: currentWorkspaceId, entries });
-      setEnvDraft((prev) => {
-        const next = { ...prev };
-        next["PYTHON_VENV_PATH"] = venvPath;
-        return next;
-      });
-    } catch {
-      // best-effort
-    }
-  }
-
-  async function doCreateVenvFromPython() {
-    if (!canUsePython) return;
-    const _busyId = notifyLoading(t("config.pyCreatingVenv"));
-    try {
-      setVenvStatus(t("config.pyCreatingVenv"));
-      const py = pythonCandidates[selectedPythonIdx].command;
-      await invoke<string>("create_venv", { pythonCommand: py, venvDir });
-      setVenvStatus(t("config.pyVenvCreated", { path: venvDir }));
-      setVenvReady(true);
-      setOpenakitaInstalled(false);
-      await persistPythonEnvConfig(venvDir);
-      notifySuccess(t("config.pyVenvReady"));
-    } catch (e) {
-      notifyError(String(e));
-      setVenvStatus(t("config.pyVenvCreateFail") + `: ${String(e)}`);
-    } finally {
-      dismissLoading(_busyId);
-    }
-  }
-
-  async function doFetchPypiVersions() {
-    setPypiVersionsLoading(true);
-    setPypiVersions([]);
-    try {
-      const raw = await invoke<string>("fetch_pypi_versions", {
-        package: "openakita",
-        indexUrl: indexUrl.trim() ? indexUrl.trim() : null,
-      });
-      const list = JSON.parse(raw) as string[];
-      setPypiVersions(list);
-      // Auto-select: match Setup Center version if available
-      if (appVersion && list.includes(appVersion)) {
-        setSelectedPypiVersion(appVersion);
-      } else if (list.length > 0) {
-        setSelectedPypiVersion(list[0]); // latest
-      }
-    } catch (e: any) {
-      notifyError(`获取 PyPI 版本列表失败：${e}`);
-    } finally {
-      setPypiVersionsLoading(false);
-    }
-  }
-
-  async function doSetupVenvAndInstallOpenAkita() {
-    if (!canUsePython) {
-      notifyError("请先在 Python 步骤安装/检测并选择一个可用 Python（3.11+）。");
-      return;
-    }
-    setInstallLiveLog("");
-    setInstallProgress({ stage: "准备开始", percent: 1 });
-    const _busyId = notifyLoading("创建 venv 并安装 openakita...");
-    try {
-      // 1) create venv (idempotent)
-      setInstallProgress({ stage: "创建 venv", percent: 10 });
-      setVenvStatus("创建 venv 中...");
-      const py = pythonCandidates[selectedPythonIdx].command;
-      await invoke<string>("create_venv", { pythonCommand: py, venvDir });
-      setVenvReady(true);
-      setOpenakitaInstalled(false);
-      setVenvStatus(`venv 就绪：${venvDir}`);
-      setInstallProgress({ stage: "venv 就绪", percent: 30 });
-      await persistPythonEnvConfig(venvDir);
-
-      // 2) pip install
-      setInstallProgress({ stage: "pip 安装", percent: 35 });
-      setVenvStatus("安装 openakita 中（pip）...");
-      setInstallLog("");
-      const ex = extras.trim();
-      const extrasPart = ex ? `[${ex}]` : "";
-      const spec = (() => {
-        if (installSource === "github") {
-          const repo = githubRepo.trim() || "openakita/openakita";
-          const ref = githubRef.trim() || "main";
-          const kind = githubRefType;
-          const url =
-            kind === "tag"
-              ? `https://github.com/${repo}/archive/refs/tags/${ref}.zip`
-              : `https://github.com/${repo}/archive/refs/heads/${ref}.zip`;
-          return `openakita${extrasPart} @ ${url}`;
-        }
-        if (installSource === "local") {
-          const p = localSourcePath.trim();
-          if (!p) {
-            throw new Error("请选择/填写本地源码路径（例如本仓库根目录）");
-          }
-          const url = toFileUrl(p);
-          if (!url) {
-            throw new Error("本地路径无效");
-          }
-          return `openakita${extrasPart} @ ${url}`;
-        }
-        // PyPI mode: append ==version if a specific version is selected
-        const ver = selectedPypiVersion.trim();
-        if (ver) {
-          return `openakita${extrasPart}==${ver}`;
-        }
-        return `openakita${extrasPart}`;
-      })();
-      const log = await invoke<string>("pip_install", {
-        venvDir,
-        packageSpec: spec,
-        indexUrl: indexUrl.trim() ? indexUrl.trim() : null,
-      });
-      setInstallLog(String(log || ""));
-      setOpenakitaInstalled(true);
-      setVenvStatus(`安装完成：${spec}`);
-      setInstallProgress({ stage: "安装完成", percent: 100 });
-      notifySuccess("openakita 已安装，可以读取服务商列表并配置端点");
-
-      // 3) verify by attempting to list providers (makes failures visible early)
-      try {
-        await doLoadProviders();
-      } catch {
-        // ignore; doLoadProviders already sets error
-      }
-    } catch (e) {
-      const msg = String(e);
-      notifyError(msg);
-      setVenvStatus(`安装失败：${msg}`);
-      setInstallLog("");
-      if (msg.includes("缺少 Setup Center 所需模块") || msg.includes("No module named 'openakita.setup_center'")) {
-        notifySuccess("你安装到的 openakita 不包含 Setup Center 模块。建议切换“安装来源”为 GitHub 或 本地源码，然后重新安装。");
-      }
-    } finally {
-      dismissLoading(_busyId);
     }
   }
 
@@ -2280,22 +2046,6 @@ function MainApp() {
    * 仅在后端运行时调用有意义；后端未运行时静默跳过。
    * 返回 true 表示重载成功，false 表示失败或后端未运行。
    */
-  async function triggerConfigReload(): Promise<boolean> {
-    if (!shouldUseHttpApi()) return false;
-    try {
-      const resp = await safeFetch(`${httpApiBase()}/api/config/reload`, {
-        method: "POST",
-        signal: AbortSignal.timeout(3000),
-      });
-      const data = await resp.json();
-      if (data.reloaded) return true;
-      logger.warn("App", `Config reload not applied: ${data.reason || "unknown"}`);
-      return false;
-    } catch {
-      return false;
-    }
-  }
-
   /**
    * 纯重启：安装 IM 依赖 → 检测存活 → 触发重启 → 轮询恢复。
    * 不含 env 保存逻辑，可独立调用（如 Bot 配置保存后重启）。
@@ -2439,8 +2189,6 @@ function MainApp() {
     await restartService();
   }
 
-
-  const step = steps[currentStepIdx] || steps[0];
 
 
   /** 根据当前步骤返回需要自动保存的 env key 列表 */
@@ -3349,45 +3097,6 @@ function MainApp() {
     }
   }
 
-  async function doSaveSkillsSelection() {
-    if (!currentWorkspaceId) {
-      notifyError("请先设置当前工作区");
-      return;
-    }
-    if (!skillsDetail) {
-      notifyError("未读取到 skills 列表（请先刷新 skills）");
-      return;
-    }
-    const _busyId = notifyLoading("保存 skills 启用状态...");
-    try {
-      const externalAllowlist = skillsDetail
-        .filter((s) => !s.system && !!s.skill_id)
-        .filter((s) => !!skillsSelection[s.skill_id])
-        .map((s) => s.skill_id);
-
-      const content =
-        JSON.stringify(
-          {
-            version: 1,
-            external_allowlist: externalAllowlist,
-            updated_at: new Date().toISOString(),
-          },
-          null,
-          2,
-        ) + "\n";
-
-      await writeWorkspaceFile("data/skills.json", content);
-      setSkillsTouched(false);
-      notifySuccess("已保存：data/skills.json（系统技能默认启用；外部技能按你的选择启用）");
-    } catch (e) {
-      notifyError(String(e));
-    } finally {
-      dismissLoading(_busyId);
-    }
-  }
-
-
-
   function renderStatus() {
     return (
       <div className="space-y-4">
@@ -3471,11 +3180,6 @@ function MainApp() {
     <FieldBool key={p.k} {...p} {..._envBase} />;
   const FS = (p: { k: string; label: string; options: { value: string; label: string }[]; help?: string; defaultValue?: string }) =>
     <FieldSelect key={p.k} {...p} {..._envBase} />;
-  const FC = (p: { k: string; label: string; options: { value: string; label: string }[]; placeholder?: string; help?: string }) =>
-    <FieldCombo key={p.k} {...p} {..._envBase} />;
-  const FR = (p: { k: string; label: string; help?: string; min: number; max: number; step: number; defaultValue: number; unit?: string }) =>
-    <FieldSlider key={p.k} {...p} {..._envBase} />;
-
   async function renderIntegrationsSave(keys: string[], successText: string) {
     if (!currentWorkspaceId) { notifyError(t("common.error")); return; }
     const _busyId = notifyLoading(t("common.loading"));
@@ -3519,25 +3223,6 @@ function MainApp() {
   }
 
   function renderTools() {
-    const keysTools = [
-      "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FORCE_IPV4",
-      "TOOL_MAX_PARALLEL", "FORCE_TOOL_CALL_MAX_RETRIES", "FORCE_TOOL_CALL_IM_FLOOR", "CONFIRMATION_TEXT_MAX_RETRIES",
-      "ALLOW_PARALLEL_TOOLS_WITH_INTERRUPT_CHECKS",
-      "MCP_ENABLED", "MCP_TIMEOUT",
-      "DESKTOP_ENABLED", "DESKTOP_DEFAULT_MONITOR", "DESKTOP_COMPRESSION_QUALITY",
-      "DESKTOP_MAX_WIDTH", "DESKTOP_MAX_HEIGHT", "DESKTOP_CACHE_TTL",
-      "DESKTOP_UIA_TIMEOUT", "DESKTOP_UIA_RETRY_INTERVAL", "DESKTOP_UIA_MAX_RETRIES",
-      "DESKTOP_VISION_ENABLED", "DESKTOP_VISION_MAX_RETRIES", "DESKTOP_VISION_TIMEOUT",
-      "DESKTOP_CLICK_DELAY", "DESKTOP_TYPE_INTERVAL", "DESKTOP_MOVE_DURATION",
-      "DESKTOP_FAILSAFE", "DESKTOP_PAUSE",
-      "GITHUB_TOKEN",
-      "WEB_SEARCH_PROVIDER", "BOCHA_API_KEY", "TAVILY_API_KEY", "JINA_API_KEY", "SEARXNG_BASE_URL",
-    ];
-
-    const list = skillsDetail || [];
-    const systemSkills = list.filter((s) => !!s.system);
-    const externalSkills = list.filter((s) => !s.system);
-
     return (
       <>
         <div className="card">
@@ -3807,542 +3492,7 @@ function MainApp() {
     );
   }
 
-  function renderIntegrations() {
-    const keysCore = [
-      // network/proxy
-      "HTTP_PROXY",
-      "HTTPS_PROXY",
-      "ALL_PROXY",
-      "FORCE_IPV4",
-      // agent (基础)
-      "MAX_ITERATIONS",
-      "THINKING_MODE",
-      "TOOL_MAX_PARALLEL",
-      "FORCE_TOOL_CALL_MAX_RETRIES",
-      "FORCE_TOOL_CALL_IM_FLOOR",
-      "CONFIRMATION_TEXT_MAX_RETRIES",
-      "ALLOW_PARALLEL_TOOLS_WITH_INTERRUPT_CHECKS",
-      // timeouts
-      "PROGRESS_TIMEOUT_SECONDS",
-      "HARD_TIMEOUT_SECONDS",
-      // logging/db
-      "DATABASE_PATH",
-      "LOG_LEVEL",
-      "LOG_DIR",
-      "LOG_FILE_PREFIX",
-      "LOG_MAX_SIZE_MB",
-      "LOG_BACKUP_COUNT",
-      "LOG_RETENTION_DAYS",
-      "LOG_FORMAT",
-      "LOG_TO_CONSOLE",
-      "LOG_TO_FILE",
-      "GITHUB_TOKEN",
-      // memory / embedding
-      "MEMORY_MODE",
-      "EMBEDDING_MODEL",
-      "EMBEDDING_DEVICE",
-      "MODEL_DOWNLOAD_SOURCE",
-      "MEMORY_HISTORY_DAYS",
-      "MEMORY_MAX_HISTORY_FILES",
-      "MEMORY_MAX_HISTORY_SIZE_MB",
-      // persona
-      "PERSONA_NAME",
-      // proactive (living presence)
-      "PROACTIVE_ENABLED",
-      "PROACTIVE_MAX_DAILY_MESSAGES",
-      "PROACTIVE_MIN_INTERVAL_MINUTES",
-      "PROACTIVE_QUIET_HOURS_START",
-      "PROACTIVE_QUIET_HOURS_END",
-      "PROACTIVE_IDLE_THRESHOLD_HOURS",
-      // sticker
-      "STICKER_ENABLED",
-      "STICKER_DATA_DIR",
-      // scheduler
-      "SCHEDULER_TIMEZONE",
-      "SCHEDULER_TASK_TIMEOUT",
-      // session
-      "SESSION_TIMEOUT_MINUTES",
-      "SESSION_MAX_HISTORY",
-      "SESSION_STORAGE_PATH",
-      // IM
-      "IM_CHAIN_PUSH",
-      "TELEGRAM_ENABLED",
-      "TELEGRAM_BOT_TOKEN",
-      "TELEGRAM_PROXY",
-      "TELEGRAM_REQUIRE_PAIRING",
-      "TELEGRAM_PAIRING_CODE",
-      "TELEGRAM_WEBHOOK_URL",
-      "FEISHU_ENABLED",
-      "FEISHU_APP_ID",
-      "FEISHU_APP_SECRET",
-      "WEWORK_ENABLED",
-      "WEWORK_CORP_ID",
-      "WEWORK_TOKEN",
-      "WEWORK_ENCODING_AES_KEY",
-      "WEWORK_CALLBACK_PORT",
-      "WEWORK_CALLBACK_HOST",
-      "WEWORK_MODE",
-      "WEWORK_WS_ENABLED",
-      "WEWORK_WS_BOT_ID",
-      "WEWORK_WS_SECRET",
-      "DINGTALK_ENABLED",
-      "DINGTALK_CLIENT_ID",
-      "DINGTALK_CLIENT_SECRET",
-      "ONEBOT_ENABLED",
-      "ONEBOT_MODE",
-      "ONEBOT_WS_URL",
-      "ONEBOT_REVERSE_HOST",
-      "ONEBOT_REVERSE_PORT",
-      "ONEBOT_ACCESS_TOKEN",
-      "QQBOT_ENABLED",
-      "QQBOT_APP_ID",
-      "QQBOT_APP_SECRET",
-      "QQBOT_SANDBOX",
-      "QQBOT_MODE",
-      "QQBOT_WEBHOOK_PORT",
-      "QQBOT_WEBHOOK_PATH",
-      // WeChat (iLink Bot API)
-      "WECHAT_ENABLED",
-      "WECHAT_TOKEN",
-      // MCP (docs/mcp-integration.md)
-      "MCP_ENABLED",
-      "MCP_TIMEOUT",
-      // Desktop automation
-      "DESKTOP_ENABLED",
-      "DESKTOP_DEFAULT_MONITOR",
-      "DESKTOP_COMPRESSION_QUALITY",
-      "DESKTOP_MAX_WIDTH",
-      "DESKTOP_MAX_HEIGHT",
-      "DESKTOP_CACHE_TTL",
-      "DESKTOP_UIA_TIMEOUT",
-      "DESKTOP_UIA_RETRY_INTERVAL",
-      "DESKTOP_UIA_MAX_RETRIES",
-      "DESKTOP_VISION_ENABLED",
-      "DESKTOP_VISION_MAX_RETRIES",
-      "DESKTOP_VISION_TIMEOUT",
-      "DESKTOP_CLICK_DELAY",
-      "DESKTOP_TYPE_INTERVAL",
-      "DESKTOP_MOVE_DURATION",
-      "DESKTOP_FAILSAFE",
-      "DESKTOP_PAUSE",
-      // browser-use / openai compatibility (used by browser_mcp)
-      "OPENAI_API_BASE",
-      "OPENAI_BASE_URL",
-      "OPENAI_API_KEY",
-      "OPENAI_API_KEY_BASE64",
-      "BROWSER_USE_API_KEY",
-    ];
 
-    return (
-      <>
-        <div className="card">
-          <div className="cardTitle">工具与集成（全覆盖写入 .env）</div>
-          <div className="cardHint">
-            这一页会把项目里常用的开关与参数集中起来（参考 `examples/.env.example` + MCP 文档 + 桌面自动化配置）。
-            <br />
-            只会写入你实际填写/修改过的键；留空保存会从工作区 `.env` 删除该键（可选项不填就不会落盘）。
-          </div>
-          <div className="divider" />
-
-          <div className="card" style={{ marginTop: 0 }}>
-            <div className="cardTitle">
-              LLM（不在这里重复填）
-            </div>
-            <div className="cardHint">
-              LLM 的 API Key / Base URL / 模型选择，统一在上一步“LLM 端点”里完成：端点会写入 `data/llm_endpoints.json`，并把对应 `api_key_env` 写入工作区 `.env`。
-              <br />
-              这里主要管理 IM / MCP / 桌面自动化 / Agent/调度 等“运行期开关与参数”。
-            </div>
-          </div>
-
-          <div className="card" style={{ marginTop: 0 }}>
-            <div className="cardTitle">
-              网络代理与并行
-            </div>
-            <div className="grid3">
-              {FT({ k: "HTTP_PROXY", label: "HTTP_PROXY", placeholder: "http://127.0.0.1:7890" })}
-              {FT({ k: "HTTPS_PROXY", label: "HTTPS_PROXY", placeholder: "http://127.0.0.1:7890" })}
-              {FT({ k: "ALL_PROXY", label: "ALL_PROXY", placeholder: "socks5://127.0.0.1:1080" })}
-            </div>
-            <div className="grid3" style={{ marginTop: 10 }}>
-              {FB({ k: "FORCE_IPV4", label: "强制 IPv4", help: "某些 VPN/IPv6 环境下有用" })}
-              {FT({ k: "TOOL_MAX_PARALLEL", label: "TOOL_MAX_PARALLEL", placeholder: "1", help: "单轮多工具并行数（默认 1=串行）" })}
-              {FT({ k: "LOG_LEVEL", label: "LOG_LEVEL", placeholder: "INFO", help: "DEBUG/INFO/WARNING/ERROR" })}
-            </div>
-          </div>
-
-          <div className="card">
-            <div className="cardTitle">
-              IM 通道
-            </div>
-            <div className="cardHint">
-              默认折叠显示。选择“启用”后展开填写信息（上下排列）。建议先把 LLM 端点配置好，再回来启用 IM。
-            </div>
-            <div className="divider" />
-
-            {[
-              {
-                title: "Telegram",
-                enabledKey: "TELEGRAM_ENABLED",
-                apply: "https://t.me/BotFather",
-                body: (
-                  <>
-                    {FT({ k: "TELEGRAM_BOT_TOKEN", label: "Bot Token", placeholder: "从 BotFather 获取（仅会显示一次）", type: "password" })}
-                    {FT({ k: "TELEGRAM_PROXY", label: "代理（可选）", placeholder: "http://127.0.0.1:7890 / socks5://..." })}
-                    {FB({ k: "TELEGRAM_REQUIRE_PAIRING", label: t("config.imPairing") })}
-                    {FT({ k: "TELEGRAM_PAIRING_CODE", label: t("config.imPairingCode"), placeholder: t("config.imPairingCodeHint") })}
-                    <TelegramPairingCodeHint currentWorkspaceId={currentWorkspaceId} envDraft={envDraft} onEnvChange={setEnvDraft} />
-                    {FT({ k: "TELEGRAM_WEBHOOK_URL", label: "Webhook URL", placeholder: "https://..." })}
-                  </>
-                ),
-              },
-              {
-                title: "飞书（需要 openakita[feishu]）",
-                enabledKey: "FEISHU_ENABLED",
-                apply: "https://open.feishu.cn/",
-                body: (
-                  <>
-                    {FT({ k: "FEISHU_APP_ID", label: "App ID", placeholder: "" })}
-                    {FT({ k: "FEISHU_APP_SECRET", label: "App Secret", placeholder: "", type: "password" })}
-                  </>
-                ),
-              },
-              (() => {
-                const wMode = (envDraft["WEWORK_MODE"] || "websocket") as "http" | "websocket";
-                const isWs = wMode === "websocket";
-                return {
-                  title: "企业微信（需要 openakita[wework]）",
-                  enabledKey: isWs ? "WEWORK_WS_ENABLED" : "WEWORK_ENABLED",
-                  apply: "https://work.weixin.qq.com/",
-                  body: (
-                    <>
-                      <div style={{ marginBottom: 8 }}>
-                        <div className="label">{t("config.imWeworkMode")}</div>
-                        <ToggleGroup type="single" variant="outline" size="sm" value={wMode} onValueChange={(v) => {
-                          if (!v) return;
-                          const m = v as "http" | "websocket";
-                          const oldKey = isWs ? "WEWORK_WS_ENABLED" : "WEWORK_ENABLED";
-                          const newKey = m === "websocket" ? "WEWORK_WS_ENABLED" : "WEWORK_ENABLED";
-                          setEnvDraft((d) => {
-                            const wasEnabled = (d[oldKey] || "false").toLowerCase() === "true";
-                            const next: Record<string, string> = { ...d, WEWORK_MODE: m };
-                            if (wasEnabled && oldKey !== newKey) { next[oldKey] = "false"; next[newKey] = "true"; }
-                            return next;
-                          });
-                        }} className="mt-1 [&_[data-state=on]]:bg-primary [&_[data-state=on]]:text-primary-foreground">
-                          <ToggleGroupItem value="http">{t("config.imWeworkModeHttp")}</ToggleGroupItem>
-                          <ToggleGroupItem value="websocket">{t("config.imWeworkModeWs")}</ToggleGroupItem>
-                        </ToggleGroup>
-                        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
-                          {isWs ? t("config.imWeworkModeWsHint") : t("config.imWeworkModeHttpHint")}
-                        </div>
-                      </div>
-                      {isWs ? (
-                        <>
-                          {FT({ k: "WEWORK_WS_BOT_ID", label: t("config.imWeworkBotId") })}
-                          {FT({ k: "WEWORK_WS_SECRET", label: t("config.imWeworkSecret"), type: "password" })}
-                        </>
-                      ) : (
-                        <>
-                          {FT({ k: "WEWORK_CORP_ID", label: "Corp ID" })}
-                          {FT({ k: "WEWORK_TOKEN", label: "回调 Token", placeholder: "在企业微信后台「接收消息」设置中获取" })}
-                          {FT({ k: "WEWORK_ENCODING_AES_KEY", label: "EncodingAESKey", placeholder: "在企业微信后台「接收消息」设置中获取", type: "password" })}
-                          {FT({ k: "WEWORK_CALLBACK_PORT", label: "回调端口", placeholder: "9880" })}
-                          <div style={{ fontSize: 12, color: "var(--muted)", margin: "4px 0 0 0", lineHeight: 1.6 }}>
-                            <IconLightbulb size={12} /> 企业微信后台「接收消息服务器配置」的 URL 请填：<code style={{ background: "#f5f5f5", padding: "1px 5px", borderRadius: 4, fontSize: 11 }}>http://your-domain:9880/callback</code>
-                          </div>
-                        </>
-                      )}
-                    </>
-                  ),
-                };
-              })(),
-              {
-                title: "钉钉（需要 openakita[dingtalk]）",
-                enabledKey: "DINGTALK_ENABLED",
-                apply: "https://open.dingtalk.com/",
-                body: (
-                  <>
-                    {FT({ k: "DINGTALK_CLIENT_ID", label: "Client ID" })}
-                    {FT({ k: "DINGTALK_CLIENT_SECRET", label: "Client Secret", type: "password" })}
-                  </>
-                ),
-              },
-              {
-                title: "QQ 官方机器人（需要 openakita[qqbot]）",
-                enabledKey: "QQBOT_ENABLED",
-                apply: "https://bot.q.qq.com/wiki/develop/api-v2/",
-                body: (
-                  <>
-                    {FT({ k: "QQBOT_APP_ID", label: "AppID", placeholder: "q.qq.com 开发设置" })}
-                    {FT({ k: "QQBOT_APP_SECRET", label: "AppSecret", type: "password", placeholder: "q.qq.com 开发设置" })}
-                    {FB({ k: "QQBOT_SANDBOX", label: t("config.imQQBotSandbox") })}
-                    <div style={{ marginTop: 8 }}>
-                      <div className="label">{t("config.imQQBotMode")}</div>
-                      <ToggleGroup type="single" variant="outline" size="sm" value={envDraft["QQBOT_MODE"] || "websocket"} onValueChange={(v) => { if (v) setEnvDraft((d) => ({ ...d, QQBOT_MODE: v })); }} className="mt-1 [&_[data-state=on]]:bg-primary [&_[data-state=on]]:text-primary-foreground">
-                        <ToggleGroupItem value="websocket">WebSocket</ToggleGroupItem>
-                        <ToggleGroupItem value="webhook">Webhook</ToggleGroupItem>
-                      </ToggleGroup>
-                      <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
-                        {(envDraft["QQBOT_MODE"] || "websocket") === "websocket"
-                          ? t("config.imQQBotModeWsHint")
-                          : t("config.imQQBotModeWhHint")}
-                      </div>
-                    </div>
-                    {(envDraft["QQBOT_MODE"] === "webhook") && (
-                      <>
-                        {FT({ k: "QQBOT_WEBHOOK_PORT", label: t("config.imQQBotWebhookPort"), placeholder: "9890" })}
-                        {FT({ k: "QQBOT_WEBHOOK_PATH", label: t("config.imQQBotWebhookPath"), placeholder: "/qqbot/callback" })}
-                      </>
-                    )}
-                  </>
-                ),
-              },
-              {
-                title: t("config.imWechat") + "（需要 openakita[wechat]）",
-                enabledKey: "WECHAT_ENABLED",
-                apply: "",
-                body: (
-                  <>
-                    {FT({ k: "WECHAT_TOKEN", label: "Token", type: "password", placeholder: t("wechat.tokenHint") })}
-                    <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>{t("wechat.hint")}</p>
-                  </>
-                ),
-              },
-              (() => {
-                const obMode = (envDraft["ONEBOT_MODE"] || "reverse") as "reverse" | "forward";
-                const isReverse = obMode === "reverse";
-                return {
-                  title: "OneBot（需要 openakita[onebot] + NapCat/Lagrange）",
-                  enabledKey: "ONEBOT_ENABLED",
-                  apply: "https://github.com/botuniverse/onebot-11",
-                  body: (
-                    <>
-                      <div style={{ marginBottom: 8 }}>
-                        <div className="label">{t("config.imOneBotMode")}</div>
-                        <ToggleGroup type="single" variant="outline" size="sm" value={obMode} onValueChange={(v) => { if (v) setEnvDraft((d) => ({ ...d, ONEBOT_MODE: v })); }} className="mt-1 [&_[data-state=on]]:bg-primary [&_[data-state=on]]:text-primary-foreground">
-                          <ToggleGroupItem value="reverse">{t("config.imOneBotModeReverse")}</ToggleGroupItem>
-                          <ToggleGroupItem value="forward">{t("config.imOneBotModeForward")}</ToggleGroupItem>
-                        </ToggleGroup>
-                        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
-                          {isReverse ? t("config.imOneBotModeReverseHint") : t("config.imOneBotModeForwardHint")}
-                        </div>
-                      </div>
-                      {isReverse ? (
-                        <>
-                          {FT({ k: "ONEBOT_REVERSE_HOST", label: t("config.imOneBotReverseHost"), placeholder: "0.0.0.0" })}
-                          {FT({ k: "ONEBOT_REVERSE_PORT", label: t("config.imOneBotReversePort"), placeholder: "6700" })}
-                        </>
-                      ) : (
-                        FT({ k: "ONEBOT_WS_URL", label: "WebSocket URL", placeholder: "ws://127.0.0.1:8080" })
-                      )}
-                      {FT({ k: "ONEBOT_ACCESS_TOKEN", label: "Access Token", type: "password", placeholder: t("config.imOneBotTokenHint") })}
-                    </>
-                  ),
-                };
-              })(),
-            ].map((c) => {
-              const enabled = envGet(envDraft, c.enabledKey, "false").toLowerCase() === "true";
-              return (
-                <div key={c.enabledKey} className="card" style={{ marginTop: 10 }}>
-                  <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
-                    <div className="label" style={{ marginBottom: 0 }}>
-                      {c.title}
-                    </div>
-                    <label className="pill" style={{ cursor: "pointer", userSelect: "none" }}>
-                      <input
-                        style={{ width: 16, height: 16 }}
-                        type="checkbox"
-                        checked={enabled}
-                        onChange={(e) => setEnvDraft((m) => envSet(m, c.enabledKey, String(e.target.checked)))}
-                      />
-                      启用
-                    </label>
-                  </div>
-                  <div className="help" style={{ marginTop: 8 }}>
-                    申请/文档：<code style={{ userSelect: "all", fontSize: 12 }}>{c.apply}</code>
-                  </div>
-                  {enabled ? (
-                    <>
-                      <div className="divider" />
-                      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>{c.body}</div>
-                    </>
-                  ) : (
-                    <div className="cardHint" style={{ marginTop: 8 }}>
-                      未启用：保持折叠。
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-
-          <div className="card">
-            <div className="cardTitle">
-              MCP / 桌面自动化 / 语音与 GitHub
-            </div>
-            <div className="grid2">
-              <div className="card" style={{ marginTop: 0 }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-                  <div className="label" style={{ marginBottom: 0 }}>MCP</div>
-                  <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--fg2)", cursor: "pointer", userSelect: "none" }} onClick={(e) => e.stopPropagation()}>
-                    <span>{envDraft["MCP_ENABLED"] === "false" ? "已禁用" : "已启用"}</span>
-                    <div
-                      onClick={() => setEnvDraft((p) => ({ ...p, MCP_ENABLED: p.MCP_ENABLED === "false" ? "true" : "false" }))}
-                      style={{
-                        position: "relative", width: 40, height: 22, borderRadius: 11,
-                        background: envDraft["MCP_ENABLED"] === "false" ? "var(--line, #d1d5db)" : "var(--ok, #22c55e)",
-                        transition: "background 0.2s", flexShrink: 0,
-                      }}
-                    >
-                      <div style={{
-                        position: "absolute", top: 2, width: 18, height: 18, borderRadius: 9,
-                        background: "#fff", boxShadow: "0 1px 2px rgba(0,0,0,.15)",
-                        left: envDraft["MCP_ENABLED"] === "false" ? 2 : 20,
-                        transition: "left 0.2s",
-                      }} />
-                    </div>
-                  </label>
-                </div>
-                <div className="grid2">
-                  {FT({ k: "MCP_TIMEOUT", label: "MCP_TIMEOUT", placeholder: "60" })}
-                </div>
-              </div>
-
-              <div className="card" style={{ marginTop: 0 }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-                  <div className="label" style={{ marginBottom: 0 }}>桌面自动化（Windows）</div>
-                  <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--fg2)", cursor: "pointer", userSelect: "none" }} onClick={(e) => e.stopPropagation()}>
-                    <span>{envDraft["DESKTOP_ENABLED"] === "false" ? "已禁用" : "已启用"}</span>
-                    <div
-                      onClick={() => setEnvDraft((p) => ({ ...p, DESKTOP_ENABLED: p.DESKTOP_ENABLED === "false" ? "true" : "false" }))}
-                      style={{
-                        position: "relative", width: 40, height: 22, borderRadius: 11,
-                        background: envDraft["DESKTOP_ENABLED"] === "false" ? "var(--line, #d1d5db)" : "var(--ok, #22c55e)",
-                        transition: "background 0.2s", flexShrink: 0,
-                      }}
-                    >
-                      <div style={{
-                        position: "absolute", top: 2, width: 18, height: 18, borderRadius: 9,
-                        background: "#fff", boxShadow: "0 1px 2px rgba(0,0,0,.15)",
-                        left: envDraft["DESKTOP_ENABLED"] === "false" ? 2 : 20,
-                        transition: "left 0.2s",
-                      }} />
-                    </div>
-                  </label>
-                </div>
-                <div className="divider" />
-                <div className="grid3">
-                  {FT({ k: "DESKTOP_DEFAULT_MONITOR", label: "默认显示器", placeholder: "0" })}
-                  {FT({ k: "DESKTOP_MAX_WIDTH", label: "最大宽", placeholder: "1920" })}
-                  {FT({ k: "DESKTOP_MAX_HEIGHT", label: "最大高", placeholder: "1080" })}
-                </div>
-                <div className="grid3" style={{ marginTop: 10 }}>
-                  {FT({ k: "DESKTOP_COMPRESSION_QUALITY", label: "压缩质量", placeholder: "85" })}
-                  {FT({ k: "DESKTOP_CACHE_TTL", label: "截图缓存秒", placeholder: "1.0" })}
-                  {FB({ k: "DESKTOP_FAILSAFE", label: "安全角保护", help: "鼠标移到屏幕角落时自动停止桌面操作，避免误点或误操作。" })}
-                </div>
-                <div className="divider" />
-                {FB({ k: "DESKTOP_VISION_ENABLED", label: "启用视觉", help: "用于屏幕理解/定位" })}
-                <div className="grid3" style={{ marginTop: 10 }}>
-                  {FT({ k: "DESKTOP_CLICK_DELAY", label: "click_delay", placeholder: "0.1" })}
-                  {FT({ k: "DESKTOP_TYPE_INTERVAL", label: "type_interval", placeholder: "0.03" })}
-                  {FT({ k: "DESKTOP_MOVE_DURATION", label: "move_duration", placeholder: "0.15" })}
-                </div>
-              </div>
-            </div>
-
-            <div className="divider" />
-            <div className="grid3">
-              {FT({ k: "GITHUB_TOKEN", label: "GITHUB_TOKEN", placeholder: "", type: "password", help: "用于搜索/下载技能" })}
-              {FT({ k: "DATABASE_PATH", label: "DATABASE_PATH", placeholder: "data/agent.db" })}
-            </div>
-          </div>
-
-          <div className="card">
-            <div className="cardTitle">
-              灵魂与意志（核心配置）
-            </div>
-            <div className="cardHint">
-              这些是系统内置能力的开关与参数。<b>内置项默认启用</b>（你随时可以关闭）。建议先用默认值跑通，再按需调优。
-            </div>
-            <div className="divider" />
-
-            <details open>
-              <summary style={{ cursor: "pointer", fontWeight: 800, padding: "8px 0" }}>基础</summary>
-              <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 10 }}>
-                {FT({ k: "MAX_ITERATIONS", label: "最大迭代次数", placeholder: "300" })}
-                {FS({ k: "THINKING_MODE", label: t("config.agentThinking"), options: [
-                  { value: "auto", label: t("config.agentThinkingAuto") },
-                  { value: "always", label: t("config.agentThinkingAlways") },
-                  { value: "never", label: t("config.agentThinkingNever") },
-                ] })}
-                {FT({ k: "DATABASE_PATH", label: "数据库路径", placeholder: "data/agent.db" })}
-                {FS({ k: "LOG_LEVEL", label: "日志级别", options: [
-                  { value: "DEBUG", label: "DEBUG" },
-                  { value: "INFO", label: "INFO" },
-                  { value: "WARNING", label: "WARNING" },
-                  { value: "ERROR", label: "ERROR" },
-                ] })}
-              </div>
-            </details>
-
-            <div className="divider" />
-            <details>
-              <summary style={{ cursor: "pointer", fontWeight: 800, padding: "8px 0" }}>日志高级</summary>
-              <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 10 }}>
-                {FT({ k: "LOG_DIR", label: "日志目录", placeholder: "logs" })}
-                {FT({ k: "LOG_FILE_PREFIX", label: "日志文件前缀", placeholder: "openakita" })}
-                {FT({ k: "LOG_MAX_SIZE_MB", label: "单文件最大 MB", placeholder: "10" })}
-                {FT({ k: "LOG_BACKUP_COUNT", label: "备份文件数", placeholder: "30" })}
-                {FT({ k: "LOG_RETENTION_DAYS", label: "保留天数", placeholder: "30" })}
-                {FT({ k: "LOG_FORMAT", label: "日志格式", placeholder: "%(asctime)s - %(name)s - %(levelname)s - %(message)s" })}
-                {FB({ k: "LOG_TO_CONSOLE", label: "输出到控制台", help: "默认 true" })}
-                {FB({ k: "LOG_TO_FILE", label: "输出到文件", help: "默认 true" })}
-              </div>
-            </details>
-
-            <div className="divider" />
-            <details>
-              <summary style={{ cursor: "pointer", fontWeight: 800, padding: "8px 0" }}>会话</summary>
-              <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 10 }}>
-                {FT({ k: "SESSION_TIMEOUT_MINUTES", label: "会话超时（分钟）", placeholder: "30" })}
-                {FT({ k: "SESSION_MAX_HISTORY", label: "会话最大历史条数", placeholder: "50" })}
-                {FT({ k: "SESSION_STORAGE_PATH", label: "会话存储路径", placeholder: "data/sessions" })}
-              </div>
-            </details>
-
-            <div className="divider" />
-            <details open>
-              <summary style={{ cursor: "pointer", fontWeight: 800, padding: "8px 0" }}>调度器</summary>
-              <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 10 }}>
-                {FT({ k: "SCHEDULER_TIMEZONE", label: "时区", placeholder: "Asia/Shanghai" })}
-                {FT({ k: "SCHEDULER_TASK_TIMEOUT", label: "任务超时（秒）", placeholder: "600" })}
-              </div>
-            </details>
-
-          </div>
-
-          <div className="btnRow" style={{ gap: 8 }}>
-            <button
-              className="btnPrimary"
-              onClick={() => renderIntegrationsSave(keysCore, "已写入工作区 .env（工具/IM/MCP/桌面/高级配置）")}
-              disabled={!currentWorkspaceId || !!busy}
-            >
-              一键写入工作区 .env（全覆盖）
-            </button>
-            <button className="btnApplyRestart"
-              onClick={() => applyAndRestart(keysCore)}
-              disabled={!currentWorkspaceId || !!busy || !!restartOverlay}
-              title={t("config.applyRestartHint")}>
-              {t("config.applyRestart")}
-            </button>
-          </div>
-
-        </div>
-      </>
-    );
-  }
 
   // 构造端点摘要（供 ChatView 使用，仅启用的端点）
   const chatEndpoints: EndpointSummaryType[] = useMemo(() =>
@@ -5409,29 +4559,6 @@ function MainApp() {
     if (!info) return <div className="card">{t("common.loading")}</div>;
     if (view === "status") return renderStatus();
     if (view === "chat") return null;  // ChatView 始终挂载，不在此渲染
-
-    const _disableToggle = (viewKey: string, label: string) => (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", marginBottom: 12 }}>
-        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--muted)", cursor: "pointer" }}>
-          <span>{disabledViews.includes(viewKey) ? t("common.disabled", { label }) : t("common.enabled", { label })}</span>
-          <div
-            onClick={() => toggleViewDisabled(viewKey)}
-            style={{
-              width: 40, height: 22, borderRadius: 11, cursor: "pointer",
-              background: disabledViews.includes(viewKey) ? "var(--line)" : "var(--ok)",
-              position: "relative", transition: "background 0.2s",
-            }}
-          >
-            <div style={{
-              width: 18, height: 18, borderRadius: 9, background: "#fff",
-              position: "absolute", top: 2,
-              left: disabledViews.includes(viewKey) ? 2 : 20,
-              transition: "left 0.2s", boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
-            }} />
-          </div>
-        </label>
-      </div>
-    );
 
     if (view === "skills") {
       return disabledViews.includes("skills") ? (

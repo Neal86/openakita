@@ -167,8 +167,6 @@ const ICON_CATEGORIES: Record<string, { label: string; icons: string[] }> = {
     icons: SVG_ICON_KEYS.map((k) => `svg:${k}`),
   },
 };
-const EMOJI_PRESETS = Object.values(ICON_CATEGORIES).flatMap((c) => c.icons);
-
 export function AgentManagerView({
   apiBaseUrl = "http://127.0.0.1:18900",
   visible = true,
@@ -255,22 +253,6 @@ export function AgentManagerView({
       await safeFetch(`${apiBaseUrl}/api/agents/profiles/${profileId}/identity/init`, { method: "POST" });
     } catch {}
   }, [apiBaseUrl]);
-
-  const extractErrorMsg = (detail: unknown, fallback: string): string => {
-    if (typeof detail === "string") return detail;
-    if (Array.isArray(detail)) {
-      const msgs = detail
-        .map((d: Record<string, unknown>) => typeof d?.msg === "string" ? d.msg : "")
-        .filter(Boolean);
-      return msgs.length ? msgs.join("; ") : fallback;
-    }
-    if (typeof detail === "object" && detail !== null) {
-      const d = detail as Record<string, unknown>;
-      if (typeof d.msg === "string") return d.msg;
-      try { return JSON.stringify(detail); } catch { /* fall through */ }
-    }
-    return fallback;
-  };
 
   const fetchCategories = useCallback(async () => {
     try {
@@ -505,7 +487,7 @@ export function AgentManagerView({
         : `${apiBaseUrl}/api/agents/profiles/${editingProfile.id}`;
       const method = isCreating ? "POST" : "PUT";
 
-      const res = await safeFetch(url, {
+      await safeFetch(url, {
         method,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
