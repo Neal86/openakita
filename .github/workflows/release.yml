@@ -1051,24 +1051,36 @@ jobs:
             base="$(basename "$f")"
             local norm="${base// /.}"
             if [ -n "${SUFFIX}" ]; then
-              local ext="${norm##*.}"
-              local name_no_ext="${norm%.*}"
+              local ext
+              local name_no_ext
+              if [[ "${norm}" == *.app.tar.gz ]]; then
+                ext="app.tar.gz"
+                name_no_ext="${norm%.app.tar.gz}"
+              else
+                ext="${norm##*.}"
+                name_no_ext="${norm%.*}"
+              fi
               # 去掉 Tauri 自动生成的架构前缀（最后一个 _ 之后的部分），
               # 替换为统一的平台标识符，如 windows-x64-core、macos-arm64
               local base_name="${name_no_ext%_*}"
               norm="${base_name}_${SUFFIX}.${ext}"
             fi
             cp -f "$f" "${OUT_DIR}/${norm}"
+            if [ -f "${f}.sig" ]; then
+              cp -f "${f}.sig" "${OUT_DIR}/${norm}.sig"
+              sig_count=$((sig_count+1))
+            fi
           }
 
           want=()
           case "${RUNNER_OS}" in
             Windows) want=("exe") ;;
-            macOS) want=("dmg") ;;
+            macOS) want=("app.tar.gz" "dmg") ;;
             Linux) want=("deb" "AppImage") ;;
             *) echo "Unsupported RUNNER_OS=${RUNNER_OS}" >&2; exit 2 ;;
           esac
 
+          sig_count=0
           found=0
           for ext in "${want[@]}"; do
             while IFS= read -r -d '' f; do
@@ -1091,12 +1103,6 @@ jobs:
             done < <(find "${BUNDLE_DIR}" -type f -name "*.${ext}" -print0)
           done
 
-          # 同时收集 .sig 签名文件（如果存在）
-          sig_count=0
-          while IFS= read -r -d '' sigf; do
-            cp -f "$sigf" "${OUT_DIR}/"
-            sig_count=$((sig_count+1))
-          done < <(find "${BUNDLE_DIR}" -type f -name "*.sig" -print0)
           if [ "${sig_count}" -gt 0 ]; then
             echo "Collected ${sig_count} signature file(s)."
           fi
@@ -1106,6 +1112,10 @@ jobs:
 
           if [ "${found}" -eq 0 ]; then
             echo "ERROR: no installer bundles found." >&2
+            exit 1
+          fi
+          if [ "${sig_count}" -eq 0 ]; then
+            echo "ERROR: no updater signature files found. Check bundle.createUpdaterArtifacts and TAURI_SIGNING_PRIVATE_KEY." >&2
             exit 1
           fi
 
