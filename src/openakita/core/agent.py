@@ -9738,6 +9738,35 @@ class Agent:
                         )
                         continue  # 继续循环，让 LLM 调用工具
 
+                    # Steer done-drain: the model produced a final answer with
+                    # no tool calls, so process_post_tool_signals did NOT drain
+                    # inserts this round. If a message was steered in via
+                    # insert_user_message while this answer was being generated
+                    # (e.g. an IM user following up on a long task), address it
+                    # now instead of finishing and dropping it. Bounded by
+                    # max_tool_iterations inside the helper, so it can never run
+                    # away. No-op for scheduler/sub-agent tasks (no inserts).
+                    _steered = await self.reasoning_engine._drain_steer_before_finish(
+                        state=(
+                            self.agent_state.current_task if self.agent_state else None
+                        ),
+                        working_messages=messages,
+                        final_text=final_response or cleaned_text or "",
+                        iteration=iteration - 1,  # loop here is 1-based
+                        max_iterations=max_tool_iterations,
+                    )
+                    if _steered:
+                        no_tool_call_count = 0
+                        logger.info(
+                            "[execute_task][DoneDrain] %d steered message(s) "
+                            "arrived during final-answer generation; folding "
+                            "answer into context and continuing (iter=%d/%d)",
+                            len(_steered),
+                            iteration,
+                            max_tool_iterations,
+                        )
+                        continue
+
                     # 追问次数用尽，任务完成
                     break
 

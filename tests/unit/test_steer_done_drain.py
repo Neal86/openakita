@@ -261,3 +261,47 @@ class TestReasonStreamWiringContract:
             "is the anti-hang ceiling that guarantees termination."
         )
         assert "drain_user_inserts" in src
+
+
+class TestExecuteTaskWiringContract:
+    """The Ralph loop (Agent.execute_task) also drains inserts only after a
+    tool round, so it strands a message steered in during the final answer the
+    same way the streaming loop did. It must reuse the same done-drain helper
+    before the terminal break."""
+
+    def test_execute_task_calls_drain_steer_before_finish(self) -> None:
+        from openakita.core.agent import Agent
+
+        src = inspect.getsource(Agent.execute_task)
+        assert "_drain_steer_before_finish(" in src, (
+            "Agent.execute_task must reuse the done-drain helper before the "
+            "no-tool-call terminal break, otherwise an insert steered into a "
+            "background/IM task during its final answer is dropped."
+        )
+
+    def test_execute_task_done_drain_runs_before_terminal_break(self) -> None:
+        from openakita.core.agent import Agent
+
+        src = inspect.getsource(Agent.execute_task)
+        drain_at = src.find("_drain_steer_before_finish(")
+        # the terminal break is anchored by its unique preceding comment
+        break_at = src.find("追问次数用尽，任务完成")
+        assert drain_at > 0 and break_at > 0
+        assert drain_at < break_at, (
+            "the done-drain must be evaluated before the '追问次数用尽' break; "
+            "running it after the break cannot rescue the steered message."
+        )
+
+    def test_execute_task_converts_iteration_to_zero_based(self) -> None:
+        """execute_task's loop counter is 1-based (incremented at the top),
+        so it must pass iteration-1 to keep the helper's '>= max-1' ceiling
+        aligned with the actual last iteration."""
+        from openakita.core.agent import Agent
+
+        src = inspect.getsource(Agent.execute_task)
+        block = src[src.find("_drain_steer_before_finish(") : src.find("_drain_steer_before_finish(") + 600]
+        assert "iteration - 1" in block, (
+            "execute_task must convert its 1-based loop counter to 0-based "
+            "(iteration - 1) so the anti-hang ceiling fires on the true last "
+            "iteration, not one early."
+        )
