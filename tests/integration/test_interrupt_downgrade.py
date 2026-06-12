@@ -63,7 +63,13 @@ def _reset_metrics_each_test():
 
 @pytest.fixture
 def _short_settle_timeout(monkeypatch):
+    # The QUEUE wait now reads queue_wait_timeout_ms (decoupled from
+    # preempt_settle_timeout_ms). Both share the same max(0.5, ms/1000)
+    # floor, so pinning both to 200ms keeps the historical 500ms first-wait
+    # floor these tests are built around, while still exercising the
+    # cancel/abandon-after-timeout paths instead of waiting the 10-min default.
     monkeypatch.setattr(config_mod.settings, "preempt_settle_timeout_ms", 200)
+    monkeypatch.setattr(config_mod.settings, "queue_wait_timeout_ms", 200)
     yield
 
 
@@ -525,8 +531,8 @@ class TestOtherPoliciesUnaffected:
 
         asyncio.create_task(settle_later())
 
-        # Default channel resolves to QUEUE.
-        sess = MagicMock(channel="desktop")
+        # ``cli`` channel resolves to QUEUE.
+        sess = MagicMock(channel="cli")
         decision = await a._preempt_or_queue_prev_task(
             session_id="s8", session=sess
         )
@@ -534,6 +540,37 @@ class TestOtherPoliciesUnaffected:
         snap = metrics.snapshot()
         # No interrupt_downgrade because policy was already QUEUE.
         assert not any(s["name"] == "interrupt_downgrade" for s in snap)
+
+    @pytest.mark.asyncio
+    async def test_steer_policy_downgrades_to_queue_in_agent_layer(
+        self, _short_settle_timeout
+    ) -> None:
+        """STEER is HTTP-short-circuited; if it ever reaches the agent layer
+        (e.g. a channel configured ``steer`` without an HTTP entry point) it
+        must NOT preempt/cancel the running task — it falls back to QUEUE so
+        the old task's in-flight work is preserved."""
+        a = _make_stub_agent()
+        prev = a.agent_state.begin_task(session_id="s_steer")
+        prev.transition(TaskStatus.REASONING)
+        prev.begin_tool("write_file")
+
+        async def settle_later():
+            await asyncio.sleep(0.05)
+            prev.mark_settled()
+
+        asyncio.create_task(settle_later())
+
+        # ``desktop`` channel now resolves to STEER.
+        sess = MagicMock(channel="desktop")
+        decision = await a._preempt_or_queue_prev_task(
+            session_id="s_steer", session=sess
+        )
+        # QUEUE behaviour, NOT preempt: old task settled naturally.
+        assert decision == "queued_then_proceed"
+        snap = metrics.snapshot()
+        # Recorded as a QUEUE wait, never a preempt.
+        assert any(s["name"] == "queue" for s in snap)
+        assert not any(s["name"] == "preempt" for s in snap)
 
     @pytest.mark.asyncio
     async def test_reject_policy_does_not_consult_in_flight(

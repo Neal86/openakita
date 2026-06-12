@@ -8586,12 +8586,43 @@ class Agent:
                     # Fall through to QUEUE branch below by mutating policy.
                     policy = DoubleTextingPolicy.QUEUE
 
+        # STEER is normally short-circuited at the HTTP layer (chat.py injects
+        # the new message via ``insert_user_message`` and returns 202 without
+        # ever invoking the agent run path).  If a STEER policy still reaches
+        # the agent layer — e.g. a non-HTTP caller configured a channel as
+        # ``steer`` — we must NOT fall into the INTERRUPT branch below, which
+        # would cancel the running task and violate STEER's "never interrupt"
+        # contract.  There is no steer-injection entry point here, so the
+        # safe behaviour is to treat it as QUEUE: wait for the old task to
+        # settle (preserving its in-flight work) instead of preempting it.
+        if policy is DoubleTextingPolicy.STEER:
+            logger.warning(
+                "[Session:%s] STEER policy reached agent layer with active "
+                "task %s (channel=%s); HTTP layer should have short-circuited "
+                "via insert_user_message. Treating as QUEUE to avoid "
+                "interrupting the running task.",
+                session_id,
+                _prev_task.task_id[:8],
+                channel,
+            )
+            policy = DoubleTextingPolicy.QUEUE
+
         if policy is DoubleTextingPolicy.QUEUE:
             inc_queue(channel=channel)
+            # QUEUE waits for the predecessor turn to finish *naturally*, so it
+            # uses the generous queue_wait_timeout_ms (default 10 min), NOT the
+            # short preempt_settle_timeout_ms (which is for tasks we just
+            # cancelled).  This is the agent-layer half of decoupling the two
+            # timeouts — the HTTP layer (chat.py QUEUE wait) does the same.
+            queue_timeout_s = max(
+                0.5,
+                getattr(settings, "queue_wait_timeout_ms", 600000) / 1000.0,
+            )
+            queue_timeout_ms = int(queue_timeout_s * 1000)
             # v1.28.2 FOLLOW-UP-S4-A: 第一次 timeout 后如果仍有 block 工具
             # 在跑，再延长一次等待（不直接 cancel）。覆盖大多数 long-write
-            # 场景，避免 write_file/run_shell 超过 preempt_settle_timeout_ms
-            # 仍被中断造成数据损坏。设 extension_ms=0 即关闭该机制。
+            # 场景，避免 write_file/run_shell 超过 queue 等待窗口仍被中断
+            # 造成数据损坏。设 extension_ms=0 即关闭该机制。
             extension_ms = getattr(
                 settings, "preempt_block_tool_extension_ms", 0
             )
@@ -8610,7 +8641,7 @@ class Agent:
                 # points — so the except-handler can always run to
                 # completion before re-raising.
                 await asyncio.wait_for(
-                    _prev_task.wait_until_settled(), timeout=timeout_s
+                    _prev_task.wait_until_settled(), timeout=queue_timeout_s
                 )
                 logger.info(
                     "[Session:%s] QUEUE: old task %s settled; proceeding",
@@ -8659,7 +8690,7 @@ class Agent:
                             "block tool(s) still in flight (sample=%s, "
                             "reason=%s); extending +%dms before cancel",
                             session_id,
-                            settings.preempt_settle_timeout_ms,
+                            queue_timeout_ms,
                             ",".join(in_flight_after_timeout[:3])
                             + (
                                 "…"
@@ -8702,7 +8733,7 @@ class Agent:
 
             if timed_out:
                 total_waited_ms = (
-                    settings.preempt_settle_timeout_ms
+                    queue_timeout_ms
                     + (extension_ms if extended_once else 0)
                 )
                 logger.warning(
@@ -8744,7 +8775,8 @@ class Agent:
                 self._pending_cancels.pop(session_id, None)
             return "queued_then_proceed"
 
-        # INTERRUPT / STEER：cancel 旧 task，等 settled，超时则 abandon
+        # INTERRUPT：cancel 旧 task，等 settled，超时则 abandon。
+        # （STEER 已在上面降级为 QUEUE；REJECT/QUEUE 已在各自分支 return。）
         inc_preempt(policy=policy.value, channel=channel)
         logger.info(
             "[Session:%s] Preempting active task %s (status=%s, policy=%s)",

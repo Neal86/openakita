@@ -134,11 +134,16 @@ class Settings(BaseSettings):
     # === Conversation Concurrency / Double-texting（v1.27.14, plan: conversation concurrency v1.28）===
     # 同一 conversation_id 上短时间内重发的语义。每 channel 一个策略：
     #   reject    — 旧任务在跑就 409 拒绝（不同 client 永远走这条）
-    #   queue     — 排在旧任务后面串行执行（默认，最稳）
+    #   queue     — 排在旧任务后面串行执行（最稳；等待上限是 queue_wait_timeout_ms，
+    #               默认 10 分钟，覆盖绝大多数长任务，不再是 6s 误杀）
     #   interrupt — cancel 旧任务再开新流（需要 double_texting_allow_interrupt=True）
-    #   steer     — 把新消息注入到正在跑的 turn（实验性）
-    # 默认全部 queue/reject，避免对正在跑的 shell/browser 工具误中断。
-    # S4（v1.28.2）把工具 interruptBehavior 标注做完后，再考虑把 desktop 默认切到 interrupt。
+    #   steer     — 把新消息注入到正在跑的 turn，不打断旧任务也不超时
+    #               （需要 double_texting_allow_steer=True，desktop 默认）
+    # desktop 默认 steer：长任务进行中用户追发消息时，注入到当前 turn 让
+    # Agent 在下一个工具边界自然读取，而不是排队等待（对齐 Claude Code
+    # 的 “边跑边追加指令” 体验）。STEER 由 HTTP 层（/api/chat）short-circuit 走
+    # insert_user_message 注入；不经 HTTP 的 channel（cli/IM）仍默认 reject/queue，
+    # 因为 agent 层没有 steer 注入入口（见 agent._preempt_or_queue_prev_task）。
     double_texting_default: str = Field(
         default="queue",
         description="默认 double-texting 策略（reject/queue/interrupt/steer），未配 per-channel 时使用。",
@@ -153,7 +158,7 @@ class Settings(BaseSettings):
             "qqbot": "queue",
             "onebot": "queue",
             "wechat": "reject",
-            "desktop": "queue",
+            "desktop": "steer",
             "cli": "queue",
         },
         description="按 channel 名维度的 double-texting 策略覆盖；缺省回落到 double_texting_default。",
@@ -164,6 +169,15 @@ class Settings(BaseSettings):
             "Feature flag：是否允许 INTERRUPT 策略真的 cancel 当前任务。"
             "默认 False，任何 INTERRUPT 请求在 caller 层降级为 QUEUE。"
             "S4（v1.28.2）完成工具 interrupt_behavior 标注后，可安全开启。"
+        ),
+    )
+    double_texting_allow_steer: bool = Field(
+        default=True,
+        description=(
+            "Feature flag：是否允许 STEER 策略把新消息注入到正在跑的 turn。"
+            "默认 True（desktop/cli 默认走 steer）。STEER 不打断旧任务、不超时，"
+            "新消息在下一个工具边界被 Agent 读取。设为 False 时任何 STEER 请求"
+            "在 caller 层降级为 QUEUE（回退到 6s 排队等待的旧行为），用作紧急开关。"
         ),
     )
     preempt_settle_timeout_ms: int = Field(
@@ -186,6 +200,20 @@ class Settings(BaseSettings):
             "再延长这么多毫秒等一次。覆盖大多数长写场景；第二次 timeout 才"
             "硬 cancel。设为 0 即关闭延长机制（保持 v1.28.2 之前的行为）。"
             "v1.28.2 FOLLOW-UP-S4-A。"
+        ),
+    )
+    queue_wait_timeout_ms: int = Field(
+        default=600000,
+        ge=500,
+        le=3600000,
+        description=(
+            "QUEUE 策略下，新消息等待上一轮 turn 自然跑完的最长时间（毫秒），"
+            "默认 10 分钟。与 preempt_settle_timeout_ms 解耦：后者是「抢占/取消"
+            "旧任务后等它 settle」的短超时（默认 6s），本项是「排队等旧任务自然"
+            "结束」的长超时。二者语义不同——排队场景下旧任务通常是合法的长 Agent"
+            "任务，用 6s 误杀会让 CLI/默认 queue 通道一追发就报 queue_timeout。"
+            "等待期间 HTTP 层有 SSE keepalive ping，客户端断开会立即结束等待；"
+            "agent 层等待期间被外层 cancel 也会立即退出。"
         ),
     )
 

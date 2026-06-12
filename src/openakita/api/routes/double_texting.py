@@ -23,9 +23,10 @@ class DoubleTextingPolicy(StrEnum):
     """Conversation 上重发新消息时的处理策略。
 
     - REJECT    — 旧任务在跑就 409 拒绝（不同 client 永远走这条）
-    - QUEUE     — 排在旧任务后面串行执行（默认）
+    - QUEUE     — 排在旧任务后面串行执行
     - INTERRUPT — cancel 旧任务再开新流（需要 double_texting_allow_interrupt=True）
-    - STEER     — 把新消息注入到正在跑的 turn（实验性，S1 仅 dispatch 占位）
+    - STEER     — 把新消息注入到正在跑的 turn，不打断旧任务也不超时
+                  （需要 double_texting_allow_steer=True，desktop/cli 默认）
     """
 
     REJECT = "reject"
@@ -59,8 +60,10 @@ def resolve_policy(
     """根据 header / channel / 全局默认解析最终 policy。
 
     且应用 feature flag 降级：
-    若 `double_texting_allow_interrupt=False` 时把 INTERRUPT 降为 QUEUE，
-    避免在 S4（v1.28.2）之前真的 cancel 正在跑的 shell/browser 工具。
+    - 若 `double_texting_allow_interrupt=False` 时把 INTERRUPT 降为 QUEUE，
+      避免在 S4（v1.28.2）之前真的 cancel 正在跑的 shell/browser 工具。
+    - 若 `double_texting_allow_steer=False` 时把 STEER 降为 QUEUE，作为紧急
+      开关回退到 “排队等待旧任务结束” 的旧行为。
 
     Args:
         channel: 调用 channel 名（feishu/desktop/cli/...），用于查 per_channel 表。
@@ -86,6 +89,17 @@ def resolve_policy(
     ):
         logger.debug(
             "[DoubleTexting] INTERRUPT requested (channel=%s) but feature flag off; "
+            "downgrading to QUEUE",
+            channel,
+        )
+        policy = DoubleTextingPolicy.QUEUE
+
+    if (
+        policy is DoubleTextingPolicy.STEER
+        and not getattr(settings, "double_texting_allow_steer", True)
+    ):
+        logger.debug(
+            "[DoubleTexting] STEER requested (channel=%s) but feature flag off; "
             "downgrading to QUEUE",
             channel,
         )

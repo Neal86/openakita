@@ -2048,10 +2048,27 @@ async def chat(request: Request, body: ChatRequest):
     # before falling back to 409.  Header X-OpenAkita-DoubleTexting can
     # override per request (used by frontend "force interrupt" button when
     # double_texting_allow_interrupt is enabled).
-    from .double_texting import resolve_policy
+    from .double_texting import DoubleTextingPolicy, resolve_policy
 
     _dt_header = request.headers.get("x-openakita-doubletexting")
     _dt_policy = resolve_policy(channel="desktop", header_value=_dt_header)
+
+    # STEER hands the new message to the running ReAct loop via
+    # insert_user_message, which is text-only.  If this request carries
+    # attachments, steering would silently drop them — so downgrade to
+    # QUEUE here and let the message run as its own turn (with the
+    # attachments intact) once the current turn settles.  The frontend
+    # makes the same decision client-side, but a desktop client on an
+    # older build (or any non-desktop caller) could still POST attachments
+    # under a STEER policy, so we must guard the backend too.
+    if _dt_policy is DoubleTextingPolicy.STEER and body.attachments:
+        logger.info(
+            "[Chat API] STEER downgraded to QUEUE: conv=%s carries %d "
+            "attachment(s) that cannot be steered into the running turn.",
+            conversation_id,
+            len(body.attachments),
+        )
+        _dt_policy = DoubleTextingPolicy.QUEUE
 
     lifecycle = get_lifecycle_manager()
     busy_gen = 0
@@ -2143,7 +2160,12 @@ async def chat(request: Request, body: ChatRequest):
         ):
             from openakita.config import settings
 
-            _queue_timeout_s = max(0.5, settings.preempt_settle_timeout_ms / 1000.0)
+            # Queue wait uses its own (generous) timeout — NOT
+            # preempt_settle_timeout_ms.  Waiting for a still-running
+            # predecessor turn to finish naturally can legitimately take
+            # minutes; the 6s settle window is for cancelled tasks, not for
+            # queued ones.  Decoupling these is what stops "排队超过 6s 报错".
+            _queue_timeout_s = max(0.5, settings.queue_wait_timeout_ms / 1000.0)
             _queued_after_gen = start_result.queued_after_generation
             logger.info(
                 "[Chat API] QUEUE wait conv=%s after gen=%d (timeout=%.1fs)",
@@ -2162,7 +2184,7 @@ async def chat(request: Request, body: ChatRequest):
                             "type": "queued",
                             "conversation_id": conversation_id,
                             "after_generation": _queued_after_gen,
-                            "timeout_ms": settings.preempt_settle_timeout_ms,
+                            "timeout_ms": settings.queue_wait_timeout_ms,
                         },
                         ensure_ascii=False,
                     )
@@ -2207,7 +2229,7 @@ async def chat(request: Request, body: ChatRequest):
                                 "type": "error",
                                 "error": "queue_timeout",
                                 "message": (
-                                    f"等待上一次任务结束超过 {settings.preempt_settle_timeout_ms}ms，"
+                                    f"等待上一次任务结束超过 {settings.queue_wait_timeout_ms}ms，"
                                     "请稍后重试或显式取消上一次任务。"
                                 ),
                             },

@@ -146,10 +146,14 @@ class ConversationLifecycleManager:
         - **QUEUE**: same-client overlap → ``conflict`` set,
           ``generation=0``, ``queued_after_generation`` = current holder's
           generation.  Caller awaits ``settled_event`` (S1.5) then retries.
-        - **INTERRUPT** / **STEER**: same-client overlap → lock acquired,
+        - **INTERRUPT**: same-client overlap → lock acquired,
           ``took_over`` = previous :class:`BusyInfo`, new generation issued.
           Caller is responsible for actually cancelling the in-flight task
           (see ``agent._preempt_or_queue``, S1.4).
+        - **STEER**: same-client overlap → lock is **NOT** acquired,
+          ``generation=0``, ``steered=True``.  The old turn keeps running;
+          the caller hands the new message to ``Agent.insert_user_message``
+          so the ReAct loop drains it on the next post-tool tick (S2 P1-4).
         """
         async with self._lock:
             self._expire_stale()

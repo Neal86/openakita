@@ -69,7 +69,13 @@ def _reset_metrics_each_test():
 
 @pytest.fixture
 def _short_settle_timeout(monkeypatch):
+    # preempt_settle: how long to wait for a *cancelled* task to settle.
+    # queue_wait: how long to wait for a *running* task to finish naturally
+    # (decoupled from preempt_settle as of the queue_wait_timeout_ms split).
+    # The QUEUE-timeout tests need BOTH short or they would wait the 10-min
+    # default and hang.
     monkeypatch.setattr(config_mod.settings, "preempt_settle_timeout_ms", 200)
+    monkeypatch.setattr(config_mod.settings, "queue_wait_timeout_ms", 200)
     yield
 
 
@@ -271,7 +277,7 @@ class TestPreemptOrQueueHelper:
             prev.mark_settled()
 
         asyncio.create_task(settle_later())
-        sess = MagicMock(channel="desktop")  # desktop default QUEUE in v1.27.14
+        sess = MagicMock(channel="desktop")  # desktop=steer → agent layer downgrades to QUEUE
         decision = await a._preempt_or_queue_prev_task(session_id="s2", session=sess)
         assert decision == "queued_then_proceed"
         snap = metrics.snapshot()
