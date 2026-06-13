@@ -507,11 +507,14 @@ export function ChatView({
   const activeConvIdRef = useRef(activeConvId);
   const isCurrentConvStreaming = streamContexts.current.get(activeConvId ?? "")?.isStreaming ?? false;
 
-  // C17 Phase B.3: SSE Last-Event-ID dedup state per conversation.
-  //   - lastSeqByConv: max seq we've already processed (sent as
-  //     ``Last-Event-ID`` header on the next /api/chat fetch).
+  // C17 Phase B.3: SSE seq tracking per conversation.
+  //   - lastSeqByConv: max seq we've already processed. Used as ``since_seq``
+  //     when re-attaching to a still-running turn via GET /api/chat/resume.
+  //     It is deliberately NOT sent as a Last-Event-ID header on the new-turn
+  //     POST — that replays the *previous* turn's buffered tail across the turn
+  //     boundary (see the POST below for the full rationale).
   //   - seenSeqsByConv: ringbuffer of recently-seen seqs to drop
-  //     duplicates that may arrive during replay→live overlap.
+  //     duplicates that may arrive during replay→live overlap (resume).
   // Both are refs (no re-render needed); only the streaming loop reads them.
   const lastSeqByConv = useRef<Map<string, number>>(new Map());
   const seenSeqsByConv = useRef<Map<string, Set<number>>>(new Map());
@@ -2446,13 +2449,25 @@ export function ChatView({
       });
       void logger.flush();
 
-      // C17 Phase B.3: Last-Event-ID 让后端把断点后的事件 replay 给我们。
-      // 首次 fetch 没有 last seq 就不带 header，后端正常推进 seq；重连
-      // 时带上最后看到的 seq，后端 SSE writer 会先 flush 缓冲事件再接
-      // active 流。``lastSeqByConv`` 是 ref，跨重渲染保留。
-      const _lastSeq = thisConvId ? lastSeqByConv.current.get(thisConvId) ?? 0 : 0;
+      // 重要：一条全新的用户消息**不是**断点重连，绝不能带 Last-Event-ID。
+      //
+      // 后端的 SSE ringbuffer 是 per-conversation、seq 单调递增、且跨多个
+      // turn 持续累积的。当上一轮 turn 的 SSE 在中途断开（切后台 / 切会话 /
+      // 网络抖动），后端在 finally 里仍会把这一轮**剩余的事件（含最终答复）**
+      // 继续 add_event 进 ringbuffer——但此时客户端已断开，看不到这些事件，
+      // 于是本地 ``lastSeqByConv`` 停在断点处、落后于 buffer 真实 max。
+      //
+      // 如果此刻发新消息时把这个滞后的 seq 当 Last-Event-ID 传给后端，后端
+      // ``replay_from(staleSeq)`` 会把上一轮缓冲的尾巴（旧的最终答复）瞬间
+      // flush 进**这一轮**的流里，顶在新问题下面——也就是用户反馈的“跑完了，
+      // 一问新问题就又把旧回复刷出来一遍”。seq 去重也救不了，因为客户端从未
+      // 见过那些 seq。
+      //
+      // 真正的重连/补齐另有其路：流中途断了由 ``attemptRecovery`` 走 REST
+      // history 轮询补齐；要挂载仍在跑的 turn 走 202 steered → GET
+      // /api/chat/resume（用 since_seq，仅在**同一** turn 内 replay）。POST
+      // /api/chat 永远是开新 turn，因此这里固定不带 Last-Event-ID。
       const _headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (_lastSeq > 0) _headers["Last-Event-ID"] = String(_lastSeq);
       let response = await safeFetch(`${apiBase}/api/chat`, {
         method: "POST",
         headers: _headers,
@@ -2566,11 +2581,12 @@ export function ChatView({
       resetIdleTimer();
 
       // 处理 SSE 流
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error("No response body");
+      const _initialReader = response.body?.getReader();
+      if (!_initialReader) throw new Error("No response body");
+      let reader = _initialReader;
       sctx.reader = reader;
 
-      const decoder = new TextDecoder();
+      let decoder = new TextDecoder();
       let buffer = "";
       let currentContent = "";
       let currentThinking = "";
@@ -2623,6 +2639,43 @@ export function ChatView({
       let pendingCompressedInfo: { beforeTokens: number; afterTokens: number } | null = null;
       let sseParseFailures = 0;
 
+      // ── 断流后 live resume（复用现成 /api/chat/resume，不动后端）──
+      // 一条 turn 的 SSE 中途断开（网络抖动 / 切后台 / 代理 idle 超时）时，后端
+      // 的 Agent task 并未结束（DISCONNECT_GRACE=15min），事件仍在 per-turn
+      // ringbuffer 里继续累积。与其直接降级成 attemptRecovery（REST 轮询最终答
+      // 复、丢掉实时流），不如先用 GET /api/chat/resume 重新挂载实时流：把断点
+      // 之后漏掉的事件按 ``since_seq`` 补齐，并继续实时续写。resume 现在受
+      // turn-floor 保护，只会回放**本 turn** 内 seq>since 的事件，跨 turn 串回复
+      // 已不可能；seq 去重（hasSeenSeq）再兜一层防重叠。返回 null 的两种情况都
+      // 安全回落到 attemptRecovery：① resume 404（任务已结束 / GC / 后端重启，
+      // 无可恢复流）；② 已是 graceful / 用户中止 / 重试用尽。
+      let resumeAttempts = 0;
+      const MAX_RESUME_ATTEMPTS = 3;
+      const tryAttachLiveResume = async () => {
+        if (!thisConvId || orgCommandPendingRef.current) return null;
+        if (abort.signal.aborted || sctx.userStopped || gracefulDone) return null;
+        if (resumeAttempts >= MAX_RESUME_ATTEMPTS) return null;
+        resumeAttempts++;
+        try {
+          const sinceSeq = lastSeqByConv.current.get(thisConvId) ?? 0;
+          const resp = await safeFetch(
+            `${apiBase}/api/chat/resume?conversation_id=${encodeURIComponent(thisConvId)}&since_seq=${sinceSeq}`,
+            { method: "GET", signal: abort.signal },
+          );
+          if (!resp.ok) return null;
+          const r = resp.body?.getReader();
+          if (!r) return null;
+          logger.info("Chat", "sse_drop_live_resume", {
+            convId: thisConvId,
+            sinceSeq,
+            attempt: resumeAttempts,
+          });
+          return r;
+        } catch {
+          return null;
+        }
+      };
+
       while (true) {
         // ── 1. 每次循环检查 abort 状态 ──
         if (abort.signal.aborted) break;
@@ -2632,7 +2685,19 @@ export function ChatView({
         try {
           ({ done, value } = await reader.read());
         } catch (readErr) {
-          // reader.read() 抛异常（abort 或网络错误）→ 跳到外层 catch
+          // reader.read() 抛异常（abort 或网络错误）。先试 live resume 重挂实时
+          // 流；挂上了就换 reader 继续读，挂不上再抛给外层 catch（→ attemptRecovery）。
+          const resumed = await tryAttachLiveResume();
+          if (resumed) {
+            reader = resumed;
+            sctx.reader = resumed;
+            // Drop the dropped stream's partial frame + decoder state so a
+            // multibyte char split across the break can't bleed into the new
+            // stream. resume replays full frames from since_seq.
+            buffer = "";
+            decoder = new TextDecoder();
+            continue;
+          }
           throw readErr;
         }
 
@@ -3613,7 +3678,21 @@ export function ChatView({
           }
         }
 
-        if (done) break;
+        if (done) {
+          // 流自然 EOF。若是 graceful（已收到 done 事件）/ 用户中止，
+          // tryAttachLiveResume 会同步返回 null → 正常 break（零额外开销）。
+          // 否则视为中途断开，尝试 live resume 续流；挂不上再 break 落到
+          // 循环结束后的恢复逻辑（attemptRecovery）。
+          const resumed = await tryAttachLiveResume();
+          if (resumed) {
+            reader = resumed;
+            sctx.reader = resumed;
+            buffer = "";
+            decoder = new TextDecoder();
+            continue;
+          }
+          break;
+        }
       }
 
       // ── 循环结束后：判断是正常完成还是被用户中止 ──
@@ -3898,6 +3977,11 @@ export function ChatView({
 
   // ── 消息排队系统 ──
   const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([]);
+  // Mirror of messageQueue for synchronous reads inside async callbacks (e.g.
+  // the busy-probe auto-dequeue): the effect closure's ``messageQueue`` goes
+  // stale across an await, so we re-check liveness against this ref instead.
+  const messageQueueRef = useRef<QueuedMessage[]>(messageQueue);
+  useEffect(() => { messageQueueRef.current = messageQueue; }, [messageQueue]);
   const [queueExpanded, setQueueExpanded] = useState(true);
 
   // ── 消息编辑：回填到输入框，删除该条及后续消息 ──
@@ -4171,6 +4255,14 @@ export function ChatView({
   // ── 排队消息自动出队 ──
   // 后端支持并发流式 — 每会话独立 Agent 实例。
   // 排队仅限同会话：某会话流结束时，出队该会话排队的下一条消息。
+  //
+  // 关键：``isStreaming`` 在 fetch 循环退出时**一律**被置 false（见流式
+  // finally），其中也包括「turn 中途 SSE 断开」——此时后端的 Agent task 并没
+  // 结束（DISCONNECT_GRACE 给了 15 分钟宽限，任务继续跑）。若此刻就把排队消息
+  // 当作「新 turn」POST 出去，会撞上仍在运行的上一 turn，被后端 STEER/QUEUE
+  // 重路由（改过模式的纯文本会被误并进上一 turn，丢掉用户切换的模式意图）。
+  // 因此出队前先探一次 ``/api/chat/busy``：后端确实空闲了才发，仍忙就稍后再探。
+  // 这与 openclaw「失序先和服务端真相对账、再行动」是同一思路。
   const prevStreamingSetRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     const currentStreamingSet = new Set(
@@ -4185,16 +4277,45 @@ export function ChatView({
         const nextIdx = messageQueue.findIndex(m => m.convId === finishedId);
         if (nextIdx >= 0) {
           const next = messageQueue[nextIdx];
-          setMessageQueue(prev => prev.filter((_, i) => i !== nextIdx));
-          const targetId = next.convId;
-          setTimeout(() => {
+          // Drain only once the backend reports this conversation idle. We do
+          // NOT remove the item from the visible queue until it is actually
+          // sent, so a still-running turn (e.g. after a mid-turn drop) keeps
+          // the item parked in the queue UI instead of mis-firing it early.
+          const drainWhenIdle = (attempt: number) => {
+            safeFetch(
+              `${apiBaseRef.current}/api/chat/busy?conversation_id=${encodeURIComponent(finishedId)}`,
+            )
+              .then((r) => (r.ok ? r.json() : null))
+              .then((data) => {
+                const busy = Boolean(data?.busy);
+                // Up to ~30s of patience for a turn that is still settling after
+                // a dropped stream; past that, fall through and let the backend's
+                // own STEER/QUEUE policy arbitrate (same as the legacy behaviour).
+                if (busy && attempt < 20) {
+                  setTimeout(() => drainWhenIdle(attempt + 1), 1500);
+                  return;
+                }
+                doSend();
+              })
+              // Probe failed (offline / backend down): don't strand the item —
+              // fall back to the legacy "send anyway" behaviour.
+              .catch(() => doSend());
+          };
+          const doSend = () => {
+            // Re-check liveness against the ref (the closure's messageQueue is
+            // stale after the busy-probe await): the user may have edited /
+            // removed / manually sent this item during the wait. The removal
+            // updater stays pure; sendMessage fires exactly once, outside it.
+            if (!messageQueueRef.current.some((m) => m.id === next.id)) return;
+            setMessageQueue((prev) => prev.filter((m) => m.id !== next.id));
             // Replay as a brand-new turn carrying the attachments and mode
             // captured at queue time (not the live composer state). Pass an
             // explicit [] when the queued item had no attachments, otherwise
-            // sendMessage would fall back to whatever is staged in the
-            // composer right now and attach the wrong files.
-            sendMessage(next.text, targetId, undefined, next.mode, next.attachments ?? []);
-          }, 100);
+            // sendMessage would fall back to whatever is staged in the composer
+            // right now and attach the wrong files.
+            sendMessage(next.text, next.convId, undefined, next.mode, next.attachments ?? []);
+          };
+          drainWhenIdle(0);
           break;
         }
       }
