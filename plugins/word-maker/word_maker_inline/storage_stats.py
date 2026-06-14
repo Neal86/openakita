@@ -75,3 +75,4 @@ async def collect_storage_stats(
         sample_paths=max(0, int(sample_paths)),
         skip_hidden=bool(skip_hidden),
     )
+

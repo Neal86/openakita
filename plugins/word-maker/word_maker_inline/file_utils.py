@@ -34,3 +34,4 @@ def assert_within_root(root: str | Path, child: str | Path) -> Path:
     child_path = Path(child).resolve()
     child_path.relative_to(root_path)
     return child_path
+

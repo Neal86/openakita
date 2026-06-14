@@ -160,9 +160,7 @@ def load_source(path: str | Path, *, max_chars: int = 20000) -> SourceLoadResult
                 error=f"Unsupported source file type: {suffix or '(none)'}",
             )
     except Exception as exc:
-        return SourceLoadResult(
-            str(target), suffix.lstrip(".") or "unknown", "", ok=False, error=str(exc)
-        )
+        return SourceLoadResult(str(target), suffix.lstrip(".") or "unknown", "", ok=False, error=str(exc))
 
     return SourceLoadResult(
         str(target),
@@ -171,3 +169,4 @@ def load_source(path: str | Path, *, max_chars: int = 20000) -> SourceLoadResult
         ok=True,
         metadata={"chars": len(text), "filename": target.name},
     )
+
