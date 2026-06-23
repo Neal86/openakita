@@ -26,6 +26,8 @@ _CURRENT_PLATFORM = sys.platform  # "win32", "darwin", "linux"
 
 logger = logging.getLogger(__name__)
 
+_RuntimeRegistryRecord = dict[str, object]
+
 
 @dataclass
 class SkillLoadIssue:
@@ -297,6 +299,7 @@ class SkillLoader:
 
         directories = self.discover_skill_directories(base_path)
         loaded = 0
+        runtime_records: list[_RuntimeRegistryRecord] = []
 
         for skill_dir in directories:
             # __builtin__ / skills/system/ 等只读源以及被识别为 system 的根
@@ -311,13 +314,19 @@ class SkillLoader:
             loaded += self.load_from_directory(
                 skill_dir,
                 _readonly=is_readonly_root,
+                _runtime_registry_records=runtime_records,
             )
 
-        loaded += self._load_cli_anything_skills()
+        loaded += self._load_cli_anything_skills(_runtime_registry_records=runtime_records)
+        self._flush_runtime_registry_records(runtime_records)
 
         return loaded
 
-    def _load_cli_anything_skills(self) -> int:
+    def _load_cli_anything_skills(
+        self,
+        *,
+        _runtime_registry_records: list[_RuntimeRegistryRecord] | None = None,
+    ) -> int:
         """Discover and load SKILL.md files from pip-installed cli-anything-* packages.
 
         CLI-Anything generates SKILL.md alongside each CLI harness. When installed
@@ -351,7 +360,11 @@ class SkillLoader:
                         full_path = rel_path.locate()
                         if isinstance(full_path, Path) and full_path.exists():
                             skill_dir = full_path.parent
-                            skill = self.load_skill(skill_dir, force=True)
+                            skill = self.load_skill(
+                                skill_dir,
+                                force=True,
+                                _runtime_registry_records=_runtime_registry_records,
+                            )
                             if skill:
                                 loaded += 1
                                 logger.info(
@@ -364,12 +377,24 @@ class SkillLoader:
             logger.info(f"Loaded {loaded} cli-anything skills from pip packages")
         return loaded
 
+    @staticmethod
+    def _flush_runtime_registry_records(records: list[_RuntimeRegistryRecord]) -> None:
+        if not records:
+            return
+        try:
+            from .runtime_registry import mark_skills_loaded
+
+            mark_skills_loaded(records)
+        except Exception:
+            logger.debug("Failed to update skill runtime registry batch", exc_info=True)
+
     def load_from_directory(
         self,
         directory: Path,
         *,
         force: bool = True,
         _readonly: bool = False,
+        _runtime_registry_records: list[_RuntimeRegistryRecord] | None = None,
     ) -> int:
         """从目录递归加载所有技能。
 
@@ -396,6 +421,8 @@ class SkillLoader:
             return 0
 
         loaded = 0
+        runtime_records = _runtime_registry_records if _runtime_registry_records is not None else []
+        flush_runtime_records = _runtime_registry_records is None
 
         for item in directory.iterdir():
             if not item.is_dir():
@@ -404,7 +431,11 @@ class SkillLoader:
             skill_md = item / "SKILL.md"
             if skill_md.exists():
                 try:
-                    skill = self.load_skill(item, force=force)
+                    skill = self.load_skill(
+                        item,
+                        force=force,
+                        _runtime_registry_records=runtime_records,
+                    )
                     if skill:
                         loaded += 1
                         cat = skill.metadata.category
@@ -429,6 +460,7 @@ class SkillLoader:
                     item,
                     force=force,
                     _readonly=child_readonly,
+                    _runtime_registry_records=runtime_records,
                 )
             elif item.name.startswith(".") or item.name.startswith("_"):
                 continue
@@ -437,8 +469,11 @@ class SkillLoader:
                     item,
                     force=force,
                     _readonly=_readonly,
+                    _runtime_registry_records=runtime_records,
                 )
 
+        if flush_runtime_records:
+            self._flush_runtime_registry_records(runtime_records)
         logger.info(f"Loaded {loaded} skills from {directory}")
         return loaded
 
@@ -458,6 +493,7 @@ class SkillLoader:
         *,
         plugin_source: str | None = None,
         force: bool = False,
+        _runtime_registry_records: list[_RuntimeRegistryRecord] | None = None,
     ) -> ParsedSkill | None:
         """加载单个技能。
 
@@ -543,15 +579,19 @@ class SkillLoader:
 
             self._loaded_skills[sid] = skill
             try:
-                from .runtime_registry import mark_skill_loaded
-
                 deps = getattr(skill.metadata, "python_dependencies", []) or []
-                mark_skill_loaded(
-                    sid,
-                    source_path=str(skill_dir),
-                    enabled=True,
-                    dependencies=deps,
-                )
+                record: _RuntimeRegistryRecord = {
+                    "skill_id": sid,
+                    "source_path": str(skill_dir),
+                    "enabled": True,
+                    "dependencies": list(deps),
+                }
+                if _runtime_registry_records is not None:
+                    _runtime_registry_records.append(record)
+                else:
+                    from .runtime_registry import mark_skills_loaded
+
+                    mark_skills_loaded([record])
             except Exception:
                 logger.debug("Failed to update skill runtime registry for %s", sid, exc_info=True)
             logger.info(f"Loaded skill: {sid} (name={skill.metadata.name})")
