@@ -569,7 +569,7 @@ class OneBotAdapter(ChannelAdapter):
             await ws.send(json.dumps(request))
             result = await asyncio.wait_for(future, timeout=30)
             return result
-        except (asyncio.TimeoutError, TimeoutError):
+        except TimeoutError:
             self._api_callbacks.pop(echo, None)
             raise RuntimeError(f"API call timeout: {action}")
         except Exception:
@@ -768,8 +768,10 @@ class OneBotAdapter(ChannelAdapter):
             raise FileNotFoundError(f"File not found: {file_path}")
 
         chat_id_int = int(chat_id)
-        _is_grp = is_group if is_group is not None else (
-            self._chat_type_map.get(chat_id, "group") == "group"
+        _is_grp = (
+            is_group
+            if is_group is not None
+            else (self._chat_type_map.get(chat_id, "group") == "group")
         )
 
         if caption:
@@ -808,8 +810,10 @@ class OneBotAdapter(ChannelAdapter):
             raise FileNotFoundError(f"Voice file not found: {voice_path}")
 
         chat_id_int = int(chat_id)
-        _is_grp = is_group if is_group is not None else (
-            self._chat_type_map.get(chat_id, "group") == "group"
+        _is_grp = (
+            is_group
+            if is_group is not None
+            else (self._chat_type_map.get(chat_id, "group") == "group")
         )
 
         normalized = str(path.resolve()).replace("\\", "/")

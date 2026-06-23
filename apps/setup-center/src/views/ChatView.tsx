@@ -1,19 +1,17 @@
 // ─── ChatView: 完整 AI 聊天页面 ───
 // 组装层: 通过 hooks + 子组件构建完整聊天界面
 
-import { useEffect, useMemo, useRef, useState, useCallback, memo } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { setLanguage } from "../i18n";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ProviderIcon } from "../components/ProviderIcon";
-import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { toast } from "sonner";
 import { setThemePref } from "../theme";
 import type { Theme } from "../theme";
-import { invoke, downloadFile, openFileWithDefault, showInFolder, readFileBase64, onDragDrop, IS_TAURI, IS_WEB, IS_MOBILE_BROWSER, onWsEvent, logger, getAssetUrl } from "../platform";
-import { getAccessToken } from "../platform/auth";
+import { downloadFile, showInFolder, readFileBase64, onDragDrop, IS_TAURI, IS_WEB, IS_MOBILE_BROWSER, onWsEvent, logger } from "../platform";
 import { safeFetch } from "../providers";
 import type {
   ChatMessage,
@@ -24,7 +22,6 @@ import type {
   ChatTodo,
   ChatTodoStep,
   ChatAskUser,
-  ChatAskQuestion,
   ChatAttachment,
   ChatArtifact,
   ChatSource,
@@ -35,52 +32,49 @@ import type {
   ChainToolCall,
   ChainEntry,
   ChainSummaryItem,
+  ChainTimelineGroup,
   ChatDisplayMode,
   PlanApprovalEvent,
   OrgTimelineEntry,
+  MessagePart,
 } from "../types";
-import { genId, formatTime, formatDate, timeAgo } from "../utils";
-import { notifyError } from "../utils/notify";
+import { genId, timeAgo } from "../utils";
+import { notifyError, notifyInfo } from "../utils/notify";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import {
   IconSend, IconPaperclip, IconMic, IconStopCircle,
   IconPlan, IconPlus, IconMenu, IconStop, IconX,
-  IconCheck, IconLoader, IconCircle, IconPlay, IconMinus,
+  IconCheck, IconLoader, IconCircle,
   IconChevronDown, IconChevronUp, IconMessageCircle, IconChevronRight,
-  IconImage, IconRefresh, IconClipboard, IconTrash, IconZap,
-  IconMask, IconBot, IconUsers, IconHelp, IconEdit, IconDownload,
+  IconClipboard, IconTrash, IconZap,
+  IconBot, IconEdit, IconDownload,
   IconPin, IconSearch, IconCircleDot, IconXCircle,
-  IconBuilding, IconShield, IconAlertCircle,
+  IconBuilding, IconAlertCircle,
   IconHourglass, IconTarget, IconCheckCircle, IconPlug, IconClock, IconBarChart, IconGlobe, IconMail,
-  getFileTypeIcon,
 } from "../icons";
 
 // ─── Chat module imports ───
 import type {
-  MdModules, QueuedMessage, StreamEvent,
+  QueuedMessage, StreamEvent,
   SubAgentEntry, SubAgentTask, StreamContext, AgentProfile,
 } from "./chat/utils/chatTypes";
 import {
   IDLE_THRESHOLD_MS, IDLE_TOKEN_THRESHOLD, PASTE_CHAR_THRESHOLD, UNDO_MAX_STEPS,
-  exportConversation, appendAuthToken, stripLegacySummary,
-  sanitizeStoredMessages, loadMessagesFromStorage, saveMessagesToStorage, STORED_MESSAGE_WINDOW,
-  buildChainFromSummary, formatAskUserAnswer, patchMessagesWithBackend, patchMessagesWithBackendDetailed,
-  classifyError, basename, formatToolDescription, generateGroupSummary,
-  ERROR_META, SVG_PATHS, getNextSpinnerTip, shouldRenderConversationMessages,
+  exportConversation,
+  loadMessagesFromStorage, saveMessagesToStorage, STORED_MESSAGE_WINDOW,
+  buildChainFromSummary, buildChainFromTimeline, formatAskUserAnswer, patchMessagesWithBackend, patchMessagesWithBackendDetailed,
+  classifyError, formatToolDescription,
+  shouldRenderConversationMessages,
 } from "./chat/utils/chatHelpers";
 import { useMdModules } from "./chat/hooks/useMdModules";
 import { useMessageReducer, useConversationReducer } from "./chat/hooks/useMessages";
-import type { MessageAction, ConversationAction } from "./chat/hooks/useMessages";
 import { useQueryGuard } from "./chat/hooks/useQueryGuard";
-import type { QueryState } from "./chat/hooks/useQueryGuard";
 import { useSecurityPolicy } from "./chat/hooks/useSecurityPolicy";
 import {
-  SpinnerTipDisplay, AttachmentPreview, ErrorCard,
-  ThinkingBlock, ToolCallDetail, ToolCallsGroup, ThinkingChain,
-  FloatingPlanBar, AskUserBlock, ArtifactList, PlanApprovalPanel,
+  AttachmentPreview,
+  FloatingPlanBar, PlanApprovalPanel,
   SlashCommandPanel, RenderIcon, SubAgentCards,
   SecurityConfirmModal, ContextMenuInner, LightboxOverlay,
-  MessageBubble, FlatMessageItem,
   MessageList,
 } from "./chat/components";
 import type { SecurityCloseInfo } from "./chat/components";
@@ -95,29 +89,6 @@ function _cmdPrefix(cmd: string): string {
 
 const HISTORY_PAGE_LIMIT = 80;
 type EndpointPolicy = "prefer" | "require";
-
-function formatOrgCommandPhase(phase?: string, openChainCount?: number): string {
-  switch (phase) {
-    case "awaiting_summary":
-      return "正在等待主编汇总最终结果";
-    case "done":
-      return "组织命令已完成";
-    case "error":
-      return "组织命令执行出错";
-    case "running":
-    default:
-      if (typeof openChainCount === "number" && openChainCount > 0) {
-        return `正在等待 ${openChainCount} 条下级任务链收口`;
-      }
-      return "组织正在协调任务";
-  }
-}
-
-const SOFT_ORG_EXIT_REASONS = new Set(["normal", "ask_user", "waiting_user", "verify_incomplete"]);
-
-function isSoftOrgExitReason(reason?: string): boolean {
-  return !reason || SOFT_ORG_EXIT_REASONS.has(reason);
-}
 
 type HistoryPageState = {
   total: number;
@@ -136,6 +107,7 @@ export function ChatView({
   visible = true,
   multiAgentEnabled = false,
   currentWorkspaceId,
+  feedbackModalOpen = false,
 }: {
   serviceRunning: boolean;
   endpoints: EndpointSummary[];
@@ -144,10 +116,17 @@ export function ChatView({
   visible?: boolean;
   multiAgentEnabled?: boolean;
   currentWorkspaceId?: string | null;
+  feedbackModalOpen?: boolean;
 }) {
   // multiAgentEnabled is currently observed by App but not consumed inside ChatView
   // (single-agent only); accept the prop for forward compat to avoid runtime warnings.
   void multiAgentEnabled;
+
+  // Track feedbackModalOpen via ref so the Tauri drag-drop effect (deps=[]) can
+  // read the latest value without re-registering the webview listener.
+  const feedbackModalOpenRef = useRef(false);
+  useEffect(() => { feedbackModalOpenRef.current = feedbackModalOpen; }, [feedbackModalOpen]);
+
   const { t, i18n } = useTranslation();
   const mdModules = useMdModules();
 
@@ -160,6 +139,11 @@ export function ChatView({
   const STORAGE_KEY_CONVS = `chat_conversations_${wsTag}`;
   const STORAGE_KEY_ACTIVE = `chat_activeConvId_${wsTag}`;
   const STORAGE_KEY_MSGS_PREFIX = `chat_msgs_${wsTag}_`;
+  // data_epoch is PER-WORKSPACE (each workspace owns its own
+  // data/web_access.json and thus its own randomly generated epoch), so its
+  // factory-reset cache MUST also be workspace-scoped — keep it here alongside
+  // the other scoped keys so it can't silently drift back to a global key (#635).
+  const STORAGE_KEY_DATA_EPOCH = `openakita_data_epoch_${wsTag}`;
 
   // Old (pre-isolation) global keys — used only for the one-time migration
   // performed in the workspace-change effect.
@@ -304,7 +288,6 @@ export function ChatView({
   const [selectedEndpoint, setSelectedEndpoint] = useState("auto");
   const [selectedEndpointPolicy, setSelectedEndpointPolicy] = useState<EndpointPolicy>("prefer");
   const [chatMode, setChatMode] = useState<"agent" | "plan" | "ask">("agent");
-  const planMode = chatMode === "plan";
   const [pendingApproval, setPendingApproval] = useState<PlanApprovalEvent | null>(null);
   const pendingApprovalRef = useRef<PlanApprovalEvent | null>(null);
   const [deathSwitchActive, setDeathSwitchActive] = useState(false);
@@ -422,7 +405,7 @@ export function ChatView({
     },
     [apiBaseUrl, securityAggWindow],
   );
-  const [winSize, setWinSize] = useState({ w: window.innerWidth, h: window.innerHeight });
+  const [, setWinSize] = useState({ w: window.innerWidth, h: window.innerHeight });
   useEffect(() => {
     if (!lightbox) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setLightbox(null); };
@@ -524,11 +507,14 @@ export function ChatView({
   const activeConvIdRef = useRef(activeConvId);
   const isCurrentConvStreaming = streamContexts.current.get(activeConvId ?? "")?.isStreaming ?? false;
 
-  // C17 Phase B.3: SSE Last-Event-ID dedup state per conversation.
-  //   - lastSeqByConv: max seq we've already processed (sent as
-  //     ``Last-Event-ID`` header on the next /api/chat fetch).
+  // C17 Phase B.3: SSE seq tracking per conversation.
+  //   - lastSeqByConv: max seq we've already processed. Used as ``since_seq``
+  //     when re-attaching to a still-running turn via GET /api/chat/resume.
+  //     It is deliberately NOT sent as a Last-Event-ID header on the new-turn
+  //     POST — that replays the *previous* turn's buffered tail across the turn
+  //     boundary (see the POST below for the full rationale).
   //   - seenSeqsByConv: ringbuffer of recently-seen seqs to drop
-  //     duplicates that may arrive during replay→live overlap.
+  //     duplicates that may arrive during replay→live overlap (resume).
   // Both are refs (no re-render needed); only the streaming loop reads them.
   const lastSeqByConv = useRef<Map<string, number>>(new Map());
   const seenSeqsByConv = useRef<Map<string, Set<number>>>(new Map());
@@ -825,20 +811,48 @@ export function ChatView({
   const hydrateSeqRef = useRef(0);
 
   const mapBackendHistoryToMessages = useCallback(
-    (rows: { id: string; index?: number; role: string; content: string; timestamp: number; chain_summary?: ChainSummaryItem[]; artifacts?: ChatArtifact[]; attachments?: ChatAttachment[]; org_timeline?: OrgTimelineEntry[]; ask_user?: { question: string; options?: { id: string; label: string }[]; questions?: ChatAskQuestion[] }; usage?: ChatMessage["usage"] }[]): ChatMessage[] => {
+    (rows: { id: string; index?: number; role: string; content: string; timestamp: number; chain_summary?: ChainSummaryItem[]; chain_timeline?: ChainTimelineGroup[]; artifacts?: ChatArtifact[]; attachments?: ChatAttachment[]; org_timeline?: OrgTimelineEntry[]; ask_user?: ChatAskUser; todo?: ChatTodo; parts?: MessagePart[]; usage?: ChatMessage["usage"] }[]): ChatMessage[] => {
       return rows.map((m) => ({
         id: m.id,
         ...(typeof m.index === "number" ? { historyIndex: m.index } : {}),
         role: m.role as "user" | "assistant" | "system",
         content: m.content,
         timestamp: m.timestamp,
-        ...(m.chain_summary?.length ? { thinkingChain: buildChainFromSummary(m.chain_summary) } : {}),
+        // Prefer the faithful causal timeline; fall back to the lossy summary
+        // for messages persisted before chain_timeline existed.
+        ...(m.chain_timeline?.length
+          ? { thinkingChain: buildChainFromTimeline(m.chain_timeline) }
+          : m.chain_summary?.length
+            ? { thinkingChain: buildChainFromSummary(m.chain_summary) }
+            : {}),
         ...(m.artifacts?.length ? { artifacts: m.artifacts } : {}),
         ...(m.attachments?.length ? { attachments: m.attachments } : {}),
         ...(m.org_timeline?.length ? { orgTimeline: m.org_timeline } : {}),
+        ...(m.todo?.steps?.length ? { todo: m.todo } : {}),
         ...(m.ask_user ? { askUser: m.ask_user, content: "" } : {}),
+        ...(m.parts?.length ? { parts: m.parts } : {}),
         ...(m.usage ? { usage: m.usage } : {}),
       }));
+    },
+    [],
+  );
+
+  // Re-attach a still-executing plan (not yet finalized into history) to the
+  // latest assistant message so switching windows / reloading mid-run does not
+  // drop the live plan card (#615).
+  const mergeActiveTodo = useCallback(
+    (msgs: ChatMessage[], activeTodo: ChatTodo | null | undefined): ChatMessage[] => {
+      if (!activeTodo || !activeTodo.steps?.length) return msgs;
+      let lastAssistant = -1;
+      for (let i = msgs.length - 1; i >= 0; i -= 1) {
+        if (msgs[i].role === "assistant") { lastAssistant = i; break; }
+      }
+      if (lastAssistant < 0) return msgs;
+      const target = msgs[lastAssistant];
+      if (target.todo && target.todo.id === activeTodo.id) return msgs;
+      const next = msgs.slice();
+      next[lastAssistant] = { ...target, todo: activeTodo };
+      return next;
     },
     [],
   );
@@ -872,7 +886,7 @@ export function ChatView({
       const data = await res.json();
       const backendMsgs = Array.isArray(data?.messages) ? mapBackendHistoryToMessages(data.messages) : [];
 
-      const chosen = backendMsgs.length > 0 ? backendMsgs : localMsgs;
+      const chosen = mergeActiveTodo(backendMsgs.length > 0 ? backendMsgs : localMsgs, data?.active_todo);
       if (seq === hydrateSeqRef.current) {
         setMessages(chosen);
         setHistoryPage({
@@ -899,7 +913,7 @@ export function ChatView({
         setHydrating(false);
       }
     }
-  }, [serviceRunning, apiBaseUrl, mapBackendHistoryToMessages, STORAGE_KEY_MSGS_PREFIX]);
+  }, [serviceRunning, apiBaseUrl, mapBackendHistoryToMessages, mergeActiveTodo, STORAGE_KEY_MSGS_PREFIX]);
 
   const loadOlderMessages = useCallback(async () => {
     const convId = activeConvIdRef.current;
@@ -1247,11 +1261,16 @@ export function ChatView({
         // Session serialisation and _load_sessions silently skips all old
         // sessions, yet sessions.json on disk is still intact.
         const epoch = data.data_epoch as string | undefined;
-        const EPOCH_KEY = "openakita_data_epoch";
+        // Drop the legacy GLOBAL epoch key that caused #635: it was shared across
+        // all workspaces, so switching workspaces always made it differ from the
+        // new workspace's epoch and was misread as a factory reset, wiping the
+        // local conversation list of the workspace you just switched into.
+        // Harmless if absent; idempotent.
+        try { localStorage.removeItem("openakita_data_epoch"); } catch { /* ignore */ }
 
         if (epoch) {
-          const cached = localStorage.getItem(EPOCH_KEY);
-          localStorage.setItem(EPOCH_KEY, epoch);
+          const cached = localStorage.getItem(STORAGE_KEY_DATA_EPOCH);
+          localStorage.setItem(STORAGE_KEY_DATA_EPOCH, epoch);
           if (cached && cached !== epoch) {
             setConversations((prev) => {
               for (const c of prev) {
@@ -1289,7 +1308,14 @@ export function ChatView({
               ...local,
               title: local.titleGenerated ? local.title : (b.title || local.title || "对话"),
               lastMessage: b.lastMessage || local.lastMessage,
-              timestamp: Math.max(local.timestamp || 0, b.timestamp || 0),
+              // 后端时间戳现以"最后一条真实消息"为准（见后端 #628 修复），是列表
+              // 排序/显示的权威值。这里**不能**再无脑 Math.max：早期被旧逻辑
+              // 污染（≈打开时刻）并缓存进 localStorage 的 local.timestamp 会被
+              // Math.max 永久锁住，导致升级后时间与顺序仍然不对。只有正在流式
+              // 输出的会话保留本地乐观值，避免对账瞬间把活跃会话往下挪。
+              timestamp: streamContexts.current.has(b.id)
+                ? Math.max(local.timestamp || 0, b.timestamp || 0)
+                : (b.timestamp || local.timestamp || 0),
               messageCount: Math.max(local.messageCount || 0, b.messageCount || 0),
               agentProfileId: b.agentProfileId || local.agentProfileId,
               endpointId: b.endpointId || local.endpointId,
@@ -1585,8 +1611,8 @@ export function ChatView({
   }, []);
 
   // ── 自动滚到底部 ──
-  // Virtuoso 的 followOutput 已自动处理流式追踪；
-  // 此处处理: (1) 切换对话后 hydrate 完成 (2) 从隐藏变可见。
+  // MessageList 内部的 sticky-bottom 状态机负责流式追踪与"上滚即停"；
+  // 此处只处理: (1) 切换对话后 hydrate 完成 (2) 从隐藏变可见。
   const needsScrollOnVisible = useRef(false);
   const convSwitchScrollRef = useRef(false);
 
@@ -2026,17 +2052,21 @@ export function ChatView({
 
   // ── 发送消息（overrideText 用于 ask_user 回复等场景，绕过 inputText；targetConvId 用于自动出队等需要指定目标会话的场景） ──
   // displayContent: 当发送给 API 的原文（如 JSON）不适合直接展示时，可指定用户气泡中的显示文本
-  const sendMessage = useCallback(async (overrideText?: string, targetConvId?: string, displayContent?: string, modeOverride?: "agent" | "plan" | "ask") => {
+  const sendMessage = useCallback(async (overrideText?: string, targetConvId?: string, displayContent?: string, modeOverride?: "agent" | "plan" | "ask", attachmentsOverride?: ChatAttachment[]) => {
     const text = (overrideText ?? inputTextRef.current).trim();
-    if (!text && pendingAttachments.length === 0) return;
-    const pendingUploads = pendingAttachments.filter((a) =>
+    // ``attachmentsOverride`` lets callers (e.g. the queue drain) replay a
+    // previously-captured attachment set instead of the live composer state.
+    // When omitted we fall back to the composer's pending attachments.
+    const attachmentsToSend = attachmentsOverride ?? pendingAttachments;
+    if (!text && attachmentsToSend.length === 0) return;
+    const pendingUploads = attachmentsToSend.filter((a) =>
       a.type !== "image" && a.type !== "video" && (!a.url || a.uploadStatus === "uploading")
     );
     if (pendingUploads.length > 0) {
       notifyError(t("chat.uploadStillRunning", "附件还在上传，请稍等一下"));
       return;
     }
-    const failedUploads = pendingAttachments.filter((a) => a.uploadStatus === "failed");
+    const failedUploads = attachmentsToSend.filter((a) => a.uploadStatus === "failed");
     if (failedUploads.length > 0) {
       notifyError(t("chat.uploadFailedRetry", "有附件上传失败，请重新选择或稍后重试"));
       return;
@@ -2099,7 +2129,7 @@ export function ChatView({
       id: genId(),
       role: "user",
       content: displayContent || text,
-      attachments: pendingAttachments.length > 0 ? pendingAttachments.map(({ _uploadId, ...rest }) => rest) : undefined,
+      attachments: attachmentsToSend.length > 0 ? attachmentsToSend.map(({ _uploadId, ...rest }) => rest) : undefined,
       timestamp: Date.now(),
     };
 
@@ -2114,8 +2144,16 @@ export function ChatView({
 
     let convId = resolvedConvId;
 
-    setInputValue("");
-    setPendingAttachments([]);
+    // Clear the composer for every send that draws on it (normal send,
+    // regenerate, ask_user reply — all use the live composer attachments).
+    // The ONLY sends that must leave the composer untouched are replays that
+    // bring their own attachment set (``attachmentsOverride`` defined): the
+    // queue drain and the steer-fallback. Wiping the composer there would
+    // destroy a draft the user is typing for their next message.
+    if (attachmentsOverride === undefined) {
+      setInputValue("");
+      setPendingAttachments([]);
+    }
     setSlashOpen(false);
     if (!convId) {
       convId = genId();
@@ -2165,6 +2203,7 @@ export function ChatView({
       isDelegating: false,
       pollingTimer: null,
       _hadError: false,
+      mode: modeOverride ?? chatMode,
     };
     streamContexts.current.set(thisConvId, sctx);
     const isTargetConversationActive = () =>
@@ -2266,6 +2305,15 @@ export function ChatView({
       const _recoverMsgId = assistantMsg.id;
       const _recoverUserTs = userMsg.timestamp;
       const _recoverKey = STORAGE_KEY_MSGS_PREFIX + thisConvId;
+      // Recovery only fires when the stream was interrupted / incomplete, so the
+      // local bubble's text is suspect. Flag it as a stream fallback up front:
+      // any backend reconciliation that follows (recovery poll, cross-window
+      // history patch, idle re-sync) will then prefer the persisted answer over
+      // this partial copy, even if the backend text is shorter. See
+      // ChatMessage.streamFallback and patchMessagesWithBackendDetailed.
+      updateMessages((prev) =>
+        prev.map((m) => (m.id === _recoverMsgId && !m.streamFallback ? { ...m, streamFallback: true } : m)),
+      );
       let attempts = 0;
       const maxAttempts = 40;
       const basePollInterval = 3000;
@@ -2315,14 +2363,20 @@ export function ChatView({
               const baseMessages = isActiveRecovery ? prev : loadMessagesFromStorage(_recoverKey);
               const updated = baseMessages.map((m) => {
                 if (m.id !== _recoverMsgId) return m;
-                if (m.content && m.content.length >= contentLen) return m;
-                const patched: ChatMessage = { ...m, content: lastAssistant.content };
-                if (
-                  (!m.thinkingChain || m.thinkingChain.length === 0) &&
-                  Array.isArray(lastAssistant.chain_summary) &&
-                  lastAssistant.chain_summary.length > 0
-                ) {
-                  patched.thinkingChain = buildChainFromSummary(lastAssistant.chain_summary);
+                // A stream-fallback bubble holds untrustworthy text (e.g. a
+                // "connection failed" notice that may be *longer* than the real
+                // answer), so the length guard would wrongly keep it. Adopt the
+                // backend copy regardless of length and clear the flag; the guard
+                // still applies once the bubble is reconciled.
+                if (!m.streamFallback && m.content && !m.streaming && m.content.length >= contentLen) return m;
+                const patched: ChatMessage = { ...m, content: lastAssistant.content, streaming: false, streamStatus: null, streamFallback: undefined };
+                if (!m.thinkingChain || m.thinkingChain.length === 0) {
+                  // Prefer the faithful timeline; fall back to the lossy summary.
+                  if (Array.isArray(lastAssistant.chain_timeline) && lastAssistant.chain_timeline.length > 0) {
+                    patched.thinkingChain = buildChainFromTimeline(lastAssistant.chain_timeline);
+                  } else if (Array.isArray(lastAssistant.chain_summary) && lastAssistant.chain_summary.length > 0) {
+                    patched.thinkingChain = buildChainFromSummary(lastAssistant.chain_summary);
+                  }
                 }
                 return patched;
               });
@@ -2364,8 +2418,8 @@ export function ChatView({
       };
 
       // 附件信息
-      if (pendingAttachments.length > 0) {
-        body.attachments = pendingAttachments.map((a) => ({
+      if (attachmentsToSend.length > 0) {
+        body.attachments = attachmentsToSend.map((a) => ({
           type: a.type,
           name: a.name,
           url: a.url,
@@ -2389,25 +2443,95 @@ export function ChatView({
         endpoint: typeof selectedEndpoint === "string" ? selectedEndpoint : "auto",
         thinkingMode,
         thinkingDepth: thinkingMode !== "off" ? thinkingDepth : null,
-        attachments: pendingAttachments.length,
+        attachments: attachmentsToSend.length,
         textLen: text.length,
         orgMode: Boolean(orgMode && selectedOrgId),
       });
       void logger.flush();
 
-      // C17 Phase B.3: Last-Event-ID 让后端把断点后的事件 replay 给我们。
-      // 首次 fetch 没有 last seq 就不带 header，后端正常推进 seq；重连
-      // 时带上最后看到的 seq，后端 SSE writer 会先 flush 缓冲事件再接
-      // active 流。``lastSeqByConv`` 是 ref，跨重渲染保留。
-      const _lastSeq = thisConvId ? lastSeqByConv.current.get(thisConvId) ?? 0 : 0;
+      // 重要：一条全新的用户消息**不是**断点重连，绝不能带 Last-Event-ID。
+      //
+      // 后端的 SSE ringbuffer 是 per-conversation、seq 单调递增、且跨多个
+      // turn 持续累积的。当上一轮 turn 的 SSE 在中途断开（切后台 / 切会话 /
+      // 网络抖动），后端在 finally 里仍会把这一轮**剩余的事件（含最终答复）**
+      // 继续 add_event 进 ringbuffer——但此时客户端已断开，看不到这些事件，
+      // 于是本地 ``lastSeqByConv`` 停在断点处、落后于 buffer 真实 max。
+      //
+      // 如果此刻发新消息时把这个滞后的 seq 当 Last-Event-ID 传给后端，后端
+      // ``replay_from(staleSeq)`` 会把上一轮缓冲的尾巴（旧的最终答复）瞬间
+      // flush 进**这一轮**的流里，顶在新问题下面——也就是用户反馈的“跑完了，
+      // 一问新问题就又把旧回复刷出来一遍”。seq 去重也救不了，因为客户端从未
+      // 见过那些 seq。
+      //
+      // 真正的重连/补齐另有其路：流中途断了由 ``attemptRecovery`` 走 REST
+      // history 轮询补齐；要挂载仍在跑的 turn 走 202 steered → GET
+      // /api/chat/resume（用 since_seq，仅在**同一** turn 内 replay）。POST
+      // /api/chat 永远是开新 turn，因此这里固定不带 Last-Event-ID。
       const _headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (_lastSeq > 0) _headers["Last-Event-ID"] = String(_lastSeq);
-      const response = await safeFetch(`${apiBase}/api/chat`, {
+      let response = await safeFetch(`${apiBase}/api/chat`, {
         method: "POST",
         headers: _headers,
         body: JSON.stringify(body),
         signal: abort.signal,
       });
+
+      // 方案3 STEER: desktop 默认策略是 steer。当前端以为会话空闲、但后端
+      // 的上一轮 turn 其实还在跑时（典型场景：SSE 断连或页面重载后丢了流），
+      // 后端不再排队 6s 后报错，而是把这条消息注入到正在运行的 turn，并返回
+      // HTTP 202（JSON，而非 SSE 流）。这里把 202 拦下来：
+      //   - status=steered  → 消息已注入 → 改去 /api/chat/resume 挂载原始流，
+      //                        让用户看到 Agent 读到新消息后的续写。
+      //   - status=steer_failed → 旧任务恰好已结束、未注入 → 当作新消息重发一次。
+      if (response.status === 202) {
+        let steerData: { status?: string } | null = null;
+        try { steerData = await response.json(); } catch { /* 容错 */ }
+        if (steerData?.status === "steered") {
+          const sinceSeq = thisConvId ? (lastSeqByConv.current.get(thisConvId) ?? 0) : 0;
+          const resumeUrl =
+            `${apiBase}/api/chat/resume?conversation_id=${encodeURIComponent(thisConvId)}&since_seq=${sinceSeq}`;
+          response = await safeFetch(resumeUrl, { method: "GET", signal: abort.signal });
+          if (!response.ok) {
+            // 后端没有可恢复的流。两种情况，必须区分，否则会话状态会卡住：
+            //   1) 任务仍在跑，只是没有可挂载的 SSE writer（少见）→ 保持 running。
+            //   2) 任务其实已经结束（重启 / 超时 GC / 刚好跑完）→ 必须置 idle，
+            //      否则 UI 会永远显示“运行中”，输入框停在 steer 态无法发新消息。
+            // 用 /api/chat/busy 查后端真实状态来决定，不再无条件 running。
+            let stillBusy = false;
+            try {
+              const busyResp = await safeFetch(
+                `${apiBase}/api/chat/busy?conversation_id=${encodeURIComponent(thisConvId)}`,
+                { method: "GET", signal: abort.signal },
+              );
+              if (busyResp.ok) {
+                const busyData = await busyResp.json().catch(() => null);
+                stillBusy = Boolean(busyData?.busy);
+              }
+            } catch { /* 查询失败时保守按已结束处理，至少不卡 running */ }
+            updateMessages((prev) => prev.map((m) =>
+              m.id === assistantMsg.id
+                ? {
+                    ...m,
+                    content: stillBusy
+                      ? t("chat.steeredNoResume", "已加入当前任务的上下文，正在后台继续处理。")
+                      : t("chat.steeredTaskEnded", "已加入当前任务的上下文，该任务已结束。"),
+                    streaming: false,
+                  }
+                : m
+            ));
+            if (thisConvId) updateConvStatus(thisConvId, stillBusy ? "running" : "idle");
+            return;
+          }
+          // response 现在是 resume 的 SSE 流 → 落入下方 reader 循环正常处理续写。
+        } else {
+          // steer_failed：作为全新消息重发一次（此时旧任务已结束，应能正常开流）。
+          response = await safeFetch(`${apiBase}/api/chat`, {
+            method: "POST",
+            headers: _headers,
+            body: JSON.stringify(body),
+            signal: abort.signal,
+          });
+        }
+      }
 
       if (!response.ok) {
         if (response.status === 409) {
@@ -2457,15 +2581,15 @@ export function ChatView({
       resetIdleTimer();
 
       // 处理 SSE 流
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error("No response body");
+      const _initialReader = response.body?.getReader();
+      if (!_initialReader) throw new Error("No response body");
+      let reader = _initialReader;
       sctx.reader = reader;
 
-      const decoder = new TextDecoder();
+      let decoder = new TextDecoder();
       let buffer = "";
       let currentContent = "";
       let currentThinking = "";
-      let isThinking = false;
       let currentToolCalls: ChatToolCall[] = [];
       const currentToolCallsByKey = new Map<string, ChatToolCall>();
       const currentToolCallOrder: string[] = [];
@@ -2515,6 +2639,43 @@ export function ChatView({
       let pendingCompressedInfo: { beforeTokens: number; afterTokens: number } | null = null;
       let sseParseFailures = 0;
 
+      // ── 断流后 live resume（复用现成 /api/chat/resume，不动后端）──
+      // 一条 turn 的 SSE 中途断开（网络抖动 / 切后台 / 代理 idle 超时）时，后端
+      // 的 Agent task 并未结束（DISCONNECT_GRACE=15min），事件仍在 per-turn
+      // ringbuffer 里继续累积。与其直接降级成 attemptRecovery（REST 轮询最终答
+      // 复、丢掉实时流），不如先用 GET /api/chat/resume 重新挂载实时流：把断点
+      // 之后漏掉的事件按 ``since_seq`` 补齐，并继续实时续写。resume 现在受
+      // turn-floor 保护，只会回放**本 turn** 内 seq>since 的事件，跨 turn 串回复
+      // 已不可能；seq 去重（hasSeenSeq）再兜一层防重叠。返回 null 的两种情况都
+      // 安全回落到 attemptRecovery：① resume 404（任务已结束 / GC / 后端重启，
+      // 无可恢复流）；② 已是 graceful / 用户中止 / 重试用尽。
+      let resumeAttempts = 0;
+      const MAX_RESUME_ATTEMPTS = 3;
+      const tryAttachLiveResume = async () => {
+        if (!thisConvId || orgCommandPendingRef.current) return null;
+        if (abort.signal.aborted || sctx.userStopped || gracefulDone) return null;
+        if (resumeAttempts >= MAX_RESUME_ATTEMPTS) return null;
+        resumeAttempts++;
+        try {
+          const sinceSeq = lastSeqByConv.current.get(thisConvId) ?? 0;
+          const resp = await safeFetch(
+            `${apiBase}/api/chat/resume?conversation_id=${encodeURIComponent(thisConvId)}&since_seq=${sinceSeq}`,
+            { method: "GET", signal: abort.signal },
+          );
+          if (!resp.ok) return null;
+          const r = resp.body?.getReader();
+          if (!r) return null;
+          logger.info("Chat", "sse_drop_live_resume", {
+            convId: thisConvId,
+            sinceSeq,
+            attempt: resumeAttempts,
+          });
+          return r;
+        } catch {
+          return null;
+        }
+      };
+
       while (true) {
         // ── 1. 每次循环检查 abort 状态 ──
         if (abort.signal.aborted) break;
@@ -2524,7 +2685,19 @@ export function ChatView({
         try {
           ({ done, value } = await reader.read());
         } catch (readErr) {
-          // reader.read() 抛异常（abort 或网络错误）→ 跳到外层 catch
+          // reader.read() 抛异常（abort 或网络错误）。先试 live resume 重挂实时
+          // 流；挂上了就换 reader 继续读，挂不上再抛给外层 catch（→ attemptRecovery）。
+          const resumed = await tryAttachLiveResume();
+          if (resumed) {
+            reader = resumed;
+            sctx.reader = resumed;
+            // Drop the dropped stream's partial frame + decoder state so a
+            // multibyte char split across the break can't bleed into the new
+            // stream. resume replays full frames from since_seq.
+            buffer = "";
+            decoder = new TextDecoder();
+            continue;
+          }
           throw readErr;
         }
 
@@ -2705,7 +2878,6 @@ export function ChatView({
                 break;
               }
               case "thinking_start":
-                isThinking = true;
                 thinkingStartTime = Date.now();
                 currentThinkingContent = "";
                 if (!currentChainGroup) {
@@ -2730,7 +2902,6 @@ export function ChatView({
                 }
                 break;
               case "thinking_end": {
-                isThinking = false;
                 const _thinkDuration = event.duration_ms || (Date.now() - thinkingStartTime);
                 const _hasThinking = event.has_thinking ?? (currentThinkingContent.length > 0);
                 if (currentChainGroup) {
@@ -3507,7 +3678,21 @@ export function ChatView({
           }
         }
 
-        if (done) break;
+        if (done) {
+          // 流自然 EOF。若是 graceful（已收到 done 事件）/ 用户中止，
+          // tryAttachLiveResume 会同步返回 null → 正常 break（零额外开销）。
+          // 否则视为中途断开，尝试 live resume 续流；挂不上再 break 落到
+          // 循环结束后的恢复逻辑（attemptRecovery）。
+          const resumed = await tryAttachLiveResume();
+          if (resumed) {
+            reader = resumed;
+            sctx.reader = resumed;
+            buffer = "";
+            decoder = new TextDecoder();
+            continue;
+          }
+          break;
+        }
       }
 
       // ── 循环结束后：判断是正常完成还是被用户中止 ──
@@ -3525,24 +3710,19 @@ export function ChatView({
           attemptRecovery(4000);
         }
       } else {
+        const emptyStream = !currentContent && !assistantMsg.askUser;
+        const canRecover = emptyStream && !!convId;
         updateMessages((prev) => prev.map((m) =>
           m.id === assistantMsg.id
             ? {
                 ...m,
-                content: m.content || (m.askUser ? "" : "未收到有效回复，请重试。"),
-                streaming: false,
-                streamStatus: null,
+                content: canRecover ? "" : (m.content || (m.askUser ? "" : "未收到有效回复，请重试。")),
+                streaming: canRecover,
+                streamStatus: canRecover ? t("chat.recovering", "正在恢复回复...") : null,
               }
             : m
         ));
 
-        // Crash diagnostics: final React state has been queued. If a native
-        // WebView2 crash happens during the subsequent paint, this breadcrumb
-        // is the last entry to land in frontend.log before the process dies.
-        // Force-flush is critical here: the next scheduled screen flush could be
-        // the moment the WebView2 process dies, so we must push the line to
-        // Rust IPC before then. tauriInvoke is fire-and-forget from JS side
-        // and the native side processes it on its own thread.
         logger.info("Chat", "task_completed", {
           convId,
           gracefulDone,
@@ -3554,8 +3734,27 @@ export function ChatView({
         });
         void logger.flush();
 
-        if (!gracefulDone && convId) {
-          // SSE 连接被中断（未收到 "done" 事件），后端可能仍在运行，启动持续轮询恢复
+        if (canRecover) {
+          attemptRecovery(2000);
+          const _fallbackMsgId = assistantMsg.id;
+          const _fallbackConvId = thisConvId;
+          const _fallbackStorageKey = STORAGE_KEY_MSGS_PREFIX + thisConvId;
+          setTimeout(() => {
+            setMessages((prev) => {
+              const isActive = activeConvIdRef.current === _fallbackConvId;
+              const base = isActive ? prev : loadMessagesFromStorage(_fallbackStorageKey);
+              const updated = base.map((m) => {
+                if (m.id !== _fallbackMsgId) return m;
+                if (m.content && !m.streaming) return m;
+                return { ...m, content: "未收到有效回复，请重试。", streaming: false, streamStatus: null };
+              });
+              const liveCtx = streamContexts.current.get(_fallbackConvId);
+              if (liveCtx) liveCtx.messages = updated;
+              try { saveMessagesToStorage(_fallbackStorageKey, updated); } catch { /* quota */ }
+              return isActive ? updated : prev;
+            });
+          }, 30_000);
+        } else if (!gracefulDone && convId) {
           attemptRecovery(3000);
         } else if (gracefulDone && convId) {
           // SSE 正常完成后也静默校验一次后端历史。桌面端恢复前台或
@@ -3778,6 +3977,11 @@ export function ChatView({
 
   // ── 消息排队系统 ──
   const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([]);
+  // Mirror of messageQueue for synchronous reads inside async callbacks (e.g.
+  // the busy-probe auto-dequeue): the effect closure's ``messageQueue`` goes
+  // stale across an await, so we re-check liveness against this ref instead.
+  const messageQueueRef = useRef<QueuedMessage[]>(messageQueue);
+  useEffect(() => { messageQueueRef.current = messageQueue; }, [messageQueue]);
   const [queueExpanded, setQueueExpanded] = useState(true);
 
   // ── 消息编辑：回填到输入框，删除该条及后续消息 ──
@@ -3850,40 +4054,130 @@ export function ChatView({
     });
   }, [apiBase, activeConvId, stopStreaming]);
 
+  // Steer: hand a pure-text message to the running turn via /api/chat/insert.
+  // We confirm delivery BEFORE echoing the user bubble, so there is never a
+  // double bubble and never a silent loss:
+  //   - insert accepted  → echo the user message in front of the live answer.
+  //   - no active task / error → the turn already ended; resend as a brand-new
+  //     turn (after the local SSE has wound down) instead of dropping it.
   const handleInsertMessage = useCallback((text: string) => {
-    if (!text.trim()) return;
+    const trimmed = text.trim();
+    if (!trimmed) return;
     const convId = activeConvIdRef.current;
-    const inserter = (prev: ChatMessage[]) => {
-      const uMsg = { id: genId(), role: "user" as const, content: text.trim(), timestamp: Date.now() };
-      const streamingIdx = prev.findIndex((m) => m.role === "assistant" && m.streaming);
-      if (streamingIdx >= 0) {
-        const newArr = [...prev];
-        newArr.splice(streamingIdx, 0, uMsg);
-        return newArr;
+    // The running turn's mode, captured now — used only if we end up parking
+    // the message as a fresh turn (see the queue fallback below).
+    const steerMode = convId ? streamContexts.current.get(convId)?.mode : undefined;
+
+    const echoOptimistic = () => {
+      const inserter = (prev: ChatMessage[]) => {
+        const uMsg = { id: genId(), role: "user" as const, content: trimmed, timestamp: Date.now() };
+        const streamingIdx = prev.findIndex((m) => m.role === "assistant" && m.streaming);
+        if (streamingIdx >= 0) {
+          const newArr = [...prev];
+          newArr.splice(streamingIdx, 0, uMsg);
+          return newArr;
+        }
+        return [...prev, uMsg];
+      };
+      const ctx = convId ? streamContexts.current.get(convId) : null;
+      if (ctx) ctx.messages = inserter(ctx.messages);
+      setMessages(inserter);
+      if (convId) {
+        setConversations((prev) => prev.map((c) =>
+          c.id === convId ? { ...c, messageCount: (c.messageCount || 0) + 1 } : c
+        ));
       }
-      return [...prev, uMsg];
     };
-    const ctx = convId ? streamContexts.current.get(convId) : null;
-    if (ctx) ctx.messages = inserter(ctx.messages);
-    setMessages(inserter);
-    if (convId) {
-      setConversations((prev) => prev.map((c) =>
-        c.id === convId ? { ...c, messageCount: (c.messageCount || 0) + 1 } : c
-      ));
-    }
+
+    // Resend as a fresh turn once the local stream has actually closed.
+    // The backend turn ended (that's why insert was rejected), but the
+    // frontend SSE may take a beat to wind down; sending while the client
+    // still thinks it is streaming would early-return and lose the message.
+    let resendAttempts = 0;
+    const resendAsFreshTurn = () => {
+      const stillStreaming = convId ? !!streamContexts.current.get(convId)?.isStreaming : false;
+      if (stillStreaming) {
+        if (resendAttempts < 25) {
+          resendAttempts += 1;
+          setTimeout(resendAsFreshTurn, 200);
+          return;
+        }
+        // The backend turn ended but the local SSE refuses to close after 5s.
+        // sendMessage would early-return on the streaming guard and silently
+        // drop the text, so instead park it in the local queue: it drains as
+        // a fresh turn the moment the stream finally ends, and stays visible
+        // to the user if it somehow never does. No silent loss.
+        if (convId) {
+          setMessageQueue(prev => [...prev, {
+            id: genId(), text: trimmed, timestamp: Date.now(), convId, mode: steerMode,
+          }]);
+        }
+        return;
+      }
+      // Steer is always text-only, so the resent turn must be too — pass an
+      // explicit [] so it never picks up files the user staged in the
+      // meantime.
+      void sendMessage(trimmed, convId || undefined, undefined, undefined, []);
+    };
+
     safeFetch(`${apiBaseRef.current}/api/chat/insert`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ conversation_id: convId, message: text }),
-    }).catch(() => {});
-  }, []);
+      body: JSON.stringify({ conversation_id: convId, message: trimmed }),
+    })
+      .then(async (res) => {
+        let data: { status?: string; action?: string } | null = null;
+        try { data = await res.json(); } catch { /* non-JSON → decide by HTTP status */ }
+        const droppedNoTask =
+          data?.status === "error" ||
+          (data?.status === "warning" && data?.action === "insert");
+        if (!res.ok || droppedNoTask) {
+          resendAsFreshTurn();
+        } else {
+          // action may be "insert" (normal), "cancel"/"skip" (the text was a
+          // stop/skip command) — in every accepted case echo the user bubble.
+          echoOptimistic();
+        }
+      })
+      .catch(() => {
+        // Transport failure on localhost almost always means the request
+        // never landed → resend instead of leaving the message stranded.
+        resendAsFreshTurn();
+      });
+  }, [sendMessage]);
 
+  // Queue a message to run as its own turn after the current one finishes.
+  // Unlike steer, a queued message carries its own attachments and mode so
+  // the drain can replay it faithfully (see the auto-dequeue effect below).
   const handleQueueMessage = useCallback(() => {
     const text = inputTextRef.current.trim();
-    if (!text || !activeConvId) return;
-    setMessageQueue(prev => [...prev, { id: genId(), text, timestamp: Date.now(), convId: activeConvId }]);
+    const attachments = pendingAttachments;
+    if ((!text && attachments.length === 0) || !activeConvId) return;
+    // Mirror sendMessage's upload guards: only fully-uploaded attachments may
+    // enter the queue, otherwise the drain would reject them and drop the
+    // message. Keeping them in the composer lets the user retry/wait.
+    const pendingUploads = attachments.filter((a) =>
+      a.type !== "image" && a.type !== "video" && (!a.url || a.uploadStatus === "uploading")
+    );
+    if (pendingUploads.length > 0) {
+      notifyError(t("chat.uploadStillRunning", "附件还在上传，请稍等一下"));
+      return;
+    }
+    if (attachments.some((a) => a.uploadStatus === "failed")) {
+      notifyError(t("chat.uploadFailedRetry", "有附件上传失败，请重新选择或稍后重试"));
+      return;
+    }
+    setMessageQueue(prev => [...prev, {
+      id: genId(),
+      text,
+      timestamp: Date.now(),
+      convId: activeConvId,
+      attachments: attachments.length > 0 ? attachments.map(({ _uploadId, ...rest }) => rest) : undefined,
+      mode: chatMode,
+    }]);
     setInputValue("");
-  }, [activeConvId, setInputValue]);
+    setPendingAttachments([]);
+  }, [activeConvId, setInputValue, pendingAttachments, chatMode, t]);
 
   const handleRemoveQueued = useCallback((id: string) => {
     setMessageQueue(prev => prev.filter(m => m.id !== id));
@@ -3900,11 +4194,18 @@ export function ChatView({
 
   const handleSendQueuedNow = useCallback((id: string) => {
     const item = messageQueue.find(m => m.id === id);
-    if (item) {
-      handleInsertMessage(item.text);
-      setMessageQueue(prev => prev.filter(m => m.id !== id));
+    if (!item) return;
+    // A queued message with attachments cannot be steered into the running
+    // turn (insert is text-only). Rather than silently dropping the files,
+    // leave it queued — the auto-dequeue will replay it (attachments and all)
+    // as its own turn the moment the current one finishes.
+    if (item.attachments && item.attachments.length > 0) {
+      notifyInfo(t("chat.queuedAttachmentDeferred", "含附件的消息会在当前任务结束后自动发送。"));
+      return;
     }
-  }, [messageQueue, handleInsertMessage]);
+    handleInsertMessage(item.text);
+    setMessageQueue(prev => prev.filter(m => m.id !== id));
+  }, [messageQueue, handleInsertMessage, t]);
 
   const handleMoveQueued = useCallback((id: string, direction: "up" | "down") => {
     setMessageQueue(prev => {
@@ -3918,9 +4219,50 @@ export function ChatView({
     });
   }, []);
 
+  // Single decision point for "user submitted while the current turn is still
+  // streaming". This keeps the Enter key, the send button, and any other entry
+  // in lockstep so steer-vs-queue is decided in exactly one place:
+  //   • empty composer        → drain this conversation's first queued item
+  //   • attachments present    → queue (steer is text-only; can't carry files)
+  //   • composer mode changed  → queue (user wants different behaviour now)
+  //   • otherwise (plain text) → steer into the running turn immediately
+  const submitWhileStreaming = useCallback(() => {
+    const text = inputTextRef.current.trim();
+    const hasAttachments = pendingAttachments.length > 0;
+
+    if (!text && !hasAttachments) {
+      const myFirst = messageQueue.find(m => m.convId === activeConvId);
+      if (!myFirst) return;
+      if (myFirst.attachments && myFirst.attachments.length > 0) {
+        notifyInfo(t("chat.queuedAttachmentDeferred", "含附件的消息会在当前任务结束后自动发送。"));
+        return;
+      }
+      setMessageQueue(prev => prev.filter(m => m.id !== myFirst.id));
+      handleInsertMessage(myFirst.text);
+      return;
+    }
+
+    const runningMode = activeConvId ? streamContexts.current.get(activeConvId)?.mode : undefined;
+    const modeChanged = runningMode !== undefined && runningMode !== chatMode;
+    if (hasAttachments || modeChanged) {
+      handleQueueMessage();
+    } else {
+      handleInsertMessage(text);
+      setInputValue("");
+    }
+  }, [pendingAttachments, messageQueue, activeConvId, chatMode, handleInsertMessage, handleQueueMessage, setInputValue, t]);
+
   // ── 排队消息自动出队 ──
   // 后端支持并发流式 — 每会话独立 Agent 实例。
   // 排队仅限同会话：某会话流结束时，出队该会话排队的下一条消息。
+  //
+  // 关键：``isStreaming`` 在 fetch 循环退出时**一律**被置 false（见流式
+  // finally），其中也包括「turn 中途 SSE 断开」——此时后端的 Agent task 并没
+  // 结束（DISCONNECT_GRACE 给了 15 分钟宽限，任务继续跑）。若此刻就把排队消息
+  // 当作「新 turn」POST 出去，会撞上仍在运行的上一 turn，被后端 STEER/QUEUE
+  // 重路由（改过模式的纯文本会被误并进上一 turn，丢掉用户切换的模式意图）。
+  // 因此出队前先探一次 ``/api/chat/busy``：后端确实空闲了才发，仍忙就稍后再探。
+  // 这与 openclaw「失序先和服务端真相对账、再行动」是同一思路。
   const prevStreamingSetRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     const currentStreamingSet = new Set(
@@ -3935,11 +4277,45 @@ export function ChatView({
         const nextIdx = messageQueue.findIndex(m => m.convId === finishedId);
         if (nextIdx >= 0) {
           const next = messageQueue[nextIdx];
-          setMessageQueue(prev => prev.filter((_, i) => i !== nextIdx));
-          const targetId = next.convId;
-          setTimeout(() => {
-            sendMessage(next.text, targetId);
-          }, 100);
+          // Drain only once the backend reports this conversation idle. We do
+          // NOT remove the item from the visible queue until it is actually
+          // sent, so a still-running turn (e.g. after a mid-turn drop) keeps
+          // the item parked in the queue UI instead of mis-firing it early.
+          const drainWhenIdle = (attempt: number) => {
+            safeFetch(
+              `${apiBaseRef.current}/api/chat/busy?conversation_id=${encodeURIComponent(finishedId)}`,
+            )
+              .then((r) => (r.ok ? r.json() : null))
+              .then((data) => {
+                const busy = Boolean(data?.busy);
+                // Up to ~30s of patience for a turn that is still settling after
+                // a dropped stream; past that, fall through and let the backend's
+                // own STEER/QUEUE policy arbitrate (same as the legacy behaviour).
+                if (busy && attempt < 20) {
+                  setTimeout(() => drainWhenIdle(attempt + 1), 1500);
+                  return;
+                }
+                doSend();
+              })
+              // Probe failed (offline / backend down): don't strand the item —
+              // fall back to the legacy "send anyway" behaviour.
+              .catch(() => doSend());
+          };
+          const doSend = () => {
+            // Re-check liveness against the ref (the closure's messageQueue is
+            // stale after the busy-probe await): the user may have edited /
+            // removed / manually sent this item during the wait. The removal
+            // updater stays pure; sendMessage fires exactly once, outside it.
+            if (!messageQueueRef.current.some((m) => m.id === next.id)) return;
+            setMessageQueue((prev) => prev.filter((m) => m.id !== next.id));
+            // Replay as a brand-new turn carrying the attachments and mode
+            // captured at queue time (not the live composer state). Pass an
+            // explicit [] when the queued item had no attachments, otherwise
+            // sendMessage would fall back to whatever is staged in the composer
+            // right now and attach the wrong files.
+            sendMessage(next.text, next.convId, undefined, next.mode, next.attachments ?? []);
+          };
+          drainWhenIdle(0);
           break;
         }
       }
@@ -4168,12 +4544,13 @@ export function ChatView({
     };
 
     onDragDrop({
-      onEnter: () => { if (!cancelled) setDragOver(true); },
-      onOver: () => { if (!cancelled) setDragOver(true); },
+      onEnter: () => { if (!cancelled && !feedbackModalOpenRef.current) setDragOver(true); },
+      onOver: () => { if (!cancelled && !feedbackModalOpenRef.current) setDragOver(true); },
       onLeave: () => { if (!cancelled) setDragOver(false); },
       onDrop: (paths) => {
         if (cancelled) return;
         setDragOver(false);
+        if (feedbackModalOpenRef.current) return;
         handleDroppedPaths(paths);
       },
     }).then((unsub) => { unlisten = unsub; });
@@ -4333,34 +4710,22 @@ export function ChatView({
     }
 
     if (isCurrentConvStreaming) {
-      // 当前会话正在流式传输:
-      //   Escape             = 停止生成（快捷键面板打开时让面板处理）
-      //   有文本 + Ctrl+Enter = 立即插入（仅当前会话流式时可用）
-      //   有文本 + Enter     = 排队
-      //   空文本 + Enter     = 取队列第一条立即插入
+      // 当前会话正在流式传输（方案3：默认 steer，对齐 Claude Code 的“边跑边追加指令”）:
+      //   Escape           = 停止生成（快捷键面板打开时让面板处理）
+      //   Enter            = 提交（submitWhileStreaming 决定 steer / 排队）
+      //   Ctrl/Cmd+Enter   = 强制排队（等本轮结束后作为新消息发送）
+      // 是否 steer 还是排队由 submitWhileStreaming 统一裁决（附件 / 改模式 → 排队）。
       if (e.key === "Escape" && !shortcutsOpen) {
         e.preventDefault();
         handleCancelTask();
         return;
       }
-      const domText = (e.target as HTMLTextAreaElement).value.trim();
       if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
-        if (domText) {
-          handleInsertMessage(domText);
-          setInputValue("");
-        }
+        handleQueueMessage();
       } else if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
-        if (domText) {
-          handleQueueMessage();
-        } else {
-          const myFirst = messageQueue.find(m => m.convId === activeConvId);
-          if (myFirst) {
-            setMessageQueue(prev => prev.filter(m => m.id !== myFirst.id));
-            handleInsertMessage(myFirst.text);
-          }
-        }
+        submitWhileStreaming();
       }
     } else {
       // 非当前会话流式中: Enter / Ctrl+Enter 直接发送（后端支持并发）
@@ -4372,7 +4737,7 @@ export function ChatView({
         sendMessage();
       }
     }
-  }, [atAgentOpen, atAgentFilter, atAgentIdx, agentProfiles, slashOpen, slashFilter, slashCommands, slashSelectedIdx, sendMessage, isCurrentConvStreaming, handleInsertMessage, handleQueueMessage, messageQueue, activeConvId, setInputValue, shortcutsOpen, handleCancelTask]);
+  }, [atAgentOpen, atAgentFilter, atAgentIdx, agentProfiles, slashOpen, slashFilter, slashCommands, slashSelectedIdx, sendMessage, isCurrentConvStreaming, submitWhileStreaming, handleQueueMessage, setInputValue, shortcutsOpen, handleCancelTask]);
 
   // ── 输入变化处理（非受控模式：仅更新 ref，不触发全局重渲染） ──
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -5093,7 +5458,11 @@ export function ChatView({
                           <IconCircle size={10} />
                         </span>
                         <span className="queuedItemText" title={qm.text}>
-                          {qm.text.length > 80 ? qm.text.slice(0, 80) + "..." : qm.text}
+                          {qm.text
+                            ? (qm.text.length > 80 ? qm.text.slice(0, 80) + "..." : qm.text)
+                            : (qm.attachments && qm.attachments.length > 0
+                                ? `📎 ${qm.attachments.length}`
+                                : "")}
                         </span>
                         <div className="queuedItemActions">
                           <button
@@ -5505,12 +5874,12 @@ export function ChatView({
                   );
                 })()}
                 {isCurrentConvStreaming || orgCommandPending ? (
-                  hasInputText && !orgCommandPending ? (
+                  (hasInputText || pendingAttachments.length > 0) && !orgCommandPending ? (
                     <button
-                      data-slot="queue"
-                      onClick={handleQueueMessage}
+                      data-slot="steer"
+                      onClick={() => submitWhileStreaming()}
                       className="chatInputSendBtn"
-                      title={t("chat.queueHint")}
+                      title={t("chat.steerHint", "注入到当前任务（不打断，回车发送 / Ctrl+Enter 排队）")}
                     >
                       <IconSend size={14} />
                     </button>

@@ -11,7 +11,7 @@ GET  /api/stats/tokens/context   — current context size + limit
 
 from __future__ import annotations
 
-import asyncio
+import contextlib
 import logging
 from datetime import UTC, datetime, timedelta
 
@@ -24,8 +24,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/stats/tokens", tags=["token_stats"])
 
-_db_instance: Database | None = None
-_db_lock = asyncio.Lock()
 _last_db_error: dict[str, str] = {}
 
 
@@ -42,51 +40,93 @@ def _db_unavailable_payload() -> dict[str, object]:
 
 
 async def _get_db() -> Database | None:
-    """Lazy-init a shared Database instance for stats queries."""
-    global _db_instance
-    if _db_instance is not None and _db_instance._connection is not None:
-        return _db_instance
-    async with _db_lock:
-        if _db_instance is not None and _db_instance._connection is not None:
-            return _db_instance
-        try:
-            db = Database()
-            await db.connect()
-            if db._connection is None:
-                logger.error("[TokenStats] Database connect() returned but _connection is None")
-                _last_db_error.update(
-                    {
-                        "stage": "post_connect",
-                        "exception_type": "NoConnection",
-                        "message": "Database.connect() completed but connection is None",
-                    }
-                )
-                return None
-            _db_instance = db
-            _last_db_error.clear()
-        except Exception as e:
-            logger.error(f"[TokenStats] Failed to connect database: {e}")
+    """Open a short-lived Database instance for one stats request.
+
+    ``aiosqlite`` owns a non-daemon worker thread for each open connection.
+    Keeping a module-level connection cached makes ASGITransport-based tests
+    hang at interpreter shutdown because those tests do not reliably run the
+    FastAPI shutdown hooks. Use per-request connections instead so every route
+    can close its worker thread in a local ``finally`` block.
+    """
+    try:
+        db = Database()
+        await db.connect()
+        if db._connection is None:
+            logger.error("[TokenStats] Database connect() returned but _connection is None")
             _last_db_error.update(
                 {
-                    "stage": "connect",
-                    "exception_type": type(e).__name__,
-                    "message": str(e)[:500],
+                    "stage": "post_connect",
+                    "exception_type": "NoConnection",
+                    "message": "Database.connect() completed but connection is None",
                 }
             )
+            _register_degraded_token_stats(
+                "no_connection",
+                "Database.connect() returned but connection is None",
+            )
             return None
-    return _db_instance
+        _last_db_error.clear()
+        return db
+    except Exception as e:
+        logger.error(f"[TokenStats] Failed to connect database: {e}")
+        _last_db_error.update(
+            {
+                "stage": "connect",
+                "exception_type": type(e).__name__,
+                "message": str(e)[:500],
+            }
+        )
+        # Bubble the failure into the cross-subsystem registry so the
+        # unified ``DegradedBanner`` reflects token_stats outages,
+        # not just the daemon-thread writer (token_tracking) ones.
+        # We map both `Database` and `SQLiteUnavailable` failures to
+        # the same key ``token_tracking`` because the underlying
+        # ``agent.db`` is shared; quarantining one cures the other.
+        _register_degraded_token_stats(
+            _classify_db_error(e),
+            str(e)[:200],
+        )
+        return None
+
+
+def _classify_db_error(exc: BaseException) -> str:
+    try:
+        from openakita.storage.safe_sqlite import SQLiteUnavailable
+
+        if isinstance(exc, SQLiteUnavailable):
+            return exc.reason
+    except Exception:
+        pass
+    return "open_failed"
+
+
+def _register_degraded_token_stats(reason: str, details: str) -> None:
+    try:
+        from openakita.storage.degraded import registry as _degraded
+
+        _degraded.register(
+            "token_tracking",
+            reason or "unknown",
+            repair="quarantine_token_db",
+            details=details[:200] if details else None,
+        )
+    except Exception:
+        pass
 
 
 async def _reset_db() -> None:
-    """Reset the cached db instance so next call re-connects."""
-    global _db_instance
-    async with _db_lock:
-        if _db_instance is not None:
-            try:
-                await _db_instance.close()
-            except Exception:
-                pass
-            _db_instance = None
+    """Compatibility no-op for callers that reset after a query failure.
+
+    Token stats now uses short-lived connections, so there is no process-wide
+    cached connection to reset.
+    """
+    return None
+
+
+async def _close_db(db: Database | None) -> None:
+    if db is not None:
+        with contextlib.suppress(Exception):
+            await db.close()
 
 
 def _parse_range(
@@ -111,7 +151,9 @@ def _parse_range(
             e = datetime.fromisoformat(end)
             return s.strftime("%Y-%m-%d %H:%M:%S"), e.strftime("%Y-%m-%d %H:%M:%S")
         except (ValueError, TypeError):
-            logger.warning(f"[TokenStats] Invalid time range: start={start!r}, end={end!r}, falling back to default")
+            logger.warning(
+                f"[TokenStats] Invalid time range: start={start!r}, end={end!r}, falling back to default"
+            )
 
     now_utc = datetime.now(UTC).replace(tzinfo=None)
 
@@ -170,6 +212,8 @@ async def summary(
         logger.error(f"[TokenStats] summary query failed: {e}")
         await _reset_db()
         return {"error": "query failed, connection reset"}
+    finally:
+        await _close_db(db)
     return {"start": start_str, "end": end_str, "group_by": group_by, "data": rows}
 
 
@@ -198,6 +242,8 @@ async def timeline(
         logger.error(f"[TokenStats] timeline query failed: {e}")
         await _reset_db()
         return {"error": "query failed, connection reset"}
+    finally:
+        await _close_db(db)
     return {"start": start_str, "end": end_str, "interval": interval, "data": rows}
 
 
@@ -223,6 +269,8 @@ async def sessions(
         logger.error(f"[TokenStats] sessions query failed: {e}")
         await _reset_db()
         return {"error": "query failed, connection reset"}
+    finally:
+        await _close_db(db)
     return {"start": start_str, "end": end_str, "data": rows}
 
 
@@ -255,6 +303,8 @@ async def records(
         logger.error(f"[TokenStats] records query failed: {e}")
         await _reset_db()
         return {"error": "query failed, connection reset"}
+    finally:
+        await _close_db(db)
     return {"start": start_str, "end": end_str, "data": rows}
 
 
@@ -276,6 +326,8 @@ async def total(
         logger.error(f"[TokenStats] total query failed: {e}")
         await _reset_db()
         return {"error": "query failed, connection reset"}
+    finally:
+        await _close_db(db)
     return {"start": start_str, "end": end_str, "data": row}
 
 
@@ -298,6 +350,8 @@ async def by_agent(
         logger.error(f"[TokenStats] by-agent query failed: {e}")
         await _reset_db()
         return {"error": "query failed, connection reset"}
+    finally:
+        await _close_db(db)
     return {"start": start_str, "end": end_str, "by_agent": by_agent_data}
 
 

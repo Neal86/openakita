@@ -252,10 +252,7 @@ class SkillEntry:
         # Infer exposure_level from metadata or trust level
         _exposure = getattr(meta, "exposure_level", "") or ""
         if not _exposure:
-            if meta.system or trust_level == "builtin":
-                _exposure = "core"
-            else:
-                _exposure = "recommended"
+            _exposure = "core" if meta.system or trust_level == "builtin" else "recommended"
 
         return cls(
             exposure_level=_exposure,
@@ -547,15 +544,15 @@ class SkillRegistry:
                 existing.plugin_source or "none",
                 plugin_source or "none",
             )
-            self._record_conflict(
-                action="rejected", winner=existing, loser=entry
-            )
+            self._record_conflict(action="rejected", winner=existing, loser=entry)
             return False
 
-        if existing is not None and force and not self._is_same_registration_source(existing, entry):
-            self._record_conflict(
-                action="overridden", winner=entry, loser=existing
-            )
+        if (
+            existing is not None
+            and force
+            and not self._is_same_registration_source(existing, entry)
+        ):
+            self._record_conflict(action="overridden", winner=entry, loser=existing)
 
         self._skills[entry.skill_id] = entry
         # C10: this skill's exposed tool name may have a freshly-declared
@@ -583,9 +580,7 @@ class SkillRegistry:
             and str(existing.origin or "") == str(new_entry.origin or "")
         )
 
-    def _record_conflict(
-        self, *, action: str, winner: "SkillEntry", loser: "SkillEntry"
-    ) -> None:
+    def _record_conflict(self, *, action: str, winner: "SkillEntry", loser: "SkillEntry") -> None:
         """Append a structured conflict record (capped at ``_conflicts_max``)."""
 
         def _origin(entry: SkillEntry) -> str:
@@ -986,9 +981,7 @@ class SkillRegistry:
         """
         return [s for s in self._skills.values() if s.handler == handler]
 
-    def get_tool_class(
-        self, tool_name: str
-    ) -> tuple["ApprovalClass", "DecisionSource"] | None:
+    def get_tool_class(self, tool_name: str) -> tuple["ApprovalClass", "DecisionSource"] | None:
         """C10：技能 → ApprovalClass 查表（PolicyEngineV2 ``skill_lookup`` 入口）。
 
         匹配顺序：
@@ -1052,9 +1045,7 @@ class SkillRegistry:
         # This keeps the audit/source value as SKILL_METADATA — the
         # declaration is still the origin; the heuristic is only the
         # safety floor.
-        heuristic_name = (
-            tool_name if entry.system else entry.skill_id.replace("-", "_").lower()
-        )
+        heuristic_name = tool_name if entry.system else entry.skill_id.replace("-", "_").lower()
 
         trust = infer_skill_declared_trust(trust_level=entry.trust_level)
         try:

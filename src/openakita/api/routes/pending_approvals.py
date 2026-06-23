@@ -57,11 +57,7 @@ def _serialize(entry: Any) -> dict[str, Any]:
     """Drop heavy fields (decision_chain / decision_meta) from the default
     list view — the detail endpoint returns the full entry."""
     d = entry.to_dict()
-    return {
-        k: v
-        for k, v in d.items()
-        if k not in ("decision_chain", "decision_meta")
-    }
+    return {k: v for k, v in d.items() if k not in ("decision_chain", "decision_meta")}
 
 
 # ----------------------------------------------------------------------------
@@ -78,10 +74,7 @@ async def list_pending(include: str = "active") -> JSONResponse:
            entries that haven't been archived yet).
     """
     store = _store()
-    if include == "all":
-        entries = store.list_all()
-    else:
-        entries = store.list_active()
+    entries = store.list_all() if include == "all" else store.list_active()
     return JSONResponse(
         {
             "entries": [_serialize(e) for e in entries],
@@ -115,9 +108,7 @@ class ResolveBody(BaseModel):
 
 
 @router.post("/api/pending_approvals/{pending_id}/resolve")
-async def resolve_pending(
-    pending_id: str, body: ResolveBody, request: Request
-) -> JSONResponse:
+async def resolve_pending(pending_id: str, body: ResolveBody, request: Request) -> JSONResponse:
     """C12 §14.5 + R3-5: owner approves or denies a pending tool call.
 
     On ``decision="allow"`` for a scheduled task, this also:
@@ -281,9 +272,7 @@ async def _resume_task(scheduler: Any, entry: Any) -> dict[str, Any]:
             task.metadata = {}
 
         # Prune-then-append keeps the list bounded.
-        existing = _prune_expired_replay_auths(
-            task.metadata.get("replay_authorizations"), now=now
-        )
+        existing = _prune_expired_replay_auths(task.metadata.get("replay_authorizations"), now=now)
         original_msg = (entry.user_message or "").strip() or entry.tool_name
         existing.append(
             {

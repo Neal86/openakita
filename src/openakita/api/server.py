@@ -29,18 +29,21 @@ from fastapi.responses import JSONResponse
 import openakita._ensure_utf8  # noqa: F401  # Windows UTF-8 编码保护
 
 from .auth import WebAccessConfig, create_auth_middleware
+from .middleware_setup_gate import create_setup_gate_middleware
 from .routes import (
     agents,
     bug_report,
     chat,
     chat_models,
     config,
+    diagnostics,
     feishu_onboard,
     files,
     health,
     hub,
     identity,
     im,
+    inbox,
     logs,
     mcp,
     memory,
@@ -54,11 +57,13 @@ from .routes import (
     skills,
     token_stats,
     upload,
-    web_search as web_search_routes,
     wechat_onboard,
     wecom_onboard,
     workspace_io,
     workspaces,
+)
+from .routes import (
+    web_search as web_search_routes,
 )
 
 try:
@@ -75,8 +80,27 @@ from .routes import (
 
 logger = logging.getLogger(__name__)
 
-API_HOST = os.environ.get("API_HOST", "127.0.0.1")
+# Default port. The actual host is decided by
+# :func:`openakita.api.host_resolution.resolve_api_host` at startup and passed
+# into :func:`start_api_server` explicitly. Do not import a module-level
+# ``API_HOST`` constant — it was removed because it captured ``os.environ``
+# at import time, which is too early (``.env`` may not be loaded yet) and
+# made the resolution logic invisible to tests.
 API_PORT = int(os.environ.get("API_PORT", "18900"))
+
+
+def get_api_host_for_health_display(app_state: Any | None = None) -> str:
+    """Best-effort answer to "which host did we bind to?" for /api/health.
+
+    Prefers the value stored on FastAPI ``app.state.actual_bind_host`` (the
+    truth, set by :func:`start_api_server` after uvicorn binds), then falls
+    back to the ``API_HOST`` env var, finally to ``127.0.0.1``.
+    """
+    if app_state is not None:
+        actual = getattr(app_state, "actual_bind_host", None)
+        if isinstance(actual, str) and actual:
+            return actual
+    return os.environ.get("API_HOST", "").strip() or "127.0.0.1"
 
 
 def is_port_free(host: str, port: int) -> bool:
@@ -141,14 +165,101 @@ def _find_docs_dist() -> Path | None:
     return None
 
 
+def _docs_version_matches_bundled(bundled: Path, version_dir: Path) -> bool:
+    """Return True when the deployed docs look current enough to reuse."""
+    if not version_dir.is_dir():
+        return False
+
+    try:
+        bundled_files = {path.relative_to(bundled) for path in bundled.rglob("*") if path.is_file()}
+        deployed_files = {
+            path.relative_to(version_dir) for path in version_dir.rglob("*") if path.is_file()
+        }
+        if bundled_files != deployed_files:
+            return False
+
+        for relative_path in bundled_files:
+            source_path = bundled / relative_path
+            deployed_path = version_dir / relative_path
+            if not deployed_path.is_file():
+                return False
+            source_stat = source_path.stat()
+            deployed_stat = deployed_path.stat()
+            if source_stat.st_size != deployed_stat.st_size:
+                return False
+            if source_stat.st_mtime_ns == deployed_stat.st_mtime_ns:
+                continue
+            if source_path.read_bytes() != deployed_path.read_bytes():
+                return False
+
+        for relative_name in ("index.html", "hashmap.json", "versions.html"):
+            source_path = bundled / relative_name
+            deployed_path = version_dir / relative_name
+            if source_path.is_file():
+                if not deployed_path.is_file():
+                    return False
+                if source_path.read_bytes() != deployed_path.read_bytes():
+                    return False
+    except OSError:
+        return False
+
+    return True
+
+
+def _sync_docs_tree(bundled: Path, version_dir: Path) -> None:
+    import shutil
+
+    version_dir.mkdir(parents=True, exist_ok=True)
+    bundled_files: set[Path] = set()
+    bundled_dirs: set[Path] = set()
+
+    for source_path in bundled.rglob("*"):
+        relative_path = source_path.relative_to(bundled)
+        if source_path.is_dir():
+            bundled_dirs.add(relative_path)
+            (version_dir / relative_path).mkdir(parents=True, exist_ok=True)
+            continue
+        if source_path.is_file():
+            bundled_files.add(relative_path)
+            deployed_path = version_dir / relative_path
+            deployed_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, deployed_path)
+
+    deployed_files = [path for path in version_dir.rglob("*") if path.is_file()]
+    for deployed_path in deployed_files:
+        if deployed_path.relative_to(version_dir) not in bundled_files:
+            deployed_path.unlink()
+
+    deployed_dirs = sorted(
+        (path for path in version_dir.rglob("*") if path.is_dir()),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for deployed_path in deployed_dirs:
+        if deployed_path.relative_to(version_dir) not in bundled_dirs:
+            deployed_path.rmdir()
+
+
+def _record_docs_version(docs_root: Path, version_clean: str) -> None:
+    import json
+
+    versions_file = docs_root / "versions.json"
+    try:
+        versions = json.loads(versions_file.read_text("utf-8")) if versions_file.exists() else []
+        if not isinstance(versions, list):
+            versions = []
+        if version_clean not in versions:
+            versions.insert(0, version_clean)
+            versions_file.write_text(json.dumps(versions, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"Could not update docs versions index: {e}")
+
+
 def _deploy_docs(data_dir: Path, app_version: str) -> Path | None:
     """Deploy bundled docs to data/docs/v{version}/ and refresh same-version assets.
 
     Historical versions are never deleted so users can switch between them.
     """
-    import json
-    import shutil
-
     bundled = _find_docs_dist()
     if not bundled:
         return None
@@ -156,25 +267,23 @@ def _deploy_docs(data_dir: Path, app_version: str) -> Path | None:
     docs_root = data_dir / "docs"
     version_clean = app_version.split("+")[0]
     version_dir = docs_root / f"v{version_clean}"
-    tmp_dir = docs_root / f".v{version_clean}.tmp"
 
     docs_root.mkdir(parents=True, exist_ok=True)
-    if tmp_dir.exists():
-        shutil.rmtree(tmp_dir)
-    shutil.copytree(bundled, tmp_dir)
-    if version_dir.exists():
-        shutil.rmtree(version_dir)
-    tmp_dir.replace(version_dir)
-    logger.info(f"Deployed user docs v{version_clean} → {version_dir}")
+    if _docs_version_matches_bundled(bundled, version_dir):
+        _record_docs_version(docs_root, version_clean)
+        return docs_root
 
-    versions_file = docs_root / "versions.json"
     try:
-        versions = json.loads(versions_file.read_text("utf-8")) if versions_file.exists() else []
-    except Exception:
-        versions = []
-    if version_clean not in versions:
-        versions.insert(0, version_clean)
-        versions_file.write_text(json.dumps(versions, indent=2), encoding="utf-8")
+        _sync_docs_tree(bundled, version_dir)
+    except Exception as e:
+        logger.warning(f"Could not deploy user docs v{version_clean}: {e}")
+        if version_dir.exists():
+            _record_docs_version(docs_root, version_clean)
+            return docs_root
+        return None
+
+    logger.info(f"Deployed user docs v{version_clean} → {version_dir}")
+    _record_docs_version(docs_root, version_clean)
 
     return docs_root
 
@@ -211,6 +320,10 @@ def _mount_web_frontend(app: FastAPI) -> None:
     app.mount("/web", StaticFiles(directory=str(web_dist), html=True), name="web-frontend")
 
 
+def _has_web_frontend_mount(app: FastAPI) -> bool:
+    return any(getattr(route, "name", None) == "web-frontend" for route in app.routes)
+
+
 def create_app(
     agent: Any = None,
     shutdown_event: asyncio.Event | None = None,
@@ -237,6 +350,7 @@ def create_app(
         {"name": "身份", "description": "AI 身份定义文件管理"},
         {"name": "定时任务", "description": "计划任务调度"},
         {"name": "即时通讯", "description": "IM 渠道与消息"},
+        {"name": "站内信", "description": "客户端站内信、升级公告与未读状态"},
         {"name": "Hub", "description": "Agent/Skill 导入导出与市场"},
         {"name": "工作区", "description": "备份、导入导出"},
         {"name": "健康检查", "description": "服务健康、诊断、调试"},
@@ -287,6 +401,14 @@ def create_app(
 
     auth_mw = create_auth_middleware(web_access_config)
     app.middleware("http")(auth_mw)
+
+    # Setup gate runs **before** the auth middleware on the inbound side
+    # (FastAPI middleware is LIFO: added later = executed earlier). It
+    # short-circuits non-loopback requests with HTTP 428 when the web-access
+    # password has not been configured yet, so the frontend can route the
+    # user to the SetupView before any 401 noise.
+    setup_gate_mw = create_setup_gate_middleware(web_access_config)
+    app.middleware("http")(setup_gate_mw)
 
     # CORS configuration (outermost middleware — added last)
     # NOTE: allow_origins=["*"] is incompatible with allow_credentials=True per
@@ -373,6 +495,7 @@ def create_app(
     app.include_router(chat.router, tags=["对话"])
     app.include_router(chat_models.router, tags=["模型"])
     app.include_router(config.router, tags=["配置"])
+    app.include_router(diagnostics.router, tags=["诊断"])
     app.include_router(feishu_onboard.router, tags=["飞书扫码"])
     app.include_router(qqbot_onboard.router, tags=["QQ扫码"])
     app.include_router(wechat_onboard.router, tags=["微信扫码"])
@@ -380,6 +503,7 @@ def create_app(
     app.include_router(files.router, tags=["文件"])
     app.include_router(health.router, tags=["健康检查"])
     app.include_router(im.router, tags=["即时通讯"])
+    app.include_router(inbox.router, tags=["站内信"])
     app.include_router(logs.router, tags=["日志"])
     app.include_router(mcp.router, tags=["MCP"])
     app.include_router(memory.router, tags=["记忆"])
@@ -406,7 +530,7 @@ def create_app(
     async def root():
         # If web frontend is available, redirect to it
         web_dist = _find_web_dist()
-        if web_dist:
+        if web_dist or _has_web_frontend_mount(app):
             from fastapi.responses import RedirectResponse
 
             return RedirectResponse(url="/web/")
@@ -467,6 +591,7 @@ def create_app(
         """Import any feedback records staged by Tauri while the backend was down."""
         try:
             from openakita.config import settings
+
             home = settings.openakita_home
         except Exception:
             home = Path.home() / ".openakita"
@@ -475,11 +600,13 @@ def create_app(
             return
         try:
             import json as _json
+
             records = _json.loads(pending.read_text("utf-8"))
             if not isinstance(records, list):
                 pending.unlink(missing_ok=True)
                 return
             from .routes import feedback_store
+
             imported = 0
             for rec in records:
                 try:
@@ -512,6 +639,20 @@ def create_app(
             await asyncio.to_thread(_cleanup_old_recovery_pending)
         except Exception as e:
             logger.debug("[Startup] Memory recovery pending cleanup skipped: %s", e)
+
+    @app.on_event("startup")
+    async def _cleanup_expired_resume_state():
+        """Issue #608: drop crash-leftover cancel-resume snapshots in
+        ``data/working_messages/`` so a process that died mid-turn doesn't
+        keep re-injecting yesterday's half-finished tool state on resume."""
+        try:
+            from openakita.core.cancel_cleanup import cleanup_expired_working_messages
+
+            removed = await asyncio.to_thread(cleanup_expired_working_messages, base_dir=data_dir)
+            if removed:
+                logger.info("[Startup] Removed %d expired cancel-resume snapshot(s)", removed)
+        except Exception as e:
+            logger.debug("[Startup] Cancel-resume snapshot cleanup skipped: %s", e)
 
     @app.on_event("startup")
     async def _wire_pending_approvals_sse():
@@ -561,8 +702,7 @@ def create_app(
                 logger.info("[Startup] PolicyHotReloader started")
             else:
                 logger.debug(
-                    "[Startup] PolicyHotReloader not started "
-                    "(disabled or no POLICIES.yaml)"
+                    "[Startup] PolicyHotReloader not started (disabled or no POLICIES.yaml)"
                 )
         except Exception as e:
             logger.warning("[Startup] PolicyHotReloader wire failed: %s", e)
@@ -593,6 +733,26 @@ def create_app(
             return {"status": "shutting_down"}
         logger.warning("No shutdown_event available, shutdown request ignored")
         return {"status": "error", "message": "shutdown not available in this mode"}
+
+    @app.on_event("startup")
+    async def _start_inbox_service():
+        try:
+            from openakita.config import settings
+            from openakita.inbox import get_inbox_service
+
+            if settings.inbox_enabled:
+                await get_inbox_service().start()
+        except Exception as e:
+            logger.warning("[Startup] Inbox service startup skipped: %s", e)
+
+    @app.on_event("shutdown")
+    async def _stop_inbox_service():
+        try:
+            from openakita.inbox import get_inbox_service
+
+            await get_inbox_service().stop()
+        except Exception as e:
+            logger.debug("[Shutdown] Inbox service stop skipped: %s", e)
 
     @app.on_event("startup")
     async def _startup_org_runtime():
@@ -714,8 +874,7 @@ def create_app(
             logger.info("[Startup] AsyncBatchAuditWriter started for %s", path)
         except Exception as e:
             logger.warning(
-                "[Startup] AsyncBatchAuditWriter not started; sync fallback "
-                "remains active: %s",
+                "[Startup] AsyncBatchAuditWriter not started; sync fallback remains active: %s",
                 e,
             )
 
@@ -747,7 +906,7 @@ async def start_api_server(
     gateway: Any = None,
     orchestrator: Any = None,
     agent_pool: Any = None,
-    host: str = API_HOST,
+    host: str = "127.0.0.1",
     port: int = API_PORT,
     max_retries: int = 5,
 ) -> asyncio.Task:
@@ -791,6 +950,8 @@ async def start_api_server(
         agent_pool=agent_pool,
     )
     app.state.engine_loop = engine_loop
+    app.state.actual_bind_host = host
+    app.state.actual_bind_port = port
 
     config = uvicorn.Config(
         app=app,

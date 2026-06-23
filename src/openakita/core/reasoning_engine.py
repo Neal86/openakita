@@ -33,7 +33,23 @@ from ..api.routes.websocket import broadcast_event
 from ..config import settings
 from ..llm.converters.tools import PARSE_ERROR_KEY
 from ..tracing.tracer import get_tracer
-from .agent_state import AgentState, TaskState, TaskStatus
+from .abort_scope import current_abort_scope
+from .agent_state import (
+    AgentState,
+    IllegalReasoningEntry,
+    TaskState,
+    TaskStatus,
+)
+from .cancel_cleanup import (
+    DEFAULT_TTL_SECONDS,
+    RESUME_HINT_FRESHNESS_SECONDS,
+    clear_persisted_working_messages,
+    has_tool_blocks,
+    load_persisted_working_messages,
+    persist_working_messages,
+    persisted_age_seconds,
+    synthesize_tool_results_for_orphans,
+)
 from .context_manager import ContextManager
 from .context_manager import _CancelledError as _CtxCancelledError
 from .errors import UserCancelledError
@@ -57,15 +73,17 @@ from .supervisor import TOKEN_ANOMALY_THRESHOLD, RuntimeSupervisor
 #   * supervisor 只关心**纯查询/读取**类（连续 5 次都在 list/search/get → 空转）
 #   * reasoning_engine 关心"未产出 artifact"，自然包含 todo 推进和 memory 写入
 #     （这些工具产生的是"内部状态变化"而非"用户可见交付物"，所以仍算 admin）
-_ADMIN_TOOL_NAMES = frozenset({
-    "create_todo",
-    "update_todo_step",
-    "get_todo_status",
-    "complete_todo",
-    "search_memory",
-    "add_memory",
-    "list_directory",
-})
+_ADMIN_TOOL_NAMES = frozenset(
+    {
+        "create_todo",
+        "update_todo_step",
+        "get_todo_status",
+        "complete_todo",
+        "search_memory",
+        "add_memory",
+        "list_directory",
+    }
+)
 
 
 def _tool_rate_limit_key(tool_name: str, tool_args: Any) -> str:
@@ -148,33 +166,39 @@ def _build_tool_end_events(
         end_event.update(extra)
     events: list[dict[str, Any]] = [end_event]
     if hint is not None:
-        events.append({
-            "type": "config_hint",
-            "tool_use_id": tool_id,
-            "scope": hint.scope,
-            "error_code": hint.error_code,
-            "title": hint.title,
-            "message": hint.message,
-            # Copy actions to plain dicts so downstream JSON serializers don't
-            # have to special-case the dataclass; ConfigHint.actions is already
-            # a list[dict] but we re-shallow-copy each entry to be safe against
-            # callers that mutate.
-            "actions": [dict(a) for a in hint.actions],
-        })
+        events.append(
+            {
+                "type": "config_hint",
+                "tool_use_id": tool_id,
+                "scope": hint.scope,
+                "error_code": hint.error_code,
+                "title": hint.title,
+                "message": hint.message,
+                # Copy actions to plain dicts so downstream JSON serializers don't
+                # have to special-case the dataclass; ConfigHint.actions is already
+                # a list[dict] but we re-shallow-copy each entry to be safe against
+                # callers that mutate.
+                "actions": [dict(a) for a in hint.actions],
+            }
+        )
     return events
+
+
 _CACHEABLE_READONLY_TOOLS = frozenset({"web_fetch", "web_search", "news_search"})
-_READONLY_EXPLORATION_TOOLS = frozenset({
-    "read_file",
-    "list_directory",
-    "grep",
-    "glob",
-    "get_tool_info",
-    "list_skills",
-    "get_skill_info",
-    "search_memory",
-    "get_memory_stats",
-    "get_session_context",
-})
+_READONLY_EXPLORATION_TOOLS = frozenset(
+    {
+        "read_file",
+        "list_directory",
+        "grep",
+        "glob",
+        "get_tool_info",
+        "list_skills",
+        "get_skill_info",
+        "search_memory",
+        "get_memory_stats",
+        "get_session_context",
+    }
+)
 _READONLY_STAGNATION_LIMIT = 3
 
 
@@ -306,7 +330,7 @@ def _format_budget_pause_message(status: Any) -> str:
     suffix = "（近 60s 无新工具调用或 token 产出，可能已陷入循环）" if dim == "duration" else ""
     return (
         f"⚠️ 任务暂停（{dim}: {pct:.0%}{suffix}）\n\n"
-        f"▸ 直接回复\"继续\"即可让我接力完成（系统会以新任务接力，"
+        f'▸ 直接回复"继续"即可让我接力完成（系统会以新任务接力，'
         f"对话历史和已有进展都已保留）\n"
         f"▸ 如果你预期任务时间确实较长，到【配置 → 高级配置 → 长任务与上下文保护 → 任务预算】"
         f"把对应预算调高并保存（TASK_BUDGET_DURATION 设为 0 = 不限时长，"
@@ -438,6 +462,7 @@ def _filter_tools_by_intent(
     """
     try:
         from .feature_flags import is_enabled as _ff_enabled
+
         if not _ff_enabled("intent_tool_slim_v1"):
             return tools
     except Exception:
@@ -701,9 +726,7 @@ def _get_source_tag_re() -> "re.Pattern[str]":
     return pat
 
 
-def _check_source_tag_consistency(
-    text: str, tools_executed_count: int
-) -> str | None:
+def _check_source_tag_consistency(text: str, tools_executed_count: int) -> str | None:
     """检查回答中的来源标签与实际工具调用次数是否一致。
 
     P0-2 阶段 3：后置一致性检测。
@@ -729,7 +752,7 @@ def _check_source_tag_consistency(
             return (
                 "\n\n---\n"
                 "⚠️ **系统提示**：本轮未实际调用任何工具，上述"
-                "\"已查到/已执行/已读到\"等动作完成短语可能不准确，请你核实。"
+                '"已查到/已执行/已读到"等动作完成短语可能不准确，请你核实。'
             )
     return None
 
@@ -1243,14 +1266,16 @@ class ReasoningEngine:
     # （例如 "❌ steps 不能为空"、"❌ todo_id 不存在"），属于 schema 提示
     # 而不是真正的执行失败，不应计入 rollback / 持久失败计数器。
     # 否则模型在 plan 推进过程中调错一次参数就会反复触发回滚，把任务卡死。
-    _PLAN_TOOL_NAMES = frozenset({
-        "create_todo",
-        "update_todo_step",
-        "get_todo_status",
-        "complete_todo",
-        "create_plan_file",
-        "exit_plan_mode",
-    })
+    _PLAN_TOOL_NAMES = frozenset(
+        {
+            "create_todo",
+            "update_todo_step",
+            "get_todo_status",
+            "complete_todo",
+            "create_plan_file",
+            "exit_plan_mode",
+        }
+    )
 
     def __init__(
         self,
@@ -1283,7 +1308,9 @@ class ReasoningEngine:
 
         # Checkpoint 管理
         self._checkpoints: list[Checkpoint] = []
-        self._tool_failure_counter: dict[str, int] = {}  # tool_name(args_hash) -> consecutive_failures
+        self._tool_failure_counter: dict[
+            str, int
+        ] = {}  # tool_name(args_hash) -> consecutive_failures
         self._consecutive_truncation_count: int = 0  # 连续截断计数（防止截断→回滚死循环）
 
         # 跨 rollback 的持久性失败计数器（rollback 不会清除）
@@ -1601,9 +1628,7 @@ class ReasoningEngine:
             self._persistent_tool_failures.pop(key, None)
         else:
             self._tool_failure_counter[key] = self._tool_failure_counter.get(key, 0) + 1
-            self._persistent_tool_failures[key] = (
-                self._persistent_tool_failures.get(key, 0) + 1
-            )
+            self._persistent_tool_failures[key] = self._persistent_tool_failures.get(key, 0) + 1
 
     def _compact_after_token_anomaly(
         self,
@@ -1881,6 +1906,118 @@ class ReasoningEngine:
         tool_evidence_required: bool = False,
         is_sub_agent: bool = False,
         mode: str = "agent",
+        agent_voice: str = "",
+    ) -> str:
+        """Outer wrapper for :meth:`_run_impl` (v1.27.14, plan S1.5).
+
+        Mirrors the wrapper around :meth:`reason_stream`: guarantees
+        ``state.mark_settled()`` runs in ``finally`` on every exit path so
+        that S1.4 preempt protocol can ``await wait_until_settled()``
+        reliably.  The inner impl reports the resolved :class:`TaskState`
+        through ``_on_state_resolved`` so we don't re-resolve in ``finally``
+        (where ``self._state.current_task`` may already point at the new
+        task).
+        """
+        captured_state_ref: dict[str, Any] = {"state": None}
+        _scope_attach: dict[str, Any] = {"parent": None, "attached": False}
+
+        def _on_state_resolved(st: Any) -> None:
+            captured_state_ref["state"] = st
+            # v1.28 S3: sub-agent attachment (see reason_stream outer wrapper
+            # for full rationale).
+            try:
+                _parent = current_abort_scope.get()
+                if (
+                    _parent is not None
+                    and _parent is not st.abort_root
+                    and st.abort_root.parent is None
+                ):
+                    _parent.children.append(st.abort_root)
+                    st.abort_root.parent = _parent
+                    _scope_attach["parent"] = _parent
+                    _scope_attach["attached"] = True
+                    if _parent.event.is_set() and not st.abort_root.event.is_set():
+                        st.abort_root.abort(_parent.reason, _from=_parent.name)
+            except Exception:
+                logger.debug(
+                    "[ReAct] sub-agent AbortScope attach failed",
+                    exc_info=True,
+                )
+
+        try:
+            return await self._run_impl(
+                messages,
+                tools=tools,
+                system_prompt=system_prompt,
+                base_system_prompt=base_system_prompt,
+                task_description=task_description,
+                task_monitor=task_monitor,
+                session_type=session_type,
+                interrupt_check_fn=interrupt_check_fn,
+                conversation_id=conversation_id,
+                thinking_mode=thinking_mode,
+                thinking_depth=thinking_depth,
+                progress_callback=progress_callback,
+                agent_profile_id=agent_profile_id,
+                endpoint_override=endpoint_override,
+                endpoint_policy=endpoint_policy,
+                force_tool_retries=force_tool_retries,
+                tool_evidence_required=tool_evidence_required,
+                is_sub_agent=is_sub_agent,
+                mode=mode,
+                agent_voice=agent_voice,
+                _on_state_resolved=_on_state_resolved,
+            )
+        finally:
+            st = captured_state_ref.get("state")
+            if st is not None and not st.settled_event.is_set():
+                try:
+                    st.mark_settled()
+                except Exception:
+                    logger.debug(
+                        "[ReAct] mark_settled failed in run() outer wrapper finally",
+                        exc_info=True,
+                    )
+            # v1.28 S3: detach (see reason_stream outer wrapper)
+            if _scope_attach.get("attached"):
+                _parent = _scope_attach.get("parent")
+                if _parent is not None and st is not None:
+                    try:
+                        _parent.remove_child(st.abort_root)
+                    except Exception:
+                        pass
+                    if st.abort_root.parent is _parent:
+                        st.abort_root.parent = None
+
+            # Issue #608: clear stale resume snapshot on non-cancel exit (cancel
+            # exits keep the file the funnel just persisted). Mirrors the
+            # reason_stream impl finally for the non-stream / IM path.
+            self._maybe_clear_resume_state(conversation_id, is_sub_agent, st)
+
+    async def _run_impl(
+        self,
+        messages: list[dict],
+        *,
+        tools: list[dict],
+        system_prompt: str = "",
+        base_system_prompt: str = "",
+        task_description: str = "",
+        task_monitor: Any = None,
+        session_type: str = "cli",
+        interrupt_check_fn: Any = None,
+        conversation_id: str | None = None,
+        thinking_mode: str | None = None,
+        thinking_depth: str | None = None,
+        progress_callback: Any = None,
+        agent_profile_id: str = "default",
+        endpoint_override: str | None = None,
+        endpoint_policy: str = "prefer",
+        force_tool_retries: int | None = None,
+        tool_evidence_required: bool = False,
+        is_sub_agent: bool = False,
+        mode: str = "agent",
+        agent_voice: str = "",
+        _on_state_resolved: Any = None,
     ) -> str:
         """
         主推理循环: Reason -> Act -> Observe。
@@ -1940,7 +2077,33 @@ class ReasoningEngine:
             state.cancel_reason = ""
             state.cancel_event = asyncio.Event()
 
+        # Issue #608: tag the task so the cancel funnel can skip persisting a
+        # resumable snapshot for delegated sub-agents (they share the parent
+        # conversation_id and would otherwise clobber the parent's resume state).
+        state.is_sub_agent = is_sub_agent
+
+        # v1.27.14 (plan: conversation concurrency v1.28, S1.5):
+        # 通知 outer wrapper 把这个 state 捕获，wrapper finally 才能精确
+        # mark_settled 这个具体的 state（避免 self._state.current_task
+        # 在 finally 阶段已被新流替换的 race）。
+        if _on_state_resolved is not None:
+            try:
+                _on_state_resolved(state)
+            except Exception:
+                logger.debug(
+                    "[ReAct] _on_state_resolved callback failed",
+                    exc_info=True,
+                )
+
         self._context_manager.set_cancel_event(state.cancel_event)
+
+        # v1.28 S3 (plan: conversation concurrency v1.28): publish the task's
+        # AbortScope so downstream code (tool_executor.execute_tool, sub-agent
+        # delegates) can derive child scopes via ``current_abort_scope.get()``
+        # without explicit parameter threading.  Set is task-local —
+        # contextvar is reset automatically when the asyncio.Task wrapping
+        # this coroutine completes, so no manual cleanup required.
+        current_abort_scope.set(state.abort_root)
 
         tracer = get_tracer()
         tracer.begin_trace(
@@ -1956,7 +2119,9 @@ class ReasoningEngine:
         _task_budget_iterations = int(getattr(settings, "task_budget_iterations", 0) or 0)
         if _task_budget_iterations > 0:
             _configured_max_iterations = min(_configured_max_iterations, _task_budget_iterations)
-        max_iterations = getattr(self, "_max_iterations_override", None) or _configured_max_iterations
+        max_iterations = (
+            getattr(self, "_max_iterations_override", None) or _configured_max_iterations
+        )
         self._max_iterations_override = None  # consume once
         self._empty_content_retries = 0
 
@@ -1971,7 +2136,36 @@ class ReasoningEngine:
         # 保存原始用户消息（用于模型切换时重置上下文）
         state.original_user_messages = [msg for msg in messages if self._is_human_user_message(msg)]
 
-        working_messages = list(messages)
+        # Issue #608: if the previous turn was cancelled mid-tool, resume its
+        # persisted structured working_messages instead of re-running from the
+        # flattened text history.  Falls back to text history when none exists.
+        _resumed_wm = self._maybe_load_resume_working_messages(
+            messages, conversation_id, is_sub_agent
+        )
+        working_messages = _resumed_wm if _resumed_wm is not None else list(messages)
+
+        # v1.28 S3 (plan: conversation concurrency v1.28): repair orphan
+        # ``tool_use`` blocks at turn start.  If the previous turn was cancelled
+        # mid-tool, ``working_messages`` may contain an assistant message with
+        # ``tool_use`` blocks that never got a matching ``tool_result`` (the
+        # cancel happened before the tool's result was appended).  Sending that
+        # to Anthropic API yields HTTP 400 "tool_use ids were found without
+        # tool_result blocks immediately after".  We synthesize a stub
+        # tool_result right after the orphan assistant message so the next LLM
+        # call sees a well-formed sequence.  This compensation is *only* in
+        # the LLM-facing ``working_messages`` and never written to
+        # ``session.context.messages`` — users keep seeing the clean cancel
+        # marker that v1.27.15 ``aborted_partial`` already provides.
+        _n_synth = synthesize_tool_results_for_orphans(working_messages)
+        if _n_synth > 0:
+            logger.info(
+                "[ReAct] Repaired %d orphan tool_use block(s) at turn start "
+                "(conversation_id=%s, task=%s)",
+                _n_synth,
+                conversation_id or "?",
+                state.task_id[:8] if state else "?",
+            )
+
         current_model = getattr(self._brain, "model", "")
 
         # === 端点覆盖 ===
@@ -1996,7 +2190,8 @@ class ReasoningEngine:
         im_floor = max(0, int(getattr(settings, "force_tool_call_im_floor", 2)))
         _override = getattr(self, "_force_tool_override", None)
         configured = int(
-            _override if _override is not None
+            _override
+            if _override is not None
             else getattr(settings, "force_tool_call_max_retries", 2)
         )
         if session_type == "im":
@@ -2037,7 +2232,9 @@ class ReasoningEngine:
         # 0=不限/禁用对应检测；LoopBudgetGuard 内部已处理 0 短路
         _loop_budget_guard = LoopBudgetGuard(
             max_total_tool_calls=max(0, int(getattr(settings, "task_budget_tool_calls", 0) or 0)),
-            readonly_stagnation_limit=max(0, int(getattr(settings, "readonly_stagnation_limit", 0) or 0)),
+            readonly_stagnation_limit=max(
+                0, int(getattr(settings, "readonly_stagnation_limit", 0) or 0)
+            ),
             readonly_stagnation_hard_limit=max(
                 0, int(getattr(settings, "readonly_stagnation_hard_limit", 0) or 0)
             ),
@@ -2051,9 +2248,10 @@ class ReasoningEngine:
         )
         _last_real_input_tokens: int | None = None
 
+        _content_safety_name = agent_voice.strip() if isinstance(agent_voice, str) else ""
+        _content_safety_identity = _content_safety_name or "一个 AI 助手"
         _CONTENT_SAFETY_MINIMAL_PROMPT = (
-            "你是 OpenAkita，一个 AI 助手。"
-            "始终使用与用户当前消息相同的语言回复。"
+            f"你是 {_content_safety_identity}。始终使用与用户当前消息相同的语言回复。"
         )
 
         def _build_effective_system_prompt() -> str:
@@ -2127,6 +2325,19 @@ class ReasoningEngine:
             self._last_working_messages = working_messages
             state.iteration = iteration
 
+            # v1.27.14 (plan: conversation concurrency v1.28, S1.5):
+            # abandoned 由 S1.4 preempt 协议在 wait_until_settled 超时后置 True。
+            # 老协程立即静默退出，绝不再写共享 state（避免 issue #572 类的
+            # "终态 -> REASONING" 状态机崩溃路径）。
+            if getattr(state, "abandoned", False):
+                logger.info(
+                    "[ReAct] Task %s abandoned by preempt; exiting silently at iter=%d",
+                    state.task_id[:8],
+                    iteration,
+                )
+                tracer.end_trace(metadata={"result": "abandoned", "iterations": iteration})
+                return ""
+
             # 检查取消
             if state.cancelled:
                 logger.info(f"[ReAct] Task cancelled at iteration start: {state.cancel_reason}")
@@ -2168,13 +2379,9 @@ class ReasoningEngine:
                 # 用户能看到状态。NOT injected into LLM context (avoids
                 # 让 LLM 提前缩手缩脚 / 浪费 token).
                 threshold_name = (
-                    "downgrade"
-                    if budget_status.action == BudgetAction.DOWNGRADE
-                    else "warning"
+                    "downgrade" if budget_status.action == BudgetAction.DOWNGRADE else "warning"
                 )
-                if self._budget.should_emit_threshold(
-                    budget_status.dimension, threshold_name
-                ):
+                if self._budget.should_emit_threshold(budget_status.dimension, threshold_name):
                     logger.info(
                         "[Budget] %s reached %s threshold: %s",
                         budget_status.dimension,
@@ -2282,7 +2489,30 @@ class ReasoningEngine:
                 try:
                     state.transition(TaskStatus.REASONING)
                 except ValueError:
-                    pass
+                    # FIX-S5A-2 (v1.28.3-pre audit): silent swallow remains
+                    # (S5-B will delete it), but emit telemetry so the IM /
+                    # CLI run() path contributes to the inc_illegal_reasoning
+                    # _entry counter on equal footing with reason_stream.
+                    # Without this, telemetry was 100% blind to IM users
+                    # — S5-B's "2-week zero hits" gate would be vacuously
+                    # met regardless of actual race incidence.
+                    if state.is_terminal:
+                        logger.warning(
+                            "[ReAct] Iter %d: state already terminal (%s) "
+                            "before REASONING transition; preempt protocol "
+                            "bypassed (session=%r)",
+                            iteration + 1,
+                            state.status.value,
+                            conversation_id,
+                        )
+                        try:
+                            from .conversation_metrics import (
+                                inc_illegal_reasoning_entry,
+                            )
+
+                            inc_illegal_reasoning_entry(source="run_impl_main_loop")
+                        except Exception:
+                            pass
 
             # Refresh tools only when _discovered_tools actually changes
             # (not every iteration — otherwise Supervisor NUDGE that strips
@@ -2333,8 +2563,7 @@ class ReasoningEngine:
                 if retry_result == "retry":
                     _total_r = getattr(state, "_total_llm_retries", 1)
                     await _emit_progress(
-                        f"AI 服务响应异常，正在重试"
-                        f"（{_total_r}/{self.MAX_TOTAL_LLM_RETRIES}）..."
+                        f"AI 服务响应异常，正在重试（{_total_r}/{self.MAX_TOTAL_LLM_RETRIES}）..."
                     )
                     _retry_sleep = min(2 * _total_r, 15)
                     _sleep = asyncio.create_task(asyncio.sleep(_retry_sleep))
@@ -2355,9 +2584,7 @@ class ReasoningEngine:
                     continue
                 elif isinstance(retry_result, tuple):
                     current_model, working_messages = retry_result
-                    await _emit_progress(
-                        "当前模型不可用，正在切换到备用模型..."
-                    )
+                    await _emit_progress("当前模型不可用，正在切换到备用模型...")
                     no_tool_call_count = 0
                     tools_executed_in_task = False
                     _supervisor_intervened = False
@@ -2501,7 +2728,9 @@ class ReasoningEngine:
                     decision.stop_reason == "max_tokens"
                     and getattr(state, "_text_continuation_count", 0) < 2
                 ):
-                    state._text_continuation_count = getattr(state, "_text_continuation_count", 0) + 1
+                    state._text_continuation_count = (
+                        getattr(state, "_text_continuation_count", 0) + 1
+                    )
                     if not hasattr(state, "_accumulated_text_parts"):
                         state._accumulated_text_parts = []
                     state._accumulated_text_parts.append(decision.text_content or "")
@@ -2509,15 +2738,24 @@ class ReasoningEngine:
                         f"[ReAct] FINAL_ANSWER truncated by max_tokens, "
                         f"auto-continuation #{state._text_continuation_count}"
                     )
-                    working_messages.append({
-                        "role": "assistant",
-                        "content": decision.assistant_content or [{"type": "text", "text": decision.text_content or ""}],
-                        **({"reasoning_content": decision.thinking_content} if decision.thinking_content else {}),
-                    })
-                    working_messages.append({
-                        "role": "user",
-                        "content": "你的回答被截断了。请直接从断点处继续输出，不要重复已说过的内容，不要道歉。",
-                    })
+                    working_messages.append(
+                        {
+                            "role": "assistant",
+                            "content": decision.assistant_content
+                            or [{"type": "text", "text": decision.text_content or ""}],
+                            **(
+                                {"reasoning_content": decision.thinking_content}
+                                if decision.thinking_content
+                                else {}
+                            ),
+                        }
+                    )
+                    working_messages.append(
+                        {
+                            "role": "user",
+                            "content": "你的回答被截断了。请直接从断点处继续输出，不要重复已说过的内容，不要道歉。",
+                        }
+                    )
                     react_trace.append(_iter_trace)
                     continue
 
@@ -2794,7 +3032,24 @@ class ReasoningEngine:
                         try:
                             state.transition(TaskStatus.REASONING)
                         except ValueError:
-                            pass
+                            # FIX-S5A-2: see main-loop hotfix above.
+                            if state.is_terminal:
+                                logger.warning(
+                                    "[ReAct] ask_user reply: state terminal "
+                                    "(%s) on iter %d; preempt protocol "
+                                    "bypassed (session=%r)",
+                                    state.status.value,
+                                    iteration + 1,
+                                    conversation_id,
+                                )
+                                try:
+                                    from .conversation_metrics import (
+                                        inc_illegal_reasoning_entry,
+                                    )
+
+                                    inc_illegal_reasoning_entry(source="run_impl_ask_user_reply")
+                                except Exception:
+                                    pass
                         continue  # 继续 ReAct 循环
 
                     elif (
@@ -2825,7 +3080,24 @@ class ReasoningEngine:
                         try:
                             state.transition(TaskStatus.REASONING)
                         except ValueError:
-                            pass
+                            # FIX-S5A-2: see main-loop hotfix above.
+                            if state.is_terminal:
+                                logger.warning(
+                                    "[ReAct] ask_user timeout: state "
+                                    "terminal (%s) on iter %d; preempt "
+                                    "protocol bypassed (session=%r)",
+                                    state.status.value,
+                                    iteration + 1,
+                                    conversation_id,
+                                )
+                                try:
+                                    from .conversation_metrics import (
+                                        inc_illegal_reasoning_entry,
+                                    )
+
+                                    inc_illegal_reasoning_entry(source="run_impl_ask_user_timeout")
+                                except Exception:
+                                    pass
                         continue  # 继续 ReAct 循环，让 LLM 自行决策
 
                     else:
@@ -2894,10 +3166,7 @@ class ReasoningEngine:
                     _tool_call_counter[_tc_key] = _tool_call_counter.get(_tc_key, 0) + 1
                     _tool_name_counter[_tc_name] = _tool_name_counter.get(_tc_name, 0) + 1
                     _per_name_limit = _PER_TOOL_NAME_TASK_LIMITS.get(_tc_name, 0)
-                    if (
-                        _per_name_limit > 0
-                        and _tool_name_counter[_tc_name] > _per_name_limit
-                    ):
+                    if _per_name_limit > 0 and _tool_name_counter[_tc_name] > _per_name_limit:
                         logger.warning(
                             f"[RateLimit] Tool '{_tc_name}' called "
                             f"{_tool_name_counter[_tc_name]} times in this task "
@@ -2986,9 +3255,7 @@ class ReasoningEngine:
                     raise DeferredApprovalRequired(
                         message=str(_first_deferred.get("content", "")),
                         pending_id=_first_deferred.get("_deferred_approval_id"),
-                        unattended_strategy=_first_deferred.get(
-                            "_deferred_approval_strategy"
-                        ),
+                        unattended_strategy=_first_deferred.get("_deferred_approval_strategy"),
                     )
                 for _exec_tc, _exec_result in zip(decision.tool_calls, tool_results, strict=False):
                     if isinstance(_exec_result, dict):
@@ -3011,9 +3278,7 @@ class ReasoningEngine:
                             merged_results.append(_executed_by_id[tid])
                     tool_results = merged_results
                     decision.tool_calls = [
-                        tc
-                        for tc in _all_tool_calls
-                        if tc.get("id", "") not in _rate_limited_by_id
+                        tc for tc in _all_tool_calls if tc.get("id", "") not in _rate_limited_by_id
                     ]
 
                 all_tool_results.extend(tool_results)
@@ -3070,11 +3335,7 @@ class ReasoningEngine:
                         )
                     _r_summary = self._summarize_tool_result(_tc_name, result_content)
                     if _r_summary:
-                        _icon = (
-                            "🕒"
-                            if pending_confirm
-                            else ("❌" if is_error else "✅")
-                        )
+                        _icon = "🕒" if pending_confirm else ("❌" if is_error else "✅")
                         await _emit_progress(f"{_icon} {_r_summary}")
 
                 if receipts:
@@ -3130,14 +3391,14 @@ class ReasoningEngine:
                     if not isinstance(tr, dict):
                         continue
                     _rc = str(tr.get("content", ""))
-                    _is_err = tr.get("is_error", False) or any(
-                        m in _rc for m in _error_markers
+                    _is_err = tr.get("is_error", False) or any(m in _rc for m in _error_markers)
+                    _trace_results.append(
+                        {
+                            "tool_use_id": tr.get("tool_use_id", ""),
+                            "result_content": _rc,
+                            "is_error": _is_err,
+                        }
                     )
-                    _trace_results.append({
-                        "tool_use_id": tr.get("tool_use_id", ""),
-                        "result_content": _rc,
-                        "is_error": _is_err,
-                    })
                     logger.info(
                         f"[ReAct] Iter {iteration + 1} — tool_result "
                         f"id={tr.get('tool_use_id', '')} len={len(_rc)}"
@@ -3145,7 +3406,9 @@ class ReasoningEngine:
                 _iter_trace["tool_results"] = _trace_results
                 react_trace.append(_iter_trace)
 
-                _budget_decision = _loop_budget_guard.record_tool_results(_all_tool_calls, tool_results)
+                _budget_decision = _loop_budget_guard.record_tool_results(
+                    _all_tool_calls, tool_results
+                )
                 if _budget_decision.should_stop:
                     msg = _budget_decision.message
                     self._save_react_trace(
@@ -3511,10 +3774,7 @@ class ReasoningEngine:
                             if intervention.pattern.value == "signature_repeat"
                             else "⚠️ 检测到工具调用陷入死循环，任务已自动终止。请重新描述您的需求。"
                         )
-                        return (
-                            cleaned
-                            or fallback_msg
-                        )
+                        return cleaned or fallback_msg
 
                     if intervention.should_rollback:
                         rollback_result = self._rollback(intervention.message)
@@ -3608,6 +3868,154 @@ class ReasoningEngine:
         is_sub_agent: bool = False,
         request_id: str = "",
         turn_id: str = "",
+        agent_voice: str = "",
+    ):
+        """Outer wrapper for :meth:`_reason_stream_impl` (v1.27.14, plan S1.5).
+
+        Adds a top-level ``try/finally`` that guarantees ``state.mark_settled()``
+        runs on every exit path (normal completion, exception, generator close,
+        explicit ``return``).  Inner impl notifies us of the resolved
+        ``TaskState`` through a tiny callback so we don't have to re-resolve
+        it in ``finally`` (avoiding the "new task already took over current_task"
+        race).
+        """
+        captured_state_ref: dict[str, Any] = {"state": None}
+        # v1.28 S3: track sub-agent AbortScope attachment for cleanup in finally
+        _scope_attach: dict[str, Any] = {"parent": None, "attached": False}
+
+        def _on_state_resolved(st: Any) -> None:
+            captured_state_ref["state"] = st
+            # v1.28 S3 (plan: conversation concurrency v1.28): sub-agent
+            # attachment.  When the caller already has an AbortScope on the
+            # contextvar (typical: ``orchestrator.delegate`` invokes sub-agent
+            # from inside the parent's reasoning loop), wire ``st.abort_root``
+            # as a child of that parent so the parent's ``cancel()`` fans
+            # out down here too.  ``current_abort_scope.set(state.abort_root)``
+            # in ``_reason_stream_impl`` then publishes this sub-scope to
+            # *its* downstream (tools, deeper sub-agents).
+            try:
+                _parent = current_abort_scope.get()
+                if (
+                    _parent is not None
+                    and _parent is not st.abort_root
+                    and st.abort_root.parent is None
+                ):
+                    _parent.children.append(st.abort_root)
+                    st.abort_root.parent = _parent
+                    _scope_attach["parent"] = _parent
+                    _scope_attach["attached"] = True
+                    if _parent.event.is_set() and not st.abort_root.event.is_set():
+                        st.abort_root.abort(_parent.reason, _from=_parent.name)
+            except Exception:
+                logger.debug(
+                    "[ReAct-Stream] sub-agent AbortScope attach failed",
+                    exc_info=True,
+                )
+
+        try:
+            async for event in self._reason_stream_impl(
+                messages,
+                tools=tools,
+                system_prompt=system_prompt,
+                base_system_prompt=base_system_prompt,
+                task_description=task_description,
+                task_monitor=task_monitor,
+                session_type=session_type,
+                plan_mode=plan_mode,
+                mode=mode,
+                endpoint_override=endpoint_override,
+                endpoint_policy=endpoint_policy,
+                conversation_id=conversation_id,
+                thinking_mode=thinking_mode,
+                thinking_depth=thinking_depth,
+                agent_profile_id=agent_profile_id,
+                session=session,
+                force_tool_retries=force_tool_retries,
+                tool_evidence_required=tool_evidence_required,
+                is_sub_agent=is_sub_agent,
+                request_id=request_id,
+                turn_id=turn_id,
+                agent_voice=agent_voice,
+                _on_state_resolved=_on_state_resolved,
+            ):
+                # v1.27.15 (S2 P0-3): record streamed text/thinking into
+                # TaskState so a later cancel/preempt can persist a
+                # ``marker_type="aborted_partial"`` message containing
+                # whatever the user has already seen.  Cheap O(len)
+                # per-event work; capped at 16k chars per channel.
+                _st = captured_state_ref.get("state")
+                if _st is not None:
+                    _et = event.get("type")
+                    if _et in ("text_delta", "chain_text"):
+                        _content = event.get("content", "")
+                        if isinstance(_content, str) and _content:
+                            try:
+                                _st.append_partial_text(_content)
+                            except Exception:  # pragma: no cover
+                                logger.debug(
+                                    "[ReAct-Stream] append_partial_text failed",
+                                    exc_info=True,
+                                )
+                    elif _et in ("thinking_delta", "reasoning_delta"):
+                        _content = event.get("content", "")
+                        if isinstance(_content, str) and _content:
+                            try:
+                                _st.append_partial_thinking(_content)
+                            except Exception:  # pragma: no cover
+                                logger.debug(
+                                    "[ReAct-Stream] append_partial_thinking failed",
+                                    exc_info=True,
+                                )
+                yield event
+        finally:
+            st = captured_state_ref.get("state")
+            if st is not None and not st.settled_event.is_set():
+                try:
+                    st.mark_settled()
+                except Exception:
+                    logger.debug(
+                        "[ReAct-Stream] mark_settled failed in outer wrapper finally",
+                        exc_info=True,
+                    )
+            # v1.28 S3: detach this sub-agent's abort_root from the parent
+            # tree so the parent's ``children`` list doesn't grow with each
+            # delegation.  Safe to call multiple times.
+            if _scope_attach.get("attached"):
+                _parent = _scope_attach.get("parent")
+                if _parent is not None and st is not None:
+                    try:
+                        _parent.remove_child(st.abort_root)
+                    except Exception:
+                        pass
+                    if st.abort_root.parent is _parent:
+                        st.abort_root.parent = None
+
+    async def _reason_stream_impl(
+        self,
+        messages: list[dict],
+        *,
+        tools: list[dict] | None = None,
+        system_prompt: str = "",
+        base_system_prompt: str = "",
+        task_description: str = "",
+        task_monitor: Any = None,
+        session_type: str = "desktop",
+        plan_mode: bool = False,
+        mode: str = "agent",
+        endpoint_override: str | None = None,
+        endpoint_policy: str = "prefer",
+        conversation_id: str | None = None,
+        thinking_mode: str | None = None,
+        thinking_depth: str | None = None,
+        agent_profile_id: str = "default",
+        session: Any = None,
+        force_tool_retries: int | None = None,
+        tool_evidence_required: bool = False,
+        is_sub_agent: bool = False,
+        request_id: str = "",
+        turn_id: str = "",
+        agent_voice: str = "",
+        _on_state_resolved: Any = None,
     ):
         """
         流式推理循环，为 HTTP API (SSE) 设计。
@@ -3673,15 +4081,37 @@ class ReasoningEngine:
             state.cancel_reason = ""
             state.cancel_event = asyncio.Event()
 
+        # Issue #608: tag the task so the cancel funnel can skip persisting a
+        # resumable snapshot for delegated sub-agents (they share the parent
+        # conversation_id and would otherwise clobber the parent's resume state).
+        state.is_sub_agent = is_sub_agent
+
+        # v1.27.14 (plan: conversation concurrency v1.28, S1.5):
+        # 通知 outer wrapper 把这个 state 捕获，wrapper finally 才能精确
+        # mark_settled 这个具体的 state（避免 self._state.current_task
+        # 在 finally 阶段已被新流替换的 race）。
+        if _on_state_resolved is not None:
+            try:
+                _on_state_resolved(state)
+            except Exception:
+                logger.debug(
+                    "[ReAct-Stream] _on_state_resolved callback failed",
+                    exc_info=True,
+                )
+
         self._context_manager.set_cancel_event(state.cancel_event)
+
+        # v1.28 S3: publish AbortScope; see ``_run_inner`` for full rationale.
+        current_abort_scope.set(state.abort_root)
 
         try:
             # === 动态 System Prompt（追加活跃 Plan） ===
             _base_sp = base_system_prompt or system_prompt
 
+            _content_safety_name = agent_voice.strip() if isinstance(agent_voice, str) else ""
+            _content_safety_identity = _content_safety_name or "一个 AI 助手"
             _CONTENT_SAFETY_MINIMAL_PROMPT_STREAM = (
-                "你是 OpenAkita，一个 AI 助手。"
-                "始终使用与用户当前消息相同的语言回复。"
+                f"你是 {_content_safety_identity}。始终使用与用户当前消息相同的语言回复。"
             )
 
             def _build_effective_prompt() -> str:
@@ -3766,19 +4196,43 @@ class ReasoningEngine:
             _configured_max_iterations = int(getattr(settings, "max_iterations", 100) or 100)
             _task_budget_iterations = int(getattr(settings, "task_budget_iterations", 0) or 0)
             if _task_budget_iterations > 0:
-                _configured_max_iterations = min(_configured_max_iterations, _task_budget_iterations)
+                _configured_max_iterations = min(
+                    _configured_max_iterations, _task_budget_iterations
+                )
             max_iterations = (
                 getattr(self, "_max_iterations_override", None) or _configured_max_iterations
             )
             self._max_iterations_override = None  # consume once
             self._empty_content_retries = 0
-            working_messages = list(messages)
+
+            # Issue #608: resume persisted structured working_messages from a
+            # prior cancelled turn (see ``_run_impl`` seed for full rationale).
+            _resumed_wm_s = self._maybe_load_resume_working_messages(
+                messages, conversation_id, is_sub_agent
+            )
+            working_messages = _resumed_wm_s if _resumed_wm_s is not None else list(messages)
+
+            # v1.28 S3 (plan: conversation concurrency v1.28): mirror of the
+            # repair in ``_run_inner``.  Streaming entry point sees the same
+            # cancel-leftover risk; we patch orphan tool_use here too so
+            # /api/chat resume after a cancel doesn't blow up at the first
+            # Anthropic call. See ``_run_inner`` for full rationale.
+            _n_synth_s = synthesize_tool_results_for_orphans(working_messages)
+            if _n_synth_s > 0:
+                logger.info(
+                    "[ReAct-Stream] Repaired %d orphan tool_use block(s) at turn start "
+                    "(conversation_id=%s, task=%s)",
+                    _n_synth_s,
+                    conversation_id or "?",
+                    state.task_id[:8] if state else "?",
+                )
 
             # ForceToolCall 配置
             im_floor = max(0, int(getattr(settings, "force_tool_call_im_floor", 2)))
             _override = getattr(self, "_force_tool_override", None)
             configured = int(
-                _override if _override is not None
+                _override
+                if _override is not None
                 else getattr(settings, "force_tool_call_max_retries", 2)
             )
             if session_type == "im":
@@ -3816,8 +4270,12 @@ class ReasoningEngine:
             _MAX_SAME_TOOL_PER_TASK = max(0, int(getattr(settings, "same_tool_call_limit", 0) or 0))
             # 0=不限/禁用对应检测；LoopBudgetGuard 内部已处理 0 短路
             _loop_budget_guard = LoopBudgetGuard(
-                max_total_tool_calls=max(0, int(getattr(settings, "task_budget_tool_calls", 0) or 0)),
-                readonly_stagnation_limit=max(0, int(getattr(settings, "readonly_stagnation_limit", 0) or 0)),
+                max_total_tool_calls=max(
+                    0, int(getattr(settings, "task_budget_tool_calls", 0) or 0)
+                ),
+                readonly_stagnation_limit=max(
+                    0, int(getattr(settings, "readonly_stagnation_limit", 0) or 0)
+                ),
                 readonly_stagnation_hard_limit=max(
                     0, int(getattr(settings, "readonly_stagnation_hard_limit", 0) or 0)
                 ),
@@ -3901,6 +4359,19 @@ class ReasoningEngine:
                 self._last_working_messages = working_messages
                 state.iteration = _iteration
 
+                # v1.27.14 (plan: conversation concurrency v1.28, S1.5):
+                # abandoned 由 S1.4 preempt 协议在 wait_until_settled 超时后置 True。
+                # 老协程立即静默退出（不 yield "error"，让被抢占体感丝滑），
+                # outer wrapper finally 兜底 mark_settled。
+                if getattr(state, "abandoned", False):
+                    logger.info(
+                        "[ReAct-Stream] Task %s abandoned by preempt; exiting silently at iter=%d",
+                        state.task_id[:8],
+                        _iteration,
+                    )
+                    yield {"type": "done"}
+                    return
+
                 # --- 取消检查 ---
                 if state.cancelled:
                     logger.info(
@@ -3916,7 +4387,7 @@ class ReasoningEngine:
                         iteration=_iteration,
                         exit_reason="user_cancelled",
                         summary=str(state.cancel_reason or "用户主动停止"),
-                        next_step_hint="如需重启，发送新的指令或回复\"继续\"",
+                        next_step_hint='如需重启，发送新的指令或回复"继续"',
                     )
                     yield {"type": "text_delta", "content": "✅ 任务已停止。"}
                     yield {"type": "done"}
@@ -3950,7 +4421,7 @@ class ReasoningEngine:
                         iteration=_iteration,
                         exit_reason="budget_paused",
                         summary=str(budget_status.message or "预算耗尽，任务暂停"),
-                        next_step_hint="回复\"继续\"即可让系统接力完成；或在配置中调高任务预算",
+                        next_step_hint='回复"继续"即可让系统接力完成；或在配置中调高任务预算',
                     )
                     yield {"type": "text_delta", "content": msg}
                     yield {"type": "done"}
@@ -3960,13 +4431,9 @@ class ReasoningEngine:
                     # 但**不**写入 LLM 上下文（避免污染 / 让 LLM 提前缩手）。
                     # 阈值去抖：每个 (dimension, threshold) 仅触发一次 emit。
                     threshold_name = (
-                        "downgrade"
-                        if budget_status.action == BudgetAction.DOWNGRADE
-                        else "warning"
+                        "downgrade" if budget_status.action == BudgetAction.DOWNGRADE else "warning"
                     )
-                    if self._budget.should_emit_threshold(
-                        budget_status.dimension, threshold_name
-                    ):
+                    if self._budget.should_emit_threshold(budget_status.dimension, threshold_name):
                         logger.info(
                             "[Budget-Stream] %s reached %s threshold: %s",
                             budget_status.dimension,
@@ -4006,8 +4473,51 @@ class ReasoningEngine:
                 )
 
                 # --- 状态转换: REASONING（与 run() 一致） ---
+                # v1.28.3 S5-A: 用 ensure_ready_for_reasoning() idempotent
+                # helper 替换原 hotfix 06c67221 的 try/transition 块。
+                # terminal 路径现在抛 IllegalReasoningEntry 走显式 telemetry +
+                # 友好 error code; 其他非法转换的 belt-and-suspenders force-
+                # write 仍保留（v1.28.3 没有"必删"的灰度数据，S5-B 灰度 2 周
+                # 后再删）。
                 if state.status != TaskStatus.REASONING:
-                    state.transition(TaskStatus.REASONING)
+                    try:
+                        state.ensure_ready_for_reasoning()
+                    except IllegalReasoningEntry as _illegal_entry:
+                        logger.warning(
+                            "[ReAct-Stream] IllegalReasoningEntry on iter %d (session=%r): %s",
+                            _iteration + 1,
+                            _session_key,
+                            _illegal_entry,
+                        )
+                        try:
+                            from .conversation_metrics import (
+                                inc_illegal_reasoning_entry,
+                            )
+
+                            inc_illegal_reasoning_entry(source="reason_stream_iter")
+                        except Exception:
+                            pass
+                        yield {
+                            "type": "error",
+                            "code": "illegal_state",
+                            "message": "上一条消息正在收尾，请稍候再试或新建会话。",
+                        }
+                        yield {"type": "done"}
+                        return
+                    except ValueError:  # s5b-allow-force-write
+                        # Belt-and-suspenders (v1.28.3-pre): post-S5-B 灰度
+                        # 后这条分支理论上不可达——保留 force-write 避免
+                        # 任何未识别的 race 路径让 SSE 流硬崩。
+                        logger.error(
+                            "[ReAct-Stream] Illegal transition %s -> REASONING "
+                            "(non-terminal) on iter %d; forcing status overwrite. "
+                            "If you see this in production, S5-A's safety net "
+                            "is catching a race path that wasn't supposed to "
+                            "exist post-S1+S3+S4 — please file a bug.",
+                            state.status.value,
+                            _iteration + 1,
+                        )
+                        state.status = TaskStatus.REASONING
 
                 _ctx_compressed_info: dict | None = None
                 effective_prompt = _build_effective_prompt()
@@ -4162,13 +4672,13 @@ class ReasoningEngine:
 
                     # --- Thinking 降级通知 ---
                     if not _thinking_notice_emitted and decision:
-                        _resp = getattr(decision, 'raw_response', None)
-                        if _resp and getattr(_resp, '_thinking_fallback', False):
+                        _resp = getattr(decision, "raw_response", None)
+                        if _resp and getattr(_resp, "_thinking_fallback", False):
                             _thinking_notice_emitted = True
                             yield {
                                 "type": "endpoint_notice",
                                 "notice_type": "degraded",
-                                "endpoint": getattr(_resp, 'endpoint_name', ''),
+                                "endpoint": getattr(_resp, "endpoint_name", ""),
                                 "reason_code": "thinking_degraded",
                             }
 
@@ -4295,7 +4805,7 @@ class ReasoningEngine:
                             _last_chain_text = _decision_text
                         else:
                             logger.info(
-                                f"[ReAct-Stream] Iter {_iteration+1} — suppressed duplicate chain_text "
+                                f"[ReAct-Stream] Iter {_iteration + 1} — suppressed duplicate chain_text "
                                 f"({len(_decision_text)} chars)"
                             )
                 elif decision.type == DecisionType.TOOL_CALLS:
@@ -4307,7 +4817,7 @@ class ReasoningEngine:
                             _last_chain_text = _decision_text
                         else:
                             logger.info(
-                                f"[ReAct-Stream] Iter {_iteration+1} — suppressed duplicate chain_text "
+                                f"[ReAct-Stream] Iter {_iteration + 1} — suppressed duplicate chain_text "
                                 f"({len(_decision_text)} chars)"
                             )
                 elif _raw_streamed_text != (decision.text_content or ""):
@@ -4332,16 +4842,10 @@ class ReasoningEngine:
                     _in_tokens = _stream_usage.get("input_tokens", 0)
                     _out_tokens = _stream_usage.get("output_tokens", 0)
                 if _stream_usage:
-                    _cache_read = int(
-                        _stream_usage.get("cache_read_input_tokens", 0) or 0
-                    )
-                    _cache_create = int(
-                        _stream_usage.get("cache_creation_input_tokens", 0) or 0
-                    )
+                    _cache_read = int(_stream_usage.get("cache_read_input_tokens", 0) or 0)
+                    _cache_create = int(_stream_usage.get("cache_creation_input_tokens", 0) or 0)
                 if _usage:
-                    _cache_read = _cache_read or getattr(
-                        _usage, "cache_read_input_tokens", 0
-                    )
+                    _cache_read = _cache_read or getattr(_usage, "cache_read_input_tokens", 0)
                     _cache_create = _cache_create or getattr(
                         _usage, "cache_creation_input_tokens", 0
                     )
@@ -4350,7 +4854,9 @@ class ReasoningEngine:
                 if not (_in_tokens or _out_tokens):
                     try:
                         _est_input = ContextManager.static_estimate_tokens(effective_prompt or "")
-                        _est_input += self._context_manager.estimate_messages_tokens(working_messages)
+                        _est_input += self._context_manager.estimate_messages_tokens(
+                            working_messages
+                        )
                         _est_input += self._context_manager.estimate_tools_tokens(tools)
                         _est_output_payload = {
                             "thinking": decision.thinking_content or "",
@@ -4425,15 +4931,15 @@ class ReasoningEngine:
                     if hasattr(decision.type, "value")
                     else str(decision.type),
                     "model": current_model,
-                "request_id": _request_id,
-                "turn_id": _turn_id,
-                "tool_policy": {
-                    "mode": _effective_mode,
-                    "visible_count": len(tools),
-                    "hidden_count": _hidden_tool_count,
-                    "source": "reason_stream_mode_filter",
-                    "visible_tools": sorted(t.get("name", "") for t in tools if t.get("name")),
-                },
+                    "request_id": _request_id,
+                    "turn_id": _turn_id,
+                    "tool_policy": {
+                        "mode": _effective_mode,
+                        "visible_count": len(tools),
+                        "hidden_count": _hidden_tool_count,
+                        "source": "reason_stream_mode_filter",
+                        "visible_tools": sorted(t.get("name", "") for t in tools if t.get("name")),
+                    },
                     "thinking": decision.thinking_content,
                     "thinking_duration_ms": _thinking_duration,
                     "text": decision.text_content,
@@ -4505,20 +5011,31 @@ class ReasoningEngine:
                         decision.stop_reason == "max_tokens"
                         and getattr(state, "_text_continuation_count", 0) < 2
                     ):
-                        state._text_continuation_count = getattr(state, "_text_continuation_count", 0) + 1
+                        state._text_continuation_count = (
+                            getattr(state, "_text_continuation_count", 0) + 1
+                        )
                         logger.info(
                             f"[ReAct-Stream] FINAL_ANSWER truncated by max_tokens, "
                             f"auto-continuation #{state._text_continuation_count}"
                         )
-                        working_messages.append({
-                            "role": "assistant",
-                            "content": decision.assistant_content or [{"type": "text", "text": decision.text_content or ""}],
-                            **({"reasoning_content": decision.thinking_content} if decision.thinking_content else {}),
-                        })
-                        working_messages.append({
-                            "role": "user",
-                            "content": "你的回答被截断了。请直接从断点处继续输出，不要重复已说过的内容，不要道歉。",
-                        })
+                        working_messages.append(
+                            {
+                                "role": "assistant",
+                                "content": decision.assistant_content
+                                or [{"type": "text", "text": decision.text_content or ""}],
+                                **(
+                                    {"reasoning_content": decision.thinking_content}
+                                    if decision.thinking_content
+                                    else {}
+                                ),
+                            }
+                        )
+                        working_messages.append(
+                            {
+                                "role": "user",
+                                "content": "你的回答被截断了。请直接从断点处继续输出，不要重复已说过的内容，不要道歉。",
+                            }
+                        )
                         react_trace.append(_iter_trace)
                         continue
 
@@ -4547,6 +5064,57 @@ class ReasoningEngine:
                     )
 
                     if isinstance(result, str):
+                        # === Steer done-drain ===
+                        # The model produced a final answer with no tool calls,
+                        # so process_post_tool_signals did NOT drain inserts this
+                        # round. A message steered in (insert_user_message) while
+                        # this answer was being generated would otherwise be lost
+                        # the instant we terminate. Address it now: fold the
+                        # finished answer into context, inject the steered
+                        # message, and loop once more. Bounded by max_iterations
+                        # inside the helper, so it can never run away.
+                        _steered = await self._drain_steer_before_finish(
+                            state=state,
+                            working_messages=working_messages,
+                            final_text=result,
+                            iteration=_iteration,
+                            max_iterations=max_iterations,
+                        )
+                        if _steered:
+                            # Surface the answer the model just finished so the
+                            # user still sees it before the follow-up is handled.
+                            if _streamed_text:
+                                if result != _raw_streamed_text:
+                                    yield {"type": "text_replace", "content": result}
+                            else:
+                                _chunk = 20
+                                for _ci in range(0, len(result), _chunk):
+                                    yield {
+                                        "type": "text_delta",
+                                        "content": result[_ci : _ci + _chunk],
+                                    }
+                                    await asyncio.sleep(0.01)
+                            for _ins_text in _steered:
+                                yield {
+                                    "type": "chain_text",
+                                    "content": f"用户插入消息: {_ins_text[:60]}",
+                                }
+                            # Fresh per-answer budget: the steered message is a
+                            # new user ask, don't penalise it with the previous
+                            # answer's retry/verify counters.
+                            no_tool_call_count = 0
+                            verify_incomplete_count = 0
+                            no_confirmation_text_count = 0
+                            logger.info(
+                                "[ReAct-Stream][DoneDrain] %d steered message(s) "
+                                "arrived during final-answer generation; folding "
+                                "answer into context and continuing (iter=%d/%d)",
+                                len(_steered),
+                                _iteration + 1,
+                                max_iterations,
+                            )
+                            react_trace.append(_iter_trace)
+                            continue
                         react_trace.append(_iter_trace)
                         final_exit_reason = self._last_exit_reason
                         is_verify_incomplete = final_exit_reason == "verify_incomplete"
@@ -4562,7 +5130,7 @@ class ReasoningEngine:
                             state.transition(
                                 TaskStatus.FAILED if is_verify_incomplete else TaskStatus.COMPLETED
                             )
-                        except ValueError:
+                        except ValueError:  # s5b-allow-force-write
                             state.status = (
                                 TaskStatus.FAILED if is_verify_incomplete else TaskStatus.COMPLETED
                             )
@@ -4605,7 +5173,7 @@ class ReasoningEngine:
                         react_trace.append(_iter_trace)
                         try:
                             state.transition(TaskStatus.VERIFYING)
-                        except ValueError:
+                        except ValueError:  # s5b-allow-force-write
                             state.status = TaskStatus.VERIFYING
                         (
                             working_messages,
@@ -4620,7 +5188,7 @@ class ReasoningEngine:
                 elif decision.type == DecisionType.TOOL_CALLS and decision.tool_calls:
                     try:
                         state.transition(TaskStatus.ACTING)
-                    except ValueError:
+                    except ValueError:  # s5b-allow-force-write
                         state.status = TaskStatus.ACTING
 
                     working_messages.append(
@@ -4765,20 +5333,20 @@ class ReasoningEngine:
                                 _delegate_chain = (
                                     list(_emit_ctx.delegate_chain) if _emit_ctx else []
                                 )
-                                _root_user_id = (
-                                    _emit_ctx.root_user_id if _emit_ctx else None
-                                )
+                                _root_user_id = _emit_ctx.root_user_id if _emit_ctx else None
                                 # C13 §15.5: dedup — when delegate_parallel
                                 # siblings issue the same (tool, params), only
                                 # the first emits the SSE; siblings attach as
                                 # followers on the leader's confirm event.
-                                _dedup_key = _compute_confirm_dedup_key(
-                                    t_name, t_args
+                                _dedup_key = _compute_confirm_dedup_key(t_name, t_args)
+                                _leader_id = (
+                                    _bus.find_dedup_leader(
+                                        session_id=conversation_id or "",
+                                        dedup_key=_dedup_key,
+                                    )
+                                    if _dedup_key
+                                    else None
                                 )
-                                _leader_id = _bus.find_dedup_leader(
-                                    session_id=conversation_id or "",
-                                    dedup_key=_dedup_key,
-                                ) if _dedup_key else None
                                 _confirm_timeout = float(_v2_conf.timeout_seconds)
                                 if _is_im:
                                     _confirm_timeout = max(_confirm_timeout * 4, 180.0)
@@ -4789,8 +5357,7 @@ class ReasoningEngine:
                                     # deregister, so we still read _decisions
                                     # safely.
                                     logger.info(
-                                        "[C13 dedup] tool=%s session=%s join "
-                                        "leader confirm_id=%s",
+                                        "[C13 dedup] tool=%s session=%s join leader confirm_id=%s",
                                         t_name,
                                         (conversation_id or "")[:12],
                                         _leader_id[:8],
@@ -4938,9 +5505,7 @@ class ReasoningEngine:
 
                                 raise DeferredApprovalRequired(
                                     message=r,
-                                    pending_id=_deferred_tool_result.get(
-                                        "_deferred_approval_id"
-                                    ),
+                                    pending_id=_deferred_tool_result.get("_deferred_approval_id"),
                                     unattended_strategy=_deferred_tool_result.get(
                                         "_deferred_approval_strategy"
                                     ),
@@ -5022,7 +5587,7 @@ class ReasoningEngine:
                         self._last_exit_reason = "ask_user"
                         try:
                             state.transition(TaskStatus.WAITING_USER)
-                        except ValueError:
+                        except ValueError:  # s5b-allow-force-write
                             state.status = TaskStatus.WAITING_USER
                         yield {"type": "done"}
                         return
@@ -5055,10 +5620,7 @@ class ReasoningEngine:
                         _tool_name_counter[tool_name] = _tool_name_counter.get(tool_name, 0) + 1
                         _per_name_limit = _PER_TOOL_NAME_TASK_LIMITS.get(tool_name, 0)
                         _rl_msg = ""
-                        if (
-                            _per_name_limit > 0
-                            and _tool_name_counter[tool_name] > _per_name_limit
-                        ):
+                        if _per_name_limit > 0 and _tool_name_counter[tool_name] > _per_name_limit:
                             logger.warning(
                                 f"[RateLimit] Tool '{tool_name}' called "
                                 f"{_tool_name_counter[tool_name]} times in this task "
@@ -5153,7 +5715,10 @@ class ReasoningEngine:
                                 "result": _cached_text[:_SSE_RESULT_PREVIEW_CHARS],
                                 "id": tool_id,
                                 "is_error": False,
-                                "result_summary": self._summarize_tool_result(tool_name, _cached_text) or "",
+                                "result_summary": self._summarize_tool_result(
+                                    tool_name, _cached_text
+                                )
+                                or "",
                                 "cached": True,
                             }
                             tool_results_for_msg.append(_cached_result)
@@ -5272,9 +5837,7 @@ class ReasoningEngine:
 
                             raise DeferredApprovalRequired(
                                 message=result_text,
-                                pending_id=_deferred_tool_result.get(
-                                    "_deferred_approval_id"
-                                ),
+                                pending_id=_deferred_tool_result.get("_deferred_approval_id"),
                                 unattended_strategy=_deferred_tool_result.get(
                                     "_deferred_approval_strategy"
                                 ),
@@ -5298,27 +5861,24 @@ class ReasoningEngine:
                             )
 
                             _emit_ctx = _pv2_get_ctx_for_emit()
-                            _delegate_chain = (
-                                list(_emit_ctx.delegate_chain) if _emit_ctx else []
-                            )
-                            _root_user_id = (
-                                _emit_ctx.root_user_id if _emit_ctx else None
-                            )
+                            _delegate_chain = list(_emit_ctx.delegate_chain) if _emit_ctx else []
+                            _root_user_id = _emit_ctx.root_user_id if _emit_ctx else None
                             # C13 §15.5: dedup — 见上方 hotspot 同款注释。
-                            _dedup_key = _compute_confirm_dedup_key(
-                                tool_name, _tool_args_dict
+                            _dedup_key = _compute_confirm_dedup_key(tool_name, _tool_args_dict)
+                            _leader_id = (
+                                _bus.find_dedup_leader(
+                                    session_id=conversation_id or "",
+                                    dedup_key=_dedup_key,
+                                )
+                                if _dedup_key
+                                else None
                             )
-                            _leader_id = _bus.find_dedup_leader(
-                                session_id=conversation_id or "",
-                                dedup_key=_dedup_key,
-                            ) if _dedup_key else None
                             _confirm_timeout = float(_v2_conf.timeout_seconds)
                             if _is_im:
                                 _confirm_timeout = max(_confirm_timeout * 4, 180.0)
                             if _leader_id:
                                 logger.info(
-                                    "[C13 dedup] tool=%s session=%s join "
-                                    "leader confirm_id=%s",
+                                    "[C13 dedup] tool=%s session=%s join leader confirm_id=%s",
                                     tool_name,
                                     (conversation_id or "")[:12],
                                     _leader_id[:8],
@@ -5358,7 +5918,12 @@ class ReasoningEngine:
                                     # C23 P2-2: ship decision_chain (see other call site
                                     # above for rationale).
                                     "decision_chain": _pr.to_ui_chain(),
-                                    "options": ["allow_once", "allow_session", "allow_always", "deny"]
+                                    "options": [
+                                        "allow_once",
+                                        "allow_session",
+                                        "allow_always",
+                                        "deny",
+                                    ]
                                     + (["sandbox"] if _needs_sb else []),
                                 }
                                 _decision = await _bus.wait_for_resolution(
@@ -5388,7 +5953,8 @@ class ReasoningEngine:
                                             reason=f"用户已允许安全确认: {_decision}",
                                             metadata={
                                                 "confirmed_bypass": True,
-                                                "needs_sandbox": _decision == "sandbox" or _needs_sb,
+                                                "needs_sandbox": _decision == "sandbox"
+                                                or _needs_sb,
                                             },
                                         ),
                                         session_id=conversation_id,
@@ -5410,7 +5976,8 @@ class ReasoningEngine:
                                 result_text=result_text,
                                 hint=_confirm_hint,
                                 is_error=_confirm_is_error,
-                                result_summary=self._summarize_tool_result(tool_name, result_text) or "",
+                                result_summary=self._summarize_tool_result(tool_name, result_text)
+                                or "",
                             ):
                                 yield _evt
                             tool_results_for_msg.append(
@@ -5507,7 +6074,9 @@ class ReasoningEngine:
                                     "reason": h.get("reason", ""),
                                 }
                             session.context.handoff_events.clear()
-                        _end_result_summary = self._summarize_tool_result(tool_name, result_text) or ""
+                        _end_result_summary = (
+                            self._summarize_tool_result(tool_name, result_text) or ""
+                        )
                         # 跳过 / 取消 / 超时 路径 hint 已显式置 None；只有正常完成
                         # 路径才会带着 _stream_hint（由 ToolConfigError 触发）。
                         if _stream_skipped:
@@ -5563,7 +6132,8 @@ class ReasoningEngine:
                         # 父节点验收中继交付，三种 receipts 都算 TaskVerify
                         # 眼里的有效交付证据。
                         if (
-                            tool_name in (
+                            tool_name
+                            in (
                                 "deliver_artifacts",
                                 "org_submit_deliverable",
                                 "org_accept_deliverable",
@@ -5773,7 +6343,11 @@ class ReasoningEngine:
                             raw_r: Any = None
                             if i < len(tool_results_for_msg):
                                 raw_r = tool_results_for_msg[i]
-                                r_content = str(raw_r.get("content", "")) if isinstance(raw_r, dict) else str(raw_r)
+                                r_content = (
+                                    str(raw_r.get("content", ""))
+                                    if isinstance(raw_r, dict)
+                                    else str(raw_r)
+                                )
                             if self._is_pending_confirm_result(raw_r):
                                 continue
                             is_error = any(
@@ -5794,11 +6368,13 @@ class ReasoningEngine:
                         _is_err = tr.get("is_error", False) or any(
                             m in _rc for m in _s_error_markers
                         )
-                        _iter_trace["tool_results"].append({
-                            "tool_use_id": tr.get("tool_use_id", ""),
-                            "result_content": _rc,
-                            "is_error": _is_err,
-                        })
+                        _iter_trace["tool_results"].append(
+                            {
+                                "tool_use_id": tr.get("tool_use_id", ""),
+                                "result_content": _rc,
+                                "is_error": _is_err,
+                            }
+                        )
                     react_trace.append(_iter_trace)
 
                     _budget_decision = _loop_budget_guard.record_tool_results(
@@ -5841,7 +6417,7 @@ class ReasoningEngine:
 
                     try:
                         state.transition(TaskStatus.OBSERVING)
-                    except ValueError:
+                    except ValueError:  # s5b-allow-force-write
                         state.status = TaskStatus.OBSERVING
 
                     # --- 截断检测（与 run() 一致）---
@@ -6003,7 +6579,9 @@ class ReasoningEngine:
                             max_context_tokens=_pressure.max_tokens,
                         )
                         if _budget_decision.should_warn:
-                            before = self._context_manager.estimate_messages_tokens(working_messages)
+                            before = self._context_manager.estimate_messages_tokens(
+                                working_messages
+                            )
                             try:
                                 compacted = await self._context_manager.reactive_compact(
                                     working_messages,
@@ -6014,13 +6592,17 @@ class ReasoningEngine:
                                     last_real_input_tokens=_last_real_input_tokens,
                                 )
                                 working_messages = compacted
-                                after = self._context_manager.estimate_messages_tokens(working_messages)
-                                _recovered_pressure = self._context_manager.calculate_context_pressure(
-                                    working_messages,
-                                    system_prompt=effective_prompt,
-                                    tools=tools,
-                                    conversation_id=conversation_id,
-                                    last_real_input_tokens=_last_real_input_tokens,
+                                after = self._context_manager.estimate_messages_tokens(
+                                    working_messages
+                                )
+                                _recovered_pressure = (
+                                    self._context_manager.calculate_context_pressure(
+                                        working_messages,
+                                        system_prompt=effective_prompt,
+                                        tools=tools,
+                                        conversation_id=conversation_id,
+                                        last_real_input_tokens=_last_real_input_tokens,
+                                    )
                                 )
                                 _loop_budget_guard.check_token_growth(
                                     _in_tokens,
@@ -6092,9 +6674,8 @@ class ReasoningEngine:
                         if cleaned_text and cleaned_text.strip():
                             # Plan-mode 守卫：plan 仍有未完成步骤时不结束本轮，
                             # 强制走 ForceToolCall 推进剩余步骤。
-                            if (
-                                _effective_mode == "plan"
-                                and self._has_active_todo_pending(conversation_id)
+                            if _effective_mode == "plan" and self._has_active_todo_pending(
+                                conversation_id
                             ):
                                 logger.info(
                                     "[ReAct-Stream][PlanGuard] stop_reason=end_turn ignored — "
@@ -6182,7 +6763,7 @@ class ReasoningEngine:
                             )
                             try:
                                 state.transition(TaskStatus.FAILED)
-                            except ValueError:
+                            except ValueError:  # s5b-allow-force-write
                                 state.status = TaskStatus.FAILED
                             self._run_failure_analysis(
                                 react_trace,
@@ -6190,15 +6771,12 @@ class ReasoningEngine:
                                 task_description=task_description,
                                 task_id=state.task_id,
                             )
-                            msg = (
-                                cleaned
-                                or (
-                                    "⚠️ 检测到同一工具参数反复调用，任务已自动终止以避免继续消耗 token。\n"
-                                    "已获取的工具结果已保留在本轮上下文摘要中；请基于已有摘要给出结论，"
-                                    "或换一个查询目标继续。"
-                                    if intervention.pattern.value == "signature_repeat"
-                                    else "⚠️ 检测到工具调用陷入死循环，任务已自动终止。请重新描述您的需求。"
-                                )
+                            msg = cleaned or (
+                                "⚠️ 检测到同一工具参数反复调用，任务已自动终止以避免继续消耗 token。\n"
+                                "已获取的工具结果已保留在本轮上下文摘要中；请基于已有摘要给出结论，"
+                                "或换一个查询目标继续。"
+                                if intervention.pattern.value == "signature_repeat"
+                                else "⚠️ 检测到工具调用陷入死循环，任务已自动终止。请重新描述您的需求。"
                             )
                             self._last_exit_reason = "loop_terminated"
                             # P5.3: supervisor termination — emit a checkpoint with
@@ -6266,7 +6844,7 @@ class ReasoningEngine:
             )
             try:
                 state.transition(TaskStatus.FAILED)
-            except ValueError:
+            except ValueError:  # s5b-allow-force-write
                 state.status = TaskStatus.FAILED
             logger.info(f"[ReAct-Stream] === MAX_ITERATIONS reached ({max_iterations}) ===")
             self._run_failure_analysis(
@@ -6282,7 +6860,9 @@ class ReasoningEngine:
                     f"建议在设置中调整为 100~300 以支持复杂任务）"
                 )
             else:
-                hint = "\n\n（已达到最大迭代次数，请基于当前进展重新描述需求或缩小任务范围后继续。）"
+                hint = (
+                    "\n\n（已达到最大迭代次数，请基于当前进展重新描述需求或缩小任务范围后继续。）"
+                )
             self._last_exit_reason = "max_iterations"
             # P5.3: max-iterations termination — surface a checkpoint with the
             # iteration cap and a config-adjustment hint so the failure card has
@@ -6301,6 +6881,42 @@ class ReasoningEngine:
                 ),
             )
             yield {"type": "text_delta", "content": hint}
+            yield {"type": "done"}
+
+        except IllegalReasoningEntry as _illegal_entry:
+            # FIX-S5A-1 (v1.28.3-pre audit): defensive net for any future
+            # ensure_ready_for_reasoning() callsite added outside the inner
+            # try/except in the main loop (line ~4367).  Without this
+            # branch the exception would fall into the generic
+            # ``except Exception`` below and lose the stable ``code`` field
+            # + the inc_illegal_reasoning_entry counter that ops alert on.
+            logger.error(
+                "[ReAct-Stream] IllegalReasoningEntry escaped to outer catch (session=%r): %s",
+                _session_key,
+                _illegal_entry,
+                extra={"alarm": "pager"},
+            )
+            try:
+                from .conversation_metrics import inc_illegal_reasoning_entry
+
+                inc_illegal_reasoning_entry(source="reason_stream_outer")
+            except Exception:
+                pass
+            self._last_working_messages = working_messages
+            self._save_react_trace(
+                react_trace,
+                conversation_id,
+                session_type,
+                "error: illegal_state",
+                _trace_started_at,
+            )
+            yield {
+                "type": "error",
+                "code": "illegal_state",
+                "message": "上一条消息正在收尾，请稍候再试或新建会话。",
+            }
+            with contextlib.suppress(Exception):
+                await broadcast_event("pet-status-update", {"status": "error"})
             yield {"type": "done"}
 
         except Exception as e:
@@ -6327,6 +6943,11 @@ class ReasoningEngine:
                     except Exception:
                         pass
 
+            # Issue #608: on any non-cancel exit, drop a stale resume snapshot so
+            # the next turn doesn't reload a finished task's working_messages.
+            # Cancel exits skip this (the funnel just persisted for resume).
+            self._maybe_clear_resume_state(conversation_id, is_sub_agent, locals().get("state"))
+
     # ==================== Unified Async Generator Interface ====================
 
     async def run_stream(
@@ -6349,6 +6970,7 @@ class ReasoningEngine:
         session: Any = None,
         force_tool_retries: int | None = None,
         is_sub_agent: bool = False,
+        agent_voice: str = "",
     ):
         """
         统一流式接口: 将 reason_stream 包装为标准化异步生成器。
@@ -6398,6 +7020,7 @@ class ReasoningEngine:
             session=session,
             force_tool_retries=force_tool_retries,
             is_sub_agent=is_sub_agent,
+            agent_voice=agent_voice,
         ):
             # Track token usage for budget
             if budget and event.get("type") == "usage":
@@ -6771,6 +7394,159 @@ class ReasoningEngine:
 
         return result
 
+    # ==================== 取消恢复持久化（Issue #608） ====================
+
+    @staticmethod
+    def _resume_eligible(conversation_id: str | None, is_sub_agent: bool) -> bool:
+        """是否对该会话启用"取消后续聊恢复"旁路文件。
+
+        排除：falsy conversation_id（无 key 无法续聊）、sub-agent（与父任务共享
+        conversation_id，持久化会互相覆盖）、合成的 ``_run_xxx`` ephemeral id
+        （一次性运行，无续聊价值）。
+        """
+        if not conversation_id or is_sub_agent:
+            return False
+        return not str(conversation_id).startswith("_run_")
+
+    def _maybe_persist_cancelled_working_messages(
+        self,
+        working_messages: list[dict],
+        state: "TaskState | None",
+        current_model: str,
+    ) -> None:
+        """取消收尾时持久化完整 working_messages，供下一轮续聊恢复（Issue #608）。
+
+        key 用 ``state.session_id``（在两个 loop 入口处恒等于 conversation_id）。
+        仅当含真实工具块时才落盘，避免无意义旁路文件。任何异常都吞掉——持久化
+        失败不应影响取消收尾本身。
+        """
+        try:
+            conversation_id = getattr(state, "session_id", "") if state else ""
+            is_sub_agent = bool(getattr(state, "is_sub_agent", False)) if state else False
+            if not self._resume_eligible(conversation_id, is_sub_agent):
+                return
+            if not working_messages or not has_tool_blocks(working_messages):
+                return
+            written = persist_working_messages(
+                conversation_id,
+                working_messages,
+                base_dir=settings.data_dir,
+                metadata={
+                    "cancel_reason": (getattr(state, "cancel_reason", "") if state else ""),
+                    "model": current_model or "",
+                },
+            )
+            # Mark on the state object that this turn just wrote a resume
+            # snapshot.  The finally-stage clear keys off this flag (not off an
+            # inferred ``cancelled`` read) so it can never delete a file we just
+            # persisted, even on a future cancel path where ``cancelled`` is not
+            # set the way we expect.
+            if written is not None and state is not None:
+                try:
+                    state._resume_persisted = True
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.debug("[CancelResume] persist skipped: %s", exc)
+
+    def _maybe_clear_resume_state(
+        self,
+        conversation_id: str | None,
+        is_sub_agent: bool,
+        state: "TaskState | None",
+    ) -> None:
+        """正常（非取消）退出时清除旁路文件，避免下一轮误加载已完成任务的旧状态。
+
+        取消退出时**不清**——funnel 刚 persist 的文件要留给续聊。在 reason_stream
+        impl 的 finally 与 run() wrapper 的 finally 集中调用，覆盖所有 return 分支。
+        """
+        try:
+            if not self._resume_eligible(conversation_id, is_sub_agent):
+                return
+            # Preserve a snapshot this turn just persisted for resume. We check
+            # an explicit per-turn flag set by the persist funnel rather than
+            # re-inferring ``cancelled`` here — bulletproof against any cancel
+            # path that doesn't leave ``cancelled`` True at finally time.
+            if state is not None and (
+                getattr(state, "_resume_persisted", False) or getattr(state, "cancelled", False)
+            ):
+                return
+            clear_persisted_working_messages(conversation_id, base_dir=settings.data_dir)
+        except Exception as exc:
+            logger.debug("[CancelResume] clear skipped: %s", exc)
+
+    def _maybe_load_resume_working_messages(
+        self,
+        messages: list[dict],
+        conversation_id: str | None,
+        is_sub_agent: bool,
+    ) -> list[dict] | None:
+        """续聊入口尝试恢复上一轮取消时持久化的 working_messages（Issue #608）。
+
+        返回 merge 后的 working_messages（已完成结构化工具块 + 本轮新 user 消息 +
+        续聊提示），无可恢复状态时返回 None（调用方回退到文本历史重建）。
+
+        merge 语义：保留 loaded 的结构化工具块，把 ``messages`` 尾部"最后一条人类
+        user 消息及其后续"拼到其后（系统提示等附着在新一轮的块随之带入）。
+        """
+        try:
+            if not self._resume_eligible(conversation_id, is_sub_agent):
+                return None
+            # Peek age before the consuming load so we can decide whether the
+            # turn is still "fresh" enough to inject a continue-nudge.  The load
+            # itself uses the 24h hygiene window (DEFAULT_TTL_SECONDS): a snapshot
+            # is ALWAYS restored if it survived the startup janitor, so completed
+            # tools are never re-run just because the user came back later.
+            age = persisted_age_seconds(conversation_id, base_dir=settings.data_dir)
+            loaded = load_persisted_working_messages(
+                conversation_id,
+                base_dir=settings.data_dir,
+                ttl_seconds=DEFAULT_TTL_SECONDS,
+                consume=True,
+            )
+            if not loaded:
+                return None
+
+            tail_idx: int | None = None
+            for i in range(len(messages) - 1, -1, -1):
+                if self._is_human_user_message(messages[i]):
+                    tail_idx = i
+                    break
+            new_tail = list(messages[tail_idx:]) if tail_idx is not None else []
+            merged = list(loaded) + new_tail
+            # Hint freshness is separate from load: past the freshness window we
+            # still feed completed tool results back (no redo) but stop actively
+            # telling the model to continue, since a long-stale resume is more
+            # likely a topic change.  age is None only if the file vanished
+            # between peek and load (race) — treat as fresh.
+            inject_hint = age is None or age <= RESUME_HINT_FRESHNESS_SECONDS
+            if inject_hint:
+                merged.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "[系统提示] 上一轮任务被中断，以上工具调用与结果是上一轮已真实"
+                            "执行完成的进度（尚未写入可见对话）。如果当前消息是要继续该任务，"
+                            "请直接复用这些已完成的结果，不要重复执行；如果是新的请求，正常处理即可。"
+                        ),
+                    }
+                )
+            logger.info(
+                "[CancelResume] resumed working_messages: conv=%s, loaded=%d, new_tail=%d, "
+                "age=%.0fs, hint=%s",
+                conversation_id,
+                len(loaded),
+                len(new_tail),
+                (age if age is not None else -1.0),
+                inject_hint,
+            )
+            return merged
+        except Exception as exc:
+            logger.warning(
+                "[CancelResume] load/merge failed, falling back to text history: %s", exc
+            )
+            return None
+
     async def _cancel_farewell(
         self,
         working_messages: list[dict],
@@ -6780,6 +7556,10 @@ class ReasoningEngine:
     ) -> str:
         """非流式场景下的取消收尾：立即返回默认文本，后台异步发起 LLM 收尾。"""
         self._yield_missing_tool_results(working_messages)
+
+        # Issue #608: persist the (orphan-repaired) working_messages so the
+        # next turn resumes completed tool work instead of re-running it.
+        self._maybe_persist_cancelled_working_messages(working_messages, state, current_model)
 
         cancel_reason = (state.cancel_reason if state else "") or "用户请求停止"
         logger.info(
@@ -6812,6 +7592,10 @@ class ReasoningEngine:
             {"type": "user_insert", ...} 和 {"type": "text_delta", ...} 事件
         """
         self._yield_missing_tool_results(working_messages)
+
+        # Issue #608: persist the (orphan-repaired) working_messages so the
+        # next turn resumes completed tool work instead of re-running it.
+        self._maybe_persist_cancelled_working_messages(working_messages, state, current_model)
 
         cancel_reason = (state.cancel_reason if state else "") or "用户请求停止"
         logger.info(
@@ -6945,13 +7729,14 @@ class ReasoningEngine:
                 )
                 extra_parts = [r for r in hook_results if isinstance(r, str) and r.strip()]
                 if extra_parts and messages:
+                    plugin_text = "\n\n[Plugin Context]\n" + "\n".join(extra_parts)
                     for i in range(len(messages) - 1, -1, -1):
                         if messages[i].get("role") == "user":
                             content = messages[i].get("content", "")
                             if isinstance(content, str):
-                                messages[i]["content"] = (
-                                    content + "\n\n[Plugin Context]\n" + "\n".join(extra_parts)
-                                )
+                                messages[i]["content"] = content + plugin_text
+                            elif isinstance(content, list):
+                                content.append({"type": "text", "text": plugin_text})
                             break
             except Exception as _hook_err:
                 logger.debug(f"on_before_llm_call hook error (ignored): {_hook_err}")
@@ -7410,6 +8195,72 @@ class ReasoningEngine:
 
         return None
 
+    # ==================== Steer done-drain ====================
+
+    @staticmethod
+    async def _drain_steer_before_finish(
+        *,
+        state: "TaskState | None",
+        working_messages: list[dict],
+        final_text: str,
+        iteration: int,
+        max_iterations: int,
+    ) -> list[str]:
+        """Final-answer done-drain: rescue a message steered in during the
+        last LLM generation so the turn does not terminate while it is still
+        sitting un-read in ``pending_user_inserts``.
+
+        Background
+        ----------
+        ``process_post_tool_signals`` only drains ``pending_user_inserts``
+        after a tool round. When the model produces a *final answer with no
+        tool calls* that drain never runs, so anything that arrived via
+        ``insert_user_message`` while the answer was being generated would be
+        lost the instant the loop terminates. This is the STEER race: the
+        desktop client injects the follow-up the moment the turn appears to
+        finish.
+
+        Behaviour
+        ---------
+        * No pending insert → return ``[]``; caller terminates normally.
+        * Pending insert AND iteration budget remains → fold ``final_text``
+          back into ``working_messages`` as a settled assistant turn, append
+          the steered message(s) with the canonical insert wording, and
+          return the drained texts so the caller continues the loop.
+        * Pending insert but ``iteration`` is the last allowed one → return
+          ``[]`` WITHOUT draining. This is the hard anti-hang ceiling: the
+          loop can never be extended past ``max_iterations``, so a client
+          that keeps steering a message on every single final answer can at
+          worst consume the remaining iteration budget, never loop forever.
+          (The un-drained message stays in ``pending_user_inserts`` rather
+          than being appended to a context we are about to abandon.)
+
+        The method is intentionally static + dependency-free so it can be
+        unit-tested in isolation against a real :class:`TaskState`, without
+        standing up the full reasoning-engine coroutine.
+        """
+        if state is None or not getattr(state, "pending_user_inserts", None):
+            return []
+        # Hard ceiling: never grant another iteration on the last loop tick.
+        if iteration >= max_iterations - 1:
+            return []
+        drained = await state.drain_user_inserts()
+        if not drained:
+            return []
+        # Settle the answer the model just produced into the transcript so the
+        # follow-up turn sees what was already told to the user. Skip the fold
+        # when the final answer is blank (the empty-content / model-glitch
+        # exit can return ""): an empty text block is rejected by strict
+        # providers, and the downstream context layer already collapses the
+        # resulting consecutive user turns just like the empty-retry path does.
+        if final_text and final_text.strip():
+            working_messages.append(
+                {"role": "assistant", "content": [{"type": "text", "text": final_text}]}
+            )
+        for _text in drained:
+            working_messages.append(state.build_user_insert_message(_text))
+        return drained
+
     # ==================== 最终答案处理 ====================
 
     async def _handle_final_answer(
@@ -7506,8 +8357,8 @@ class ReasoningEngine:
                 # 汇总轮（root post-summary 注入的 [用户指令最终汇总] 提示）下，
                 # 本次 ReAct 的目的就是输出汇总文本而非再产出文件，verify 全程绕过。
                 # 与 B1 的关键词白名单互补：B1 修关键词命中根因，B2 兜底全路径。
-                is_summary_round = (last_user_request or "").lstrip().startswith(
-                    "[用户指令最终汇总]"
+                is_summary_round = (
+                    (last_user_request or "").lstrip().startswith("[用户指令最终汇总]")
                 )
                 # 同时拼装组织级 verify 上下文（B4 由 ValidationContext 消费）
                 org_validation_kwargs = self._build_org_validation_kwargs()
@@ -7630,9 +8481,8 @@ class ReasoningEngine:
                         bool(delivery_receipts)
                         or bool(self._collect_inbound_artifact_receipts())
                         or any(
-                            (tr.get("tool_name") or tr.get("name") or "") in {
-                                "write_file", "auto_persist_node_final_answer"
-                            }
+                            (tr.get("tool_name") or tr.get("name") or "")
+                            in {"write_file", "auto_persist_node_final_answer"}
                             for tr in (all_tool_results or [])
                             if isinstance(tr, dict) and not tr.get("is_error")
                         )
@@ -7646,13 +8496,13 @@ class ReasoningEngine:
                             "但你刚才只回了纯文字、没有产生任何文件证据。"
                             "请立即在本轮调用以下工具之一完成真正的落盘交付，"
                             "不要再仅靠文字声明完成：\n"
-                            "1) `write_file({\"path\": \"<workspace>/deliverables/<title>.md\", "
-                            "\"content\": \"<完整内容>\"})` —— 把成果写到工作区；\n"
+                            '1) `write_file({"path": "<workspace>/deliverables/<title>.md", '
+                            '"content": "<完整内容>"})` —— 把成果写到工作区；\n'
                             "2) 如果你处在协作组织内、需要交给上级，调用 "
-                            "`org_submit_deliverable({\"to_node\": \"<上级>\", "
-                            "\"deliverable\": \"<摘要>\", \"file_attachments\": "
-                            "[{\"filename\": \"<title>.md\", \"file_path\": "
-                            "\"<workspace>/deliverables/<title>.md\"}]})` —— "
+                            '`org_submit_deliverable({"to_node": "<上级>", '
+                            '"deliverable": "<摘要>", "file_attachments": '
+                            '[{"filename": "<title>.md", "file_path": '
+                            '"<workspace>/deliverables/<title>.md"}]})` —— '
                             "带附件提交并触发上级验收；\n"
                             "3) 若是图片/视频类成果，先用对应生成工具产出文件，"
                             "再用上面任一方式落盘。\n"
@@ -7854,8 +8704,7 @@ class ReasoningEngine:
                 )
             # ACTION 重试用尽 → fall-through 到下方 disclaimer 路径
             logger.warning(
-                "[IntentTag] ACTION retry budget exhausted, "
-                "falling through to disclaimer path"
+                "[IntentTag] ACTION retry budget exhausted, falling through to disclaimer path"
             )
         else:
             # 三种"非真幻觉"情况：log-only 软提示，不重试，让原文返回
@@ -7894,7 +8743,7 @@ class ReasoningEngine:
                 disclaimer = (
                     "\n\n---\n"
                     "⚠️ **系统提示**：本轮未实际调用任何工具，上述声明的"
-                    "\"已执行/已查到/已读取\"等内容可能不准确，请你核实。"
+                    '"已执行/已查到/已读取"等内容可能不准确，请你核实。'
                     "如需精确数据请告诉我去查。"
                 )
             else:
@@ -7903,13 +8752,16 @@ class ReasoningEngine:
                     "（提示：本次回答未调用工具核对外部状态，"
                     "结论来自训练常识或历史对话；如需最新精确数据请允许我调用相关工具。）"
                 )
-            return cleaned_text + disclaimer if cleaned_text else (
-                "未能就该问题给出可靠回答。请允许我调用读取、搜索或相关工具后再继续核对。"
+            return (
+                cleaned_text + disclaimer
+                if cleaned_text
+                else ("未能就该问题给出可靠回答。请允许我调用读取、搜索或相关工具后再继续核对。")
             )
 
         # P0-2 阶段 3：成功路径上的来源标签一致性检测（后置 belt）
         consistency_warning = _check_source_tag_consistency(
-            cleaned_text, tools_executed_count=0  # 此分支前提就是 tool_calls=0
+            cleaned_text,
+            tools_executed_count=0,  # 此分支前提就是 tool_calls=0
         )
         if consistency_warning:
             return cleaned_text + consistency_warning
@@ -7934,6 +8786,15 @@ class ReasoningEngine:
             return None
 
         new_model = task_monitor.fallback_model
+        if not new_model:
+            # 单端点部署：没有备用模型可切换，由外层 LLM 错误处理 / 总重试上限收尾。
+            # 这里直接返回 None，避免对外发送"正在切换到备用模型..."的误导提示，也避免
+            # 用空字符串去调用 switch_model 污染 TaskMonitor.metrics。
+            logger.info(
+                "[ModelSwitch] should_switch_model=True but no fallback_model configured "
+                "(single-endpoint deployment); keeping current endpoint."
+            )
+            return None
         self._switch_llm_endpoint(new_model, reason="task_monitor timeout fallback")
         task_monitor.switch_model(
             new_model,
@@ -8443,10 +9304,25 @@ class ReasoningEngine:
         # --- 检查 fallback 模型是否可用 ---
         new_model = task_monitor.fallback_model
         if not new_model:
-            logger.warning(
-                "[ModelSwitch] No fallback model available (all endpoints may be in cooldown), "
-                "aborting model switch"
-            )
+            # 区分两种"没有 fallback"的情况：
+            #   1. 单端点部署 —— 用户本来就只配了 1 个端点，这是合法配置；
+            #   2. 多端点部署但全部进入冷静期 —— 是异常状态。
+            # 用 list_available_models 的总数区分，避免对单端点用户报告误导信息。
+            try:
+                llm_client = getattr(self._brain, "_llm_client", None)
+                total_endpoints = len(llm_client.list_available_models()) if llm_client else 0
+            except Exception:
+                total_endpoints = 0
+            if total_endpoints <= 1:
+                logger.info(
+                    "[ModelSwitch] No fallback model available (single-endpoint deployment), "
+                    "aborting model switch and surfacing the error to the user."
+                )
+            else:
+                logger.warning(
+                    "[ModelSwitch] No fallback model available "
+                    "(all endpoints may be in cooldown), aborting model switch."
+                )
             return None
 
         resolved = self._resolve_endpoint_name(new_model)
@@ -8487,7 +9363,18 @@ class ReasoningEngine:
             }
         )
 
-        state.transition(TaskStatus.MODEL_SWITCHING)
+        # 并发兜底：与 reason_stream 主循环其他 transition 调用点（4609 / 4624 /
+        # 4845 / 5026 / 5845 等）保持一致——只要状态机本身判定不合法，回退到
+        # 直接覆写 status，避免在共享 TaskState 被另一个协程推到终态后崩溃。
+        try:
+            state.transition(TaskStatus.MODEL_SWITCHING)
+        except ValueError:  # s5b-allow-force-write
+            logger.warning(
+                "[ModelSwitch] Illegal transition %s -> MODEL_SWITCHING, "
+                "forcing status overwrite (likely concurrent task on session)",
+                state.status.value,
+            )
+            state.status = TaskStatus.MODEL_SWITCHING
         state.reset_for_model_switch()
         return new_model, new_messages
 
@@ -8574,6 +9461,7 @@ class ReasoningEngine:
                 return {}
 
             from openakita.orgs.runtime import get_runtime  # 延迟导入避免环路
+
             runtime = get_runtime()
             if runtime is None:
                 return {}
@@ -8588,9 +9476,7 @@ class ReasoningEngine:
             if accepted == 0:
                 # 严格信号失败时再问弱信号，避免重复 IO
                 try:
-                    has_recent = bool(
-                        runtime.has_recent_accepted_signal(org_id, node_id)
-                    )
+                    has_recent = bool(runtime.has_recent_accepted_signal(org_id, node_id))
                 except Exception:
                     has_recent = False
 
@@ -8722,4 +9608,3 @@ class ReasoningEngine:
         except Exception:
             pass
         return False
-

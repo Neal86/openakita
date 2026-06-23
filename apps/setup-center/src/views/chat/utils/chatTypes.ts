@@ -13,6 +13,7 @@ import type {
   ChatSource,
   ChatMcpCall,
   ChatErrorInfo,
+  MessagePart,
   OrgTimelineEntry,
   ChatConversation,
   ChatDisplayMode,
@@ -23,6 +24,7 @@ import type {
   ChainToolCall,
   ChainEntry,
   ChainSummaryItem,
+  ChainTimelineGroup,
 } from "../../../types";
 
 export type {
@@ -37,6 +39,7 @@ export type {
   ChatSource,
   ChatMcpCall,
   ChatErrorInfo,
+  MessagePart,
   OrgTimelineEntry,
   ChatConversation,
   ChatDisplayMode,
@@ -47,6 +50,7 @@ export type {
   ChainToolCall,
   ChainEntry,
   ChainSummaryItem,
+  ChainTimelineGroup,
 };
 
 /** Lazy-loaded markdown rendering modules */
@@ -62,6 +66,14 @@ export type QueuedMessage = {
   text: string;
   timestamp: number;
   convId: string;
+  /**
+   * Attachments captured at queue time. A queued message is replayed as a
+   * brand-new turn (not a steer/insert), so it must carry its own attachments
+   * instead of picking up whatever happens to be in the composer at drain time.
+   */
+  attachments?: ChatAttachment[];
+  /** Composer mode captured at queue time, so the replay honours the user's intent. */
+  mode?: "agent" | "plan" | "ask";
 };
 
 /** SSE stream event union — synced with Python openakita.events / src/streamEvents.ts */
@@ -219,6 +231,13 @@ export type StreamContext = {
   isDelegating: boolean;
   pollingTimer: ReturnType<typeof setInterval> | null;
   _hadError: boolean;
+  /**
+   * The composer mode (agent/plan/ask) this turn was started with. Used to
+   * decide whether a new submission while this turn is streaming can be
+   * steered (same mode → inject) or must be queued as a fresh turn
+   * (mode changed → the user explicitly wants different behaviour).
+   */
+  mode?: "agent" | "plan" | "ask";
 };
 
 /** Agent profile for agent selector */

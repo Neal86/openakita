@@ -26,9 +26,9 @@ job before calling the vendor API.
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
 
 from ..llm.endpoint_manager import EndpointManager
 from ..llm.types import EndpointConfig
@@ -48,9 +48,8 @@ class RelayNotFound(KeyError):
         self.available = list(available)
 
     def __str__(self) -> str:
-        return (
-            f"relay endpoint {self.name!r} not found"
-            + (f" (available: {', '.join(self.available)})" if self.available else "")
+        return f"relay endpoint {self.name!r} not found" + (
+            f" (available: {', '.join(self.available)})" if self.available else ""
         )
 
 

@@ -27,13 +27,16 @@ class ChatRequest(BaseModel):
     plan_mode: bool = Field(
         False, description="Deprecated: use mode='plan' instead. Kept for backward compatibility."
     )
-    permission_mode: Literal[
-        "plan",
-        "default",
-        "accept_edits",
-        "dont_ask",
-        "bypass_permissions",
-    ] | None = Field(None, description="Product-level permission mode for this turn")
+    permission_mode: (
+        Literal[
+            "plan",
+            "default",
+            "accept_edits",
+            "dont_ask",
+            "bypass_permissions",
+        ]
+        | None
+    ) = Field(None, description="Product-level permission mode for this turn")
     endpoint: str | None = Field(None, description="Specific endpoint name (null=auto)")
     endpoint_policy: Literal["prefer", "require"] = Field(
         "prefer",
@@ -71,6 +74,17 @@ class ChatRequest(BaseModel):
     client_id: str | None = Field(
         None,
         description="Unique client/tab identifier for multi-device busy-lock coordination.",
+    )
+    turn_id: str | None = Field(
+        None,
+        description=(
+            "Per-turn idempotency key (v1.27.14, plan v1.28 S1.6). "
+            "Identical turn_id replayed within ~60s returns 409 turn_already_processing "
+            "to avoid duplicate streams on flaky networks / SSE reconnects. "
+            "Optional; missing means no idempotency short-circuit."
+        ),
+        max_length=128,
+        pattern=r"^[A-Za-z0-9_\-:.@]{0,128}$",
     )
 
 

@@ -14,6 +14,7 @@ DM Pairing（配对授权）
 - 使用 secrets 生成安全随机码
 """
 
+import json as _json
 import logging
 import secrets
 import string
@@ -21,9 +22,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-import json as _json
-
-from ..utils.atomic_io import safe_json_write
+from ..utils.atomic_io import atomic_json_write
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +70,7 @@ class DMPairingManager:
         self._authorized = set()
 
     def _save_authorized(self) -> None:
-        safe_json_write(self._auth_file, {"authorized": sorted(self._authorized)})
+        atomic_json_write(self._auth_file, {"authorized": sorted(self._authorized)})
 
     def _make_key(self, channel: str, chat_id: str) -> str:
         return f"{channel}:{chat_id}"
@@ -153,12 +152,15 @@ class DMPairingManager:
         rec.last_attempt = now
         if rec.count >= MAX_ATTEMPTS:
             rec.locked_until = now + LOCKOUT_SECONDS
-            logger.warning(f"DM Pairing: locked {key} for {LOCKOUT_SECONDS}s after {rec.count} failures")
+            logger.warning(
+                f"DM Pairing: locked {key} for {LOCKOUT_SECONDS}s after {rec.count} failures"
+            )
 
     def _cleanup_expired(self) -> None:
         now = time.time()
         expired = [
-            code for code, pc in self._active_codes.items()
+            code
+            for code, pc in self._active_codes.items()
             if now - pc.created_at > CODE_TTL_SECONDS
         ]
         for code in expired:

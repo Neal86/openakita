@@ -155,6 +155,12 @@ def _ensure_desktop():
 logger = logging.getLogger(__name__)
 
 
+# v1.28 S4: process-wide flag so the tool-interrupt-behavior startup warn
+# only fires once even when multi-agent fan-out creates several Agents in
+# the same process.  See ``_init_handlers`` for the consumer.
+_INTERRUPT_BEHAVIOR_WARN_DONE: bool = False
+
+
 def _resolve_force_tool_policy(intent: Any) -> tuple[int | None, bool]:
     """Return (force_tool_retries, tool_evidence_required) for the reasoning engine.
 
@@ -181,7 +187,7 @@ def _resolve_force_tool_policy(intent: Any) -> tuple[int | None, bool]:
     if force_tool:
         return 2, False  # 允许 2 次 ForceToolCall 重试，但不要求 evidence
     if evidence_required:
-        return 1, True   # 1 次柔性提示，evidence_required 走阶段 0 disclaimer
+        return 1, True  # 1 次柔性提示，evidence_required 走阶段 0 disclaimer
     return 0, False
 
 
@@ -369,15 +375,18 @@ def _looks_like_previous_answer_replay_request(message: str, history_messages: l
     has_replay_marker = any(marker in normalized for marker in _REPLAY_REQUEST_MARKERS)
     has_context_marker = any(marker in normalized for marker in _REPLAY_CONTEXT_MARKERS)
     asks_to_show_again = (
-        ("重新展示" in normalized or "重新显示" in normalized or "再发" in normalized)
-        and has_context_marker
-    )
+        "重新展示" in normalized or "重新显示" in normalized or "再发" in normalized
+    ) and has_context_marker
     asks_to_continue_previous = (
         ("继续" in normalized or "接着" in normalized)
         and ("展示" in normalized or "显示" in normalized or "输出" in normalized)
         and has_context_marker
     )
-    return (has_replay_marker and has_context_marker) or asks_to_show_again or asks_to_continue_previous
+    return (
+        (has_replay_marker and has_context_marker)
+        or asks_to_show_again
+        or asks_to_continue_previous
+    )
 
 
 def _apply_previous_answer_replay_hint(message: str) -> str:
@@ -537,12 +546,14 @@ def _maybe_inline_local_image(att_url: str, att_mime: str) -> str | None:
         if size > _INLINE_IMAGE_MAX_BYTES:
             logger.info(
                 "[InlineImage] skip %s: %.1f MB exceeds limit",
-                filename, size / 1024 / 1024,
+                filename,
+                size / 1024 / 1024,
             )
             return None
         mime = att_mime or ""
         if not mime.startswith("image/"):
             import mimetypes
+
             mime = mimetypes.guess_type(str(filepath))[0] or "image/png"
         data = filepath.read_bytes()
         b64 = base64.b64encode(data).decode("ascii")
@@ -608,8 +619,7 @@ def _save_data_uri_attachment(
             suffix = mimetypes.guess_extension(mime) or ".bin"
 
         filename = (
-            f"{int(time.time())}_{uuid.uuid4().hex[:8]}_"
-            f"{_safe_attachment_stem(att_name)}{suffix}"
+            f"{int(time.time())}_{uuid.uuid4().hex[:8]}_{_safe_attachment_stem(att_name)}{suffix}"
         )
         filepath = get_upload_dir() / filename
         filepath.write_bytes(raw)
@@ -742,6 +752,7 @@ class PromptStrategy:
     catalog_scope: list[str] = field(default_factory=list)
     include_project_guidelines: bool = False
 
+
 def _classify_risk_intent(intent: Any, message: str) -> RiskIntentResult:
     """Single source of truth for the pre-ReAct risk gate."""
     return classify_risk_intent(message, intent)
@@ -779,10 +790,7 @@ def _consume_risk_authorization(session: Any, message: str) -> bool:
             expired = float(stamp.get("expires_at", 0)) < time.time()
         except (TypeError, ValueError):
             expired = True
-        msg_match = (
-            (stamp.get("original_message") or "").strip()
-            == (message or "").strip()
-        )
+        msg_match = (stamp.get("original_message") or "").strip() == (message or "").strip()
         if expired:
             try:
                 session.set_metadata("risk_authorized_replay", None)
@@ -832,7 +840,7 @@ def _consume_risk_authorization(session: Any, message: str) -> bool:
 
 
 # Targets that still require RiskGate confirmation even under trust (yolo) mode.
-#普通用户文件 / 桌面文件 / 未知目标 在信任模式下放行；
+# 普通用户文件 / 桌面文件 / 未知目标 在信任模式下放行；
 # 安全策略 / 死亡开关 / 安全白名单 / shell 命令 / 已知受保护文件 仍要 confirm。
 # 真正的系统/密钥目录与 CRITICAL shell 由 PolicyEngine baseline 兜底拦截。
 _TRUST_MODE_MUST_CONFIRM_TARGETS = frozenset(
@@ -875,9 +883,7 @@ def _check_trust_mode_skip(risk_intent: RiskIntentResult | None) -> str | None:
         from .policy_v2.global_engine import get_config_v2
 
         mode_value = get_config_v2().confirmation.mode
-        is_trust = (
-            mode_value == ConfirmationMode.TRUST or str(mode_value) == "trust"
-        )
+        is_trust = mode_value == ConfirmationMode.TRUST or str(mode_value) == "trust"
     except Exception:
         return None  # v2 不可用 → 当作未启用 trust（保守）
 
@@ -924,7 +930,9 @@ def _check_trusted_path_skip(
     return None
 
 
-def _build_destructive_intent_question(message: str, classification: RiskIntentResult | None = None) -> str:
+def _build_destructive_intent_question(
+    message: str, classification: RiskIntentResult | None = None
+) -> str:
     """生成高危确认提示。
 
     PR-1.1：两步式 summary。先把用户的长描述抽成 ≤30 字的"准备执行 X"
@@ -961,8 +969,17 @@ def _build_destructive_intent_question(message: str, classification: RiskIntentR
 
 
 _DESTRUCTIVE_VERBS = (
-    "删除", "删掉", "清空", "清除", "重置", "覆盖", "禁用", "关闭",
-    "卸载", "销毁", "格式化",
+    "删除",
+    "删掉",
+    "清空",
+    "清除",
+    "重置",
+    "覆盖",
+    "禁用",
+    "关闭",
+    "卸载",
+    "销毁",
+    "格式化",
 )
 
 
@@ -985,6 +1002,7 @@ def _summarize_destructive_action(text: str, classification: Any | None = None) 
             tail = raw[i : i + 28]
             return tail + ("…" if len(raw) > i + 28 else "")
     return raw[:28] + "…"
+
 
 # Prompt Compiler 系统提示词（两段式 Prompt 第一阶段）
 PROMPT_COMPILER_SYSTEM = """【角色】
@@ -1378,9 +1396,7 @@ class Agent:
 
         self._tools.extend(AGENT_TOOLS)
         self._tools.extend(ORG_SETUP_TOOLS)
-        logger.info(
-            f"Multi-agent tools enabled ({len(AGENT_TOOLS) + len(ORG_SETUP_TOOLS)} tools)"
-        )
+        logger.info(f"Multi-agent tools enabled ({len(AGENT_TOOLS) + len(ORG_SETUP_TOOLS)} tools)")
 
         # Platform hub tools (Agent Hub + Skill Store, only when enabled)
         if settings.hub_enabled:
@@ -1547,7 +1563,9 @@ class Agent:
                     deps=self._runtime_env_dependencies,
                 )
             except Exception as exc:
-                logger.warning("Failed to resolve agent runtime env for %s: %s", self._agent_profile_id, exc)
+                logger.warning(
+                    "Failed to resolve agent runtime env for %s: %s", self._agent_profile_id, exc
+                )
 
         if hasattr(self.shell_tool, "execution_env_spec"):
             self.shell_tool.execution_env_spec = self._execution_env_spec
@@ -1967,7 +1985,8 @@ class Agent:
                 # 中继交付都让 TaskVerify 看到真实的交付证据。
                 if (
                     capture_delivery_receipts
-                    and tool_name in (
+                    and tool_name
+                    in (
                         "deliver_artifacts",
                         "org_submit_deliverable",
                         "org_accept_deliverable",
@@ -2091,9 +2110,7 @@ class Agent:
             self._attach_shared_runtime(share_from)
             # 启动记忆会话（sub-agent 独享 session_id，但底层 store 通常
             # 仍是主 Agent 的，除非 factory 后续 apply 了 memory_isolation）。
-            session_id = (
-                datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(uuid.uuid4())[:8]
-            )
+            session_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(uuid.uuid4())[:8]
             self.memory_manager.start_session(session_id)
             self._current_session_id = session_id
             if hasattr(self, "_memory_handler"):
@@ -2147,9 +2164,7 @@ class Agent:
                     else None
                 ),
             )
-            logger.info(
-                "[PolicyV2] global engine rebuilt with skill/mcp/plugin lookups (C10)"
-            )
+            logger.info("[PolicyV2] global engine rebuilt with skill/mcp/plugin lookups (C10)")
         except Exception as exc:
             logger.warning(
                 "[PolicyV2] failed to inject skill/mcp/plugin lookups: %s — "
@@ -2373,7 +2388,9 @@ class Agent:
             pa._plugin_catalog = self.plugin_catalog
 
         if hasattr(self, "tool_executor") and self.tool_executor is not None:
-            self.tool_executor._plugin_hooks = self._plugin_manager.hook_registry if self._plugin_manager else None
+            self.tool_executor._plugin_hooks = (
+                self._plugin_manager.hook_registry if self._plugin_manager else None
+            )
             self.tool_executor._plugin_manager = self._plugin_manager
 
         if hasattr(self, "reasoning_engine") and self.reasoning_engine is not None:
@@ -2382,13 +2399,19 @@ class Agent:
             )
 
         # 让 memory_manager.retrieval_engine 也能走 plugin hook
-        if self.memory_manager and hasattr(self.memory_manager, "retrieval_engine") and self._plugin_manager:
+        if (
+            self.memory_manager
+            and hasattr(self.memory_manager, "retrieval_engine")
+            and self._plugin_manager
+        ):
             self.memory_manager.retrieval_engine._plugin_hooks = self._plugin_manager.hook_registry
 
         logger.info(
             "[share_from] sub-agent '%s' attached to parent '%s': "
             "+%d tool defs, plugins/skills/mcp shared by reference",
-            self.name, parent.name, added,
+            self.name,
+            parent.name,
+            added,
         )
 
     async def _load_plugins(self) -> None:
@@ -2588,6 +2611,23 @@ class Agent:
         logger.info(
             f"Initialized {len(self.handler_registry._handlers)} handlers with {len(self.handler_registry._tool_to_handler)} tools"
         )
+
+        # v1.28 S4: surface any tools missing from
+        # ``_INTERRUPT_BEHAVIOR_MAP`` so contributors notice drift.  Runs
+        # at most once per process — sub-agents share the same warning
+        # state via module-level flag, otherwise multi-agent fan-out
+        # would spam the same warning N times.  Cheap to call (just dict
+        # lookups), but no point doing it more than once.
+        global _INTERRUPT_BEHAVIOR_WARN_DONE
+        if not _INTERRUPT_BEHAVIOR_WARN_DONE:
+            try:
+                from .tool_interrupt_behavior import warn_unclassified_tools
+
+                warn_unclassified_tools(self.handler_registry.list_tools())
+            except Exception as exc:
+                logger.debug("[S4] startup warn skipped: %s", exc)
+            finally:
+                _INTERRUPT_BEHAVIOR_WARN_DONE = True
 
         # C7：handler 全部注册完毕 → 让 PolicyEngineV2 classifier 拿到
         # SystemHandlerRegistry.get_tool_class 作 explicit_lookup。这样 handler
@@ -3013,9 +3053,7 @@ class Agent:
         if retrieval_sources is None or memory_backends is None:
             return
 
-        existing_sources = {
-            getattr(source, "source_name", "") for source in retrieval_sources
-        }
+        existing_sources = {getattr(source, "source_name", "") for source in retrieval_sources}
 
         for server in self.mcp_catalog.servers:
             provider_cfg = getattr(server, "memory_provider", None) or {}
@@ -3415,6 +3453,93 @@ class Agent:
         """构建系统提示词（统一使用编译管线 v2）。"""
         return self._build_system_prompt_compiled_sync(task_description, session_type=session_type)
 
+    def _prepare_prompt_identity_dir(self) -> Path:
+        """Return an identity dir whose files match the active Identity object.
+
+        Profile identities may inherit SOUL.md / AGENT.md from the global
+        identity while keeping USER.md / MEMORY.md inside the profile dir.
+        The prompt compiler accepts one directory, so materialize the resolved
+        source files into a private runtime input dir for custom identities.
+        """
+        identity = getattr(self, "identity", None)
+        soul_path = Path(getattr(identity, "soul_path", settings.soul_path))
+        agent_path = Path(getattr(identity, "agent_path", settings.agent_path))
+        user_path = Path(getattr(identity, "user_path", settings.user_path))
+        paths = {
+            "SOUL.md": soul_path,
+            "AGENT.md": agent_path,
+            "USER.md": user_path,
+        }
+
+        global_identity_dir = settings.identity_path.resolve()
+        source_dirs = {p.parent.resolve() for p in paths.values()}
+        if len(source_dirs) == 1:
+            return next(iter(source_dirs))
+
+        profile_id = getattr(self, "_agent_profile_id", None) or getattr(self, "name", "agent")
+        safe_profile_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(profile_id)).strip("._")
+        runtime_root = Path(
+            getattr(self, "_prompt_identity_runtime_root", None) or settings.openakita_home
+        )
+        resolved_dir = runtime_root / "runtime" / "profile_identity" / (safe_profile_id or "agent")
+        resolved_dir.mkdir(parents=True, exist_ok=True)
+
+        for filename, src in paths.items():
+            dst = resolved_dir / filename
+            try:
+                content = src.read_text(encoding="utf-8") if src.exists() else ""
+            except Exception as exc:
+                logger.warning("Failed to read resolved identity file %s: %s", src, exc)
+                content = ""
+            existing = ""
+            try:
+                existing = dst.read_text(encoding="utf-8") if dst.exists() else ""
+            except Exception:
+                existing = ""
+            if existing != content:
+                dst.write_text(content, encoding="utf-8")
+
+        source_meta = {
+            name: str(path)
+            for name, path in paths.items()
+            if path.parent.resolve() != global_identity_dir
+        }
+        meta_path = resolved_dir / "runtime" / "sources.json"
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            current_meta = meta_path.read_text(encoding="utf-8") if meta_path.exists() else ""
+        except Exception:
+            current_meta = ""
+        meta_text = json.dumps(source_meta, ensure_ascii=False, sort_keys=True, indent=2)
+        if current_meta != meta_text:
+            meta_path.write_text(meta_text, encoding="utf-8")
+
+        return resolved_dir
+
+    def _resolve_agent_voice(self) -> str:
+        """Return the display name that SOUL.md's ``{{agent_name}}`` should expand to.
+
+        Priority: profile's localized display name → profile.name → self.name →
+        ``settings.agent_name`` (legacy fallback). The string is what the LLM
+        will read as its own self-reference inside SOUL.md, so it should match
+        what the user sees in the chat header and the Agents list.
+        """
+        profile = getattr(self, "_agent_profile", None)
+        if profile is not None:
+            try:
+                display = profile.get_display_name("zh")
+            except Exception:
+                display = ""
+            if isinstance(display, str) and display.strip():
+                return display.strip()
+            primary = getattr(profile, "name", "")
+            if isinstance(primary, str) and primary.strip():
+                return primary.strip()
+        agent_name = getattr(self, "name", "")
+        if isinstance(agent_name, str) and agent_name.strip():
+            return agent_name.strip()
+        return getattr(settings, "agent_name", "") or ""
+
     def _build_system_prompt_compiled_sync(
         self, task_description: str = "", session_type: str = "cli"
     ) -> str:
@@ -3425,11 +3550,14 @@ class Agent:
                 return ctx.system
 
         ctx_window = self._get_raw_context_window()
+        identity_dir = self._prepare_prompt_identity_dir()
         prompt = self.prompt_assembler._build_compiled_sync(
             task_description,
             session_type=session_type,
             context_window=ctx_window,
             is_sub_agent=self._is_sub_agent_call,
+            agent_voice=self._resolve_agent_voice(),
+            identity_dir=identity_dir,
         )
         if self._custom_prompt_suffix:
             prompt += f"\n\n{self._custom_prompt_suffix}"
@@ -3442,7 +3570,9 @@ class Agent:
         profile_id = getattr(self, "_agent_profile_id", "default") or "default"
         spec = getattr(self, "_execution_env_spec", None)
         if spec is None:
-            env_line = "当前 Agent 使用共享 `agent-venv` fallback；不要把长期任务依赖随意安装到共享环境。"
+            env_line = (
+                "当前 Agent 使用共享 `agent-venv` fallback；不要把长期任务依赖随意安装到共享环境。"
+            )
         else:
             env_line = (
                 f"当前 AgentProfile `{profile_id}` 使用独立 Python 环境 "
@@ -3645,7 +3775,9 @@ class Agent:
                     "channel": getattr(session, "channel", "unknown"),
                     "chat_type": getattr(session, "chat_type", "private"),
                     "message_count": len(session.context.messages) if session.context else 0,
-                    "working_facts": getattr(session.context, "working_facts", {}) if session.context else {},
+                    "working_facts": getattr(session.context, "working_facts", {})
+                    if session.context
+                    else {},
                     "effective_model": session.get_metadata("effective_model", {}),
                     "has_sub_agents": bool(sub_records),
                     "sub_agent_count": len(sub_records),
@@ -3707,6 +3839,8 @@ class Agent:
             )
         except Exception:
             _working_facts_cache_key = ""
+        _resolved_voice = self._resolve_agent_voice()
+        _identity_dir = self._prepare_prompt_identity_dir()
         _cache_key = (
             _conv_id,
             _effective_mode,
@@ -3725,12 +3859,11 @@ class Agent:
             tuple(sorted(_mem_keywords)) if _mem_keywords else (),
             _working_facts_cache_key,
             bool((session_context or {}).get("evidence_recommended", False)),
+            _resolved_voice,
+            str(_identity_dir),
         )
 
-        if (
-            not self._system_prompt_cache_dirty
-            and _cache_key in self._system_prompt_cache
-        ):
+        if not self._system_prompt_cache_dirty and _cache_key in self._system_prompt_cache:
             prompt = self._system_prompt_cache[_cache_key]
             logger.debug("[Agent] system prompt cache HIT (key=%s)", _cache_key[:3])
         else:
@@ -3754,6 +3887,8 @@ class Agent:
                 catalog_scope=_strategy.catalog_scope,
                 include_project_guidelines=_strategy.include_project_guidelines,
                 intent_tool_hints=_intent_tool_hints,
+                agent_voice=_resolved_voice,
+                identity_dir=_identity_dir,
             )
             self._system_prompt_cache[_cache_key] = prompt
             self._system_prompt_cache_dirty = False
@@ -3804,11 +3939,19 @@ class Agent:
         profile = self._resolve_prompt_profile(intent, session_type)
         prompt_mode = PromptMode.FULL
         skip_catalogs = False
-        memory_scope = getattr(intent, "memory_scope", MemoryScope.RELEVANT) if intent else MemoryScope.RELEVANT
+        memory_scope = (
+            getattr(intent, "memory_scope", MemoryScope.RELEVANT)
+            if intent
+            else MemoryScope.RELEVANT
+        )
         catalog_scope = list(getattr(intent, "catalog_scope", []) or [])
         include_project_guidelines = bool(getattr(intent, "requires_project_context", False))
 
-        prompt_depth = getattr(intent, "prompt_depth", PromptDepth.STANDARD) if intent else PromptDepth.STANDARD
+        prompt_depth = (
+            getattr(intent, "prompt_depth", PromptDepth.STANDARD)
+            if intent
+            else PromptDepth.STANDARD
+        )
         requires_tools = bool(getattr(intent, "requires_tools", False))
 
         if intent and intent.intent in (IntentType.CHAT, IntentType.QUERY):
@@ -3855,6 +3998,7 @@ class Agent:
             return ""
 
         from ..agents.presets import SYSTEM_PRESETS
+
         if self._is_sub_agent_call:
             return (
                 "\n\n---\n"
@@ -3869,7 +4013,7 @@ class Agent:
                 "（Windows 用 run_powershell，其他环境用 run_shell）执行 python，"
                 "或调用对应工具获得，不得凭经验估算。\n"
                 "- 任何没有工具输出佐证的数字、百分比、均值、标准差、概率一律视为违规。\n"
-                "- 无法获得真实数据时，明确返回：\"无法执行：<具体原因>，建议 <替代方案>\"，"
+                '- 无法获得真实数据时，明确返回："无法执行：<具体原因>，建议 <替代方案>"，'
                 "禁止编造数据占位。\n"
             )
 
@@ -4407,7 +4551,9 @@ class Agent:
 
         _tt = set_tracking_context(
             TokenTrackingContext(
-                session_id=getattr(self, "_current_conversation_id", "") or getattr(self, "_current_session_id", "") or "",
+                session_id=getattr(self, "_current_conversation_id", "")
+                or getattr(self, "_current_session_id", "")
+                or "",
                 operation_type="context_compress",
                 operation_detail=context_type,
             )
@@ -4574,7 +4720,9 @@ class Agent:
 
             _tt2 = set_tracking_context(
                 TokenTrackingContext(
-                    session_id=getattr(self, "_current_conversation_id", "") or getattr(self, "_current_session_id", "") or "",
+                    session_id=getattr(self, "_current_conversation_id", "")
+                    or getattr(self, "_current_session_id", "")
+                    or "",
                     operation_type="context_compress",
                     operation_detail=f"chunk_{i}",
                 )
@@ -4929,7 +5077,8 @@ class Agent:
             memory_workspace_id = self._resolve_memory_workspace_id(session)
             if (
                 getattr(self.memory_manager, "_current_session_id", None) != conversation_safe_id
-                or getattr(self.memory_manager, "_current_workspace_id", None) != memory_workspace_id
+                or getattr(self.memory_manager, "_current_workspace_id", None)
+                != memory_workspace_id
             ):
                 self.memory_manager.start_session(
                     conversation_safe_id,
@@ -4951,7 +5100,11 @@ class Agent:
                         from ..memory.types import Scratchpad as _SpClear
 
                         store.save_scratchpad(
-                            _SpClear(user_id=getattr(session, "user_id", "default") if session else "default")
+                            _SpClear(
+                                user_id=getattr(session, "user_id", "default")
+                                if session
+                                else "default"
+                            )
                         )
                         logger.debug(
                             f"[Session] Cleared scratchpad for new conversation {conversation_id}"
@@ -5347,9 +5500,8 @@ class Agent:
             f"{len(messages)} history msgs, has_history={_has_history}"
         )
 
-        if (
-            isinstance(compiled_message, str)
-            and _looks_like_previous_answer_replay_request(message, messages)
+        if isinstance(compiled_message, str) and _looks_like_previous_answer_replay_request(
+            message, messages
         ):
             compiled_message = _apply_previous_answer_replay_hint(compiled_message)
             logger.info(
@@ -6109,7 +6261,9 @@ class Agent:
             endpoint_policy = (
                 endpoint_policy
                 if explicit_endpoint
-                else self._endpoint_policy if endpoint_override == self._preferred_endpoint else "prefer"
+                else self._endpoint_policy
+                if endpoint_override == self._preferred_endpoint
+                else "prefer"
             )
         else:
             endpoint_policy = "prefer"
@@ -6128,29 +6282,22 @@ class Agent:
         conversation_id = self._resolve_conversation_id(session, session_id)
         self._current_conversation_id = conversation_id
 
-        # 清理上一轮残留的任务状态（按 session 隔离）
-        _prev_task = None
-        _reset_key = session_id
-        if self.agent_state:
-            _prev_task = self.agent_state.get_task_for_session(session_id)
-        if not _prev_task and self.agent_state:
-            _prev_task = self.agent_state.current_task
-            if _prev_task:
-                _reset_key = _prev_task.session_id or _prev_task.task_id
-        if _prev_task:
-            if _prev_task.cancelled or not _prev_task.is_active:
-                logger.info(
-                    f"[Session:{session_id}] Resetting stale task "
-                    f"(cancelled={_prev_task.cancelled}, status={_prev_task.status.value}, "
-                    f"reset_key={_reset_key!r})"
-                )
-                self.agent_state.reset_task(session_id=_reset_key)
-            else:
-                _prev_task.clear_skip()
-                await _prev_task.drain_user_inserts()
-
-        # 清除上一轮残留的 pending_cancels（disconnect watcher 可能在清理后写入）
-        self._pending_cancels.pop(session_id, None) if session_id else None
+        # v1.27.14 (plan: conversation concurrency v1.28, S1.3 + S1.4):
+        # 把旧的 "clear_skip + drain_user_inserts 让两个并发请求共享同一个
+        # TaskState" 反模式替换为显式 preempt/queue 协议。详见
+        # :meth:`_preempt_or_queue_prev_task`。
+        # FIX 1: 传入 conversation_id，reason_stream / run 用它作 task key。
+        _preempt_decision = await self._preempt_or_queue_prev_task(
+            session_id=session_id,
+            session=session,
+            conversation_id=conversation_id,
+        )
+        logger.debug(
+            "[ChatSync] preempt decision for session=%s conv=%s: %s",
+            session_id,
+            conversation_id,
+            _preempt_decision,
+        )
 
         # 用户主动发新消息 → 无条件清除所有端点冷却期，不让上一轮的错误阻塞本轮
         llm_client = getattr(self.brain, "_llm_client", None)
@@ -6307,7 +6454,9 @@ class Agent:
                             _trust_mode_reason,
                             session_id,
                             getattr(_risk_intent.target_kind, "value", _risk_intent.target_kind),
-                            getattr(_risk_intent.operation_kind, "value", _risk_intent.operation_kind),
+                            getattr(
+                                _risk_intent.operation_kind, "value", _risk_intent.operation_kind
+                            ),
                             message[:200],
                         )
             if (
@@ -6347,7 +6496,11 @@ class Agent:
                     _identity_snippet = ""
                     if hasattr(self, "identity") and hasattr(self.identity, "get_system_prompt"):
                         _identity_snippet = (
-                            self.identity.get_system_prompt(include_active_task=False) or ""
+                            self.identity.get_system_prompt(
+                                include_active_task=False,
+                                agent_voice=self._resolve_agent_voice(),
+                            )
+                            or ""
                         )[:500]
 
                     _fast_system = (
@@ -6391,7 +6544,11 @@ class Agent:
                     _identity_snippet = ""
                     if hasattr(self, "identity") and hasattr(self.identity, "get_system_prompt"):
                         _identity_snippet = (
-                            self.identity.get_system_prompt(include_active_task=False) or ""
+                            self.identity.get_system_prompt(
+                                include_active_task=False,
+                                agent_voice=self._resolve_agent_voice(),
+                            )
+                            or ""
                         )[:500]
 
                     _fast_system = (
@@ -6538,7 +6695,9 @@ class Agent:
             endpoint_policy = (
                 endpoint_policy
                 if explicit_endpoint
-                else self._endpoint_policy if endpoint_override == self._preferred_endpoint else "prefer"
+                else self._endpoint_policy
+                if endpoint_override == self._preferred_endpoint
+                else "prefer"
             )
         else:
             endpoint_policy = "prefer"
@@ -6563,29 +6722,20 @@ class Agent:
         conversation_id = self._resolve_conversation_id(session, session_id)
         self._current_conversation_id = conversation_id
 
-        # 清理上一轮残留的任务状态（按 session 隔离）
-        _prev_task = None
-        _reset_key = session_id
-        if self.agent_state:
-            _prev_task = self.agent_state.get_task_for_session(session_id)
-        if not _prev_task and self.agent_state:
-            _prev_task = self.agent_state.current_task
-            if _prev_task:
-                _reset_key = _prev_task.session_id or _prev_task.task_id
-        if _prev_task:
-            if _prev_task.cancelled or not _prev_task.is_active:
-                logger.info(
-                    f"[Session:{session_id}] Resetting stale task "
-                    f"(cancelled={_prev_task.cancelled}, status={_prev_task.status.value}, "
-                    f"reset_key={_reset_key!r})"
-                )
-                self.agent_state.reset_task(session_id=_reset_key)
-            else:
-                _prev_task.clear_skip()
-                await _prev_task.drain_user_inserts()
-
-        # 清除上一轮残留的 pending_cancels（disconnect watcher 可能在清理后写入）
-        self._pending_cancels.pop(session_id, None) if session_id else None
+        # v1.27.14 (plan: conversation concurrency v1.28, S1.3 + S1.4):
+        # 与 chat_with_session 同源；详见 :meth:`_preempt_or_queue_prev_task`。
+        # FIX 1: 传入 conversation_id，reason_stream / run 用它作 task key。
+        _preempt_decision = await self._preempt_or_queue_prev_task(
+            session_id=session_id,
+            session=session,
+            conversation_id=conversation_id,
+        )
+        logger.debug(
+            "[ChatStream] preempt decision for session=%s conv=%s: %s",
+            session_id,
+            conversation_id,
+            _preempt_decision,
+        )
 
         # 用户主动发新消息 → 无条件清除所有端点冷却期
         llm_client = getattr(self.brain, "_llm_client", None)
@@ -6788,7 +6938,9 @@ class Agent:
                             session_id,
                             conversation_id,
                             getattr(_risk_intent.target_kind, "value", _risk_intent.target_kind),
-                            getattr(_risk_intent.operation_kind, "value", _risk_intent.operation_kind),
+                            getattr(
+                                _risk_intent.operation_kind, "value", _risk_intent.operation_kind
+                            ),
                             message[:200],
                         )
             if (
@@ -6959,7 +7111,11 @@ class Agent:
                 _identity_snippet = ""
                 if hasattr(self, "identity") and hasattr(self.identity, "get_system_prompt"):
                     _identity_snippet = (
-                        self.identity.get_system_prompt(include_active_task=False) or ""
+                        self.identity.get_system_prompt(
+                            include_active_task=False,
+                            agent_voice=self._resolve_agent_voice(),
+                        )
+                        or ""
                     )[:500]
 
                 _fast_system = (
@@ -7020,7 +7176,11 @@ class Agent:
                 _identity_snippet = ""
                 if hasattr(self, "identity") and hasattr(self.identity, "get_system_prompt"):
                     _identity_snippet = (
-                        self.identity.get_system_prompt(include_active_task=False) or ""
+                        self.identity.get_system_prompt(
+                            include_active_task=False,
+                            agent_voice=self._resolve_agent_voice(),
+                        )
+                        or ""
                     )[:500]
 
                 _fast_system = (
@@ -7090,7 +7250,11 @@ class Agent:
                 if messages and isinstance(messages[-1], dict):
                     messages = list(messages)
                     last = dict(messages[-1])
-                    last["content"] = (last.get("content") or "") + soft_hint
+                    existing = last.get("content")
+                    if isinstance(existing, list):
+                        last["content"] = existing + [{"type": "text", "text": soft_hint}]
+                    else:
+                        last["content"] = (existing or "") + soft_hint
                     messages[-1] = last
 
             async for event in self.reasoning_engine.reason_stream(
@@ -7114,6 +7278,7 @@ class Agent:
                 is_sub_agent=getattr(self, "_is_sub_agent_call", False),
                 request_id=_request_id,
                 turn_id=_turn_id,
+                agent_voice=self._resolve_agent_voice(),
             ):
                 # 收集回复文本（用于 session 保存 & memory）
                 if event.get("type") == "text_delta":
@@ -7272,9 +7437,7 @@ class Agent:
         total_out = sum(t.get("tokens", {}).get("output", 0) for t in trace)
         usage_estimated = any(bool(t.get("usage_estimated")) for t in trace)
         usage_sources = {
-            str(t.get("usage_source"))
-            for t in trace
-            if str(t.get("usage_source") or "").strip()
+            str(t.get("usage_source")) for t in trace if str(t.get("usage_source") or "").strip()
         }
         summary = {
             "input_tokens": total_in,
@@ -7288,7 +7451,9 @@ class Agent:
             summary["billable_output_tokens"] = total_out
             summary["billable_total_tokens"] = total_in + total_out
         if usage_sources:
-            summary["usage_source"] = "mixed" if len(usage_sources) > 1 else next(iter(usage_sources))
+            summary["usage_source"] = (
+                "mixed" if len(usage_sources) > 1 else next(iter(usage_sources))
+            )
         try:
             re = self.reasoning_engine
             ctx_mgr = getattr(self, "context_manager", None) or getattr(
@@ -8160,6 +8325,7 @@ class Agent:
             tool_evidence_required=tool_evidence_required,
             is_sub_agent=getattr(self, "_is_sub_agent_call", False),
             mode=mode,
+            agent_voice=self._resolve_agent_voice(),
         )
 
     # ==================== 取消状态代理属性 ====================
@@ -8265,6 +8431,516 @@ class Agent:
         实时取消由 cancel_event 机制在 reason_stream/run 内部处理。
         """
         return bool(session_id and session_id in self._pending_cancels)
+
+    def _append_preempt_marker(
+        self,
+        *,
+        session: Any,
+        policy: str,
+        prev_task_id: str,
+        reason: str,
+        partial_text: str = "",
+        partial_thinking: str = "",
+        partial_truncated: bool = False,
+    ) -> None:
+        """Append a "task was interrupted" marker to session history.
+
+        v1.27.14 (plan: v1.28, S1.8). Bypasses :meth:`Session.add_message`
+        de-dup so multiple rapid preempts each leave a visible record.
+        Frontend can render these specially via ``marker_type``.
+
+        v1.27.15 (S2 P0-3) — extended to also persist the partial
+        assistant text the user already saw before the cancel.  When
+        ``partial_text`` is non-empty we write a SECOND marker right
+        after the bare "[interrupted]" placeholder, with
+        ``marker_type="aborted_partial"`` and the actual partial
+        content.  This avoids the previous behaviour where mid-answer
+        cancel made the timeline look like the model never said
+        anything at all.
+
+        Silently no-ops if ``session`` does not expose ``append_marker``
+        (CLI / unit-test stubs); the lifecycle reset has already been
+        recorded via logger + telemetry counters.
+        """
+        if session is None:
+            return
+        appender = getattr(session, "append_marker", None)
+        if appender is None:
+            return
+        try:
+            # 1) Preempt placeholder — always written so the timeline
+            # has a "this turn was cut short" anchor that the front-end
+            # can render specially (e.g. amber separator).
+            appender(
+                "assistant",
+                "[上一条任务被新请求中断]",
+                marker_type="preempted",
+                policy=policy,
+                preempted_task_id=prev_task_id,
+                reason=reason,
+                has_partial=bool(partial_text or partial_thinking),
+                partial_truncated=partial_truncated,
+            )
+            # 2) Partial assistant content — only when there *is* partial
+            # to show.  We persist text + thinking as separate markers
+            # so the front-end can collapse thinking the same way it
+            # does for finished turns.  Without this, the user used to
+            # see "task was interrupted" placeholder with zero context
+            # for what they had already started reading.
+            if partial_text:
+                appender(
+                    "assistant",
+                    partial_text,
+                    marker_type="aborted_partial",
+                    partial_channel="text",
+                    policy=policy,
+                    preempted_task_id=prev_task_id,
+                    reason=reason,
+                    truncated=partial_truncated,
+                )
+            if partial_thinking:
+                appender(
+                    "assistant",
+                    partial_thinking,
+                    marker_type="aborted_partial",
+                    partial_channel="thinking",
+                    policy=policy,
+                    preempted_task_id=prev_task_id,
+                    reason=reason,
+                    truncated=partial_truncated,
+                )
+        except Exception:
+            logger.debug(
+                "[Preempt] append_marker failed (prev_task=%s, policy=%s)",
+                prev_task_id[:8] if prev_task_id else "?",
+                policy,
+                exc_info=True,
+            )
+
+    async def _preempt_or_queue_prev_task(
+        self,
+        *,
+        session_id: str,
+        session: Any = None,
+        conversation_id: str | None = None,
+    ) -> str:
+        """Resolve prev_task lifecycle before starting a new run on the same session.
+
+        v1.27.14 (plan: conversation concurrency v1.28, S1.3 + S1.4).
+
+        Replaces the legacy ad-hoc "clear_skip + drain_user_inserts" block
+        that silently shared a single ``TaskState`` between two concurrent
+        requests on the same conversation — the root cause behind
+        ``completed -> reasoning`` crashes (issue #572) and "thinking
+        bleeding across turns" complaints.
+
+        Key resolution (FIX 1 vs v1.27.14 first cut):
+        ``reasoning_engine.reason_stream`` / ``run`` register the
+        :class:`TaskState` under ``conversation_id`` (after
+        ``Agent._resolve_conversation_id``).  ``session_id`` is the raw
+        chat/channel identifier, which may differ — especially for IM /
+        org-mode where the resolver maps a ``chat_id`` to a synthetic
+        conversation key.  Looking up by ``session_id`` alone misses the
+        live task in that case, leaving the new request to silently share
+        state with the old one.  We now query ``conversation_id`` first,
+        falling back to ``session_id`` for direct-CLI / sub-agent paths
+        where the caller did not supply a ``conversation_id``.
+
+        Resolution policy comes from
+        :func:`openakita.api.routes.double_texting.resolve_policy`
+        (channel-aware, with INTERRUPT down-graded to QUEUE while
+        ``settings.double_texting_allow_interrupt`` is off; pre-S4 default).
+
+        Returns one of:
+
+        * ``"proceed"`` — old task already settled / was inactive; the
+          caller should fall through to the normal ``begin_task()`` flow.
+        * ``"queued_then_proceed"`` — old task settled within the timeout
+          (or was abandoned on timeout); the caller may proceed.
+        * ``"preempted"`` — old task was actively cancelled and waited on
+          (or marked abandoned on timeout); the caller may proceed.
+
+        REJECT is **not** handled here: the HTTP/IM entry layer already
+        rejects via :class:`ConversationLifecycleManager` busy-lock 409s
+        before reaching Agent; if a REJECT-policy request still makes it
+        here it is treated as "proceed" (lifecycle already permitted the
+        run, presumably because the previous lock was finished).
+        """
+        # Lazy import to avoid circular: agent.py -> api.routes.* would
+        # otherwise pull the FastAPI router stack into Agent import time.
+        from ..api.routes.double_texting import DoubleTextingPolicy, resolve_policy
+        from ..config import settings
+        from .conversation_metrics import (
+            inc_abandon,
+            inc_preempt,
+            inc_queue,
+            inc_settled_timeout,
+        )
+
+        if not self.agent_state:
+            return "proceed"
+
+        # FIX 1: reason_stream / run register TaskState under conversation_id;
+        # query that first.  Fall back to session_id (legacy CLI / sub-agent
+        # paths) and then to current_task (best-effort cross-key search).
+        _prev_task = None
+        _reset_key: str = ""
+        if conversation_id:
+            _prev_task = self.agent_state.get_task_for_session(conversation_id)
+            if _prev_task:
+                _reset_key = conversation_id
+        if not _prev_task and session_id and session_id != conversation_id:
+            _prev_task = self.agent_state.get_task_for_session(session_id)
+            if _prev_task:
+                _reset_key = session_id
+        if not _prev_task:
+            _prev_task = self.agent_state.current_task
+            if _prev_task:
+                _reset_key = _prev_task.session_id or _prev_task.task_id
+        if not _prev_task:
+            return "proceed"
+
+        # 旧 task 已死（cancelled 或非活动状态）→ 清理 + proceed，与老逻辑一致
+        if _prev_task.cancelled or not _prev_task.is_active:
+            logger.info(
+                "[Session:%s] Resetting stale task (cancelled=%s, status=%s, reset_key=%r)",
+                session_id,
+                _prev_task.cancelled,
+                _prev_task.status.value,
+                _reset_key,
+            )
+            self.agent_state.reset_task(session_id=_reset_key)
+            # Discard any pending_cancel that targeted the now-gone task to
+            # avoid mis-firing on the next task created here.
+            if session_id:
+                self._pending_cancels.pop(session_id, None)
+            return "proceed"
+
+        # 旧 task 仍在跑：按 policy 处理
+        channel = getattr(session, "channel", None) if session is not None else None
+        policy = resolve_policy(channel=channel)
+        timeout_s = max(0.5, settings.preempt_settle_timeout_ms / 1000.0)
+
+        if policy is DoubleTextingPolicy.REJECT:
+            # HTTP/IM 入口应已 409；走到这里意味着 lifecycle 允许进入但
+            # agent_state 里却还有活 task。安全处理：reset_task 让新流自己
+            # begin_task。打 warning 让运维注意。
+            logger.warning(
+                "[Session:%s] REJECT policy reached agent layer with active "
+                "task %s; HTTP layer should have blocked. Resetting to "
+                "recover.",
+                session_id,
+                _prev_task.task_id[:8],
+            )
+            _prev_task.abandoned = True
+            self.agent_state.reset_task(session_id=_reset_key)
+            if session_id:
+                self._pending_cancels.pop(session_id, None)
+            return "proceed"
+
+        # v1.28 S4: INTERRUPT 降级判定。
+        #
+        # 走到 INTERRUPT 意味着用户/客户端期望"立即抢占"，老 task 应被
+        # cancel。但若老 task 此刻正在执行 "block" 类工具（write_file /
+        # run_shell / browser_click / mcp_call …），中途 cancel 会留下
+        # 半成品副作用：半写文件、subprocess 持锁、远端 RPC 半执行。
+        # 此时降级为 QUEUE——让老 task 把当前工具跑完，再开始新的请求。
+        # 未知工具默认 block，触发同样降级。
+        #
+        # 不影响 REJECT（HTTP 层已 409 不进 agent）/ STEER（HTTP 层
+        # short-circuit）/ QUEUE（本来就要等）。
+        if policy is DoubleTextingPolicy.INTERRUPT:
+            in_flight = _prev_task.get_in_flight_tools()
+            if in_flight:
+                from .tool_interrupt_behavior import (
+                    has_any_block_in_flight,
+                    is_unknown_tool,
+                    parse_mcp_sub_tool,
+                    resolve_in_flight_behavior,
+                )
+
+                # v1.28.2 FOLLOW-UP-S4-B: pass mcp_client so encoded
+                # ``mcp:server:sub_tool`` entries can resolve via MCP
+                # annotations rather than treating every MCP call as block.
+                mcp_client = getattr(self, "mcp_client", None)
+                if has_any_block_in_flight(in_flight, mcp_client=mcp_client):
+                    # Use the mcp-aware resolver for partition + reason
+                    # too — keeps logging accurate.
+                    block_tools: list[str] = []
+                    for n in in_flight:
+                        if resolve_in_flight_behavior(n, mcp_client=mcp_client) == "block":
+                            block_tools.append(n)
+
+                    # Distinguish "我们标了 block 的工具" vs "未知工具默认
+                    # block"——后者表明 _INTERRUPT_BEHAVIOR_MAP 漏标了，
+                    # 运维需要在监控里看到这个比例。
+                    # MCP sub-tool encoding counts as "unknown" only when
+                    # the annotations themselves are missing — the
+                    # encoded prefix is intentional, not a registry drift.
+                    def _is_drift(n: str) -> bool:
+                        if parse_mcp_sub_tool(n) is not None:
+                            return False
+                        return is_unknown_tool(n)
+
+                    only_unknown = all(_is_drift(n) for n in block_tools)
+                    downgrade_reason = "unknown_tool" if only_unknown else "block_in_flight"
+                    logger.info(
+                        "[Session:%s] Downgrading INTERRUPT -> QUEUE on task "
+                        "%s: %d block-class tool(s) in flight "
+                        "(reason=%s, sample=%s)",
+                        session_id,
+                        _prev_task.task_id[:8],
+                        len(block_tools),
+                        downgrade_reason,
+                        ",".join(block_tools[:5]) + ("…" if len(block_tools) > 5 else ""),
+                    )
+                    try:
+                        from .conversation_metrics import inc_interrupt_downgrade
+
+                        inc_interrupt_downgrade(channel=channel, reason=downgrade_reason)
+                    except Exception:
+                        pass
+                    # Fall through to QUEUE branch below by mutating policy.
+                    policy = DoubleTextingPolicy.QUEUE
+
+        # STEER is normally short-circuited at the HTTP layer (chat.py injects
+        # the new message via ``insert_user_message`` and returns 202 without
+        # ever invoking the agent run path).  If a STEER policy still reaches
+        # the agent layer — e.g. a non-HTTP caller configured a channel as
+        # ``steer`` — we must NOT fall into the INTERRUPT branch below, which
+        # would cancel the running task and violate STEER's "never interrupt"
+        # contract.  There is no steer-injection entry point here, so the
+        # safe behaviour is to treat it as QUEUE: wait for the old task to
+        # settle (preserving its in-flight work) instead of preempting it.
+        if policy is DoubleTextingPolicy.STEER:
+            logger.warning(
+                "[Session:%s] STEER policy reached agent layer with active "
+                "task %s (channel=%s); HTTP layer should have short-circuited "
+                "via insert_user_message. Treating as QUEUE to avoid "
+                "interrupting the running task.",
+                session_id,
+                _prev_task.task_id[:8],
+                channel,
+            )
+            policy = DoubleTextingPolicy.QUEUE
+
+        if policy is DoubleTextingPolicy.QUEUE:
+            inc_queue(channel=channel)
+            # QUEUE waits for the predecessor turn to finish *naturally*, so it
+            # uses the generous queue_wait_timeout_ms (default 10 min), NOT the
+            # short preempt_settle_timeout_ms (which is for tasks we just
+            # cancelled).  This is the agent-layer half of decoupling the two
+            # timeouts — the HTTP layer (chat.py QUEUE wait) does the same.
+            queue_timeout_s = max(
+                0.5,
+                getattr(settings, "queue_wait_timeout_ms", 600000) / 1000.0,
+            )
+            queue_timeout_ms = int(queue_timeout_s * 1000)
+            # v1.28.2 FOLLOW-UP-S4-A: 第一次 timeout 后如果仍有 block 工具
+            # 在跑，再延长一次等待（不直接 cancel）。覆盖大多数 long-write
+            # 场景，避免 write_file/run_shell 超过 queue 等待窗口仍被中断
+            # 造成数据损坏。设 extension_ms=0 即关闭该机制。
+            extension_ms = getattr(settings, "preempt_block_tool_extension_ms", 0)
+            extension_s = max(0.0, extension_ms / 1000.0)
+            timed_out = False
+            extended_once = False
+            try:
+                # NOTE: do NOT wrap this in ``asyncio.shield`` — when the
+                # outer coroutine is cancelled while the shield is in
+                # effect, the *inner* wait_for() keeps running with no
+                # awaiter, producing zombie "Task was destroyed but it
+                # is pending" warnings and a leaked asyncio task that
+                # only completes once the prev task naturally settles.
+                # We don't need shield here: ``inc_abandon`` below is
+                # sync, and CancelledError is only injected at await
+                # points — so the except-handler can always run to
+                # completion before re-raising.
+                await asyncio.wait_for(_prev_task.wait_until_settled(), timeout=queue_timeout_s)
+                logger.info(
+                    "[Session:%s] QUEUE: old task %s settled; proceeding",
+                    session_id,
+                    _prev_task.task_id[:8],
+                )
+            except asyncio.CancelledError:
+                # Outer cancel.  Don't write a marker (the new turn is
+                # being abandoned, not the old one), but DO record the
+                # event in telemetry so we can see queue-cancel rates.
+                try:
+                    inc_abandon(policy=policy.value, channel=channel)
+                except Exception:
+                    pass
+                raise
+            except TimeoutError:
+                # First timeout — check if a block-class tool is still in
+                # flight.  If yes (and extension is configured), give the
+                # old task one more grace window before forcibly cancelling.
+                in_flight_after_timeout = _prev_task.get_in_flight_tools()
+                if extension_s > 0 and in_flight_after_timeout:
+                    from .tool_interrupt_behavior import (
+                        has_any_block_in_flight,
+                        is_unknown_tool,
+                        parse_mcp_sub_tool,
+                    )
+
+                    mcp_client_for_ext = getattr(self, "mcp_client", None)
+                    if has_any_block_in_flight(
+                        in_flight_after_timeout,
+                        mcp_client=mcp_client_for_ext,
+                    ):
+                        only_unknown = all(
+                            parse_mcp_sub_tool(n) is None and is_unknown_tool(n)
+                            for n in in_flight_after_timeout
+                        )
+                        ext_reason = "unknown_tool" if only_unknown else "block_in_flight"
+                        logger.info(
+                            "[Session:%s] QUEUE wait timed out after %dms but "
+                            "block tool(s) still in flight (sample=%s, "
+                            "reason=%s); extending +%dms before cancel",
+                            session_id,
+                            queue_timeout_ms,
+                            ",".join(in_flight_after_timeout[:3])
+                            + ("…" if len(in_flight_after_timeout) > 3 else ""),
+                            ext_reason,
+                            extension_ms,
+                        )
+                        try:
+                            from .conversation_metrics import inc_queue_extended
+
+                            inc_queue_extended(channel=channel, reason=ext_reason)
+                        except Exception:
+                            pass
+                        extended_once = True
+                        try:
+                            await asyncio.wait_for(
+                                _prev_task.wait_until_settled(),
+                                timeout=extension_s,
+                            )
+                            logger.info(
+                                "[Session:%s] QUEUE: old task %s settled "
+                                "during extension window; proceeding",
+                                session_id,
+                                _prev_task.task_id[:8],
+                            )
+                        except asyncio.CancelledError:
+                            try:
+                                inc_abandon(policy=policy.value, channel=channel)
+                            except Exception:
+                                pass
+                            raise
+                        except TimeoutError:
+                            timed_out = True
+                if not extended_once:
+                    timed_out = True
+
+            if timed_out:
+                total_waited_ms = queue_timeout_ms + (extension_ms if extended_once else 0)
+                logger.warning(
+                    "[Session:%s] QUEUE wait timed out after %dms "
+                    "(extended=%s); cancelling+abandoning old task %s "
+                    "and proceeding",
+                    session_id,
+                    total_waited_ms,
+                    extended_once,
+                    _prev_task.task_id[:8],
+                )
+                inc_settled_timeout(policy=policy.value, channel=channel)
+                inc_abandon(policy=policy.value, channel=channel)
+                # FIX 4: 不光标 abandoned (reason_stream 头部检查)，还要
+                # 调 cancel() 让 cancel_event 触发——长 running tool 的
+                # handler 监听的是 cancel_event，不是 abandoned 标志。
+                # 不调 cancel 的话 QUEUE 超时后老工具（shell / browser）
+                # 会继续跑直到自己返回，跟新 task 的工具产生 cwd / fs
+                # 副作用 race。
+                _prev_task.cancel(f"QUEUE timeout after {total_waited_ms}ms")
+                _prev_task.abandoned = True
+                # S1.8 + P0-3: when abandoning, also surface whatever
+                # partial answer the user already saw — otherwise the
+                # timeline looks like the model never said anything,
+                # even if 800 chars had already streamed.
+                self._append_preempt_marker(
+                    session=session,
+                    policy=policy.value,
+                    prev_task_id=_prev_task.task_id,
+                    reason="queue_timeout_abandoned",
+                    partial_text=_prev_task.partial_text,
+                    partial_thinking=_prev_task.partial_thinking,
+                    partial_truncated=_prev_task.partial_truncated,
+                )
+            self.agent_state.reset_task(session_id=_reset_key)
+            if session_id:
+                self._pending_cancels.pop(session_id, None)
+            return "queued_then_proceed"
+
+        # INTERRUPT：cancel 旧 task，等 settled，超时则 abandon。
+        # （STEER 已在上面降级为 QUEUE；REJECT/QUEUE 已在各自分支 return。）
+        inc_preempt(policy=policy.value, channel=channel)
+        logger.info(
+            "[Session:%s] Preempting active task %s (status=%s, policy=%s)",
+            session_id,
+            _prev_task.task_id[:8],
+            _prev_task.status.value,
+            policy.value,
+        )
+        _prev_task.cancel(f"被新请求抢占 (policy={policy.value})")
+        # S1.8 + P0-3: surface both the bare interrupt marker AND the
+        # partial assistant text/thinking that already streamed.  The
+        # user's UI now reads as "<half-finished answer>\n[interrupted]"
+        # instead of just "[interrupted]" with no context.
+        #
+        # P2-9: even if an upstream cancel arrives between cancel() and
+        # marker, we want the marker recorded so the user doesn't lose
+        # their partial answer.  ``_append_preempt_marker`` is sync, so
+        # wrapping the *next* await in shield ensures we got here.
+        self._append_preempt_marker(
+            session=session,
+            policy=policy.value,
+            prev_task_id=_prev_task.task_id,
+            reason="preempted_by_new_message",
+            partial_text=_prev_task.partial_text,
+            partial_thinking=_prev_task.partial_thinking,
+            partial_truncated=_prev_task.partial_truncated,
+        )
+        # S1.3: preempt 已显式 cancel 老 task，pending_cancel 失效，避免新
+        # task 被几秒前的过期 cancel 误杀。
+        if session_id:
+            popped = self._pending_cancels.pop(session_id, None)
+            if popped:
+                logger.debug(
+                    "[Preempt] Discarded pending_cancel for session=%s "
+                    "(preempt supersedes; reason=%r)",
+                    session_id,
+                    popped,
+                )
+        try:
+            # NOTE: do NOT wrap this in ``asyncio.shield`` — the inner
+            # wait_for would become a zombie task with no awaiter when
+            # the outer is cancelled.  The except-handler below is sync
+            # except for the final ``raise``, so cleanup still runs to
+            # completion before propagation.
+            await asyncio.wait_for(_prev_task.wait_until_settled(), timeout=timeout_s)
+        except asyncio.CancelledError:
+            # Outer cancel mid-wait — still flip abandoned so the old
+            # coroutine knows to bail out at its next iteration check.
+            _prev_task.abandoned = True
+            try:
+                inc_abandon(policy=policy.value, channel=channel)
+            except Exception:
+                pass
+            raise
+        except TimeoutError:
+            logger.warning(
+                "[Session:%s] Old task %s did not settle within %dms; "
+                "marking abandoned. Old coroutine will exit on its next "
+                "iteration check.",
+                session_id,
+                _prev_task.task_id[:8],
+                settings.preempt_settle_timeout_ms,
+            )
+            inc_settled_timeout(policy=policy.value, channel=channel)
+            inc_abandon(policy=policy.value, channel=channel)
+            _prev_task.abandoned = True
+        self.agent_state.reset_task(session_id=_reset_key)
+        return "preempted"
 
     def _consume_pending_cancel(self, session_id: str | None = None) -> str | None:
         """消费并返回挂起的取消原因，如果没有则返回 None。"""
@@ -8586,9 +9262,7 @@ class Agent:
                         f"task suspended. pending_approvals={_ids}"
                     ),
                     pending_id=_ids[0],
-                    unattended_strategy=_deferred[0].get(
-                        "_deferred_approval_strategy", ""
-                    ),
+                    unattended_strategy=_deferred[0].get("_deferred_approval_strategy", ""),
                     meta={"all_pending_ids": _ids},
                 )
 
@@ -9156,6 +9830,33 @@ class Agent:
                         )
                         continue  # 继续循环，让 LLM 调用工具
 
+                    # Steer done-drain: the model produced a final answer with
+                    # no tool calls, so process_post_tool_signals did NOT drain
+                    # inserts this round. If a message was steered in via
+                    # insert_user_message while this answer was being generated
+                    # (e.g. an IM user following up on a long task), address it
+                    # now instead of finishing and dropping it. Bounded by
+                    # max_tool_iterations inside the helper, so it can never run
+                    # away. No-op for scheduler/sub-agent tasks (no inserts).
+                    _steered = await self.reasoning_engine._drain_steer_before_finish(
+                        state=(self.agent_state.current_task if self.agent_state else None),
+                        working_messages=messages,
+                        final_text=final_response or cleaned_text or "",
+                        iteration=iteration - 1,  # loop here is 1-based
+                        max_iterations=max_tool_iterations,
+                    )
+                    if _steered:
+                        no_tool_call_count = 0
+                        logger.info(
+                            "[execute_task][DoneDrain] %d steered message(s) "
+                            "arrived during final-answer generation; folding "
+                            "answer into context and continuing (iter=%d/%d)",
+                            len(_steered),
+                            iteration,
+                            max_tool_iterations,
+                        )
+                        continue
+
                     # 追问次数用尽，任务完成
                     break
 
@@ -9250,9 +9951,7 @@ class Agent:
                             f"task suspended. pending_approvals={_ids}"
                         ),
                         pending_id=_ids[0],
-                        unattended_strategy=_deferred[0].get(
-                            "_deferred_approval_strategy", ""
-                        ),
+                        unattended_strategy=_deferred[0].get("_deferred_approval_strategy", ""),
                         meta={"all_pending_ids": _ids, "task_id": task.id},
                     )
 
@@ -9599,4 +10298,3 @@ class Agent:
     def get_memory_stats(self) -> dict:
         """获取记忆统计"""
         return self.memory_manager.get_stats()
-

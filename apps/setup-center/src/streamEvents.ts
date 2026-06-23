@@ -58,6 +58,10 @@ export const StreamEventType = {
   USER_INSERT: "user_insert",
   SUB_AGENT_STATE: "sub_agent_state",
 
+  // ── Pending Approvals (C12 §14.5) ──
+  PENDING_APPROVAL_CREATED: "pending_approval_created",
+  PENDING_APPROVAL_RESOLVED: "pending_approval_resolved",
+
   // ── UI enrichment (injected by API layer) ──
   ARTIFACT: "artifact",
   UI_PREFERENCE: "ui_preference",

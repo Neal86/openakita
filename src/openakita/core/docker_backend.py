@@ -64,7 +64,8 @@ class DockerBackend:
 
         try:
             proc = await asyncio.create_subprocess_exec(
-                "docker", "info",
+                "docker",
+                "info",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -83,12 +84,18 @@ class DockerBackend:
         cfg = self._config
 
         args = [
-            "docker", "run", "--rm",
-            "--cap-drop", "ALL",
+            "docker",
+            "run",
+            "--rm",
+            "--cap-drop",
+            "ALL",
             "--no-new-privileges",
-            "--pids-limit", str(cfg.pids_limit),
-            "--memory", cfg.memory_limit,
-            "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+            "--pids-limit",
+            str(cfg.pids_limit),
+            "--memory",
+            cfg.memory_limit,
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=64m",
         ]
 
         if cfg.network:
@@ -142,7 +149,7 @@ class DockerBackend:
                 returncode=proc.returncode or 0,
             )
 
-        except (asyncio.TimeoutError, TimeoutError):
+        except TimeoutError:
             if proc and proc.returncode is None:
                 proc.kill()
                 await proc.wait()

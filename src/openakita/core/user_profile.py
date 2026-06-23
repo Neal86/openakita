@@ -8,7 +8,6 @@
 - 更新 USER.md 文件
 """
 
-import json
 import logging
 import random
 from dataclasses import dataclass, field
@@ -443,20 +442,22 @@ class UserProfileManager:
 
     def _load_state(self) -> UserProfileState:
         """加载状态"""
-        if self.state_file.exists():
-            try:
-                with open(self.state_file, encoding="utf-8") as f:
-                    data = json.load(f)
+        try:
+            from openakita.utils.atomic_io import read_json_safe
+
+            data = read_json_safe(self.state_file)
+            if isinstance(data, dict):
                 return UserProfileState.from_dict(data)
-            except Exception as e:
-                logger.warning(f"Failed to load profile state: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to load profile state: {e}")
         return UserProfileState()
 
     def _save_state(self) -> None:
         """保存状态"""
         try:
-            with open(self.state_file, "w", encoding="utf-8") as f:
-                json.dump(self.state.to_dict(), f, ensure_ascii=False, indent=2)
+            from openakita.utils.atomic_io import atomic_json_write
+
+            atomic_json_write(self.state_file, self.state.to_dict())
         except Exception as e:
             logger.error(f"Failed to save profile state: {e}")
 
@@ -762,7 +763,15 @@ class UserProfileManager:
 
         summary = f"已收集 {collected}/{total} 项用户信息\n\n"
 
-        for category in ["basic", "tech", "communication", "habits", "business", "personal", "persona"]:
+        for category in [
+            "basic",
+            "tech",
+            "communication",
+            "habits",
+            "business",
+            "personal",
+            "persona",
+        ]:
             category_items = [item for item in self.items.values() if item.category == category]
             summary += f"**{category.title()}**:\n"
             for item in category_items:
