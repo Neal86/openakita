@@ -354,7 +354,14 @@ def test_b19_create_node_schedule(
 
     monkeypatch.setattr(NodeSchedule, "from_dict", staticmethod(lambda d: d), raising=False)
     mint_app.state.org_manager.add_node_schedule.return_value = fake
-    resp = mint_client.post("/api/v2/orgs/org_x/nodes/n1/schedules", json={"type": "interval"})
+    # The route hardens against trigger-less schedules (v10 E3.8): an ``interval``
+    # schedule must carry ``interval_s`` (or run_at/cron) or it would never fire
+    # and the endpoint returns 422. Send a complete interval body so the smoke
+    # test exercises the happy path it intends.
+    resp = mint_client.post(
+        "/api/v2/orgs/org_x/nodes/n1/schedules",
+        json={"schedule_type": "interval", "interval_s": 60},
+    )
     assert resp.status_code == 201
     assert resp.json()["id"] == "s1"
 
