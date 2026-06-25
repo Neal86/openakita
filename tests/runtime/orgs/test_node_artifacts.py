@@ -458,6 +458,50 @@ def test_executor_persists_artifact_and_memory_on_success(
     assert "producer" in finished["artifact_path"]
 
 
+def test_executor_strips_thinking_from_persisted_artifact_and_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """case id: deliverable.thinking.executor_chokepoint
+
+    Exploratory v21 (2026-06): a real multi-layer content-team run leaked the
+    root主编's full ``<thinking>…</thinking>`` chain-of-thought into the
+    persisted ``.md`` artifact AND the 713 KB final PDF (the PDF renders from
+    that very ``.md``). The completeness gate accepts the output because a
+    markdown heading follows the reasoning block, so the strip must happen at
+    the executor chokepoint BEFORE persistence + return. This pins that the
+    persisted artifact and the returned output are both thinking-free while the
+    real document survives intact.
+    """
+
+    monkeypatch.delenv("OPENAKITA_ORGS_V2_PERSIST_ARTIFACTS", raising=False)
+    bus = _RecordingBus()
+    lookup = _Lookup(["producer"], org_dir=tmp_path)
+    leaky = (
+        "<thinking>用户要我整合，我注意到下属里没有 writer-a，我先并行分派。</thinking>\n"
+        "# 季度营销方案\n\n## 概述\n这是真正的成文交付物内容。"
+    )
+    brain = _brain_with_replies([leaky])
+    executor = _make_executor(lookup=lookup, brain=brain, bus=bus)
+
+    result = asyncio.run(
+        executor.activate_and_run(
+            org_id="o1", node_id="producer", content="hi", command_id="cmd_th"
+        )
+    )
+
+    assert result["status"] == "ok"
+    out = str(result.get("output") or "")
+    assert "<thinking>" not in out and "我注意到下属里没有 writer-a" not in out
+    assert "# 季度营销方案" in out and "这是真正的成文交付物内容" in out
+
+    artifacts = list((tmp_path / "artifacts").iterdir())
+    assert len(artifacts) == 1
+    body = artifacts[0].read_text(encoding="utf-8")
+    assert "<thinking>" not in body and "</thinking>" not in body
+    assert "我注意到下属里没有 writer-a" not in body
+    assert body.startswith("# 季度营销方案")
+
+
 def test_executor_skips_persistence_when_env_var_off(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

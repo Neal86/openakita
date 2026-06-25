@@ -35,6 +35,7 @@ from ._runtime_node_artifacts import (
     classify_node_output,
     persist_node_artifact,
     persist_node_memory,
+    strip_deliverable_thinking,
 )
 from .command_service import OrgLookupProtocol
 
@@ -503,6 +504,16 @@ class AgentPipelineExecutor:
         # persistence is either disabled or hit an I/O snag, never that
         # the agent run itself failed.
         output_text = str(output) if output else ""
+        # Exploratory v21 (2026-06): strip any leaked ``<thinking>…</thinking>``
+        # reasoning block from the deliverable BEFORE it is classified,
+        # persisted (.md + PDF source), summarised to memory, or returned up the
+        # chain to become the parent review sample / root ``final_message``. A
+        # multi-layer content-team run leaked the root主编's full chain-of-thought
+        # into both the persisted artifact and the 713 KB final PDF because the
+        # block is preceded by a markdown heading, which the completeness gate
+        # (correctly) treats as a valid "reasoning + document" deliverable. The
+        # live ``node_thinking`` timeline channel is unaffected.
+        output_text = strip_deliverable_thinking(output_text)
         # Quality gate. 核心1: completeness for a CHILD node (one with a
         # connected upstream ``parent_node_id``) is decided by that parent's
         # review in :meth:`dispatch_subtask`, NOT by this central heuristic —

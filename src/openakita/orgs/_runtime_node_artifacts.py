@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -53,6 +54,7 @@ __all__ = [
     "persist_node_artifact",
     "persist_node_memory",
     "safe_path_segment",
+    "strip_deliverable_thinking",
 ]
 
 _LOGGER = logging.getLogger(__name__)
@@ -172,6 +174,63 @@ _MID_REASONING_MARKERS: tuple[str, ...] = (
     "需要更准确",
     "需要更权威",
 )
+
+
+# Exploratory v21 (2026-06): a node's deliverable text frequently OPENS with
+# a leaked chain-of-thought block — Anthropic-style ``<thinking>…</thinking>``
+# or a ``<think>…</think>`` variant — followed by the real document. The
+# completeness gate (:func:`classify_node_output`) deliberately ACCEPTS such
+# output when a real markdown heading is present (reasoning + a document is a
+# valid deliverable), so the leak survived all the way into the persisted
+# ``.md`` artifact, the rendered PDF, the parent review sample, and the root
+# node's final ``command_done`` report. This stripper is the single chokepoint
+# (applied in the executor BEFORE persist / classify / return) that removes the
+# reasoning block from the *deliverable* — the dedicated live ``node_thinking``
+# channel (``_clean_thinking``) is untouched, so the reasoning is still visible
+# in the timeline, just never inside the formal deliverable.
+_THINKING_BLOCK_RE = re.compile(
+    r"<\s*think(?:ing)?\s*>.*?<\s*/\s*think(?:ing)?\s*>",
+    re.DOTALL | re.IGNORECASE,
+)
+_LEADING_OPEN_THINK_RE = re.compile(r"^\s*<\s*think(?:ing)?\s*>", re.IGNORECASE)
+_STRAY_THINK_TAG_RE = re.compile(r"<\s*/?\s*think(?:ing)?\s*>", re.IGNORECASE)
+
+
+def strip_deliverable_thinking(text: str | None) -> str:
+    """Remove leaked chain-of-thought from a node *deliverable*.
+
+    Returns the deliverable text with every well-formed
+    ``<thinking>…</thinking>`` / ``<think>…</think>`` block removed. Handles
+    three shapes seen in the wild:
+
+    1. One or more closed reasoning blocks (most common) -> all removed.
+    2. An UNCLOSED leading reasoning tag followed by the real document at the
+       first markdown heading -> everything up to that heading is dropped.
+    3. An unclosed leading tag with no heading after it (the whole output was
+       reasoning) -> returns ``""`` so the caller's completeness gate rejects
+       it as ``empty_output`` instead of persisting a thinking-only artifact.
+
+    Conservative by construction: a deliverable that never opens a reasoning
+    tag is returned essentially unchanged (only stray bare tags are dropped).
+    Never raises; a non-string input yields ``""``.
+    """
+
+    if not isinstance(text, str) or not text:
+        return ""
+    cleaned = _THINKING_BLOCK_RE.sub("", text)
+    # An unclosed leading reasoning tag: drop everything up to the first
+    # markdown heading (the real document), else treat the whole thing as
+    # reasoning and return empty for the completeness gate to reject.
+    if _LEADING_OPEN_THINK_RE.search(cleaned):
+        lines = cleaned.splitlines()
+        for i, ln in enumerate(lines):
+            if ln.lstrip().startswith("#"):
+                cleaned = "\n".join(lines[i:])
+                break
+        else:
+            return ""
+    cleaned = _STRAY_THINK_TAG_RE.sub("", cleaned)
+    return cleaned.strip()
 
 
 def classify_node_output(output: str | None) -> tuple[str, str]:
