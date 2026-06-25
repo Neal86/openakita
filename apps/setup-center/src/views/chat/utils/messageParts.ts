@@ -186,7 +186,7 @@ export function resolveMessageParts(msg: ChatMessage): MessagePart[] {
   if (explicit) {
     // Fill any attachment markers that didn't inline their artifact, in order.
     let artIdx = 0;
-    return explicit.map((part) => {
+    let healed = explicit.map((part) => {
       if (part.kind === "attachment" && !part.artifact) {
         const art = msg.artifacts?.[artIdx];
         artIdx += 1;
@@ -195,6 +195,24 @@ export function resolveMessageParts(msg: ChatMessage): MessagePart[] {
       if (part.kind === "attachment") artIdx += 1;
       return part;
     });
+    if (msg.todo?.steps?.length && !healed.some((part) => part.kind === "plan")) {
+      const planPart: MessagePart = {
+        kind: "plan",
+        id: pid(msg.id, "plan", msg.todo.id || ""),
+        todo: msg.todo,
+      };
+      const insertBefore = healed.findIndex((part) =>
+        part.kind === "text" ||
+        part.kind === "tools" ||
+        part.kind === "attachment" ||
+        part.kind === "ask_user" ||
+        part.kind === "error"
+      );
+      healed = insertBefore >= 0
+        ? [...healed.slice(0, insertBefore), planPart, ...healed.slice(insertBefore)]
+        : [...healed, planPart];
+    }
+    return healed;
   }
   return deriveMessageParts(msg);
 }

@@ -6264,6 +6264,7 @@ class ReasoningEngine:
                                 "type": "todo_step_updated",
                                 "stepId": step_id,
                                 "status": tool_args.get("status", "completed"),
+                                "result": tool_args.get("result", ""),
                             }
                         elif tool_name == "complete_todo":
                             yield {"type": "todo_completed"}

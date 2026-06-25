@@ -73,6 +73,12 @@ def _visible_history_messages(session) -> list[tuple[int, dict]]:
 
     truncation_prefixes = ("[用户规则（必须遵守）]", "[历史背景，非当前任务]")
     visible: list[tuple[int, dict]] = []
+    deduped_messages: list[dict] = []
+    try:
+        from ...sessions.session import is_duplicate_message
+    except Exception:
+        is_duplicate_message = None
+
     for idx, msg in enumerate(session.context.messages):
         content = msg.get("content", "")
         if (
@@ -81,7 +87,14 @@ def _visible_history_messages(session) -> list[tuple[int, dict]]:
             and content.startswith(truncation_prefixes)
         ):
             continue
+        if (
+            is_duplicate_message is not None
+            and not msg.get("marker_type")
+            and is_duplicate_message(deduped_messages, msg)
+        ):
+            continue
         visible.append((idx, msg))
+        deduped_messages.append(msg)
     return visible
 
 
@@ -187,22 +200,23 @@ def _maybe_backfill_messages(session) -> None:
             pass
         return
 
-    # 合并：用 (role, content, timestamp) 做去重
-    existing_keys = {
-        (m.get("role"), m.get("content"), m.get("timestamp"))
-        for m in (session.context.messages or [])
-    }
+    try:
+        from ...sessions.session import is_duplicate_message
+    except Exception:
+        is_duplicate_message = None
+
     appended = 0
     try:
         with getattr(session.context, "_msg_lock", _NULL_LOCK):
             for turn in db_turns:
                 if not isinstance(turn, dict):
                     continue
-                key = (turn.get("role"), turn.get("content"), turn.get("timestamp"))
-                if key in existing_keys:
+                if is_duplicate_message is not None and is_duplicate_message(
+                    session.context.messages,
+                    turn,
+                ):
                     continue
                 session.context.messages.append(dict(turn))
-                existing_keys.add(key)
                 appended += 1
     except Exception as exc:
         logger.debug(f"[Sessions] backfill append failed: {exc}")
@@ -285,6 +299,12 @@ def _history_entry(session, conversation_id: str, original_idx: int, msg: dict) 
     artifacts = msg.get("artifacts")
     if artifacts:
         entry["artifacts"] = artifacts
+    sources = msg.get("sources")
+    if sources:
+        entry["sources"] = sources
+    mcp_calls = msg.get("mcp_calls")
+    if mcp_calls:
+        entry["mcp_calls"] = mcp_calls
     attachments = msg.get("attachments")
     if attachments:
         entry["attachments"] = attachments

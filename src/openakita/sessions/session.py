@@ -20,6 +20,55 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+DEDUP_TIME_WINDOW_SECONDS = 30
+
+
+def is_duplicate_message(
+    existing_messages: list[dict],
+    candidate: dict,
+    *,
+    time_window_seconds: int = DEDUP_TIME_WINDOW_SECONDS,
+) -> bool:
+    """Return whether ``candidate`` is already represented in recent history."""
+    role = candidate.get("role")
+    content = candidate.get("content")
+    if not role or content is None:
+        return False
+
+    candidate_ts = None
+    raw_ts = candidate.get("timestamp")
+    if raw_ts:
+        try:
+            candidate_ts = datetime.fromisoformat(str(raw_ts))
+        except (TypeError, ValueError):
+            candidate_ts = None
+
+    last_message = existing_messages[-1] if existing_messages else None
+    for msg in reversed(existing_messages[-8:]):
+        if msg.get("role") != role or msg.get("content") != content:
+            continue
+
+        if msg is last_message:
+            return True
+
+        if raw_ts and msg.get("timestamp") == raw_ts:
+            return True
+
+        msg_ts = None
+        msg_raw_ts = msg.get("timestamp")
+        if msg_raw_ts:
+            try:
+                msg_ts = datetime.fromisoformat(str(msg_raw_ts))
+            except (TypeError, ValueError):
+                msg_ts = None
+
+        if candidate_ts is None or msg_ts is None:
+            continue
+        if abs((candidate_ts - msg_ts).total_seconds()) < time_window_seconds:
+            return True
+
+    return False
+
 
 class SessionState(Enum):
     """会话状态"""
@@ -156,8 +205,6 @@ class SessionContext:
     precompact_snapshot: dict[str, Any] = field(default_factory=dict)
     _msg_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
-    _DEDUP_TIME_WINDOW_SECONDS = 30
-
     def add_message(self, role: str, content: str, **metadata) -> bool:
         """添加消息（含去重：连续相同 + 时间窗口内相同）。
 
@@ -165,32 +212,18 @@ class SessionContext:
             True if the message was actually added, False if deduped.
         """
         with self._msg_lock:
-            if self.messages:
-                last = self.messages[-1]
-                if last.get("role") == role and last.get("content") == content:
-                    return False
-
             now = datetime.now()
-            for msg in reversed(self.messages[-8:]):
-                if msg.get("role") != role:
-                    continue
-                msg_content = msg.get("content", "") or ""
-                if msg_content != content:
-                    continue
-                ts_str = msg.get("timestamp", "")
-                if ts_str:
-                    try:
-                        msg_time = datetime.fromisoformat(ts_str)
-                        if (now - msg_time).total_seconds() < self._DEDUP_TIME_WINDOW_SECONDS:
-                            return False
-                    except (ValueError, TypeError):
-                        pass
+            metadata = dict(metadata)
+            msg_ts = metadata.get("timestamp") or now.isoformat()
+            metadata["timestamp"] = msg_ts
+            candidate = {"role": role, "content": content, "timestamp": msg_ts}
+            if is_duplicate_message(self.messages, candidate):
+                return False
 
             self.messages.append(
                 {
                     "role": role,
                     "content": content,
-                    "timestamp": now.isoformat(),
                     **metadata,
                 }
             )
@@ -659,7 +692,10 @@ class Session:
         # Best-effort SQLite persistence, identical guards to ``add_message``.
         try:
             if role in ("user", "assistant", "tool") and not metadata.get("transient_for_llm"):
-                self._write_turn_to_store(role, content, metadata)
+                msg_metadata = dict(metadata)
+                if self.context.messages:
+                    msg_metadata.setdefault("timestamp", self.context.messages[-1].get("timestamp"))
+                self._write_turn_to_store(role, content, msg_metadata)
         except Exception as exc:
             logger.debug(f"[Session] append_marker write_turn_to_store skipped: {exc}")
 
@@ -677,7 +713,10 @@ class Session:
             # 临时消息（如 RiskGate 确认应答）不写盘。
             try:
                 if role in ("user", "assistant", "tool") and not metadata.get("transient_for_llm"):
-                    self._write_turn_to_store(role, content, metadata)
+                    msg_metadata = dict(metadata)
+                    if self.context.messages:
+                        msg_metadata.setdefault("timestamp", self.context.messages[-1].get("timestamp"))
+                    self._write_turn_to_store(role, content, msg_metadata)
             except Exception as exc:
                 logger.debug(f"[Session] write_turn_to_store skipped: {exc}")
         return added

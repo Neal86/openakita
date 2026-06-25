@@ -70,6 +70,10 @@ def build_message_parts(msg: dict, *, todo: dict | None = None) -> list[dict]:
         parts.append({"kind": "reasoning", "id": "reasoning"})
     if msg.get("org_timeline"):
         parts.append({"kind": "org_timeline", "id": "org_timeline"})
+    if msg.get("sources"):
+        parts.append({"kind": "sources", "id": "sources"})
+    if msg.get("mcp_calls"):
+        parts.append({"kind": "mcp", "id": "mcp"})
 
     plan = todo if todo is not None else msg.get("todo")
     plan_todo = serialize_plan_to_chat_todo(plan) if isinstance(plan, dict) else plan

@@ -10,7 +10,12 @@ from openakita.api.message_parts import (
     normalize_chat_todo,
     serialize_plan_to_chat_todo,
 )
-from openakita.api.routes.chat import _backfill_ask_user_answer
+from openakita.api.routes.chat import (
+    _attach_todo_snapshot_meta,
+    _backfill_ask_user_answer,
+    _extract_artifact_events,
+    _observe_todo_snapshot_event,
+)
 from openakita.api.routes.sessions import router
 from openakita.sessions import SessionManager
 
@@ -89,6 +94,16 @@ def test_build_message_parts_orders_blocks_and_marks_heavy_text():
     assert ask_part["ask"]["answered"] is True
 
 
+def test_build_message_parts_includes_sources_and_mcp_markers():
+    msg = {
+        "role": "assistant",
+        "content": "done",
+        "sources": [{"requested_url": "https://example.com", "final_url": "https://example.com"}],
+        "mcp_calls": [{"server": "s", "tool": "t", "status": "ok"}],
+    }
+    assert [p["kind"] for p in build_message_parts(msg)] == ["sources", "mcp", "text"]
+
+
 def test_build_message_parts_empty_for_user():
     assert build_message_parts({"role": "user", "content": "hi"}) == []
 
@@ -97,6 +112,62 @@ def test_build_message_parts_todo_override():
     msg = {"role": "assistant", "content": "x"}
     parts = build_message_parts(msg, todo=serialize_plan_to_chat_todo(_plan()))
     assert [p["kind"] for p in parts] == ["plan", "text"]
+
+
+def test_chat_save_todo_snapshot_helpers_preserve_streamed_plan():
+    snapshot = _observe_todo_snapshot_event(None, {"type": "todo_created", "plan": _plan()})
+    snapshot = _observe_todo_snapshot_event(
+        snapshot,
+        {
+            "type": "todo_step_updated",
+            "step_id": "s2",
+            "status": "completed",
+            "result": "built",
+        },
+    )
+    snapshot = _observe_todo_snapshot_event(snapshot, {"type": "todo_completed"})
+
+    meta = {}
+    _attach_todo_snapshot_meta(meta, conversation_id="conv1", todo_snapshot=snapshot)
+
+    assert meta["todo"]["status"] == "completed"
+    assert meta["todo"]["steps"][1]["status"] == "completed"
+    assert meta["todo"]["steps"][1]["result"] == "built"
+
+
+def test_extract_artifact_events_from_tool_and_delegation_results():
+    direct = _extract_artifact_events(
+        {
+            "type": "tool_call_end",
+            "tool": "deliver_artifacts",
+            "result": (
+                '{"receipts":[{"status":"delivered","file_url":"/api/files/a",'
+                '"path":"a.txt","name":"a.txt","type":"file","caption":"A","size":3}]}'
+            ),
+        }
+    )
+    delegated = _extract_artifact_events(
+        {
+            "type": "tool_call_end",
+            "tool": "delegate_to_agent",
+            "result": (
+                'ok\n__ARTIFACT_RECEIPTS__\n'
+                '[{"status":"delivered","file_url":"/api/files/b","path":"b.txt","name":"b.txt"}]\n'
+            ),
+        }
+    )
+
+    assert direct == [
+        {
+            "artifact_type": "file",
+            "file_url": "/api/files/a",
+            "path": "a.txt",
+            "name": "a.txt",
+            "caption": "A",
+            "size": 3,
+        }
+    ]
+    assert delegated[0]["file_url"] == "/api/files/b"
 
 
 # ── history route surfaces todo / parts / answered ask_user ──
@@ -120,6 +191,20 @@ def test_history_exposes_plan_snapshot_and_parts(tmp_path):
     assert assistant["todo"]["taskSummary"] == "Ship the feature"
     assert [p["kind"] for p in assistant["parts"]] == ["plan", "text"]
     assert "active_todo" in body
+
+
+def test_history_exposes_sources_mcp_and_parts(tmp_path):
+    client = _history_client(
+        tmp_path,
+        sources=[{"requested_url": "https://example.com", "final_url": "https://example.com"}],
+        mcp_calls=[{"server": "s", "tool": "t", "status": "ok"}],
+    )
+    body = client.get("/api/sessions/conv1/history").json()
+    assistant = body["messages"][-1]
+
+    assert assistant["sources"][0]["requested_url"] == "https://example.com"
+    assert assistant["mcp_calls"][0]["server"] == "s"
+    assert [p["kind"] for p in assistant["parts"]] == ["sources", "mcp", "text"]
 
 
 def test_history_exposes_answered_ask_user(tmp_path):

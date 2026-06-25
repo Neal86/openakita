@@ -492,6 +492,96 @@ class TestChatControlEndpoints:
         )
         assert resp.status_code == 200
 
+    async def test_cancel_idle_conversation_does_not_leave_pending_cancel(
+        self, client, mock_agent
+    ):
+        mock_agent._pending_cancels = {}
+        mock_agent.cancel_current_task = MagicMock()
+
+        resp = await client.post(
+            "/api/chat/cancel",
+            json={"conversation_id": "idle-conv", "reason": "late cancel"},
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["action"] == "noop"
+        mock_agent.cancel_current_task.assert_not_called()
+        assert "idle-conv" not in mock_agent._pending_cancels
+
+    async def test_cancel_busy_conversation_still_cancels_and_releases_lock(
+        self, client, mock_agent
+    ):
+        from openakita.api.routes.conversation_lifecycle import get_lifecycle_manager
+
+        lifecycle = get_lifecycle_manager()
+        await lifecycle.start("busy-cancel-conv", "client-a")
+        mock_agent._current_conversation_id = "busy-cancel-conv"
+        mock_agent.agent_state = SimpleNamespace(get_task_for_session=lambda _cid: object())
+        mock_agent.cancel_current_task = MagicMock()
+
+        resp = await client.post(
+            "/api/chat/cancel",
+            json={"conversation_id": "busy-cancel-conv", "reason": "user stopped"},
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["action"] == "cancel"
+        mock_agent.cancel_current_task.assert_called_once_with(
+            "user stopped",
+            session_id="busy-cancel-conv",
+        )
+        busy_status = await lifecycle.get_busy_status("busy-cancel-conv")
+        assert busy_status["busy"] is False
+
+    async def test_cancel_busy_but_agent_cleaned_up_does_not_leave_pending_cancel(
+        self, client, mock_agent
+    ):
+        from openakita.api.routes.conversation_lifecycle import get_lifecycle_manager
+
+        lifecycle = get_lifecycle_manager()
+        await lifecycle.start("late-cleanup-conv", "client-a")
+        mock_agent._pending_cancels = {"late-cleanup-conv": "stale"}
+        mock_agent._current_conversation_id = None
+        mock_agent.agent_state = SimpleNamespace(get_task_for_session=lambda _cid: None)
+        mock_agent.cancel_current_task = MagicMock(
+            side_effect=lambda reason, session_id=None: mock_agent._pending_cancels.update(
+                {session_id: reason}
+            )
+        )
+
+        resp = await client.post(
+            "/api/chat/cancel",
+            json={"conversation_id": "late-cleanup-conv", "reason": "late cancel"},
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["action"] == "noop"
+        mock_agent.cancel_current_task.assert_not_called()
+        assert "late-cleanup-conv" not in mock_agent._pending_cancels
+        busy_status = await lifecycle.get_busy_status("late-cleanup-conv")
+        assert busy_status["busy"] is False
+
+    async def test_insert_stop_idle_conversation_does_not_leave_pending_cancel(
+        self, client, mock_agent
+    ):
+        mock_agent._pending_cancels = {}
+        mock_agent.cancel_current_task = MagicMock()
+        mock_agent.classify_interrupt = MagicMock(return_value="stop")
+
+        resp = await client.post(
+            "/api/chat/insert",
+            json={"conversation_id": "idle-insert-conv", "message": "stop"},
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["action"] == "noop"
+        mock_agent.cancel_current_task.assert_not_called()
+        assert "idle-insert-conv" not in mock_agent._pending_cancels
+
     async def test_skip_endpoint(self, client, mock_agent):
         mock_agent.state.skip_current_step = MagicMock()
         resp = await client.post(

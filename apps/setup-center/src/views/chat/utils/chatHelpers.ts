@@ -6,6 +6,8 @@ import type {
   ChatAskQuestion,
   ChatErrorInfo,
   ChatArtifact,
+  ChatSource,
+  ChatMcpCall,
   ChatTodo,
   MessagePart,
   ChainGroup,
@@ -257,6 +259,24 @@ function messageSignature(msg: ChatMessage | undefined): string {
   return `${msg.role}\n${msg.timestamp}\n${msg.content}`;
 }
 
+function firstUserContent(msgs: ChatMessage[]): string {
+  return msgs.find((msg) => msg.role === "user")?.content.trim() ?? "";
+}
+
+function removeAdjacentDuplicateUserMessages(msgs: ChatMessage[]): ChatMessage[] {
+  let changed = false;
+  const deduped: ChatMessage[] = [];
+  for (const msg of msgs) {
+    const prev = deduped[deduped.length - 1];
+    if (msg.role === "user" && prev?.role === "user" && prev.content === msg.content) {
+      changed = true;
+      continue;
+    }
+    deduped.push(msg);
+  }
+  return changed ? deduped : msgs;
+}
+
 /**
  * Choose which message history should hydrate the UI.
  *
@@ -266,23 +286,33 @@ function messageSignature(msg: ChatMessage | undefined): string {
  * placeholder cannot hide a complete answer already persisted by the backend.
  */
 export function chooseHydratedMessages(localMsgs: ChatMessage[], backendMsgs: ChatMessage[]): ChatMessage[] {
-  if (backendMsgs.length === 0) return localMsgs;
-  if (localMsgs.length === 0) return backendMsgs;
+  const cleanBackend = removeAdjacentDuplicateUserMessages(backendMsgs);
+  if (cleanBackend.length === 0) return removeAdjacentDuplicateUserMessages(localMsgs);
+  if (localMsgs.length === 0) return cleanBackend;
 
-  const patchedLocal = patchMessagesWithBackend(localMsgs, backendMsgs);
+  const localFirstUser = firstUserContent(localMsgs);
+  const backendFirstUser = firstUserContent(cleanBackend);
+  if (localFirstUser && backendFirstUser && localFirstUser !== backendFirstUser) {
+    return cleanBackend;
+  }
 
-  if (backendMsgs.length > localMsgs.length) return backendMsgs;
-  if (localMsgs.length > backendMsgs.length) return patchedLocal;
-  if (patchedLocal !== localMsgs) return patchedLocal;
+  const cleanLocal = removeAdjacentDuplicateUserMessages(localMsgs);
+  const patchedLocal = removeAdjacentDuplicateUserMessages(
+    patchMessagesWithBackend(cleanLocal, cleanBackend),
+  );
 
-  const localLatest = latestMessageTimestamp(localMsgs);
-  const backendLatest = latestMessageTimestamp(backendMsgs);
-  if (backendLatest > localLatest) return backendMsgs;
-  if (localLatest > backendLatest) return localMsgs;
+  if (cleanBackend.length > cleanLocal.length) return cleanBackend;
+  if (cleanLocal.length > cleanBackend.length) return patchedLocal;
+  if (patchedLocal !== cleanLocal) return patchedLocal;
 
-  const localLast = messageSignature(localMsgs[localMsgs.length - 1]);
-  const backendLast = messageSignature(backendMsgs[backendMsgs.length - 1]);
-  return backendLast && backendLast !== localLast ? backendMsgs : localMsgs;
+  const localLatest = latestMessageTimestamp(cleanLocal);
+  const backendLatest = latestMessageTimestamp(cleanBackend);
+  if (backendLatest > localLatest) return cleanBackend;
+  if (localLatest > backendLatest) return cleanLocal;
+
+  const localLast = messageSignature(cleanLocal[cleanLocal.length - 1]);
+  const backendLast = messageSignature(cleanBackend[cleanBackend.length - 1]);
+  return backendLast && backendLast !== localLast ? cleanBackend : cleanLocal;
 }
 
 // ── 思维链 ──
@@ -523,6 +553,8 @@ type BackendHistoryMessage = {
   chain_summary?: ChainSummaryItem[];
   chain_timeline?: ChainTimelineGroup[];
   artifacts?: ChatArtifact[] | null;
+  sources?: ChatSource[] | null;
+  mcp_calls?: ChatMcpCall[] | null;
   usage?: ChatMessage["usage"];
   todo?: ChatTodo | null;
   ask_user?: ChatAskUser | null;
@@ -643,13 +675,24 @@ export function patchMessagesWithBackendDetailed(
       patches.artifacts = backend.artifacts;
     }
 
+    if (!m.sources?.length && backend.sources?.length) {
+      patches.sources = backend.sources;
+    }
+
+    if (!m.mcpCalls?.length && backend.mcp_calls?.length) {
+      patches.mcpCalls = backend.mcp_calls;
+    }
+
     if (!m.usage && backend.usage) {
       patches.usage = backend.usage;
     }
 
-    // Persisted plan snapshot — restore the plan card when the local message
-    // never captured it (e.g. hydrated after a crash / in another window).
-    if (!m.todo?.steps?.length && backend.todo?.steps?.length) {
+    // Persisted plan snapshot — restore or refresh the plan card when the
+    // backend has a newer step state (e.g. after reconnecting to a running task).
+    if (
+      backend.todo?.steps?.length &&
+      (!m.todo?.steps?.length || JSON.stringify(m.todo) !== JSON.stringify(backend.todo))
+    ) {
       patches.todo = backend.todo;
     }
 
