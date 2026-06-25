@@ -302,6 +302,8 @@
     "thoughtFor": "思考了 {{seconds}}s",
     "showChain": "显示思维链",
     "hideChain": "隐藏思维链",
+    "outline": "会话大纲",
+    "outlineEmpty": "暂无提问",
     "bubbleMode": "气泡模式",
     "flatMode": "简洁模式",
     "chainSummary": "思维过程",

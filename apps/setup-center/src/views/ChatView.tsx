@@ -318,6 +318,8 @@ export function ChatView({
   const msgSearchRef = useRef<HTMLInputElement | null>(null);
   const messageListRef = useRef<MessageListHandle>(null);
   const isMessageListAtBottomRef = useRef(true);
+  // 会话大纲（Conversation outline）：右侧常驻迷你导航，悬浮展开，列出所有用户提问并支持点击跳转
+  const [activeOutlineId, setActiveOutlineId] = useState<string | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
   const [lightbox, setLightbox] = useState<{ url: string; downloadUrl: string; name: string } | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<{ message: string; onConfirm: () => void } | null>(null);
@@ -4910,6 +4912,19 @@ export function ChatView({
     return `calc(${textUnits}em + 82px)`;
   }, [quickStartItems]);
 
+  // 会话大纲条目：当前会话中所有用户提问（question），保留原始索引用于跳转
+  const outlineItems = useMemo(
+    () =>
+      messages.reduce<{ id: string; index: number; text: string }[]>((acc, m, i) => {
+        if (m.role === "user") {
+          const text = (m.content || "").replace(/\s+/g, " ").trim();
+          if (text) acc.push({ id: m.id, index: i, text });
+        }
+        return acc;
+      }, []),
+    [messages],
+  );
+
   // ── 未启动服务提示 ──
   if (!serviceRunning) {
     return (
@@ -5057,7 +5072,7 @@ export function ChatView({
       )}
 
       {/* 主聊天区 */}
-      <div className="flex min-w-0 flex-1 flex-col" onMouseDown={() => { if (sidebarOpen && !sidebarPinned) setSidebarOpen(false); }}>
+      <div className="flex min-w-0 flex-1 flex-col" style={{ position: "relative" }} onMouseDown={() => { if (sidebarOpen && !sidebarPinned) setSidebarOpen(false); }}>
         {/* Chat top bar */}
         <div className="chatTopBar">
           <button onClick={newConversation} className="chatTopBarBtn" aria-label={t("chat.newConversation", "新建会话")}>
@@ -5269,6 +5284,7 @@ export function ChatView({
               setInputValue(msg);
             }}
             onAtBottomChange={(atBottom) => { isMessageListAtBottomRef.current = atBottom; }}
+            onActiveUserMessageChange={outlineItems.length > 0 ? setActiveOutlineId : undefined}
             onAskAnswer={handleAskAnswer}
             onRetry={handleRegenerate}
             onEdit={handleEditMessage}
@@ -5280,6 +5296,29 @@ export function ChatView({
           </ErrorBoundary>
           )}
         </div>
+
+        {/* 会话大纲 —— 右侧常驻迷你导航，默认折叠为短条，悬浮展开为文字列，点击跳转到对应聊天记录 */}
+        {outlineItems.length > 0 && (
+          <div className="chatOutline" aria-label={t("chat.outline", "会话大纲")}>
+            <div className="chatOutlineList">
+              {outlineItems.map((item) => (
+                <button
+                  key={item.id}
+                  data-slot="outline"
+                  className={`chatOutlineItem ${item.id === activeOutlineId ? "chatOutlineItemActive" : ""}`}
+                  title={item.text}
+                  onClick={() => {
+                    setActiveOutlineId(item.id);
+                    messageListRef.current?.scrollToIndex(item.index, "start");
+                  }}
+                >
+                  <span className="chatOutlineBar" />
+                  <span className="chatOutlineText">{item.text}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Sub-agent progress cards */}
         {displaySubAgentTasks.length > 0 && (

@@ -302,6 +302,8 @@
     "thoughtFor": "Thought for {{seconds}}s",
     "showChain": "Show thinking chain",
     "hideChain": "Hide thinking chain",
+    "outline": "Outline",
+    "outlineEmpty": "No questions yet",
     "bubbleMode": "Bubble mode",
     "flatMode": "Flat mode",
     "chainSummary": "Thinking process",
