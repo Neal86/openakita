@@ -95,6 +95,39 @@ def _new_chain_id() -> str:
     return f"chain_{int(time.time() * 1000):013d}_{secrets.token_hex(4)}"
 
 
+def _direct_dispatch_children(org: Any, node_id: str) -> set[str] | None:
+    """Return the set of node ids ``node_id`` may dispatch DOWN to, or ``None``.
+
+    Topology guard helper (audit 2026-06). Mirrors
+    :meth:`ProfileResolver._available_nodes_for`: a node's legitimate dispatch
+    targets are the downstream ``source -> target`` endpoints of its
+    ``hierarchy`` / ``escalate`` edges (collaborate / consult are peer links,
+    not delegable). Returns:
+
+    * ``None`` when the org exposes NO readable edge metadata (test stubs /
+      flat orgs with no wiring) -> caller FAILS OPEN (keeps the legacy
+      existence-only check) so we never break a topology we cannot read.
+    * a ``set[str]`` (possibly empty) when edges ARE present -> caller HARD
+      ENFORCES membership; an empty set means ``node_id`` is a leaf within a
+      wired org and must not dispatch at all.
+    """
+    edges = getattr(org, "edges", None)
+    if not edges:
+        return None
+    children: set[str] = set()
+    for e in list(edges):
+        src = getattr(e, "source", "") or ""
+        tgt = getattr(e, "target", "") or ""
+        if src != node_id or not tgt or tgt == node_id:
+            continue
+        et = getattr(e, "edge_type", None)
+        et_val = getattr(et, "value", None) or str(et)
+        if et_val not in ("hierarchy", "escalate"):
+            continue
+        children.add(tgt)
+    return children
+
+
 _QUOTA_AUTH_HINTS: tuple[str, ...] = (
     "rate limit",
     "rate_limit",
@@ -612,6 +645,27 @@ class AgentPipelineExecutor:
                 target,
             )
             return f"[dispatch to `{target}` skipped: unknown node]"
+
+        # Hard topology guard (audit 2026-06): the agent prompt only offers a
+        # node's DIRECT reports (``_available_nodes_for``), but nothing
+        # STRUCTURALLY stopped a hallucinated ``<dispatch target=...>`` from
+        # jumping to a non-child (越级) or an unrelated node (凭空连线). Enforce
+        # adjacency here so dispatch ALWAYS follows a real org edge regardless of
+        # what the LLM emits. Fails open only when the org has no readable edge
+        # metadata (test stubs / unwired orgs), so existing flows are unaffected.
+        allowed_children = _direct_dispatch_children(org, parent_node_id)
+        if allowed_children is not None and target not in allowed_children:
+            _LOGGER.warning(
+                "dispatch refused: `%s` is not a direct report of `%s` "
+                "(越级/凭空连线 blocked; allowed=%s)",
+                target,
+                parent_node_id,
+                sorted(allowed_children),
+            )
+            return (
+                f"[dispatch to `{target}` refused: not a direct report of "
+                f"`{parent_node_id}`; dispatch must follow the org chart]"
+            )
 
         preview = body[:200]
         # Chain wiring: the parent's chain (set by its own

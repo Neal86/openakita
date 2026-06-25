@@ -49,11 +49,22 @@ class _Node:
         self.persona = None
 
 
+class _Edge:
+    def __init__(self, source: str, target: str, edge_type: str = "hierarchy") -> None:
+        self.source = source
+        self.target = target
+        self.edge_type = SimpleNamespace(value=edge_type)
+
+
 class _Org:
-    def __init__(self, node_ids: list[str]) -> None:
+    def __init__(self, node_ids: list[str], *, edges: list[_Edge] | None = None) -> None:
         self.status = SimpleNamespace(value="active")
         self.state = "active"
         self.nodes = [_Node(nid) for nid in node_ids]
+        # ``edges`` left as an empty list keeps the topology guard FAIL-OPEN
+        # (mirrors a legacy/unwired org); supplying edges opts a test into the
+        # hard adjacency enforcement.
+        self.edges = list(edges or [])
 
     def get_node(self, nid: str) -> _Node | None:
         return next((n for n in self.nodes if n.id == nid), None)
@@ -63,8 +74,14 @@ class _Org:
 
 
 class _Lookup:
-    def __init__(self, node_ids: list[str], *, org_dir: Path | None = None) -> None:
-        self._org = _Org(node_ids)
+    def __init__(
+        self,
+        node_ids: list[str],
+        *,
+        org_dir: Path | None = None,
+        edges: list[_Edge] | None = None,
+    ) -> None:
+        self._org = _Org(node_ids, edges=edges)
         self._org_dir = org_dir
 
     def get_org(self, org_id: str) -> _Org | None:  # noqa: ARG002
@@ -411,3 +428,96 @@ class _AsyncFn:
 
     async def __call__(self, **kwargs: Any) -> Any:
         return self._fn(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# 核心 (audit 2026-06): hard topology guard — dispatch must follow the org chart
+# ---------------------------------------------------------------------------
+
+
+def test_topology_guard_blocks_skip_level_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A coordinator may dispatch ONLY to its DIRECT reports.
+
+    Even if a node EXISTS in the org, a 越级 (skip-level) dispatch to a
+    non-child must be hard-refused — the prompt only OFFERS direct reports, but
+    this guarantees adjacency structurally regardless of what the LLM emits.
+    A valid dispatch to a real direct child still runs.
+    """
+    monkeypatch.setenv("OPENAKITA_ORG_REVIEW_ENABLED", "0")
+    monkeypatch.setenv("OPENAKITA_ORG_NODE_TIMEOUT_S", "0")
+    bus = _RecordingBus()
+    # n0 -> n1 -> n2 chain. n0's ONLY direct report is n1; n2 is a grandchild.
+    edges = [_Edge("n0", "n1"), _Edge("n1", "n2")]
+    lookup = _Lookup(["n0", "n1", "n2"], edges=edges)
+
+    def _resolve(**_kwargs: Any) -> SimpleNamespace:
+        return _resp("叶子节点完整成果：第一部分……结论。")
+
+    brain = SimpleNamespace(
+        messages_create_async=_AsyncFn(_resolve), set_trace_context=lambda _c: None
+    )
+    executor = _make_executor(bus=bus, lookup=lookup, brain=brain)
+
+    # Valid: n0 -> n1 (direct child) runs and returns the deliverable.
+    out_ok = asyncio.run(
+        executor.dispatch_subtask(
+            org_id="o1",
+            parent_node_id="n0",
+            parent_command_id="cmd_topo",
+            child_node_id="n1",
+            child_content="做这件事",
+        )
+    )
+    assert "成果" in out_ok
+    assert any(
+        n == "agent_run_started" and p.get("node_id") == "n1" for n, p in bus.events
+    )
+
+    # 越级: n0 -> n2 (grandchild, NOT a direct report) is hard-refused before
+    # any event is emitted or any agent runs.
+    bus.events.clear()
+    out_bad = asyncio.run(
+        executor.dispatch_subtask(
+            org_id="o1",
+            parent_node_id="n0",
+            parent_command_id="cmd_topo",
+            child_node_id="n2",
+            child_content="做这件事",
+        )
+    )
+    assert "refused" in out_bad and "n2" in out_bad
+    assert "subtask_assigned" not in _names(bus)
+    assert not any(p.get("node_id") == "n2" for _, p in bus.events)
+
+
+def test_topology_guard_fails_open_without_edges(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the org exposes no edge metadata the guard FAILS OPEN.
+
+    Pins the safety valve: a legacy / test stub org (no ``edges``) keeps the
+    legacy existence-only check, so the guard never breaks a topology it
+    cannot read.
+    """
+    monkeypatch.setenv("OPENAKITA_ORG_REVIEW_ENABLED", "0")
+    monkeypatch.setenv("OPENAKITA_ORG_NODE_TIMEOUT_S", "0")
+    bus = _RecordingBus()
+    lookup = _Lookup(["n0", "n1"])  # no edges -> fail-open
+
+    def _resolve(**_kwargs: Any) -> SimpleNamespace:
+        return _resp("完整成果内容……")
+
+    brain = SimpleNamespace(
+        messages_create_async=_AsyncFn(_resolve), set_trace_context=lambda _c: None
+    )
+    executor = _make_executor(bus=bus, lookup=lookup, brain=brain)
+
+    out = asyncio.run(
+        executor.dispatch_subtask(
+            org_id="o1",
+            parent_node_id="n0",
+            parent_command_id="cmd_open",
+            child_node_id="n1",
+            child_content="做这件事",
+        )
+    )
+    assert "成果" in out
+    assert "refused" not in out
