@@ -38,18 +38,12 @@ from openakita.core.agent_state import (
 )
 from openakita.core.reasoning_engine import ReasoningEngine
 
-# The reason_stream race-guard rewrite (``_reason_stream_impl`` +
-# ``ensure_ready_for_reasoning`` + ``IllegalReasoningEntry`` counter +
-# content-safety ``agent_voice``) is upstream work NOT ported after the
-# ADR-0003 split of ``core/agent.py``. The compat shims keep the import paths
-# alive; the behaviour is tracked for a future port. See
-# docs/follow-ups/skipped-items-roadmap.md (Batch C — core/agent.py follow-ups).
-# The state-machine contract (TestTerminalToReasoningContract) lives in
-# ``agent_state`` and stays active.
-_NOT_PORTED = (
-    "reason_stream race-guard / illegal-reasoning-entry rewrite not ported "
-    "after ADR-0003 split; see docs/follow-ups/skipped-items-roadmap.md (Batch C)"
-)
+# The reason_stream race-guard (``ensure_ready_for_reasoning`` +
+# ``IllegalReasoningEntry`` counter + content-safety ``agent_voice``) is ported
+# into ``core/_reasoning_engine_legacy`` after the ADR-0003 split (Batch C).
+# Local ``ReasoningEngine`` keeps the monolithic ``reason_stream`` / ``run``
+# methods, so the wiring-contract tests inspect those rather than upstream's
+# ``_reason_stream_impl`` / ``_run_impl`` helpers. All tests below are active.
 
 
 class TestTerminalToReasoningContract:
@@ -89,7 +83,6 @@ class TestTerminalToReasoningContract:
         second.transition(TaskStatus.REASONING)
 
 
-@pytest.mark.skip(reason=_NOT_PORTED)
 class TestReasonStreamRaceGuard:
     """``reason_stream`` line 4010 + ``_switch_model_for_stream`` line 8540
     both must guard the bare ``state.transition(...)`` call so a concurrent
@@ -121,7 +114,7 @@ class TestReasonStreamRaceGuard:
         # raises IllegalReasoningEntry on terminal states; the
         # belt-and-suspenders ValueError catch is still present for any
         # other illegal source -> REASONING transition.
-        src = self._strip_comments(inspect.getsource(ReasoningEngine._reason_stream_impl))
+        src = self._strip_comments(inspect.getsource(ReasoningEngine.reason_stream))
         pattern = re.compile(
             r"if\s+state\.status\s*!=\s*TaskStatus\.REASONING\s*:\s*"
             r"\n\s*try\s*:\s*"
@@ -142,7 +135,7 @@ class TestReasonStreamRaceGuard:
         (the terminal-state branch), we must short-circuit with an SSE
         error+done sequence including a stable ``code`` for clients to
         match on."""
-        src = self._strip_comments(inspect.getsource(ReasoningEngine._reason_stream_impl))
+        src = self._strip_comments(inspect.getsource(ReasoningEngine.reason_stream))
         assert "IllegalReasoningEntry" in src, (
             "reason_stream must catch IllegalReasoningEntry in the "
             "race-guard branch (issue #572 fix, v1.28.3 S5-A)."
@@ -161,7 +154,7 @@ class TestReasonStreamRaceGuard:
     def test_reason_stream_increments_illegal_reasoning_entry_counter(self) -> None:
         """v1.28.3 S5-A: the IllegalReasoningEntry catch must call
         inc_illegal_reasoning_entry so ops can pager-alert on it."""
-        src = self._strip_comments(inspect.getsource(ReasoningEngine._reason_stream_impl))
+        src = self._strip_comments(inspect.getsource(ReasoningEngine.reason_stream))
         assert "inc_illegal_reasoning_entry" in src, (
             "The IllegalReasoningEntry handler must increment the counter "
             "for ops alerting; this is the only signal that S1's preempt "
@@ -291,7 +284,6 @@ class TestEnsureReadyForReasoning:
             assert ts.status is TaskStatus.REASONING
 
 
-@pytest.mark.skip(reason=_NOT_PORTED)
 class TestS5AAuditFixes:
     """v1.28.3-pre audit hot-fixes (FIX-S5A-1 + FIX-S5A-2).
 
@@ -325,7 +317,7 @@ class TestS5AAuditFixes:
         We anchor the outer catch by the unique ``reason_stream_outer``
         source label (this string only appears in the outer handler we
         just added; inner main-loop uses ``reason_stream_iter``)."""
-        src = inspect.getsource(ReasoningEngine._reason_stream_impl)
+        src = inspect.getsource(ReasoningEngine.reason_stream)
         outer_marker = src.find("reason_stream_outer")
         assert outer_marker > 0, (
             "FIX-S5A-1: the outer IllegalReasoningEntry handler must "
@@ -363,7 +355,7 @@ class TestS5AAuditFixes:
         ``reason_stream_iter`` (inner main-loop catch — common path)
         from ``reason_stream_outer`` (defensive net for callsites we
         haven't yet identified)."""
-        src = inspect.getsource(ReasoningEngine._reason_stream_impl)
+        src = inspect.getsource(ReasoningEngine.reason_stream)
         assert "reason_stream_outer" in src, (
             "FIX-S5A-1: the outer catch must label its counter increment "
             "as `reason_stream_outer` so ops can distinguish 'main-loop "
@@ -375,7 +367,7 @@ class TestS5AAuditFixes:
         main loop now emits inc_illegal_reasoning_entry on the
         terminal-state branch.  IM users no longer have 100% blind
         telemetry."""
-        src = inspect.getsource(ReasoningEngine._run_impl)
+        src = inspect.getsource(ReasoningEngine.run)
         # The label distinguishes from reason_stream so dashboards can
         # see which channel surfaces races.
         assert "run_impl_main_loop" in src, (
@@ -385,14 +377,14 @@ class TestS5AAuditFixes:
         )
 
     def test_run_impl_ask_user_reply_hot_fix_increments_counter(self) -> None:
-        src = inspect.getsource(ReasoningEngine._run_impl)
+        src = inspect.getsource(ReasoningEngine.run)
         assert "run_impl_ask_user_reply" in src, (
             "FIX-S5A-2: the run() ask_user-reply hot-fix must label "
             "its counter increment as `run_impl_ask_user_reply`."
         )
 
     def test_run_impl_ask_user_timeout_hot_fix_increments_counter(self) -> None:
-        src = inspect.getsource(ReasoningEngine._run_impl)
+        src = inspect.getsource(ReasoningEngine.run)
         assert "run_impl_ask_user_timeout" in src, (
             "FIX-S5A-2: the run() ask_user-timeout hot-fix must label "
             "its counter increment as `run_impl_ask_user_timeout`."
@@ -408,7 +400,7 @@ class TestS5AAuditFixes:
         anchor in source and walk back up to 1000 chars looking for the
         nearest `if state.is_terminal:` — that guard MUST exist between
         the `except ValueError:` and the counter call."""
-        src = inspect.getsource(ReasoningEngine._run_impl)
+        src = inspect.getsource(ReasoningEngine.run)
         for label in (
             "run_impl_main_loop",
             "run_impl_ask_user_reply",
@@ -465,7 +457,6 @@ class TestS5AAuditFixes:
         }
 
 
-@pytest.mark.skip(reason=_NOT_PORTED)
 class TestIllegalReasoningEntryAlerts:
     """v1.28.3 S5-A: when IllegalReasoningEntry surfaces in
     ``_reason_stream_impl``, an ``inc_illegal_reasoning_entry`` counter
@@ -475,7 +466,7 @@ class TestIllegalReasoningEntryAlerts:
     def test_counter_is_imported_into_reason_stream_impl_handler(self) -> None:
         """The counter import lives inside the except block to keep
         startup imports lean — verify the contract via source inspection."""
-        src = inspect.getsource(ReasoningEngine._reason_stream_impl)
+        src = inspect.getsource(ReasoningEngine.reason_stream)
         # Counter import must be co-located with the IllegalReasoningEntry handler.
         assert re.search(
             r"except\s+IllegalReasoningEntry[\s\S]{0,500}?inc_illegal_reasoning_entry",
@@ -490,7 +481,7 @@ class TestIllegalReasoningEntryAlerts:
         """The fire-site uses source ``reason_stream_iter`` so ops can
         distinguish it from any future hot-path call sites we might add
         (e.g. tool execution or run() iteration entry)."""
-        src = inspect.getsource(ReasoningEngine._reason_stream_impl)
+        src = inspect.getsource(ReasoningEngine.reason_stream)
         assert "reason_stream_iter" in src
 
     def test_counter_actually_increments(self) -> None:
@@ -511,7 +502,6 @@ class TestIllegalReasoningEntryAlerts:
         assert matching[0]["value"] == 1
 
 
-@pytest.mark.skip(reason=_NOT_PORTED)
 class TestAllReasoningTransitionsGuarded:
     """Belt-and-suspenders: every ``state.transition(...)`` inside
     ``reason_stream`` should either be in the ``try/except ValueError`` shape
@@ -522,7 +512,7 @@ class TestAllReasoningTransitionsGuarded:
     def test_no_bare_state_transition_in_reason_stream(self) -> None:
         # v1.27.14 (plan S1.5): hotfix 内容现在位于 _reason_stream_impl；
         # wrapper 只做 settle hook，不含 state.transition 调用。
-        src = inspect.getsource(ReasoningEngine._reason_stream_impl)
+        src = inspect.getsource(ReasoningEngine.reason_stream)
         lines = src.splitlines()
         bare: list[tuple[int, str]] = []
         for idx, line in enumerate(lines):
@@ -558,16 +548,15 @@ class TestAllReasoningTransitionsGuarded:
         )
 
 
-@pytest.mark.skip(reason=_NOT_PORTED)
 class TestContentSafetyMinimalPromptIdentity:
     def test_run_impl_accepts_agent_voice_for_content_safety_prompt(self) -> None:
-        src = inspect.getsource(ReasoningEngine._run_impl)
+        src = inspect.getsource(ReasoningEngine.run)
         assert 'agent_voice: str = ""' in src
         assert '_content_safety_identity = _content_safety_name or "一个 AI 助手"' in src
         assert "你是 {_content_safety_identity}" in src
 
     def test_reason_stream_accepts_agent_voice_for_content_safety_prompt(self) -> None:
-        src = inspect.getsource(ReasoningEngine._reason_stream_impl)
+        src = inspect.getsource(ReasoningEngine.reason_stream)
         assert 'agent_voice: str = ""' in src
         assert '_content_safety_identity = _content_safety_name or "一个 AI 助手"' in src
         assert "你是 {_content_safety_identity}" in src
