@@ -147,12 +147,14 @@ async def test_node_tool_host_executes_real_filesystem_handler(
     event + empty workspace) if we ever regress to the empty-registry
     state.
 
-    Org-scope sandbox (this round): a node writing a RELATIVE path no
-    longer lands in the FileTool workspace / process CWD -- it is
-    redirected into the org's ``artifacts/`` dir before the handler runs
-    (see ``_redirect_relative_writes``). We point the resolver at a tmp
+    Command-scope sandbox (exploratory v22): a node writing a RELATIVE
+    path no longer lands in the FileTool workspace / process CWD -- it is
+    redirected into the PER-COMMAND workspace
+    ``data/orgs/<id>/commands/<command_id>/artifacts/`` before the handler
+    runs (see ``_redirect_relative_writes``). We point the resolver at a tmp
     org dir so the redirect is exercised end-to-end without polluting the
-    real ``data/`` tree, and assert the file materialises there.
+    real ``data/`` tree, and assert the file materialises in the per-command
+    dir (theme-drift isolation: a fresh command opens an empty workspace).
     """
 
     workspace = tmp_path / "workspace"
@@ -181,9 +183,15 @@ async def test_node_tool_host_executes_real_filesystem_handler(
     assert is_error is False
     assert "deliverable.txt" in result
     # The handler really ran -- file exists with the LLM-supplied content,
-    # redirected into the org artifacts dir (not the bare workspace/CWD).
-    written = (org_dir / "artifacts" / "deliverable.txt").read_text(encoding="utf-8")
+    # redirected into the PER-COMMAND artifacts dir (not the org-level dir, not
+    # the bare workspace/CWD). This is the command-level isolation boundary.
+    written = (
+        org_dir / "commands" / "cmd-001" / "artifacts" / "deliverable.txt"
+    ).read_text(encoding="utf-8")
     assert written == "v18 audit signal"
+    # Belt-and-braces: it must NOT have leaked into the shared org-level dir,
+    # which is exactly what would re-pollute a sibling command.
+    assert not (org_dir / "artifacts" / "deliverable.txt").exists()
     # The events.jsonl actually has the completion line -- the v17
     # smoking gun signal Sprint-6 must produce ≥3 of.
     events = _read_events(jsonl)

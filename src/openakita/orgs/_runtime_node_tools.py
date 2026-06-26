@@ -145,21 +145,75 @@ def _org_artifacts_dir(org_id: str) -> Path | None:
         return None
 
 
+def _command_workspace_dir(org_id: str, command_id: str | None) -> Path | None:
+    """Resolve the per-COMMAND artifacts sandbox for node file tools.
+
+    Exploratory v22 (theme-drift root cause): the contamination vector was a
+    node's ``list_directory`` / ``read_file`` discovering a PRIOR command's
+    on-disk deliverables (e.g. an old 《剑来》报告 left in the org workspace)
+    and anchoring the new 《凡人修仙传》task on it. We give every command its
+    OWN artifacts dir at ``data/orgs/<id>/commands/<command_id>/artifacts`` and
+    sandbox BOTH reads and writes there, so a fresh command opens an empty
+    workspace and cannot see another command's files. Same-command upstream
+    outputs still reflow downstream because (a) they are inlined into the child
+    prompt by the agent builder and (b) any tool-written file lands in this same
+    per-command dir, readable by later same-command nodes.
+
+    Falls back to the org-level ``artifacts`` dir when ``command_id`` is missing
+    (legacy / unit-test contexts) so non-command tool calls keep their old
+    behaviour byte-for-byte.
+    """
+    try:
+        from ._runtime_node_artifacts import _resolve_org_dir, safe_path_segment
+
+        org_dir = _resolve_org_dir(None, org_id)
+        if org_dir is None:
+            return None
+        cmd = (command_id or "").strip()
+        if cmd:
+            safe_cmd = safe_path_segment(cmd, fallback="_cmd")
+            return org_dir / "commands" / safe_cmd / "artifacts"
+        return org_dir / "artifacts"
+    except Exception:  # noqa: BLE001 -- never let sandbox resolution break a run
+        return None
+
+
+def _clamp_into(root: Path, raw: str) -> Path:
+    """Resolve ``raw`` (relative) under ``root``, clamping ``..`` escapes.
+
+    Mirrors the write-redirect clamp: a relative path that would escape ``root``
+    via ``..`` is collapsed to ``<root>/<basename>`` so a node can never
+    traverse out of its sandbox.
+    """
+    root_res = root.resolve()
+    candidate = (root_res / Path(raw)).resolve()
+    if candidate != root_res and not candidate.is_relative_to(root_res):
+        candidate = (root_res / Path(raw).name).resolve()
+    return candidate
+
+
 def _redirect_relative_writes(
-    tool_name: str, tool_input: dict[str, Any], org_id: str
+    tool_name: str,
+    tool_input: dict[str, Any],
+    org_id: str,
+    command_id: str | None = None,
 ) -> list[tuple[str, str]]:
-    """Rewrite RELATIVE write destinations to live under the org artifacts dir.
+    """Rewrite RELATIVE write destinations to live under the per-command dir.
 
     Mutates ``tool_input`` in place. Returns a list of ``(original, rewritten)``
     pairs for logging/transparency. Absolute paths are left untouched (the
     source-tree guard handles them). Any ``..`` that would escape the artifacts
     dir is clamped to the artifacts root using just the basename, so a node can
     never traverse out of its sandbox via a relative path.
+
+    The destination is the per-COMMAND workspace (see
+    :func:`_command_workspace_dir`); when ``command_id`` is ``None`` it falls
+    back to the org-level artifacts dir for backward compatibility.
     """
     keys = _WRITE_DEST_KEYS.get(tool_name)
     if not keys or not isinstance(tool_input, dict):
         return []
-    artifacts = _org_artifacts_dir(org_id)
+    artifacts = _command_workspace_dir(org_id, command_id)
     if artifacts is None:
         return []
     rewrites: list[tuple[str, str]] = []
@@ -172,14 +226,80 @@ def _redirect_relative_writes(
             if p.is_absolute():
                 continue  # absolute paths handled by the source-tree guard
             artifacts_root = artifacts.resolve()
-            candidate = (artifacts_root / p).resolve()
-            # Clamp ``..`` traversal: if the joined path escapes the artifacts
-            # root, fall back to <artifacts>/<basename>.
-            if candidate != artifacts_root and not candidate.is_relative_to(
-                artifacts_root
-            ):
-                candidate = (artifacts_root / Path(raw).name).resolve()
+            candidate = _clamp_into(artifacts_root, raw)
             artifacts_root.mkdir(parents=True, exist_ok=True)
+            tool_input[key] = str(candidate)
+            rewrites.append((raw, str(candidate)))
+        except Exception:  # noqa: BLE001 -- a malformed path can't be redirected
+            continue
+    return rewrites
+
+
+# Read-class tools whose RELATIVE path arg gets sandboxed into the per-command
+# workspace. Sandboxing READS (not just writes) is what actually fixes the
+# cross-command theme-drift: a node's ``list_directory(".")`` / ``read_file``
+# can no longer reach a prior command's stale deliverables.
+_READ_SRC_KEYS: dict[str, tuple[str, ...]] = {
+    "read_file": ("path", "file_path"),
+    "read_text_file": ("path", "file_path"),
+    "read_multiple_files": ("path", "file_path"),
+    "list_directory": ("path", "dir_path"),
+    "list_dir": ("path", "dir_path"),
+    "directory_tree": ("path", "dir_path"),
+    "search_files": ("path", "dir_path", "root"),
+    "glob": ("path", "dir_path", "root"),
+    "grep": ("path", "dir_path", "root"),
+}
+
+# Path aliases that mean "the workspace root listing" rather than a named file.
+_READ_ROOT_ALIASES: frozenset[str] = frozenset({"", ".", "./", "/"})
+
+
+def _redirect_relative_reads(
+    tool_name: str,
+    tool_input: dict[str, Any],
+    org_id: str,
+    command_id: str | None = None,
+) -> list[tuple[str, str]]:
+    """Sandbox RELATIVE read paths into the per-command workspace.
+
+    Mutates ``tool_input`` in place; returns ``(original, rewritten)`` pairs.
+    A bare ``.`` (workspace-root listing) resolves to the per-command dir
+    itself, so ``list_directory(".")`` shows ONLY the current command's files.
+    Absolute paths are left untouched (a node cannot auto-discover another
+    command's absolute path because directory listing is itself sandboxed).
+    No-op when ``command_id`` is missing (legacy/test parity).
+    """
+    keys = _READ_SRC_KEYS.get(tool_name)
+    if not keys or not isinstance(tool_input, dict):
+        return []
+    # Only sandbox when we actually have a per-command dir; with no command_id
+    # the workspace resolves to the org artifacts dir and we keep the old
+    # (un-sandboxed) read behaviour to avoid disturbing legacy/tests.
+    if not (command_id or "").strip():
+        return []
+    sandbox = _command_workspace_dir(org_id, command_id)
+    if sandbox is None:
+        return []
+    rewrites: list[tuple[str, str]] = []
+    sandbox_root = sandbox.resolve()
+    try:
+        sandbox_root.mkdir(parents=True, exist_ok=True)
+    except Exception:  # noqa: BLE001 -- mkdir best-effort
+        pass
+    for key in keys:
+        raw = tool_input.get(key)
+        if not isinstance(raw, str):
+            continue
+        s = raw.strip()
+        if s in _READ_ROOT_ALIASES:
+            tool_input[key] = str(sandbox_root)
+            rewrites.append((raw or ".", str(sandbox_root)))
+            continue
+        try:
+            if Path(s).is_absolute():
+                continue  # absolute reads cannot be auto-discovered (list sandboxed)
+            candidate = _clamp_into(sandbox_root, s)
             tool_input[key] = str(candidate)
             rewrites.append((raw, str(candidate)))
         except Exception:  # noqa: BLE001 -- a malformed path can't be redirected
@@ -547,19 +667,39 @@ async def execute_node_tool(
     pipeline (Sprint-3 P0-2) keeps working through tool execution.
     """
 
-    # Org-scope sandbox: redirect RELATIVE write destinations into the org's
-    # ``artifacts/`` dir BEFORE preview/exec so a bare filename like
-    # ``jianlai_points.md`` lands in data/orgs/<id>/artifacts/ instead of the
-    # process CWD (repo root). Absolute paths still hit the source-tree guard.
-    redirects = _redirect_relative_writes(tool_name, tool_input, org_id)
+    # Command-scope sandbox: redirect RELATIVE write destinations into the
+    # PER-COMMAND workspace BEFORE preview/exec so a bare filename like
+    # ``jianlai_points.md`` lands in data/orgs/<id>/commands/<cmd>/artifacts/
+    # instead of the process CWD (repo root). Absolute paths still hit the
+    # source-tree guard.
+    redirects = _redirect_relative_writes(tool_name, tool_input, org_id, command_id)
     if redirects:
         _LOGGER.info(
-            "[node-tool] redirected %s relative write(s) into org artifacts "
-            "(org=%s node=%s): %s",
+            "[node-tool] redirected %s relative write(s) into command workspace "
+            "(org=%s node=%s cmd=%s): %s",
             tool_name,
             org_id,
             node_id,
+            command_id,
             "; ".join(f"{o} -> {n}" for o, n in redirects),
+        )
+
+    # Command-scope sandbox for READS (exploratory v22 theme-drift fix): a
+    # node's ``list_directory`` / ``read_file`` is confined to THIS command's
+    # workspace so it can never discover and anchor on a PRIOR command's stale
+    # deliverables (the 《剑来》→《凡人修仙传》contamination). Same-command
+    # reflow is preserved (upstream output is inlined into the child prompt and
+    # any tool-written file lives in this same per-command dir).
+    read_redirects = _redirect_relative_reads(tool_name, tool_input, org_id, command_id)
+    if read_redirects:
+        _LOGGER.info(
+            "[node-tool] sandboxed %s relative read(s) to command workspace "
+            "(org=%s node=%s cmd=%s): %s",
+            tool_name,
+            org_id,
+            node_id,
+            command_id,
+            "; ".join(f"{o} -> {n}" for o, n in read_redirects),
         )
 
     args_preview = ""
