@@ -428,6 +428,48 @@ def _tool_quality_guidance() -> str:
     )
 
 
+# Markers that identify a cloud-model CONTENT-MODERATION rejection (vs a
+# transient network/quota error). Exploratory v23: data-analyst does the most
+# web_search calls and accumulates 同人/H漫-adjacent titles that, even after the
+# retrieval sanitizer strips the overtly explicit lines, can still trip
+# dashscope deepseek-r1's safety审核 (HTTP 400 data_inspection_failed) -> "All
+# endpoints failed" -> the node hard-failed (task phase=partial). A moderation
+# rejection will recur on retry with the same context, so we DEGRADE the node
+# to a best-effort note instead of failing the whole node -- the org keeps
+# converging and the node contributes a structured "retrieval限制" deliverable.
+_CONTENT_MODERATION_MARKERS: tuple[str, ...] = (
+    "data_inspection_failed",
+    "内容安全审核",
+    "content safety",
+    "content_filter",
+    "content_policy",
+    "risk_control",
+    "data_inspection",
+)
+
+
+def _is_content_moderation_error(exc: BaseException) -> bool:
+    """True when an LLM failure is a content-moderation rejection."""
+
+    text = str(exc).lower()
+    return any(marker.lower() in text for marker in _CONTENT_MODERATION_MARKERS)
+
+
+def _moderation_degraded_note(spec: AgentSpec) -> str:
+    """A structured, valid deliverable used when a node degrades gracefully."""
+
+    return (
+        f"## 自动检索受限说明（节点 {spec.node_id}）\n\n"
+        "本节点在执行联网检索后，部分网络检索结果触发了云端模型的内容安全审核"
+        "（data_inspection_failed），无法基于这些原始结果继续自动生成完整内容。\n\n"
+        "**已做处理**：\n"
+        "- 检索类工具结果已自动过滤明显的成人/无关内容；\n"
+        "- 本节点改为提交降级结论而非整体失败，避免阻塞编排，下游与主编可照常汇总。\n\n"
+        "**建议**：如需本部分数据，请用更精确、去口语化的检索词重试，或由人工补充"
+        "权威平台（B 站 / 抖音 / 微博官方）数据后回灌本节点。"
+    )
+
+
 def _persona_system_prompt(
     spec: AgentSpec, *, depth: int = 0, has_tools: bool = False
 ) -> str:
@@ -783,6 +825,44 @@ class _BrainBackedNodeAgent:
         from ._runtime_agent_pipeline import current_command_id_var
 
         command_id_for_events = current_command_id_var.get("") or None
+        try:
+            parent_text = await self._produce_text(
+                tool_defs=tool_defs,
+                system_prompt=system_prompt,
+                text=text,
+                command_id_for_events=command_id_for_events,
+                tool_host=tool_host,
+                cancel_event=cancel_event,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- only DEGRADE on moderation
+            if _is_content_moderation_error(exc):
+                _LOGGER.warning(
+                    "orgs_v2 node %s degraded after content-moderation rejection "
+                    "(not a hard failure): %s",
+                    self._spec.node_id,
+                    exc,
+                )
+                return _moderation_degraded_note(self._spec)
+            raise
+        return await self._maybe_dispatch(
+            parent_text=parent_text,
+            depth=depth,
+            cancel_event=cancel_event,
+        )
+
+    async def _produce_text(
+        self,
+        *,
+        tool_defs: list[dict[str, Any]],
+        system_prompt: str,
+        text: str,
+        command_id_for_events: str | None,
+        tool_host: Any,
+        cancel_event: asyncio.Event | None,
+    ) -> str:
+        """Run the brain (tool-loop or no-tools) and return the node's text."""
         if tool_defs:
             response, _rounds = await run_with_tools(
                 brain=self._brain,
@@ -796,7 +876,7 @@ class _BrainBackedNodeAgent:
                 tool_host=tool_host,
                 cancel_event=cancel_event,
             )
-            parent_text = _extract_text_from_response(response)
+            return _extract_text_from_response(response)
         else:
             # No-tools (writer/leaf) path. Stream the long-form reply token by
             # token into the 编排过程 timeline (``node_run_delta`` events) so the
@@ -813,16 +893,22 @@ class _BrainBackedNodeAgent:
                 cancel_event=cancel_event,
             )
             if streamed_ok:
-                parent_text = streamed_text
-            else:
-                response = await self._brain.messages_create_async(
-                    messages=[{"role": "user", "content": text}],
-                    system=system_prompt,
-                    tools=[],
-                    cancel_event=cancel_event,
-                )
-                parent_text = _extract_text_from_response(response)
+                return streamed_text
+            response = await self._brain.messages_create_async(
+                messages=[{"role": "user", "content": text}],
+                system=system_prompt,
+                tools=[],
+                cancel_event=cancel_event,
+            )
+            return _extract_text_from_response(response)
 
+    async def _maybe_dispatch(
+        self,
+        *,
+        parent_text: str,
+        depth: int,
+        cancel_event: asyncio.Event | None,
+    ) -> str:
         # Sprint-4 P0-1: parse + recurse on child dispatch blocks.
         # Skip if the dispatch callback is not wired (unit tests /
         # bare-builder users get exactly the Sprint-3 behaviour) or

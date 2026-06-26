@@ -231,3 +231,84 @@ async def test_execute_node_tool_appends_into_per_command_workspace(
     assert target.read_text(encoding="utf-8") == "PART1\nPART2\nPART3\n"
     # never leaked to the org-level dir (cross-command isolation preserved)
     assert not (org_dir / "artifacts" / "big.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# 5) Node graceful degradation on content-moderation rejection (data-analyst ①)
+# ---------------------------------------------------------------------------
+
+
+def test_is_content_moderation_error_detects_dashscope_rejection() -> None:
+    from openakita.orgs._default_agent_builder import _is_content_moderation_error
+
+    moderation = RuntimeError(
+        "All endpoints failed: dashscope-deepseek-r1: 云端模型的内容安全审核未通过 "
+        "(HTTP 400, data_inspection_failed)。"
+    )
+    assert _is_content_moderation_error(moderation) is True
+    # a transient network error must NOT be treated as moderation (still hard-fails)
+    assert _is_content_moderation_error(TimeoutError("connection reset by peer")) is False
+
+
+def test_node_degrades_instead_of_failing_on_moderation_rejection() -> None:
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from openakita.orgs._default_agent_builder import (
+        DefaultAgentBuilder,
+        _moderation_degraded_note,
+    )
+    from openakita.orgs._runtime_agent_pipeline import AgentSpec
+
+    spec = AgentSpec(
+        org_id="org_1",
+        node_id="data-analyst",
+        role="worker",
+        persona="data analyst",
+        enable_file_tools=False,
+        external_tools=(),
+    )
+    brain = SimpleNamespace(
+        messages_create_async=AsyncMock(
+            side_effect=RuntimeError(
+                "All endpoints failed: dashscope-deepseek-r1: 内容安全审核未通过 "
+                "(HTTP 400, data_inspection_failed)。"
+            )
+        ),
+        set_trace_context=lambda ctx: None,
+    )
+    builder = DefaultAgentBuilder(brain_provider=lambda: brain)
+    agent = builder.build(spec)
+    out = asyncio.run(agent.run("收集B站/抖音数据"))
+    # The node did NOT raise -- it returned a structured degraded deliverable.
+    assert out == _moderation_degraded_note(spec)
+    assert "自动检索受限说明" in out
+    assert "data-analyst" in out
+
+
+def test_node_still_raises_on_non_moderation_error() -> None:
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    import pytest as _pytest
+
+    from openakita.orgs._default_agent_builder import DefaultAgentBuilder
+    from openakita.orgs._runtime_agent_pipeline import AgentSpec
+
+    spec = AgentSpec(
+        org_id="org_1",
+        node_id="n1",
+        role="worker",
+        persona="x",
+        enable_file_tools=False,
+        external_tools=(),
+    )
+    brain = SimpleNamespace(
+        messages_create_async=AsyncMock(side_effect=RuntimeError("boom: socket closed")),
+        set_trace_context=lambda ctx: None,
+    )
+    agent = DefaultAgentBuilder(brain_provider=lambda: brain).build(spec)
+    with _pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(agent.run("hi"))
