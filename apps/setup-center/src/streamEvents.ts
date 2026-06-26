@@ -27,6 +27,7 @@ export const StreamEventType = {
   // ── Tool execution ──
   TOOL_CALL_START: "tool_call_start",
   TOOL_CALL_END: "tool_call_end",
+  CONFIG_HINT: "config_hint",
   SOURCE_USED: "source_used",
   MCP_CALL: "mcp_call",
 

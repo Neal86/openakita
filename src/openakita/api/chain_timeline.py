@@ -39,6 +39,8 @@ _THINKING_CAP = 1500
 _TEXT_CAP = 2000
 _ARGS_CAP = 500
 _RESULT_CAP = 800
+_CONFIG_HINT_TEXT_CAP = 500
+_CONFIG_HINT_ACTIONS_CAP = 5
 # Structural caps to keep the persisted blob small on tool-heavy turns.
 _MAX_GROUPS = 60
 _MAX_ENTRIES_PER_GROUP = 80
@@ -65,6 +67,39 @@ def _bound_args(args: Any) -> dict:
     if len(dumped) <= _ARGS_CAP:
         return args
     return {"_preview": dumped[:_ARGS_CAP], "_truncated": True}
+
+
+def _bound_config_hint(event: dict) -> dict:
+    """Return the persisted ConfigHintPayload shape, size-bounded."""
+    hint: dict[str, Any] = {
+        "scope": str(event.get("scope", ""))[:_CONFIG_HINT_TEXT_CAP],
+        "error_code": str(event.get("error_code", "unknown"))[:_CONFIG_HINT_TEXT_CAP],
+        "title": str(event.get("title", ""))[:_CONFIG_HINT_TEXT_CAP],
+    }
+    message = event.get("message")
+    if message is not None:
+        hint["message"] = str(message)[:_CONFIG_HINT_TEXT_CAP]
+
+    actions = event.get("actions")
+    if isinstance(actions, list):
+        bounded_actions: list[dict] = []
+        for action in actions[:_CONFIG_HINT_ACTIONS_CAP]:
+            if not isinstance(action, dict):
+                continue
+            bounded_action: dict[str, Any] = {}
+            for key, value in action.items():
+                if not isinstance(key, str):
+                    continue
+                if isinstance(value, str):
+                    bounded_action[key] = value[:_CONFIG_HINT_TEXT_CAP]
+                elif isinstance(value, (int, float, bool)) or value is None:
+                    bounded_action[key] = value
+            if bounded_action:
+                bounded_actions.append(bounded_action)
+        if bounded_actions:
+            hint["actions"] = bounded_actions
+
+    return hint
 
 
 class ChainTimelineBuilder:
@@ -213,6 +248,14 @@ class ChainTimelineBuilder:
                         "tool": event.get("tool") or "",
                         "result": str(event.get("result", ""))[:_RESULT_CAP],
                         "status": status,
+                    }
+                )
+            elif etype == "config_hint":
+                self._append_entry(
+                    {
+                        "kind": "config_hint",
+                        "toolId": str(event.get("tool_use_id") or event.get("id") or ""),
+                        "hint": _bound_config_hint(event),
                     }
                 )
         except Exception:

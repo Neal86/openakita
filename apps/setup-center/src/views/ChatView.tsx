@@ -23,6 +23,7 @@ import type {
   ConversationStatus,
   ChatToolCall,
   ChatTodo,
+  ChatProgressEvent,
   ChatTodoStep,
   ChatAskUser,
   ChatAttachment,
@@ -67,7 +68,7 @@ import {
   exportConversation,
   loadMessagesFromStorage, saveMessagesToStorage, STORED_MESSAGE_WINDOW,
   buildChainFromSummary, buildChainFromTimeline, formatAskUserAnswer, patchMessagesWithBackend, patchMessagesWithBackendDetailed,
-  classifyError, formatToolDescription,
+  chooseHydratedMessages, classifyError, formatToolDescription,
   shouldRenderConversationMessages,
 } from "./chat/utils/chatHelpers";
 import { useMdModules } from "./chat/hooks/useMdModules";
@@ -164,25 +165,21 @@ export function ChatView({
   // ── State（useReducer 集中管理，从 localStorage 恢复） ──
   const { messages, dispatch: msgDispatch, messagesRef: latestMessagesRef } = useMessageReducer(currentWorkspaceId);
   const { conversations, dispatch: convDispatch, conversationsRef: latestConversationsRef } = useConversationReducer(currentWorkspaceId);
+  const displayedMessagesConvIdRef = useRef<string | null>(null);
   const queryGuard = useQueryGuard();
   const securityPolicy = useSecurityPolicy(apiBaseUrl);
 
   // 向后兼容别名：逐步迁移后可移除
   const setMessages = useCallback((arg: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[])) => {
-    if (typeof arg === "function") {
-      const next = arg(latestMessagesRef.current);
-      msgDispatch({ type: "SET_ALL", messages: next });
-    } else {
-      msgDispatch({ type: "SET_ALL", messages: arg });
-    }
+    const next = typeof arg === "function" ? arg(latestMessagesRef.current) : arg;
+    latestMessagesRef.current = next;
+    msgDispatch({ type: "SET_ALL", messages: next });
   }, [msgDispatch, latestMessagesRef]);
 
   const setConversations = useCallback((arg: ChatConversation[] | ((prev: ChatConversation[]) => ChatConversation[])) => {
-    if (typeof arg === "function") {
-      convDispatch({ type: "SET_ALL", conversations: arg(latestConversationsRef.current) });
-    } else {
-      convDispatch({ type: "SET_ALL", conversations: arg });
-    }
+    const next = typeof arg === "function" ? arg(latestConversationsRef.current) : arg;
+    latestConversationsRef.current = next;
+    convDispatch({ type: "SET_ALL", conversations: next });
   }, [convDispatch, latestConversationsRef]);
 
   const [activeConvId, setActiveConvId] = useState<string | null>(() => {
@@ -229,6 +226,7 @@ export function ChatView({
         }
       }
     } catch { convs = []; }
+    latestConversationsRef.current = convs;
     convDispatch({ type: "SET_ALL", conversations: convs });
 
     // ── activeConvId ──
@@ -262,6 +260,8 @@ export function ChatView({
         }
       } catch { msgs = []; }
     }
+    displayedMessagesConvIdRef.current = convId;
+    latestMessagesRef.current = msgs;
     msgDispatch({ type: "SET_ALL", messages: msgs });
 
     // ── Migrate remaining message entries for non-active conversations ──
@@ -517,7 +517,14 @@ export function ChatView({
   // ── Per-session streaming context (supports concurrent streams) ──
   const streamContexts = useRef<Map<string, StreamContext>>(new Map());
   const activeConvIdRef = useRef(activeConvId);
+  const latestActiveConvIdRef = useRef<string | null>(activeConvId);
   const isCurrentConvStreaming = streamContexts.current.get(activeConvId ?? "")?.isStreaming ?? false;
+  const renderConversationMessages = useCallback((convId: string, nextMessages: ChatMessage[]) => {
+    if (!shouldRenderConversationMessages(convId, activeConvIdRef.current)) return false;
+    displayedMessagesConvIdRef.current = convId;
+    setMessages(nextMessages);
+    return true;
+  }, [setMessages]);
 
   // C17 Phase B.3: SSE seq tracking per conversation.
   //   - lastSeqByConv: max seq we've already processed. Used as ``since_seq``
@@ -580,6 +587,15 @@ export function ChatView({
     const busyClientId = busyConvRef.current.get(convId);
     return !!busyClientId && busyClientId !== getClientId();
   }, [getClientId]);
+
+  const activateConversation = useCallback((convId: string | null) => {
+    activeConvIdRef.current = convId;
+    latestActiveConvIdRef.current = convId;
+    if (displayedMessagesConvIdRef.current !== convId) {
+      displayedMessagesConvIdRef.current = null;
+    }
+    setActiveConvId(convId);
+  }, []);
 
   const updateConvStatus = useCallback((convId: string, status: ConversationStatus) => {
     setConversations((prev) =>
@@ -677,18 +693,24 @@ export function ChatView({
 
   // ── 持久化消息（流式中由 StreamContext 管理，finally 一次性写入） ──
   const saveMessagesTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const latestActiveConvIdRef = useRef<string | null>(activeConvId);
   useEffect(() => { latestActiveConvIdRef.current = activeConvId; }, [activeConvId]);
 
   const flushCurrentConversationToStorage = useCallback(() => {
     const convId = latestActiveConvIdRef.current;
     if (!convId) return;
+    const ctx = streamContexts.current.get(convId);
+    if (ctx?.messages?.length) {
+      saveMessagesToStorage(STORAGE_KEY_MSGS_PREFIX + convId, ctx.messages);
+      return;
+    }
+    if (displayedMessagesConvIdRef.current !== convId) return;
     saveMessagesToStorage(STORAGE_KEY_MSGS_PREFIX + convId, latestMessagesRef.current);
   }, [STORAGE_KEY_MSGS_PREFIX]);
 
   useEffect(() => {
     if (!activeConvId) return;
     if (streamContexts.current.get(activeConvId)?.isStreaming) return;
+    if (displayedMessagesConvIdRef.current !== activeConvId) return;
     if (saveMessagesTimerRef.current) clearTimeout(saveMessagesTimerRef.current);
 
     const doSave = () => {
@@ -826,7 +848,7 @@ export function ChatView({
   const hydrateSeqRef = useRef(0);
 
   const mapBackendHistoryToMessages = useCallback(
-    (rows: { id: string; index?: number; role: string; content: string; timestamp: number; chain_summary?: ChainSummaryItem[]; chain_timeline?: ChainTimelineGroup[]; artifacts?: ChatArtifact[]; attachments?: ChatAttachment[]; org_timeline?: OrgTimelineEntry[]; ask_user?: ChatAskUser; todo?: ChatTodo; parts?: MessagePart[]; usage?: ChatMessage["usage"] }[]): ChatMessage[] => {
+    (rows: { id: string; index?: number; role: string; content: string; timestamp: number; chain_summary?: ChainSummaryItem[]; chain_timeline?: ChainTimelineGroup[]; artifacts?: ChatArtifact[]; sources?: ChatSource[]; mcp_calls?: ChatMcpCall[]; attachments?: ChatAttachment[]; org_timeline?: OrgTimelineEntry[]; ask_user?: ChatAskUser; todo?: ChatTodo; progress_events?: ChatProgressEvent[]; parts?: MessagePart[]; usage?: ChatMessage["usage"] }[]): ChatMessage[] => {
       return rows.map((m) => ({
         id: m.id,
         ...(typeof m.index === "number" ? { historyIndex: m.index } : {}),
@@ -841,9 +863,12 @@ export function ChatView({
             ? { thinkingChain: buildChainFromSummary(m.chain_summary) }
             : {}),
         ...(m.artifacts?.length ? { artifacts: m.artifacts } : {}),
+        ...(m.sources?.length ? { sources: m.sources } : {}),
+        ...(m.mcp_calls?.length ? { mcpCalls: m.mcp_calls } : {}),
         ...(m.attachments?.length ? { attachments: m.attachments } : {}),
         ...(m.org_timeline?.length ? { orgTimeline: m.org_timeline } : {}),
         ...(m.todo?.steps?.length ? { todo: m.todo } : {}),
+        ...(m.progress_events?.length ? { progressEvents: m.progress_events } : {}),
         ...(m.ask_user ? { askUser: m.ask_user, content: "" } : {}),
         ...(m.parts?.length ? { parts: m.parts } : {}),
         ...(m.usage ? { usage: m.usage } : {}),
@@ -864,7 +889,7 @@ export function ChatView({
       }
       if (lastAssistant < 0) return msgs;
       const target = msgs[lastAssistant];
-      if (target.todo && target.todo.id === activeTodo.id) return msgs;
+      if (target.todo && JSON.stringify(target.todo) === JSON.stringify(activeTodo)) return msgs;
       const next = msgs.slice();
       next[lastAssistant] = { ...target, todo: activeTodo };
       return next;
@@ -874,8 +899,41 @@ export function ChatView({
 
   const hydrateConversationMessages = useCallback(async (convId: string) => {
     const seq = ++hydrateSeqRef.current;
-    setHydrating(true);
-    const localMsgs = loadMessagesFromStorage(STORAGE_KEY_MSGS_PREFIX + convId).slice(-STORED_MESSAGE_WINDOW);
+    if (shouldRenderConversationMessages(convId, activeConvIdRef.current)) {
+      setHydrating(true);
+    }
+    const finishHydrating = () => {
+      if (seq === hydrateSeqRef.current && shouldRenderConversationMessages(convId, activeConvIdRef.current)) {
+        setHydrating(false);
+      }
+    };
+    const storedMsgs = loadMessagesFromStorage(STORAGE_KEY_MSGS_PREFIX + convId).slice(-STORED_MESSAGE_WINDOW);
+    const liveCtx = streamContexts.current.get(convId);
+    const liveMsgs = liveCtx?.messages?.length ? liveCtx.messages.slice(-STORED_MESSAGE_WINDOW) : [];
+    const canUseActiveMsgs =
+      convId === activeConvIdRef.current &&
+      displayedMessagesConvIdRef.current === convId &&
+      latestMessagesRef.current.length > 0;
+    const activeMsgs = canUseActiveMsgs
+      ? latestMessagesRef.current.slice(-STORED_MESSAGE_WINDOW)
+      : [];
+    const localRichness = (msgs: ChatMessage[]) => msgs.reduce((score, msg) =>
+      score +
+      (msg.todo?.steps?.length ? 1000 + msg.todo.steps.length : 0) +
+      (msg.parts?.length ? 100 + msg.parts.length : 0) +
+      (msg.progressEvents?.length ? 10 + msg.progressEvents.length : 0) +
+      (msg.thinkingChain?.length ? 50 + msg.thinkingChain.length : 0) +
+      (msg.artifacts?.length ? 20 + msg.artifacts.length : 0) +
+      (msg.askUser ? 10 : 0) +
+      (msg.streaming ? 5 : 0) +
+      Math.min(msg.content.length, 2000) / 2000,
+    0);
+    const localMsgs = [storedMsgs, liveMsgs, activeMsgs].reduce((best, candidate) => {
+      if (candidate.length !== best.length) {
+        return candidate.length > best.length ? candidate : best;
+      }
+      return localRichness(candidate) > localRichness(best) ? candidate : best;
+    }, [] as ChatMessage[]);
 
     // Always ask the backend when available.  A completed answer may be saved
     // there after a desktop/web SSE disconnect while localStorage still has the
@@ -883,16 +941,16 @@ export function ChatView({
     const shouldSyncBackend = serviceRunning;
 
     if (!shouldSyncBackend) {
-      if (seq === hydrateSeqRef.current) {
-        setMessages(localMsgs);
+      if (seq === hydrateSeqRef.current && shouldRenderConversationMessages(convId, activeConvIdRef.current)) {
+        renderConversationMessages(convId, localMsgs);
         setHistoryPage({
           total: localMsgs.length,
           startIndex: null,
           hasMoreBefore: false,
           loadingOlder: false,
         });
-        setHydrating(false);
       }
+      finishHydrating();
       return;
     }
 
@@ -901,34 +959,34 @@ export function ChatView({
       const data = await res.json();
       const backendMsgs = Array.isArray(data?.messages) ? mapBackendHistoryToMessages(data.messages) : [];
 
-      const chosen = mergeActiveTodo(backendMsgs.length > 0 ? backendMsgs : localMsgs, data?.active_todo);
-      if (seq === hydrateSeqRef.current) {
-        setMessages(chosen);
+      const chosen = mergeActiveTodo(chooseHydratedMessages(localMsgs, backendMsgs), data?.active_todo);
+      if (seq === hydrateSeqRef.current && shouldRenderConversationMessages(convId, activeConvIdRef.current)) {
+        renderConversationMessages(convId, chosen);
         setHistoryPage({
           total: typeof data?.total === "number" ? data.total : chosen.length,
           startIndex: typeof data?.start_index === "number" ? data.start_index : null,
           hasMoreBefore: Boolean(data?.has_more_before),
           loadingOlder: false,
         });
-        setHydrating(false);
       }
+      finishHydrating();
 
       if (chosen !== localMsgs) {
         saveMessagesToStorage(STORAGE_KEY_MSGS_PREFIX + convId, chosen);
       }
     } catch {
-      if (seq === hydrateSeqRef.current) {
-        setMessages(localMsgs);
+      if (seq === hydrateSeqRef.current && shouldRenderConversationMessages(convId, activeConvIdRef.current)) {
+        renderConversationMessages(convId, localMsgs);
         setHistoryPage({
           total: localMsgs.length,
           startIndex: null,
           hasMoreBefore: false,
           loadingOlder: false,
         });
-        setHydrating(false);
       }
+      finishHydrating();
     }
-  }, [serviceRunning, apiBaseUrl, mapBackendHistoryToMessages, mergeActiveTodo, STORAGE_KEY_MSGS_PREFIX]);
+  }, [serviceRunning, apiBaseUrl, mapBackendHistoryToMessages, mergeActiveTodo, STORAGE_KEY_MSGS_PREFIX, renderConversationMessages]);
 
   const loadOlderMessages = useCallback(async () => {
     const convId = activeConvIdRef.current;
@@ -943,6 +1001,10 @@ export function ChatView({
       );
       const data = await res.json();
       const olderMsgs = Array.isArray(data?.messages) ? mapBackendHistoryToMessages(data.messages) : [];
+      if (!shouldRenderConversationMessages(convId, activeConvIdRef.current)) {
+        setHistoryPage((prev) => ({ ...prev, loadingOlder: false }));
+        return;
+      }
       if (olderMsgs.length > 0) {
         setMessages((prev) => {
           const seen = new Set(prev.map((m) => m.id));
@@ -966,6 +1028,7 @@ export function ChatView({
     if (!activeConvId) {
       setMessages([]);
       setHistoryPage({ total: 0, startIndex: null, hasMoreBefore: false, loadingOlder: false });
+      displayedMessagesConvIdRef.current = null;
       return;
     }
     if (skipConvLoadRef.current) {
@@ -976,7 +1039,7 @@ export function ChatView({
     // If a StreamContext is actively streaming for this conv, restore its state directly
     const ctx = streamContexts.current.get(activeConvId);
     if (ctx?.isStreaming) {
-      setMessages(ctx.messages);
+      renderConversationMessages(activeConvId, ctx.messages);
       setDisplayActiveSubAgents(ctx.activeSubAgents);
       setDisplaySubAgentTasks(ctx.subAgentTasks);
     } else {
@@ -999,7 +1062,94 @@ export function ChatView({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- conversations 故意排除：
     // 此 effect 语义是"切换对话时加载消息"，不应因 messageCount/title 等元数据变更而重新 hydrate，
     // 否则流结束后 setConversations 更新 messageCount 会触发竞态覆盖。
-  }, [activeConvId, hydrateConversationMessages]);
+  }, [activeConvId, hydrateConversationMessages, renderConversationMessages]);
+
+  // If the local SSE was lost while the backend task keeps running (for
+  // example after a window switch or a superseded fetch), StreamContext is gone
+  // and the normal live renderer has nothing to flush. Keep the visible
+  // conversation reconciled from backend history/active_todo until the backend
+  // reports it idle.
+  useEffect(() => {
+    if (!serviceRunning || !activeConvId) return;
+    if (streamContexts.current.get(activeConvId)?.isStreaming) return;
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const convId = activeConvId;
+
+    const pollDetachedRunningConversation = async () => {
+      if (cancelled || !shouldRenderConversationMessages(convId, activeConvIdRef.current)) return;
+      if (streamContexts.current.get(convId)?.isStreaming) return;
+
+      let busy = false;
+      try {
+        const busyResp = await safeFetch(
+          `${apiBaseUrl}/api/chat/busy?conversation_id=${encodeURIComponent(convId)}`,
+          { method: "GET", signal: AbortSignal.timeout(4000) },
+        );
+        const busyData = await busyResp.json().catch(() => null);
+        busy = Boolean(busyData?.busy);
+      } catch {
+        // If the probe fails, leave the existing UI alone and try again later.
+        if (!cancelled) timer = setTimeout(pollDetachedRunningConversation, 5000);
+        return;
+      }
+
+      if (cancelled || !shouldRenderConversationMessages(convId, activeConvIdRef.current)) return;
+
+      if (!busy) {
+        const conv = latestConversationsRef.current.find((c) => c.id === convId);
+        if (conv?.status === "running") updateConvStatus(convId, "completed");
+        void hydrateConversationMessages(convId);
+        return;
+      }
+
+      if (latestConversationsRef.current.find((c) => c.id === convId)?.status !== "running") {
+        updateConvStatus(convId, "running");
+      }
+      try {
+        const histResp = await safeFetch(
+          `${apiBaseUrl}/api/sessions/${encodeURIComponent(convId)}/history?limit=${HISTORY_PAGE_LIMIT}`,
+          { method: "GET", signal: AbortSignal.timeout(6000) },
+        );
+        const data = await histResp.json();
+        const backendMsgs = Array.isArray(data?.messages) ? mapBackendHistoryToMessages(data.messages) : [];
+        const displayedMsgs =
+          displayedMessagesConvIdRef.current === convId
+            ? latestMessagesRef.current.slice(-STORED_MESSAGE_WINDOW)
+            : [];
+        const storedMsgs = loadMessagesFromStorage(STORAGE_KEY_MSGS_PREFIX + convId).slice(-STORED_MESSAGE_WINDOW);
+        const localMsgs = displayedMsgs.length >= storedMsgs.length ? displayedMsgs : storedMsgs;
+        const chosen = mergeActiveTodo(chooseHydratedMessages(localMsgs, backendMsgs), data?.active_todo);
+        if (!cancelled && shouldRenderConversationMessages(convId, activeConvIdRef.current)) {
+          renderConversationMessages(convId, chosen);
+          saveMessagesToStorage(STORAGE_KEY_MSGS_PREFIX + convId, chosen);
+        }
+      } catch {
+        // The next poll will retry; avoid replacing visible messages with an
+        // error bubble for a transient history read.
+      }
+
+      if (!cancelled) timer = setTimeout(pollDetachedRunningConversation, 2500);
+    };
+
+    void pollDetachedRunningConversation();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [
+    activeConvId,
+    serviceRunning,
+    streamingTick,
+    apiBaseUrl,
+    hydrateConversationMessages,
+    mapBackendHistoryToMessages,
+    mergeActiveTodo,
+    renderConversationMessages,
+    updateConvStatus,
+    STORAGE_KEY_MSGS_PREFIX,
+  ]);
 
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -1372,7 +1522,7 @@ export function ChatView({
               }
               return [];
             });
-            setActiveConvId(null);
+            activateConversation(null);
             setMessages([]);
             return;
           }
@@ -1426,7 +1576,7 @@ export function ChatView({
 
         // 没有活跃会话时，默认打开后端最新会话
         if (!activeConvId) {
-          setActiveConvId(restoredConvs[0].id);
+          activateConversation(restoredConvs[0].id);
         }
       } catch {
         // Network error — retry if backend might still be starting
@@ -1442,7 +1592,7 @@ export function ChatView({
       cancelled = true;
       if (sessionRetryTimer.current) clearTimeout(sessionRetryTimer.current);
     };
-  }, [serviceRunning, apiBaseUrl, activeConvId]);
+  }, [serviceRunning, apiBaseUrl, activeConvId, activateConversation]);
 
   // ── Multi-device busy state: poll + WS events ──
   useEffect(() => {
@@ -1491,7 +1641,14 @@ export function ChatView({
         if (convId === activeConvIdRef.current) {
           safeFetch(`${apiBaseUrl}/api/sessions/${encodeURIComponent(convId)}/history`)
             .then((r) => r.json())
-            .then((d2) => { if (d2?.messages?.length) setMessages((prev) => patchMessagesWithBackend(prev, d2.messages)); })
+            .then((d2) => {
+              if (!d2?.messages?.length || activeConvIdRef.current !== convId) return;
+              if (displayedMessagesConvIdRef.current !== convId) return;
+              renderConversationMessages(
+                convId,
+                patchMessagesWithBackend(latestMessagesRef.current, d2.messages),
+              );
+            })
             .catch(() => {});
         }
         const preview = (d.last_message_preview as string) || "";
@@ -1507,7 +1664,7 @@ export function ChatView({
           return [{ id: convId, title: title || preview.slice(0, 20) || "对话", lastMessage: preview, timestamp: ts, messageCount: 1 }, ...prev];
         });
         if (!activeConvIdRef.current) {
-          setActiveConvId(convId);
+          activateConversation(convId);
         }
       } else if (event === "chat:conversation_deleted") {
         setConversations((prev) => {
@@ -1518,7 +1675,7 @@ export function ChatView({
           return filtered;
         });
         if (activeConvIdRef.current === convId) {
-          setActiveConvId(null);
+          activateConversation(null);
           setMessages([]);
         }
       } else if (event === "chat:title_update") {
@@ -1533,7 +1690,7 @@ export function ChatView({
       }
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiBaseUrl, getClientId]);
+  }, [apiBaseUrl, getClientId, activateConversation]);
 
   // ── Read-only protection state initialization + WS listener ──
   useEffect(() => {
@@ -1642,7 +1799,12 @@ export function ChatView({
       .then((r) => r.json())
       .then((data) => {
         if (!data?.messages?.length) return;
-        setMessages((prev) => patchMessagesWithBackend(prev, data.messages));
+        if (activeConvIdRef.current !== convId) return;
+        if (displayedMessagesConvIdRef.current !== convId) return;
+        renderConversationMessages(
+          convId,
+          patchMessagesWithBackend(latestMessagesRef.current, data.messages),
+        );
       })
       .catch(() => {});
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2042,7 +2204,8 @@ export function ChatView({
         saveMessagesToStorage(STORAGE_KEY_MSGS_PREFIX + activeConvId, msgsToSave);
       }
     }
-    setActiveConvId(id);
+    activateConversation(id);
+    displayedMessagesConvIdRef.current = id;
     setMessages([]);
     setPendingAttachments([]);
     setDisplayActiveSubAgents([]);
@@ -2060,7 +2223,7 @@ export function ChatView({
       agentProfileId: selectedAgent,
       orgMode: false,
     }, ...prev]);
-  }, [activeConvId, messages, selectedAgent]);
+  }, [activeConvId, messages, selectedAgent, setInputValue, activateConversation]);
 
   // ── 删除对话（实际执行） ──
   const doDeleteConversation = useCallback(async (convId: string) => {
@@ -2100,10 +2263,13 @@ export function ChatView({
       setConversations((prev) => {
         const remaining = prev.filter((c) => c.id !== convId);
         if (remaining.length > 0) {
-          setActiveConvId(remaining[0].id);
-          setMessages(loadMessagesFromStorage(STORAGE_KEY_MSGS_PREFIX + remaining[0].id));
+          activateConversation(remaining[0].id);
+          renderConversationMessages(
+            remaining[0].id,
+            loadMessagesFromStorage(STORAGE_KEY_MSGS_PREFIX + remaining[0].id),
+          );
         } else {
-          setActiveConvId(null);
+          activateConversation(null);
           setMessages([]);
         }
         return remaining;
@@ -2111,7 +2277,7 @@ export function ChatView({
     } else {
       setConversations((prev) => prev.filter((c) => c.id !== convId));
     }
-  }, [serviceRunning]);
+  }, [serviceRunning, activateConversation, renderConversationMessages]);
 
   // ── 删除对话（弹窗确认） ──
   const deleteConversation = useCallback((convId: string, e?: React.MouseEvent) => {
@@ -2167,7 +2333,7 @@ export function ChatView({
     }
     if (orgCommandPendingRef.current) return;
 
-    const resolvedConvId = targetConvId || activeConvId;
+    const resolvedConvId = targetConvId || activeConvIdRef.current;
     const targetIsStreaming = resolvedConvId ? !!streamContexts.current.get(resolvedConvId)?.isStreaming : false;
     if (targetIsStreaming) return;
 
@@ -2254,9 +2420,7 @@ export function ChatView({
       skipConvLoadRef.current = true;
       // React state updates asynchronously; update refs immediately so the
       // optimistic first turn renders before SSE/WebSocket events arrive.
-      activeConvIdRef.current = convId;
-      latestActiveConvIdRef.current = convId;
-      setActiveConvId(convId);
+      activateConversation(convId);
       setConversations((prev) => [{
         id: convId!,
         title: text.slice(0, 30) || "新对话",
@@ -2280,11 +2444,15 @@ export function ChatView({
     const thisConvId = convId!;
 
     // SSE 流式请求 (QueryGuard 保护并发)
-    const guardHandle = queryGuard.startQuery();
+    const guardHandle = queryGuard.startQuery(thisConvId);
     const abort = guardHandle.abort;
 
     // Build per-session StreamContext with initial messages
-    const fallbackMessages = thisConvId === activeConvId ? [...messages]
+    const canUseRenderedMessages =
+      shouldRenderConversationMessages(thisConvId, activeConvIdRef.current) &&
+      displayedMessagesConvIdRef.current === thisConvId;
+    const fallbackMessages = canUseRenderedMessages
+      ? [...latestMessagesRef.current]
       : loadMessagesFromStorage(STORAGE_KEY_MSGS_PREFIX + thisConvId);
     const sctx: StreamContext = {
       abort,
@@ -2303,8 +2471,7 @@ export function ChatView({
     const isTargetConversationActive = () =>
       shouldRenderConversationMessages(thisConvId, activeConvIdRef.current);
     const renderTargetMessages = (nextMessages: ChatMessage[]) => {
-      if (!isTargetConversationActive()) return;
-      setMessages(nextMessages);
+      renderConversationMessages(thisConvId, nextMessages);
     };
 
     // Sending a turn in the visible conversation should reveal the latest messages
@@ -2313,13 +2480,8 @@ export function ChatView({
       messageListRef.current?.forceFollow();
       isMessageListAtBottomRef.current = true;
     }
-    // Functional updater chains with any pending setMessages (e.g. handleAskAnswer's answered flag)
     if (isTargetConversationActive()) {
-      setMessages((prev) => {
-        const updated = [...prev, userMsg, assistantMsg];
-        sctx.messages = updated;
-        return updated;
-      });
+      renderTargetMessages(sctx.messages);
     } else {
       saveMessagesToStorage(STORAGE_KEY_MSGS_PREFIX + thisConvId, sctx.messages);
     }
@@ -2362,6 +2524,17 @@ export function ChatView({
         scheduleScreenFlush();
       }
     };
+    const patchTargetMessages = (updater: (msgs: ChatMessage[]) => ChatMessage[]) => {
+      const c = streamContexts.current.get(thisConvId);
+      const baseMessages = c?.messages?.length
+        ? c.messages
+        : loadMessagesFromStorage(STORAGE_KEY_MSGS_PREFIX + thisConvId);
+      const updated = updater(baseMessages);
+      if (c) c.messages = updated;
+      try { saveMessagesToStorage(STORAGE_KEY_MSGS_PREFIX + thisConvId, updated); } catch { /* quota */ }
+      renderTargetMessages(updated);
+      return updated;
+    };
     const updateSubAgents = (
       agentsUpdater?: (prev: SubAgentEntry[]) => SubAgentEntry[],
       tasksUpdater?: (prev: SubAgentTask[]) => SubAgentTask[],
@@ -2398,7 +2571,6 @@ export function ChatView({
       if (!convId) return;
       const _recoverMsgId = assistantMsg.id;
       const _recoverUserTs = userMsg.timestamp;
-      const _recoverKey = STORAGE_KEY_MSGS_PREFIX + thisConvId;
       // Recovery only fires when the stream was interrupted / incomplete, so the
       // local bubble's text is suspect. Flag it as a stream fallback up front:
       // any backend reconciliation that follows (recovery poll, cross-window
@@ -2452,10 +2624,8 @@ export function ChatView({
             } else {
               staleCount++;
             }
-            setMessages((prev) => {
-              const isActiveRecovery = activeConvIdRef.current === thisConvId;
-              const baseMessages = isActiveRecovery ? prev : loadMessagesFromStorage(_recoverKey);
-              const updated = baseMessages.map((m) => {
+            patchTargetMessages((prev) => {
+              return prev.map((m) => {
                 if (m.id !== _recoverMsgId) return m;
                 // A stream-fallback bubble holds untrustworthy text (e.g. a
                 // "connection failed" notice that may be *longer* than the real
@@ -2474,10 +2644,6 @@ export function ChatView({
                 }
                 return patched;
               });
-              const liveCtx = streamContexts.current.get(thisConvId);
-              if (liveCtx) liveCtx.messages = updated;
-              try { saveMessagesToStorage(_recoverKey, updated); } catch { /* quota */ }
-              return isActiveRecovery ? updated : prev;
             });
             if (staleCount < maxStale && attempts < maxAttempts) {
               setTimeout(poll, getInterval());
@@ -2710,6 +2876,7 @@ export function ChatView({
         return null;
       };
       let currentPlan: ChatTodo | null = null;
+      let currentProgressEvents: ChatProgressEvent[] = [];
       let currentAsk: ChatAskUser | null = null;
       let currentAgent: string | null = null;
       let currentArtifacts: ChatArtifact[] = [];
@@ -3347,33 +3514,69 @@ export function ChatView({
               }
               case "todo_created":
                 currentPlan = event.plan;
+                currentProgressEvents = [
+                  ...currentProgressEvents,
+                  { type: "todo_created", seq: currentProgressEvents.length + 1, plan: event.plan },
+                ];
                 updateMessages((prev) => prev.map((m) =>
-                  m.todo && m.todo.status !== "completed" && m.todo.status !== "failed" && m.todo.status !== "cancelled"
+                  m.id === assistantMsg.id
+                    ? { ...m, todo: { ...currentPlan! }, progressEvents: [...currentProgressEvents] }
+                    : m.todo && m.todo.status !== "completed" && m.todo.status !== "failed" && m.todo.status !== "cancelled"
                     ? { ...m, todo: { ...m.todo, status: "completed" as const } }
                     : m
                 ));
                 break;
               case "todo_step_updated":
                 if (currentPlan) {
+                  const stepId = event.step_id || event.stepId;
+                  currentProgressEvents = [
+                    ...currentProgressEvents,
+                    {
+                      type: "todo_step_updated",
+                      seq: currentProgressEvents.length + 1,
+                      ...(stepId ? { stepId } : {}),
+                      ...(event.stepIdx != null ? { stepIdx: event.stepIdx } : {}),
+                      status: event.status as ChatTodoStep["status"],
+                      ...(event.result !== undefined ? { result: event.result } : {}),
+                    },
+                  ];
                   const newSteps: ChatTodoStep[] = currentPlan.steps.map((s) => {
-                    const stepId = event.step_id || event.stepId;
                     const matched = stepId
                       ? s.id === stepId
                       : event.stepIdx != null && currentPlan!.steps.indexOf(s) === event.stepIdx;
-                    return matched ? { ...s, status: event.status as ChatTodoStep["status"] } : s;
+                    return matched
+                      ? { ...s, status: event.status as ChatTodoStep["status"], result: event.result ?? s.result }
+                      : s;
                   });
                   const allDone = newSteps.every((s) => s.status === "completed" || s.status === "skipped" || s.status === "failed");
                   currentPlan = { ...currentPlan, steps: newSteps, ...(allDone ? { status: "completed" as const } : {}) } as ChatTodo;
+                  updateMessages((prev) => prev.map((m) =>
+                    m.id === assistantMsg.id ? { ...m, todo: { ...currentPlan! }, progressEvents: [...currentProgressEvents] } : m
+                  ));
                 }
                 break;
               case "todo_completed":
                 if (currentPlan) {
+                  currentProgressEvents = [
+                    ...currentProgressEvents,
+                    { type: "todo_completed", seq: currentProgressEvents.length + 1 },
+                  ];
                   currentPlan = { ...currentPlan, status: "completed" } as ChatTodo;
+                  updateMessages((prev) => prev.map((m) =>
+                    m.id === assistantMsg.id ? { ...m, todo: { ...currentPlan! }, progressEvents: [...currentProgressEvents] } : m
+                  ));
                 }
                 break;
               case "todo_cancelled":
                 if (currentPlan) {
+                  currentProgressEvents = [
+                    ...currentProgressEvents,
+                    { type: "todo_cancelled", seq: currentProgressEvents.length + 1 },
+                  ];
                   currentPlan = { ...currentPlan, status: "cancelled" } as ChatTodo;
+                  updateMessages((prev) => prev.map((m) =>
+                    m.id === assistantMsg.id ? { ...m, todo: { ...currentPlan! }, progressEvents: [...currentProgressEvents] } : m
+                  ));
                 }
                 break;
               case "plan_ready_for_approval":
@@ -3749,6 +3952,7 @@ export function ChatView({
                     agentName: currentAgent,
                     toolCalls: currentToolCalls.length > 0 ? [...currentToolCalls] : null,
                     todo: currentPlan ? { ...currentPlan } : null,
+                    progressEvents: currentProgressEvents.length > 0 ? [...currentProgressEvents] : null,
                     askUser: currentAsk,
                     errorInfo: currentError,
                     artifacts: currentArtifacts.length > 0 ? [...currentArtifacts] : null,
@@ -3833,21 +4037,13 @@ export function ChatView({
         if (canRecover) {
           attemptRecovery(2000);
           const _fallbackMsgId = assistantMsg.id;
-          const _fallbackConvId = thisConvId;
-          const _fallbackStorageKey = STORAGE_KEY_MSGS_PREFIX + thisConvId;
           setTimeout(() => {
-            setMessages((prev) => {
-              const isActive = activeConvIdRef.current === _fallbackConvId;
-              const base = isActive ? prev : loadMessagesFromStorage(_fallbackStorageKey);
-              const updated = base.map((m) => {
+            patchTargetMessages((prev) => {
+              return prev.map((m) => {
                 if (m.id !== _fallbackMsgId) return m;
                 if (m.content && !m.streaming) return m;
                 return { ...m, content: "未收到有效回复，请重试。", streaming: false, streamStatus: null };
               });
-              const liveCtx = streamContexts.current.get(_fallbackConvId);
-              if (liveCtx) liveCtx.messages = updated;
-              try { saveMessagesToStorage(_fallbackStorageKey, updated); } catch { /* quota */ }
-              return isActive ? updated : prev;
             });
           }, 30_000);
         } else if (!gracefulDone && convId) {
@@ -3861,7 +4057,7 @@ export function ChatView({
             .then((data) => {
               const rows = Array.isArray(data?.messages) ? data.messages : [];
               if (!rows.length) return;
-              setMessages((prev) => {
+              patchTargetMessages((prev) => {
                 const patchResult = patchMessagesWithBackendDetailed(prev, rows);
                 const patched = patchResult.messages;
                 const noop = !patchResult.changed;
@@ -3877,9 +4073,6 @@ export function ChatView({
                   localAssistantEmpty: Boolean(assistant && !assistant.content && !assistant.askUser),
                 });
                 if (noop) return prev;
-                const liveCtx = streamContexts.current.get(thisConvId);
-                if (liveCtx) liveCtx.messages = patched;
-                try { saveMessagesToStorage(STORAGE_KEY_MSGS_PREFIX + thisConvId, patched); } catch { /* quota */ }
                 return patched;
               });
             })
@@ -3971,11 +4164,11 @@ export function ChatView({
         }
         saveMessagesToStorage(STORAGE_KEY_MSGS_PREFIX + thisConvId, ctx.messages);
         if (activeConvIdRef.current === thisConvId) {
-          setMessages(ctx.messages);
+          renderTargetMessages(ctx.messages);
         }
         streamContexts.current.delete(thisConvId);
       }
-      queryGuard.endQuery(guardHandle.generation);
+      queryGuard.endQuery(guardHandle.generation, thisConvId);
       setStreamingTick(t => t + 1);
 
       const finalStatus = sctx._hadError ? "error" : "completed";
@@ -4028,7 +4221,7 @@ export function ChatView({
     ));
     // reason_stream 在 ask_user 后中断流，用户回复通过新 /api/chat 请求继续处理
     sendMessage(answer, undefined, displayText !== answer ? displayText : undefined, isPlanSwitch ? "plan" : undefined);
-  }, [sendMessage]);
+  }, [sendMessage, renderConversationMessages]);
 
   // ── Plan 审批回调 ──
   const handlePlanApprove = useCallback(() => {
@@ -4068,7 +4261,7 @@ export function ChatView({
       try { ctx.reader?.cancel().catch(() => {}); } catch {}
       ctx.reader = null;
     }
-    queryGuard.cancel();
+    queryGuard.cancel(id);
   }, [queryGuard]);
 
   // ── 消息排队系统 ──
@@ -4177,7 +4370,9 @@ export function ChatView({
       };
       const ctx = convId ? streamContexts.current.get(convId) : null;
       if (ctx) ctx.messages = inserter(ctx.messages);
-      setMessages(inserter);
+      if (convId && ctx) {
+        renderConversationMessages(convId, ctx.messages);
+      }
       if (convId) {
         setConversations((prev) => prev.map((c) =>
           c.id === convId ? { ...c, messageCount: (c.messageCount || 0) + 1 } : c
@@ -4957,7 +5152,7 @@ export function ChatView({
       <div
         key={conv.id}
         className={`convItem ${isActive ? "convItemActive" : ""}`}
-        onClick={() => { if (renamingId !== conv.id) setActiveConvId(conv.id); }}
+        onClick={() => { if (renamingId !== conv.id) activateConversation(conv.id); }}
         onContextMenu={(e) => { e.preventDefault(); (e.nativeEvent as any)._handled = true; setCtxMenu({ x: e.clientX, y: e.clientY, convId: conv.id }); }}
       >
         <div className="convItemIcon">
@@ -5095,7 +5290,7 @@ export function ChatView({
                     <button
                       key={conv.id}
                       className={`agentOrbitNode ${isActive ? "agentOrbitActive" : ""} ${isRunning ? "agentOrbitRunning" : ""}`}
-                      onClick={() => setActiveConvId(conv.id)}
+                      onClick={() => activateConversation(conv.id)}
                       onMouseEnter={(e) => {
                         const rect = e.currentTarget.getBoundingClientRect();
                         setOrbitTip({ x: rect.left + rect.width / 2, y: rect.bottom + 6, name: ap?.name || "Default", title: conv.title });
@@ -6282,4 +6477,3 @@ export function ChatView({
     </div>
   );
 }
-

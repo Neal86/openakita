@@ -14,6 +14,7 @@ from openakita.sessions.session import (
     SessionContext,
     SessionState,
     TaskCheckpoint,
+    is_duplicate_message,
 )
 
 
@@ -220,6 +221,84 @@ class TestSessionContext:
         assert ctx.summary is None
         ctx.summary = "User asked about Python"
         assert ctx.summary == "User asked about Python"
+
+    def test_duplicate_detection_matches_same_content_with_near_timestamp(self):
+        existing = [
+            {"role": "user", "content": "same prompt", "timestamp": "2026-06-25T18:06:53.993669"}
+        ]
+        candidate = {
+            "role": "user",
+            "content": "same prompt",
+            "timestamp": "2026-06-25T18:06:53.999736",
+        }
+
+        assert is_duplicate_message(existing, candidate)
+
+    def test_duplicate_detection_allows_same_content_after_window(self):
+        existing = [
+            {"role": "user", "content": "same prompt", "timestamp": "2026-06-25T18:06:53"},
+            {"role": "assistant", "content": "done", "timestamp": "2026-06-25T18:07:10"},
+        ]
+        candidate = {
+            "role": "user",
+            "content": "same prompt",
+            "timestamp": "2026-06-25T18:08:00",
+        }
+
+        assert not is_duplicate_message(existing, candidate)
+
+    def test_add_message_writer_reuses_session_message_timestamp(self, tmp_path):
+        written: list[tuple[str, str | None]] = []
+
+        def writer(_safe_id, _turn_index, role, _content, metadata):
+            written.append((role, metadata.get("timestamp")))
+
+        manager = SessionManager(storage_path=tmp_path)
+        manager.set_turn_writer(writer)
+        session = manager.get_session("desktop", "conv1", "desktop_user")
+        assert session is not None
+
+        session.add_message("user", "hello")
+
+        assert written == [("user", session.context.messages[-1]["timestamp"])]
+
+    def test_session_manager_backfill_skips_near_duplicate_turn(self, tmp_path):
+        session = Session(
+            id="test_near_dup",
+            channel="test",
+            chat_id="1",
+            user_id="u",
+            context=SessionContext(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": "same prompt",
+                        "timestamp": "2026-06-25T18:06:53.993669",
+                    },
+                ]
+            ),
+        )
+        (tmp_path / "sessions.json").write_text(
+            json.dumps([session.to_dict()], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        manager = SessionManager(storage_path=tmp_path)
+        manager.set_turn_loader(
+            lambda _safe_id: [
+                {
+                    "role": "user",
+                    "content": "same prompt",
+                    "timestamp": "2026-06-25T18:06:53.999736",
+                },
+            ]
+        )
+
+        count = manager.backfill_sessions_from_store()
+
+        loaded = manager.get_session("test", "1", "u", create_if_missing=False)
+        assert count == 0
+        assert loaded is not None
+        assert [m["content"] for m in loaded.context.messages] == ["same prompt"]
 
 
 class TestSessionConfig:

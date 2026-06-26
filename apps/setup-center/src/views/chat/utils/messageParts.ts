@@ -13,7 +13,14 @@
 //  - 重型文本块（text / reasoning / thinking）只作为顺序"标记"，真正的内容仍
 //    从消息扁平字段读取，避免 parts 跨线传输时把正文 / 思维链翻倍。
 
-import type { ChatMessage, MessagePart, ChatArtifact, ChatTodo, ChatAskUser } from "../../../types";
+import type {
+  ChatMessage,
+  MessagePart,
+  ChatArtifact,
+  ChatTodo,
+  ChatAskUser,
+  ChatProgressEvent,
+} from "../../../types";
 
 const KNOWN_KINDS = new Set<MessagePart["kind"]>([
   "reasoning",
@@ -60,7 +67,12 @@ export function deriveMessageParts(msg: ChatMessage): MessagePart[] {
     parts.push({ kind: "mcp", id: pid(msg.id, "mcp") });
   }
   if (msg.todo && msg.todo.steps && msg.todo.steps.length > 0) {
-    parts.push({ kind: "plan", id: pid(msg.id, "plan", msg.todo.id || ""), todo: msg.todo });
+    parts.push({
+      kind: "plan",
+      id: pid(msg.id, "plan", msg.todo.id || ""),
+      todo: msg.todo,
+      progressEvents: msg.progressEvents || undefined,
+    });
   }
   if (msg.content) {
     parts.push({ kind: "text", id: pid(msg.id, "text") });
@@ -104,7 +116,11 @@ export function coerceMessageParts(raw: unknown, msg: ChatMessage): MessagePart[
     switch (kind) {
       case "plan": {
         const todo = ((item as { todo?: ChatTodo | null }).todo ?? msg.todo) || undefined;
-        out.push({ kind: "plan", id, todo });
+        const rawProgressEvents =
+          (item as { progressEvents?: ChatProgressEvent[] | null }).progressEvents ??
+          msg.progressEvents;
+        const progressEvents = Array.isArray(rawProgressEvents) ? rawProgressEvents : undefined;
+        out.push({ kind: "plan", id, todo, progressEvents });
         break;
       }
       case "attachment": {
@@ -186,7 +202,7 @@ export function resolveMessageParts(msg: ChatMessage): MessagePart[] {
   if (explicit) {
     // Fill any attachment markers that didn't inline their artifact, in order.
     let artIdx = 0;
-    return explicit.map((part) => {
+    let healed = explicit.map((part) => {
       if (part.kind === "attachment" && !part.artifact) {
         const art = msg.artifacts?.[artIdx];
         artIdx += 1;
@@ -195,6 +211,25 @@ export function resolveMessageParts(msg: ChatMessage): MessagePart[] {
       if (part.kind === "attachment") artIdx += 1;
       return part;
     });
+    if (msg.todo?.steps?.length && !healed.some((part) => part.kind === "plan")) {
+      const planPart: MessagePart = {
+        kind: "plan",
+        id: pid(msg.id, "plan", msg.todo.id || ""),
+        todo: msg.todo,
+        progressEvents: msg.progressEvents || undefined,
+      };
+      const insertBefore = healed.findIndex((part) =>
+        part.kind === "text" ||
+        part.kind === "tools" ||
+        part.kind === "attachment" ||
+        part.kind === "ask_user" ||
+        part.kind === "error"
+      );
+      healed = insertBefore >= 0
+        ? [...healed.slice(0, insertBefore), planPart, ...healed.slice(insertBefore)]
+        : [...healed, planPart];
+    }
+    return healed;
   }
   return deriveMessageParts(msg);
 }

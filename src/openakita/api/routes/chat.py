@@ -106,6 +106,66 @@ def _format_controlled_action_result(
     )
 
 
+def _observe_todo_snapshot_event(current: dict | None, event: dict) -> dict | None:
+    """Fold one progress event into the latest todo snapshot.
+
+    Kept as a compatibility wrapper for tests and older call sites; the
+    persisted source of truth is now the progress-event journal.
+    """
+    from ..message_parts import append_progress_event, project_progress_events_to_todo
+
+    journal: list[dict] = []
+    if isinstance(current, dict):
+        journal = append_progress_event(journal, {"type": "todo_created", "plan": current})
+    journal = append_progress_event(journal, event)
+    return project_progress_events_to_todo(journal) or current
+
+
+def _observe_progress_event_journal(current: list[dict] | None, event: dict) -> list[dict]:
+    """Append a progress SSE event to this turn's persisted event journal."""
+    from ..message_parts import append_progress_event
+
+    return append_progress_event(current, event)
+
+
+def _attach_todo_snapshot_meta(
+    meta: dict,
+    *,
+    conversation_id: str,
+    todo_snapshot: dict | None,
+    progress_events: list[dict] | None = None,
+) -> None:
+    """Attach progress journal and latest todo projection to assistant metadata."""
+    try:
+        from ..message_parts import (
+            normalize_progress_events,
+            project_progress_events_to_todo,
+            serialize_plan_to_chat_todo,
+        )
+
+        journal = normalize_progress_events(progress_events)
+        snapshot = project_progress_events_to_todo(journal)
+        if snapshot is None and isinstance(todo_snapshot, dict):
+            snapshot = serialize_plan_to_chat_todo(todo_snapshot)
+        if not (snapshot and snapshot.get("steps")):
+            from ...tools.handlers.plan import get_todo_handler_for_session, has_active_todo
+
+            if conversation_id and has_active_todo(conversation_id):
+                handler = get_todo_handler_for_session(conversation_id)
+                plan = handler.get_plan_for(conversation_id) if handler else None
+                snapshot = serialize_plan_to_chat_todo(plan)
+                if snapshot and not journal:
+                    journal = normalize_progress_events(
+                        [{"type": "todo_created", "plan": snapshot, "restored": True}]
+                    )
+        if journal:
+            meta["progress_events"] = journal
+        if snapshot and snapshot.get("steps"):
+            meta["todo"] = snapshot
+    except Exception:
+        pass
+
+
 class _RiskAuthorizedReplay:
     """Sentinel returned by ``_handle_pending_risk_answer`` when the user has
     confirmed a high-risk action **but** the classification has no controlled
@@ -559,6 +619,101 @@ def _extract_mcp_call(event: dict) -> dict | None:
     return payload
 
 
+def _artifact_data_from_receipt(receipt: dict) -> dict | None:
+    """Convert one delivery receipt into the chat artifact shape."""
+    if not isinstance(receipt, dict):
+        return None
+    if receipt.get("status") != "delivered" or not receipt.get("file_url"):
+        return None
+    return {
+        "artifact_type": receipt.get("type", "file"),
+        "file_url": receipt["file_url"],
+        "path": receipt.get("path", ""),
+        "name": receipt.get("name", ""),
+        "caption": receipt.get("caption", ""),
+        "size": receipt.get("size"),
+    }
+
+
+def _extract_artifact_events(event: dict) -> list[dict]:
+    """Extract delivered artifacts from tool events without emitting SSE."""
+    if event.get("type") != "tool_call_end":
+        return []
+    tool_name = event.get("tool")
+    artifacts: list[dict] = []
+    if tool_name in ("deliver_artifacts", "send_sticker"):
+        try:
+            result_str = event.get("result", "{}")
+            _log_marker = "\n\n[执行日志]"
+            if _log_marker in result_str:
+                result_str = result_str[: result_str.index(_log_marker)]
+            result_data = json.loads(result_str)
+            for receipt in result_data.get("receipts", []):
+                art_data = _artifact_data_from_receipt(receipt)
+                if art_data:
+                    artifacts.append(art_data)
+            logger.info(
+                "[Chat API] Artifact parsed: tool=%s receipts=%d emitted=%d",
+                tool_name,
+                len(result_data.get("receipts", [])),
+                len(artifacts),
+            )
+        except (json.JSONDecodeError, TypeError, KeyError) as exc:
+            logger.warning(
+                f"[Chat API] Artifact parse failed for {event.get('tool')}: {exc!r}, "
+                f"result preview: {str(event.get('result', ''))[:200]}"
+            )
+    elif tool_name in ("delegate_to_agent", "delegate_parallel", "spawn_agent"):
+        _art_marker = "__ARTIFACT_RECEIPTS__\n"
+        _del_result = event.get("result", "")
+        _search_pos = 0
+        while _art_marker in _del_result[_search_pos:]:
+            try:
+                _idx = _del_result.index(_art_marker, _search_pos) + len(_art_marker)
+                _eol = _del_result.find("\n", _idx)
+                _chunk = _del_result[_idx:] if _eol < 0 else _del_result[_idx:_eol]
+                _search_pos = _idx + len(_chunk)
+                for receipt in json.loads(_chunk):
+                    art_data = _artifact_data_from_receipt(receipt)
+                    if art_data:
+                        artifacts.append(art_data)
+            except (json.JSONDecodeError, TypeError, KeyError, ValueError) as exc:
+                logger.warning(
+                    f"[Chat API] Delegation artifact parse failed: {exc!r}, "
+                    f"chunk preview: {_del_result[max(0, _search_pos - 50) : _search_pos + 100]}"
+                )
+                break
+        if _art_marker in _del_result:
+            logger.info(
+                "[Chat API] Delegation artifact parsed: tool=%s emitted=%d",
+                tool_name,
+                len(artifacts),
+            )
+    return artifacts
+
+
+def _append_unique_artifacts(collected: list[dict], artifacts: list[dict]) -> list[dict]:
+    """Append artifacts by stable identity, returning only newly-added items."""
+    seen = {
+        (
+            str(item.get("file_url", "")),
+            str(item.get("path", "")),
+            str(item.get("name", "")),
+        )
+        for item in collected
+        if isinstance(item, dict)
+    }
+    added: list[dict] = []
+    for art in artifacts:
+        key = (str(art.get("file_url", "")), str(art.get("path", "")), str(art.get("name", "")))
+        if key in seen:
+            continue
+        seen.add(key)
+        collected.append(art)
+        added.append(art)
+    return added
+
+
 def _resolve_agent(agent: object):
     """Resolve the actual Agent instance."""
     from openakita.core.agent import Agent
@@ -622,6 +777,125 @@ def _get_existing_agent(request: Request, conversation_id: str | None):
     return getattr(request.app.state, "agent", None)
 
 
+def _discard_pending_cancel(agent: object, conversation_id: str | None) -> None:
+    """Drop a stale pending cancel for an idle conversation, if present."""
+    if not conversation_id:
+        return
+    pending = getattr(agent, "_pending_cancels", None)
+    if isinstance(pending, dict):
+        pending.pop(conversation_id, None)
+
+
+def _agent_has_cancel_target(agent: object, conversation_id: str) -> bool:
+    """Return whether a cancel can still target this agent turn.
+
+    A TaskState is the normal target. During the short startup/prepare window,
+    TaskState may not exist yet; in that case ``_stream_chat`` pre-pins
+    ``_current_conversation_id`` so a user stop can still be delivered as a
+    pending cancel. If both are absent, the agent has already cleaned up this
+    conversation and a cancel would only create stale state.
+    """
+    state = getattr(agent, "agent_state", None)
+    get_task = getattr(state, "get_task_for_session", None)
+    if callable(get_task):
+        try:
+            if get_task(conversation_id) is not None:
+                return True
+        except Exception:
+            pass
+    return getattr(agent, "_current_conversation_id", None) == conversation_id
+
+
+async def _cancel_running_chat_task(
+    actual_agent: object,
+    conversation_id: str | None,
+    reason: str,
+    *,
+    source: str,
+) -> dict:
+    """Cancel a chat task only while its lifecycle lock is still busy.
+
+    ``Agent.cancel_current_task`` intentionally records a pending cancel when
+    no TaskState exists yet, so a stop request can abort the prepare phase.
+    Once the lifecycle lock is already idle, the same pending cancel becomes
+    stale and can kill a future turn that reuses the conversation id.  Control
+    routes therefore use the lifecycle lock as the authority for whether a
+    cancel is still meaningful.
+    """
+    conv_id = conversation_id or getattr(actual_agent, "_current_conversation_id", None)
+    if not conv_id:
+        logger.info("[Chat API] %s cancel without conversation id; using legacy agent cancel", source)
+        actual_agent.cancel_current_task(reason)
+        return {"status": "ok", "action": "cancel", "reason": reason}
+
+    lifecycle = get_lifecycle_manager()
+    try:
+        busy_status = await lifecycle.get_busy_status(conv_id)
+        is_busy = bool(busy_status.get("busy"))
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        logger.warning(
+            "[Chat API] %s cancel busy check failed for conv=%s: %s; proceeding",
+            source,
+            conv_id,
+            exc,
+        )
+        is_busy = True
+
+    if not is_busy:
+        _discard_pending_cancel(actual_agent, conv_id)
+        logger.info(
+            "[Chat API] %s cancel ignored for idle conversation: conv=%s",
+            source,
+            conv_id,
+        )
+        return {
+            "status": "ok",
+            "action": "noop",
+            "reason": reason,
+            "conversation_id": conv_id,
+            "message": "No running task to cancel",
+        }
+
+    if not _agent_has_cancel_target(actual_agent, conv_id):
+        released = await lifecycle.finish(conv_id)
+        _discard_pending_cancel(actual_agent, conv_id)
+        logger.info(
+            "[Chat API] %s cancel ignored: lifecycle was busy but agent turn already "
+            "cleaned up (conv=%s, released=%s)",
+            source,
+            conv_id,
+            released,
+        )
+        return {
+            "status": "ok",
+            "action": "noop",
+            "reason": reason,
+            "conversation_id": conv_id,
+            "message": "No running task to cancel",
+        }
+
+    actual_agent.cancel_current_task(reason, session_id=conv_id)
+
+    # Release busy-lock immediately so the UI reflects cancellation. If the
+    # lock has already been released by the stream finalizer, the cancel arrived
+    # too late; discard the pending signal that may have been written above.
+    released = await lifecycle.finish(conv_id)
+    if not released:
+        _discard_pending_cancel(actual_agent, conv_id)
+        logger.info(
+            "[Chat API] %s cancel arrived after lifecycle idle; discarded pending cancel: conv=%s",
+            source,
+            conv_id,
+        )
+
+    return {
+        "status": "ok",
+        "action": "cancel",
+        "reason": reason,
+        "conversation_id": conv_id,
+    }
+
+
 def _apply_agent_profile(session: object, new_profile_id: str) -> bool:
     """Store agent_profile_id in session context and record the switch.
 
@@ -673,6 +947,10 @@ def _schedule_background_save(
     full_reply_snapshot: str,
     collected_artifacts: list,
     save_done: bool,
+    todo_snapshot: dict | None = None,
+    collected_sources: list | None = None,
+    collected_mcp_calls: list | None = None,
+    progress_events: list[dict] | None = None,
 ) -> None:
     """Register a background callback so that when a long-running agent task
     finally completes after the SSE stream has closed, the result is still
@@ -686,11 +964,24 @@ def _schedule_background_save(
 
         bg_reply = full_reply_snapshot
         bg_artifacts = list(collected_artifacts)
+        bg_sources = list(collected_sources or [])
+        bg_mcp_calls = list(collected_mcp_calls or [])
+        bg_todo_snapshot = todo_snapshot
+        bg_progress_events = list(progress_events or [])
         try:
             while not agent_queue.empty():
                 ev = agent_queue.get_nowait()
                 if ev is None or ev.get("type") == "__agent_error__":
                     break
+                bg_progress_events = _observe_progress_event_journal(bg_progress_events, ev)
+                bg_todo_snapshot = _observe_todo_snapshot_event(bg_todo_snapshot, ev)
+                _append_unique_artifacts(bg_artifacts, _extract_artifact_events(ev))
+                _source_used = _extract_source_used(ev)
+                if _source_used:
+                    bg_sources.append(_source_used)
+                _mcp_call = _extract_mcp_call(ev)
+                if _mcp_call:
+                    bg_mcp_calls.append(_mcp_call)
                 et = ev.get("type", "")
                 if et == "text_delta" and "content" in ev:
                     bg_reply += ev["content"]
@@ -704,6 +995,16 @@ def _schedule_background_save(
                 meta: dict = {}
                 if bg_artifacts:
                     meta["artifacts"] = bg_artifacts
+                if bg_sources:
+                    meta["sources"] = bg_sources
+                if bg_mcp_calls:
+                    meta["mcp_calls"] = bg_mcp_calls
+                _attach_todo_snapshot_meta(
+                    meta,
+                    conversation_id=conversation_id,
+                    todo_snapshot=bg_todo_snapshot,
+                    progress_events=bg_progress_events,
+                )
                 session.add_message("assistant", bg_reply, **meta)
                 if session_manager:
                     session_manager.persist()
@@ -758,11 +1059,18 @@ async def _stream_chat(
     _ask_user_options: list[dict] = []
     _ask_user_questions: list[dict] = []
     _collected_artifacts: list[dict] = []
+    _collected_sources: list[dict] = []
+    _collected_mcp_calls: list[dict] = []
     # Latest plan snapshot observed on the SSE stream this turn. Captured here
     # (mirroring the frontend's ``currentPlan``) so the *final* state survives —
     # ``auto_close_todo`` unregisters the plan before the assistant message is
     # saved, so a save-time registry lookup would miss completed plans (#615).
     _last_todo_snapshot: dict | None = None
+    # Persisted causal progress event journal for this assistant turn. The
+    # final ``todo`` card is a projection of this journal; keeping the events
+    # lets history/reload recover progress as first-class data instead of only
+    # the folded snapshot.
+    _progress_events: list[dict] = []
     # Server-side mirror of the browser's reasoning-chain assembly. Built from
     # the same SSE events so the persisted history can restore the causal
     # timeline (thinking / narration / tool args / results, in order) instead of
@@ -960,6 +1268,14 @@ async def _stream_chat(
         from openakita.core.policy_v2 import DeferredApprovalRequired
 
         # ── Background agent task: decoupled from SSE lifecycle ──
+        # Pin the conversation before the background runner reaches
+        # ReasoningEngine.begin_task(). This keeps an immediate user cancel
+        # meaningful during the startup/prepare window while still letting the
+        # control route reject late cancels after Agent cleanup clears the pin.
+        with contextlib.suppress(Exception):
+            actual_agent._current_session_id = conversation_id
+            actual_agent._current_conversation_id = conversation_id
+
         async def _agent_runner():
             try:
                 async for ev in actual_agent.chat_with_session_stream(
@@ -1128,6 +1444,27 @@ async def _stream_chat(
             # Observe every raw event (before coalescing / disconnect gating) so
             # the persisted timeline is complete regardless of wire state.
             _chain_timeline_builder.observe(event)
+            # Same for plan state: once the frontend disconnects we still drain
+            # the agent queue and save history, so todo events must be observed
+            # before the wire-output branch can skip the rest of the loop.
+            _progress_events = _observe_progress_event_journal(_progress_events, event)
+            _last_todo_snapshot = _observe_todo_snapshot_event(_last_todo_snapshot, event)
+            _new_artifacts = _append_unique_artifacts(
+                _collected_artifacts,
+                _extract_artifact_events(event),
+            )
+            _source_used = _extract_source_used(event)
+            if _source_used:
+                _collected_sources.append(_source_used)
+                try:
+                    actual_agent._last_link_diagnostic = dict(_source_used)
+                    if http_request is not None:
+                        http_request.app.state.last_link_diagnostic = dict(_source_used)
+                except Exception:
+                    pass
+            _mcp_call = _extract_mcp_call(event)
+            if _mcp_call:
+                _collected_mcp_calls.append(_mcp_call)
 
             if event_type == "__agent_error__":
                 _agent_errored = True
@@ -1175,14 +1512,7 @@ async def _stream_chat(
             else:
                 continue
 
-            _source_used = _extract_source_used(event)
             if _source_used:
-                try:
-                    actual_agent._last_link_diagnostic = dict(_source_used)
-                    if http_request is not None:
-                        http_request.app.state.last_link_diagnostic = dict(_source_used)
-                except Exception:
-                    pass
                 # FIX-F (post-S2 audit): these direct-yield paths bypass
                 # the coalescer, so we need to update _last_emit_ts
                 # ourselves or the heartbeat watchdog will think the
@@ -1190,111 +1520,13 @@ async def _stream_chat(
                 yield _sse("source_used", _source_used)
                 _last_emit_ts = time.time()
 
-            _mcp_call = _extract_mcp_call(event)
             if _mcp_call:
                 yield _sse("mcp_call", _mcp_call)
                 _last_emit_ts = time.time()
 
-            # Track the plan as it streams so we can persist the final snapshot
-            # onto the assistant message (the registry is cleared by auto-close
-            # before the save runs). Mirrors ChatView's currentPlan assembly.
-            if event_type == "todo_created":
-                _plan_evt = event.get("plan")
-                if isinstance(_plan_evt, dict):
-                    import copy as _copy
-
-                    _last_todo_snapshot = _copy.deepcopy(_plan_evt)
-            elif event_type == "todo_step_updated" and isinstance(_last_todo_snapshot, dict):
-                _step_id = event.get("stepId") or event.get("step_id")
-                _step_idx = event.get("stepIdx")
-                _new_status = event.get("status")
-                _steps = _last_todo_snapshot.get("steps") or []
-                for _i, _s in enumerate(_steps):
-                    if (_step_id and _s.get("id") == _step_id) or (
-                        isinstance(_step_idx, int) and _i == _step_idx
-                    ):
-                        if _new_status:
-                            _s["status"] = _new_status
-                        break
-            elif event_type == "todo_completed" and isinstance(_last_todo_snapshot, dict):
-                _last_todo_snapshot["status"] = "completed"
-            elif event_type == "todo_cancelled" and isinstance(_last_todo_snapshot, dict):
-                _last_todo_snapshot["status"] = "cancelled"
-
-            # deliver_artifacts / send_sticker 都可能返回带 receipts 的 JSON
-            _artifact_tools = ("deliver_artifacts", "send_sticker")
-            if event_type == "tool_call_end" and event.get("tool") in _artifact_tools:
-                try:
-                    result_str = event.get("result", "{}")
-                    _log_marker = "\n\n[执行日志]"
-                    if _log_marker in result_str:
-                        result_str = result_str[: result_str.index(_log_marker)]
-                    result_data = json.loads(result_str)
-                    _receipts = result_data.get("receipts", [])
-                    _emitted = 0
-                    for receipt in _receipts:
-                        if receipt.get("status") == "delivered" and receipt.get("file_url"):
-                            art_data = {
-                                "artifact_type": receipt.get("type", "file"),
-                                "file_url": receipt["file_url"],
-                                "path": receipt.get("path", ""),
-                                "name": receipt.get("name", ""),
-                                "caption": receipt.get("caption", ""),
-                                "size": receipt.get("size"),
-                            }
-                            _collected_artifacts.append(art_data)
-                            yield _sse("artifact", art_data)
-                            _last_emit_ts = time.time()
-                            _emitted += 1
-                    logger.info(
-                        f"[Chat API] Artifact SSE: tool={event.get('tool')}, "
-                        f"receipts={len(_receipts)}, emitted={_emitted}"
-                    )
-                except (json.JSONDecodeError, TypeError, KeyError) as exc:
-                    logger.warning(
-                        f"[Chat API] Artifact parse failed for {event.get('tool')}: {exc!r}, "
-                        f"result preview: {str(event.get('result', ''))[:200]}"
-                    )
-
-            # Forward artifact receipts from sub-agents (via orchestrator delegation).
-            # delegate_parallel may contain multiple __ARTIFACT_RECEIPTS__ blocks.
-            _delegation_tools = ("delegate_to_agent", "delegate_parallel", "spawn_agent")
-            if event_type == "tool_call_end" and event.get("tool") in _delegation_tools:
-                _art_marker = "__ARTIFACT_RECEIPTS__\n"
-                _del_result = event.get("result", "")
-                _search_pos = 0
-                _del_emitted = 0
-                while _art_marker in _del_result[_search_pos:]:
-                    try:
-                        _idx = _del_result.index(_art_marker, _search_pos) + len(_art_marker)
-                        _eol = _del_result.find("\n", _idx)
-                        _chunk = _del_result[_idx:] if _eol < 0 else _del_result[_idx:_eol]
-                        _search_pos = _idx + len(_chunk)
-                        for receipt in json.loads(_chunk):
-                            if isinstance(receipt, dict) and receipt.get("file_url"):
-                                art_data = {
-                                    "artifact_type": receipt.get("type", "file"),
-                                    "file_url": receipt["file_url"],
-                                    "path": receipt.get("path", ""),
-                                    "name": receipt.get("name", ""),
-                                    "caption": receipt.get("caption", ""),
-                                    "size": receipt.get("size"),
-                                }
-                                _collected_artifacts.append(art_data)
-                                yield _sse("artifact", art_data)
-                                _last_emit_ts = time.time()
-                                _del_emitted += 1
-                    except (json.JSONDecodeError, TypeError, KeyError, ValueError) as exc:
-                        logger.warning(
-                            f"[Chat API] Delegation artifact parse failed: {exc!r}, "
-                            f"chunk preview: {_del_result[max(0, _search_pos - 50) : _search_pos + 100]}"
-                        )
-                        break
-                if _art_marker in _del_result:
-                    logger.info(
-                        f"[Chat API] Delegation artifact SSE: tool={event.get('tool')}, "
-                        f"emitted={_del_emitted}"
-                    )
+            for art_data in _new_artifacts:
+                yield _sse("artifact", art_data)
+                _last_emit_ts = time.time()
 
             # Inject ui_preference events for system_config set_ui results
             if event_type == "tool_call_end" and event.get("tool") == "system_config":
@@ -1420,6 +1652,10 @@ async def _stream_chat(
                     _msg_meta["tool_summary"] = _tool_summary
                 if _collected_artifacts:
                     _msg_meta["artifacts"] = _collected_artifacts
+                if _collected_sources:
+                    _msg_meta["sources"] = _collected_sources
+                if _collected_mcp_calls:
+                    _msg_meta["mcp_calls"] = _collected_mcp_calls
                 if _usage_data and (
                     _usage_data.get("input_tokens") or _usage_data.get("output_tokens")
                 ):
@@ -1437,30 +1673,12 @@ async def _stream_chat(
                 # *final* state even after auto_close unregisters the plan);
                 # fall back to the registry for an in-progress plan that emitted
                 # no events this turn. The shape matches the ``todo_created`` SSE.
-                try:
-                    from ..message_parts import serialize_plan_to_chat_todo
-
-                    _todo_snapshot = None
-                    if isinstance(_last_todo_snapshot, dict):
-                        _todo_snapshot = serialize_plan_to_chat_todo(_last_todo_snapshot)
-                    if not (_todo_snapshot and _todo_snapshot.get("steps")):
-                        from ...tools.handlers.plan import (
-                            get_todo_handler_for_session,
-                            has_active_todo,
-                        )
-
-                        if conversation_id and has_active_todo(conversation_id):
-                            _todo_handler = get_todo_handler_for_session(conversation_id)
-                            _todo_plan = (
-                                _todo_handler.get_plan_for(conversation_id)
-                                if _todo_handler
-                                else None
-                            )
-                            _todo_snapshot = serialize_plan_to_chat_todo(_todo_plan)
-                    if _todo_snapshot and _todo_snapshot.get("steps"):
-                        _msg_meta["todo"] = _todo_snapshot
-                except Exception:
-                    pass
+                _attach_todo_snapshot_meta(
+                    _msg_meta,
+                    conversation_id=conversation_id,
+                    todo_snapshot=_last_todo_snapshot,
+                    progress_events=_progress_events,
+                )
                 if _agent_errored:
                     _msg_meta["is_truncated"] = True
                     _msg_meta["truncation_reason"] = "mid_stream_failure"
@@ -1539,6 +1757,10 @@ async def _stream_chat(
                         _full_reply,
                         _collected_artifacts,
                         _save_done,
+                        _last_todo_snapshot,
+                        _collected_sources,
+                        _collected_mcp_calls,
+                        _progress_events,
                     )
 
         # Drain remaining queue events to accumulate _full_reply for deferred save
@@ -1548,6 +1770,15 @@ async def _stream_chat(
                     ev = _agent_queue.get_nowait()
                     if ev is None or ev.get("type") == "__agent_error__":
                         break
+                    _progress_events = _observe_progress_event_journal(_progress_events, ev)
+                    _last_todo_snapshot = _observe_todo_snapshot_event(_last_todo_snapshot, ev)
+                    _append_unique_artifacts(_collected_artifacts, _extract_artifact_events(ev))
+                    _source_used = _extract_source_used(ev)
+                    if _source_used:
+                        _collected_sources.append(_source_used)
+                    _mcp_call = _extract_mcp_call(ev)
+                    if _mcp_call:
+                        _collected_mcp_calls.append(_mcp_call)
                     et = ev.get("type", "")
                     _chain_timeline_builder.observe(ev)
                     if et != "done":
@@ -1561,9 +1792,19 @@ async def _stream_chat(
                     _deferred_meta: dict = {}
                     if _collected_artifacts:
                         _deferred_meta["artifacts"] = _collected_artifacts
+                    if _collected_sources:
+                        _deferred_meta["sources"] = _collected_sources
+                    if _collected_mcp_calls:
+                        _deferred_meta["mcp_calls"] = _collected_mcp_calls
                     _deferred_timeline = _chain_timeline_builder.build()
                     if _deferred_timeline:
                         _deferred_meta["chain_timeline"] = _deferred_timeline
+                    _attach_todo_snapshot_meta(
+                        _deferred_meta,
+                        conversation_id=conversation_id,
+                        todo_snapshot=_last_todo_snapshot,
+                        progress_events=_progress_events,
+                    )
                     session.add_message("assistant", _deferred_text, **_deferred_meta)
                     if session_manager:
                         session_manager.persist()
@@ -3026,16 +3267,14 @@ async def chat_cancel(request: Request, body: ChatControlRequest):
 
     _conv_id = conv_id or getattr(actual_agent, "_current_conversation_id", None)
     logger.info(f"[Chat API] Cancel 接收到请求: reason={reason!r}, conv_id={_conv_id!r}")
-    actual_agent.cancel_current_task(reason, session_id=_conv_id)
-
-    # Immediately release busy-lock so the UI reflects the cancellation.
-    # _stream_chat's finally block will also call finish() with a generation
-    # guard, which will be a safe no-op since the lock is already released.
-    if _conv_id:
-        await get_lifecycle_manager().finish(_conv_id)
-
+    result = await _cancel_running_chat_task(
+        actual_agent,
+        _conv_id,
+        reason,
+        source="Cancel",
+    )
     logger.info(f"[Chat API] Cancel 执行完成: reason={reason!r}")
-    return {"status": "ok", "action": "cancel", "reason": reason}
+    return result
 
 
 @router.post("/api/chat/skip")
@@ -3079,11 +3318,14 @@ async def chat_insert(request: Request, body: ChatControlRequest):
         reason = f"用户发送停止指令: {body.message}"
         _conv_id = conv_id or getattr(actual_agent, "_current_conversation_id", None)
         logger.info(f"[Chat API] Insert -> STOP: reason={reason!r}, conv_id={_conv_id!r}")
-        actual_agent.cancel_current_task(reason, session_id=_conv_id)
-        if _conv_id:
-            await get_lifecycle_manager().finish(_conv_id)
+        result = await _cancel_running_chat_task(
+            actual_agent,
+            _conv_id,
+            reason,
+            source="Insert STOP",
+        )
         logger.info("[Chat API] Insert -> STOP 执行完成")
-        return {"status": "ok", "action": "cancel", "reason": reason}
+        return result
 
     if msg_type == "skip":
         reason = f"用户发送跳过指令: {body.message}"

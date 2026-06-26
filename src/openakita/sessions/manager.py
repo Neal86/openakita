@@ -19,7 +19,7 @@ from typing import Any
 
 from openakita.utils.atomic_io import atomic_json_write
 
-from .session import Session, SessionConfig, SessionState
+from .session import Session, SessionConfig, SessionState, is_duplicate_message
 from .user import UserManager
 
 logger = logging.getLogger(__name__)
@@ -282,25 +282,23 @@ class SessionManager:
                 newer = [t for t in db_turns if t.get("timestamp", "") > last_ts] if last_ts else []
                 if not newer and not session.context.messages and db_turns:
                     newer = db_turns
+                appended = 0
                 for t in newer:
                     ts = t.get("timestamp", "")
                     msg = {"role": t["role"], "content": t.get("content", "")}
                     if ts:
                         msg["timestamp"] = ts
                     with session.context._msg_lock:
-                        last = session.context.messages[-1] if session.context.messages else None
-                        if (
-                            last
-                            and last.get("role") == msg["role"]
-                            and last.get("content") == msg["content"]
-                        ):
+                        if is_duplicate_message(session.context.messages, msg):
                             continue
                         session.context.messages.append(msg)
+                        appended += 1
                 if newer:
-                    total_backfilled += len(newer)
-                    logger.info(
-                        f"Backfilled {len(newer)} turns from SQLite for {session.session_key}"
-                    )
+                    total_backfilled += appended
+                    if appended:
+                        logger.info(
+                            f"Backfilled {appended} turns from SQLite for {session.session_key}"
+                        )
             except Exception as e:
                 logger.warning(f"Turn backfill failed for {session.session_key}: {e}")
         if total_backfilled:
@@ -480,19 +478,13 @@ class SessionManager:
             return
 
         db_turns = list(db_turns)[-max_turns:]
-        existing_keys = {
-            (m.get("role"), m.get("content"), m.get("timestamp"))
-            for m in (session.context.messages or [])
-        }
         appended = 0
         for turn in db_turns:
             if not isinstance(turn, dict):
                 continue
-            key = (turn.get("role"), turn.get("content"), turn.get("timestamp"))
-            if key in existing_keys:
+            if is_duplicate_message(session.context.messages, turn):
                 continue
             session.context.messages.append(dict(turn))
-            existing_keys.add(key)
             appended += 1
         if appended:
             try:

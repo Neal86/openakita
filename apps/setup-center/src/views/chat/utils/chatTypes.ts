@@ -5,6 +5,7 @@ import type {
   ChatMessage,
   ChatToolCall,
   ChatTodo,
+  ChatProgressEvent,
   ChatTodoStep,
   ChatAskUser,
   ChatAskQuestion,
@@ -31,6 +32,7 @@ export type {
   ChatMessage,
   ChatToolCall,
   ChatTodo,
+  ChatProgressEvent,
   ChatTodoStep,
   ChatAskUser,
   ChatAskQuestion,
@@ -128,7 +130,7 @@ export type StreamEvent =
   | { type: "source_used"; tool_name?: string; tool_use_id?: string; requested_url: string; final_url: string; hostname?: string; redirected?: boolean; from_cache?: boolean; status?: string; hint?: string; protocol_version?: number }
   | { type: "mcp_call"; tool_use_id?: string; server: string; tool: string; status?: "ok" | "error" | string; auto_connected?: boolean; reconnected?: boolean; error?: string; protocol_version?: number }
   | { type: "todo_created"; plan: ChatTodo; restored?: boolean }
-  | { type: "todo_step_updated"; stepId?: string; step_id?: string; stepIdx?: number; status: string; protocol_version?: number }
+  | { type: "todo_step_updated"; stepId?: string; step_id?: string; stepIdx?: number; status: string; result?: string | null; protocol_version?: number }
   | { type: "todo_completed" }
   | { type: "todo_cancelled" }
   | { type: "plan_ready_for_approval"; data: { conversation_id: string; summary: string; plan_id: string; plan_file: string }; conversation_id?: string; plan_id?: string; plan_file?: string; protocol_version?: number }

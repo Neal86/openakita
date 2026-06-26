@@ -92,6 +92,44 @@ def test_builder_tool_error_status():
     assert next(e for e in entries if e["kind"] == "tool_end")["status"] == "error"
 
 
+def test_builder_persists_config_hint_after_tool_error():
+    b = ChainTimelineBuilder()
+    b.observe({"type": "iteration_start", "iteration": 1})
+    b.observe({"type": "tool_call_start", "id": "t1", "tool": "web_search", "args": {}})
+    b.observe(
+        {
+            "type": "tool_call_end",
+            "id": "t1",
+            "tool": "web_search",
+            "result": "[搜索源未配置]",
+            "is_error": True,
+        }
+    )
+    b.observe(
+        {
+            "type": "config_hint",
+            "tool_use_id": "t1",
+            "scope": "web_search",
+            "error_code": "missing_credential",
+            "title": "搜索源未配置",
+            "message": "请配置搜索源。",
+            "actions": [{"id": "open_settings", "label": "前往配置", "view": "config"}],
+        }
+    )
+
+    entries = b.build()[0]["entries"]
+    assert [e["kind"] for e in entries] == ["tool_start", "tool_end", "config_hint"]
+    hint_entry = entries[-1]
+    assert hint_entry["toolId"] == "t1"
+    assert hint_entry["hint"] == {
+        "scope": "web_search",
+        "error_code": "missing_credential",
+        "title": "搜索源未配置",
+        "message": "请配置搜索源。",
+        "actions": [{"id": "open_settings", "label": "前往配置", "view": "config"}],
+    }
+
+
 def test_builder_context_compressed_prepended_to_next_group():
     b = ChainTimelineBuilder()
     b.observe({"type": "iteration_start", "iteration": 1})
@@ -232,6 +270,15 @@ def test_history_exposes_chain_timeline(tmp_path):
                     "tool": "read_file",
                     "result": "body",
                     "status": "done",
+                },
+                {
+                    "kind": "config_hint",
+                    "toolId": "t1",
+                    "hint": {
+                        "scope": "web_search",
+                        "error_code": "missing_credential",
+                        "title": "搜索源未配置",
+                    },
                 },
             ],
         }
