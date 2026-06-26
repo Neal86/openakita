@@ -34,13 +34,14 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import mimetypes
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from .db import FinanceAutoDB
 from .encryption import (
@@ -257,6 +258,25 @@ class FinanceAutoService:
     def __init__(self, db: FinanceAutoDB, key_manager: KeyManager | None = None):
         self.db = db
         self.key_manager: KeyManager = key_manager or KeyManager()
+        # PluginAPI handle set by ``plugin.py`` on load. The host wires its
+        # Brain (LLM layer) *after* plugins finish loading, so we resolve the
+        # brain lazily (per request) rather than capturing it at load time.
+        self.plugin_api: Any | None = None
+
+    def get_host_brain(self) -> Any | None:
+        """Resolve the host Brain on demand (needs ``brain.access``).
+
+        Returns ``None`` when the permission is absent or the host has not
+        wired a brain yet, in which case the AI scenarios fall back to the
+        offline :class:`MockLLMResponder`.
+        """
+        api = self.plugin_api
+        if api is None:
+            return None
+        try:
+            return api.get_brain()
+        except Exception:  # noqa: BLE001 — brain.access may be absent
+            return None
 
     # Convenience: True when the manager is unlocked AND we should write
     # encrypted payloads on new inserts.
@@ -1234,6 +1254,54 @@ PLUGIN_MOUNT_PREFIX = "/api/plugins/finance-auto"
 _LEGACY_REDIRECT_EXEMPT_PREFIXES: tuple[str, ...] = ("v1/", "v1", "ws", "ws/")
 
 
+# Plugin UI bundle lives at ``<plugin_root>/ui/dist`` (this file sits at
+# ``<plugin_root>/finance_auto_backend/routes.py``).
+_UI_DIST_DIR = Path(__file__).resolve().parents[1] / "ui" / "dist"
+
+
+def _attach_ui_static(outer: APIRouter) -> None:
+    """Serve the plugin UI bundle from inside the plugin router.
+
+    The host mounts ``ui/dist`` at ``/api/plugins/finance-auto/ui`` too, but
+    that mount is registered *after* this router (``server.py`` flushes
+    pending routers before pending UI mounts). Since the catch-all
+    ``/{legacy_path:path}`` below is greedy, a host-level mount registered
+    later never gets reached — ``/ui/`` matched the catch-all and 308'd to
+    ``/v1/ui/`` (→ 404 ``{"detail":"not_found"}``). Registering explicit UI
+    routes here, *before* the catch-all, guarantees ``/ui/...`` resolves to
+    the static bundle regardless of host mount ordering.
+    """
+    if not _UI_DIST_DIR.is_dir():
+        return
+
+    root = _UI_DIST_DIR.resolve()
+
+    def _resolve(rel: str) -> Path:
+        rel = (rel or "").lstrip("/")
+        target = (root / rel).resolve() if rel else (root / "index.html")
+        if target != root and root not in target.parents:
+            # Path traversal attempt — refuse and fall back to the SPA entry.
+            return root / "index.html"
+        if target.is_dir():
+            target = target / "index.html"
+        if not target.is_file():
+            target = root / "index.html"
+        return target
+
+    @outer.get("/ui", include_in_schema=False)
+    @outer.get("/ui/", include_in_schema=False)
+    @outer.get("/ui/{ui_path:path}", include_in_schema=False)
+    async def serve_ui(ui_path: str = "") -> FileResponse:
+        target = _resolve(ui_path)
+        media_type, _ = mimetypes.guess_type(str(target))
+        headers = {"Cache-Control": "no-cache, no-store, must-revalidate"}
+        return FileResponse(
+            str(target),
+            media_type=media_type or "application/octet-stream",
+            headers=headers,
+        )
+
+
 def _attach_legacy_redirects(outer: APIRouter, service: FinanceAutoService) -> None:
     """Mount a catch-all on ``outer`` that 308-redirects every non-v1
     HTTP path to the corresponding ``/v1/`` URL.
@@ -1299,6 +1367,10 @@ def build_router(service: FinanceAutoService) -> APIRouter:
     # task 5 step 6 ships the URL switch.
     from .ai.ws import register_ws_endpoint
     register_ws_endpoint(outer)
+
+    # Serve the UI bundle *before* the catch-all so ``/ui/...`` is not
+    # swallowed by the legacy 308 redirect (see _attach_ui_static docstring).
+    _attach_ui_static(outer)
 
     # Catch-all 308 redirect for legacy HTTP paths.
     _attach_legacy_redirects(outer, service)

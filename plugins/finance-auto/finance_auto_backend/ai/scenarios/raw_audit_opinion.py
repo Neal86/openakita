@@ -31,8 +31,8 @@ from .._base_paths import TEMPLATE_DIR
 from ..audit import maybe_persist_debug_snapshot, record_llm_call
 from ..consent import ConsentDenied, check_consent
 from ..desensitizer import desensitize
-from ..router import FinanceAIRouter, LLMResponse, MockLLMResponder
-from ._base import ScenarioRunResult, render_prompt
+from ..router import FinanceAIRouter, LLMResponse
+from ._base import ScenarioRunResult, render_prompt, resolve_router
 
 if TYPE_CHECKING:
     from ...routes import FinanceAutoService
@@ -132,7 +132,7 @@ async def run(
     scenarios (provider / model / hash / outcome / consent_id).
     """
     started = time.perf_counter()
-    router = router or FinanceAIRouter(responder=MockLLMResponder())
+    router = resolve_router(service, router)
     user_id = "local"
 
     injected = detect_prompt_injection(payload)

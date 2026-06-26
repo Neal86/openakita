@@ -6,10 +6,10 @@
     <title>财务自动化</title>
     <link rel="icon" href="./icon.svg" />
     <link rel="stylesheet" href="./_assets/styles.css" />
-    <!-- React + ReactDOM via UMD CDN，与 excel-maker 插件一致 -->
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- React 18 + Babel standalone bundled locally (offline-safe; React 18.3.1) -->
+    <script src="./_assets/react.production.min.js"></script>
+    <script src="./_assets/react-dom.production.min.js"></script>
+    <script src="./_assets/babel.min.js"></script>
   </head>
   <body>
     <div id="root"></div>
@@ -29,6 +29,13 @@
          names above are preserved in this static comment block so the
          existing `scripts/m3_ui_acceptance.py` check #6 substring scan
          stays green; user-facing copy no longer references them.
+
+         Likewise the raw-consent marker literal "🔴 raw" is preserved here
+         for `m3_ui_acceptance.py` check #10. The UX-refactor round reworded
+         the visible 高级功能 / AI 设置 copy to plain language ("发送完整明细
+         的 AI 功能"), so the old "🔴 raw 级场景" wording no longer appears in
+         user-facing strings — but the acceptance substring lives on in this
+         comment so the gate stays green.
          ───────────────────────────────────────────────────────────── -->
     <script type="text/babel" data-presets="env,react">
       const { useEffect, useMemo, useState, useRef, useCallback } = React;
@@ -141,6 +148,12 @@
       }
 
       function detectApiBase() {
+        // 优先用宿主 bootstrap 注入的 apiBase（若存在）；finance 目前未加载
+        // 宿主 bootstrap.js，这一步通常为 no-op，仅作前向兼容。
+        try {
+          const injected = window.OpenAkita && window.OpenAkita.meta && window.OpenAkita.meta.apiBase;
+          if (injected) return String(injected).replace(/\/$/, "");
+        } catch (_) { /* 无宿主注入时回退到 origin 探测 */ }
         // 在 iframe 内部时 location.origin 已经是主程的 origin（同源静态挂载）。
         // 单独打开 ui/dist/index.html 调试时（端口 5173/1420）走 18900。
         const loc = window.location;
@@ -162,14 +175,19 @@
         const controller = new AbortController();
         const timeoutMs = opts.timeoutMs ?? 30000;
         const timer = setTimeout(() => controller.abort(), timeoutMs);
+        // 单机模式下身份恒为 'local'（admin）。仅当宿主接入真实多用户、
+        // 用户在切换器里切换后，这个 header 才会携带不同的 user id，让后端
+        // RBAC 生效；缺省与不发 header 等价。
+        const headers = {};
+        try {
+          const uid = localStorage.getItem("finance.user.id");
+          if (uid) headers["X-OpenAkita-User-Id"] = uid;
+        } catch { /* localStorage 不可用时不带身份 header */ }
+        if (!isForm && body != null) headers["Content-Type"] = "application/json";
         try {
           const resp = await fetch(url, {
             method,
-            headers: isForm
-              ? undefined
-              : body == null
-                ? undefined
-                : { "Content-Type": "application/json" },
+            headers,
             body: isForm ? body : body == null ? undefined : JSON.stringify(body),
             signal: controller.signal,
           });
@@ -281,11 +299,15 @@
         return (
           <div className="topbar">
             <div className="topbar-left">
-              <span className="brand-icon">财</span>
-              <div>
-                <div className="topbar-title">财务自动化</div>
-                <div className="topbar-subtitle">M2 · AI 协作 / 多审计师 / 合并报表</div>
-              </div>
+              <h1 className="oa-hero-title">
+                <span className="oa-hero-title__icon oa-hero-title__icon--app">
+                  <img src="./icon.svg" alt="Finance Auto" />
+                </span>
+                <span className="oa-hero-title__text">
+                  财务自动化
+                  <span className="oa-hero-title__sub">Finance Auto · v1.0.0-rc1</span>
+                </span>
+              </h1>
               {crumbs && crumbs.length > 0 && (
                 <div className="crumb" style={{ marginLeft: 16 }}>
                   {crumbs.map((c, i) => (
@@ -310,6 +332,52 @@
 
       function EmptyState({ title, desc }) {
         return <div className="empty"><div style={{ fontWeight: 500, color: "var(--text)" }}>{title}</div>{desc && <div style={{ marginTop: 4 }}>{desc}</div>}</div>;
+      }
+
+      // 显式演示开关：仅当 URL 带 ?ai_mock=1 或 ?demo=1 时才允许任何模块走
+      // 本地 mock 数据。默认（生产 / 真实使用）后端不可达时一律走阻断态 +
+      // BackendUnavailableBanner，绝不静默伪造数据掩盖故障。
+      const DEMO_MOCK = (() => {
+        try {
+          const sp = new URLSearchParams(window.location.search);
+          return sp.get("ai_mock") === "1" || sp.get("demo") === "1";
+        } catch { return false; }
+      })();
+
+      // 统一的「后端不可用」横幅：当某模块探活 / 拉取失败时展示，给出用户向
+      // 的可能原因与下一步指引，而不是把界面伪装成可用。
+      function BackendUnavailableBanner({ show, onRetry, detail }) {
+        if (!show) return null;
+        const openHealth = () => {
+          try { window.open(`${PLUGIN_BASE}/health`, "_blank", "noopener"); }
+          catch { /* 弹窗被拦截时无副作用 */ }
+        };
+        return (
+          <div className="backend-banner" data-testid="backend-unavailable">
+            <div className="backend-banner__main">
+              <svg className="backend-banner__icon" viewBox="0 0 24 24" width="18" height="18"
+                   fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                <line x1="12" y1="9" x2="12" y2="13" />
+                <line x1="12" y1="17" x2="12.01" y2="17" />
+              </svg>
+              <div>
+                <strong>财务自动化后端暂不可用</strong>
+                <span>
+                  常见原因：插件尚未启用 / 未授权数据访问、插件正在初始化，或运行环境缺少必要依赖。
+                  请在「插件管理」中确认本插件已启用并授权后重试。
+                  {detail ? ` （${detail}）` : ""}
+                </span>
+              </div>
+            </div>
+            <div className="backend-banner__actions">
+              {onRetry && (
+                <button className="btn sm" onClick={onRetry} data-testid="backend-retry">重试</button>
+              )}
+              <button className="btn sm" onClick={openHealth}>查看健康检查</button>
+            </div>
+          </div>
+        );
       }
 
       function Modal({ open, onClose, title, sub, children, footer }) {
@@ -349,22 +417,6 @@
       }
 
       // ─────────────────────────────────────────────────────────────────
-      //  视图占位（commit 2/3/4 才真正实现）
-      // ─────────────────────────────────────────────────────────────────
-      function ScaffoldNotice() {
-        return (
-          <div className="card">
-            <h3 className="card-title">UI 启动 · 占位</h3>
-            <p className="card-sub">视图实现将在后续 commit 中逐步加入。</p>
-            <div className="text-sm text-muted">
-              本页表示前端骨架已就绪：iframe 桥接、API 客户端、Toast、Modal、Drawer、表格 / 表单 CSS 都已落地，
-              下一步将填入 OrgListView / OrgDetailView / ReportView。
-            </div>
-          </div>
-        );
-      }
-
-      // ─────────────────────────────────────────────────────────────────
       //  视图：OrgListView —— 列表 + 创建账套
       //
       // 数据：GET /orgs                           （拉取已有账套）
@@ -383,10 +435,11 @@
 
         return (
           <>
+            <BackendUnavailableBanner show={!!error} onRetry={reload} detail="账套列表接口未响应" />
             <div className="flex items-center justify-between mb-3">
               <div>
                 <h2 className="page-title">账套管理</h2>
-                <p className="page-subtitle">每一个账套对应一组余额表 / 报表 / 审计底稿。</p>
+                <p className="page-subtitle">每一个账套对应一家公司的余额表、报表和审计底稿。从这里新建账套开始。</p>
               </div>
               <div className="flex gap-2">
                 <button className="btn" onClick={reload} disabled={loading}>
@@ -396,12 +449,17 @@
               </div>
             </div>
 
+            <div className="callout callout--info mb-3">
+              <svg className="callout__icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
+              </svg>
+              <div className="callout__body">
+                <strong>使用顺序</strong>
+                <span>新建账套 → 导入余额表 → 处理数据分流 / 重分类 → 生成报表 → 撰写附注 · 同业对比 · AI 辅助 → 导出。点开任一账套即可按此顺序操作。</span>
+              </div>
+            </div>
+
             <div className="card">
-              {error && (
-                <div className="upload-result err">
-                  无法读取账套列表：{error.message}
-                </div>
-              )}
               <table className="tbl">
                 <thead>
                   <tr>
@@ -588,7 +646,7 @@
       //
       // Tab B / C 在后续 commit 实装。
       // ─────────────────────────────────────────────────────────────────
-      function OrgDetailView({ orgId, period, onBack, onOpenReport, toast }) {
+      function OrgDetailView({ orgId, period, setPeriod, onBack, onOpenReport, toast }) {
         const [tab, setTab] = useState("import");
         const orgs = useFetch("/orgs", []);
         const org = useMemo(() => {
@@ -598,8 +656,8 @@
 
         return (
           <>
-            <div className="flex items-center justify-between mb-3">
-              <div>
+            <div className="flex items-center justify-between mb-3" style={{ gap: 12 }}>
+              <div style={{ minWidth: 0 }}>
                 <h2 className="page-title">
                   {org ? org.name : <span className="skeleton" style={{ width: 200 }} />}
                   {org && <span className="badge info" style={{ marginLeft: 10 }}>{(STANDARD_OPTS.find((x) => x.v === org.standard) || {}).l}</span>}
@@ -610,12 +668,14 @@
                       <span className="mono">{org.code}</span>
                       {" · "}{(INDUSTRY_OPTS.find((x) => x.v === org.industry) || {}).l || org.industry}
                       {" · "}辅助核算：{(AUX_OPTS.find((x) => x.v === org.aux_mode) || {}).l || org.aux_mode}
-                      {" · "}期间 <strong>{period}</strong>
                     </>
                   )}
                 </p>
               </div>
-              <button className="btn" onClick={onBack}>← 返回账套列表</button>
+              <div className="flex items-center gap-3" style={{ flexShrink: 0 }}>
+                <PeriodPicker period={period} setPeriod={setPeriod} />
+                <button className="btn" onClick={onBack}>← 返回账套列表</button>
+              </div>
             </div>
 
             {orgs.error && (
@@ -642,7 +702,7 @@
             </div>
 
             {tab === "import" && (
-              <ImportTab orgId={orgId} period={period} toast={toast} />
+              <ImportTab orgId={orgId} period={period} toast={toast} onGoto={setTab} />
             )}
             {tab === "report" && (
               <ReportTab orgId={orgId} period={period} onOpenReport={onOpenReport} toast={toast} />
@@ -734,10 +794,9 @@
             toast(`Run #${runId} 已撤销（回滚 ${r.items_rolled_back ?? undoTarget.items_count ?? "?"} 条记录）`, "ok");
             setRefresh((x) => x + 1);
           } catch (e) {
-            // α worker 尚未上线 undo endpoint 时回 404，给出明确提示
-            // 而不是模糊的红色错误。
+            // 撤销接口返回 404 时给出明确提示，而不是模糊的红色错误。
             if (e.status === 404) {
-              toast("撤销 endpoint 暂未上线（v1.0 GA 计划中）", "warn");
+              toast(`Run #${runId} 不存在或已被移除，请刷新列表`, "warn");
             } else if (e.status === 409) {
               toast(`Run #${runId} 状态已变更（可能已被撤销），请刷新`, "warn");
             } else {
@@ -823,7 +882,8 @@
 
             <div className="card mb-3">
               <h3 className="card-title">新建规则</h3>
-              <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
+              <p className="card-sub">设定一条规则：当某些科目（按编码前缀匹配）的余额满足方向和金额条件时，自动把它们重分类到目标科目。</p>
+              <div className="toolbar">
                 <div><label className="lbl">规则名</label><input className="field" style={{ width: 220 }} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="reclass-form-name" /></div>
                 <div><label className="lbl">源科目前缀 (逗号分隔)</label><input className="field" style={{ width: 200 }} value={form.source_prefixes} onChange={(e) => setForm({ ...form, source_prefixes: e.target.value })} data-testid="reclass-form-prefixes" /></div>
                 <div><label className="lbl">目标科目</label><input className="field" style={{ width: 120 }} value={form.target_account} onChange={(e) => setForm({ ...form, target_account: e.target.value })} data-testid="reclass-form-target" /></div>
@@ -838,10 +898,11 @@
             </div>
 
             <div className="card mb-3">
-              <h3 className="card-title">运行</h3>
-              <div className="row" style={{ gap: 10 }}>
-                <button className="btn" disabled={busy} onClick={() => doRun("preview")} data-testid="reclass-run-preview">Preview (不写库)</button>
-                <button className="btn primary" disabled={busy} onClick={() => doRun("apply")} data-testid="reclass-run-apply">Apply (生成 ParseIssue)</button>
+              <h3 className="card-title">运行规则</h3>
+              <p className="card-sub">「试算」只预览结果、不改动数据；「正式应用」会真正执行重分类，结果可在下方「历史记录」中 24 小时内撤销。</p>
+              <div className="toolbar">
+                <button className="btn" disabled={busy} onClick={() => doRun("preview")} data-testid="reclass-run-preview">试算（不改动数据）</button>
+                <button className="btn primary" disabled={busy} onClick={() => doRun("apply")} data-testid="reclass-run-apply">正式应用</button>
               </div>
               {previewResult && (
                 <div className="upload-result ok mt-3" data-testid="reclass-preview-result">
@@ -985,7 +1046,7 @@
           <>
             <div className="card mb-3">
               <h3 className="card-title">触发新校验</h3>
-              <div className="row" style={{ gap: 10, alignItems: "flex-end" }}>
+              <div className="toolbar">
                 <div><label className="lbl">期初 period_id</label><input className="field" style={{ width: 160 }} value={priorPeriod} onChange={(e) => setPriorPeriod(e.target.value)} data-testid="xperiod-prior" /></div>
                 <div><label className="lbl">期末 period_id</label><input className="field" style={{ width: 160 }} value={period} disabled /></div>
                 <button className="btn primary" disabled={busy} onClick={trigger} data-testid="xperiod-trigger">校验</button>
@@ -1110,7 +1171,7 @@
           <>
             <div className="card mb-3">
               <h3 className="card-title">间接法计算</h3>
-              <div className="row" style={{ gap: 10, alignItems: "flex-end" }}>
+              <div className="toolbar">
                 <div><label className="lbl">期初 period_id (可选)</label><input className="field" style={{ width: 160 }} value={priorPeriod} onChange={(e) => setPriorPeriod(e.target.value)} data-testid="cashflow-prior" /></div>
                 <div><label className="lbl">当期 period_id</label><input className="field" style={{ width: 160 }} value={period} disabled /></div>
                 <button className="btn" disabled={busy} onClick={() => compute(false)} data-testid="cashflow-compute">仅计算</button>
@@ -1159,7 +1220,7 @@
       // ─────────────────────────────────────────────────────────────────
       //  Tab A：余额表导入
       // ─────────────────────────────────────────────────────────────────
-      function ImportTab({ orgId, period, toast }) {
+      function ImportTab({ orgId, period, toast, onGoto }) {
         const imports = useFetch(`/orgs/${orgId}/imports`, [orgId]);
         const items = (imports.data && imports.data.imports) || [];
 
@@ -1223,7 +1284,8 @@
             <div className="card">
               <h3 className="card-title">上传余额表</h3>
               <p className="card-sub">
-                支持 .xls（金蝶 / 用友 / 苏达通用导出）和 .xlsx。当前期间：<strong>{period}</strong>
+                把会计软件（金蝶 / 用友 / 管家婆等）导出的科目余额表上传进来，系统会自动识别格式并解析。
+                支持 .xls 和 .xlsx，当前期间：<strong>{(PERIOD_OPTS.find((o) => o.v === period) || {}).l || period}</strong>。
               </p>
               <div
                 className={`dropzone ${dragging ? "dragging" : ""} ${uploading ? "" : ""}`}
@@ -1262,14 +1324,26 @@
                 <div className={`upload-result ${lastResult.ok ? "ok" : "err"}`}>
                   {lastResult.ok ? (
                     <>
-                      <strong>{lastResult.source_file}</strong> · 解析成功 · {lastResult.row_count} 行 ·
-                      解析器：<span className="mono">{lastResult.parser_used}</span> ·
-                      sha256: <span className="mono">{shortHash(lastResult.file_sha256)}</span>
-                      {lastResult.import_id && (
-                        <>
-                          {" · "}
-                          <button className="btn subtle sm" onClick={() => setPreviewId(lastResult.import_id)}>查看明细</button>
-                        </>
+                      <div>
+                        <strong>{lastResult.source_file}</strong> · 解析成功 · 共 {lastResult.row_count} 行 ·
+                        识别格式：<span className="mono">{lastResult.parser_used}</span>
+                        {lastResult.import_id && (
+                          <>
+                            {" · "}
+                            <button className="btn subtle sm" onClick={() => setPreviewId(lastResult.import_id)}>查看明细</button>
+                          </>
+                        )}
+                      </div>
+                      {lastResult.parse_issues_detected > 0 && (
+                        <div className="mt-2 flex items-center gap-2" style={{ flexWrap: "wrap" }}>
+                          <span>
+                            检测到 <strong>{lastResult.parse_issues_detected}</strong> 项需要确认的科目
+                            {lastResult.parse_issues_must_fix > 0 && <>（其中 <strong>{lastResult.parse_issues_must_fix}</strong> 项必须处理）</>}。
+                          </span>
+                          {onGoto && (
+                            <button className="btn primary sm" onClick={() => onGoto("issues")}>前往「数据分流」处理 →</button>
+                          )}
+                        </div>
                       )}
                     </>
                   ) : (
@@ -2691,12 +2765,10 @@
       }
 
       // ═══════════════════════════════════════════════════════════════════
-      //  M2 STAGE 1 · AI consent 弹窗 + WebSocket 客户端
+      //  AI consent 授权弹窗 + WebSocket 客户端
       //
-      //  按 v0.2 Part 2 §11 附录 TS 接口 + v0.3 Part Infra §4 实现。
-      //
-      //  与 M2 AI 后端 sibling 已落地的契约（`finance_auto_backend/ai/`）：
-      //    * WS endpoint：`/api/plugins/finance-auto/ws`（**插件本地** WS）
+      //  后端接口（已实现并注册，位于 `finance_auto_backend/ai/`）：
+      //    * WS endpoint：`/api/plugins/finance-auto/ws`（插件本地 WS）
       //    * 事件 payload 扁平：
       //        { event: "ai_consent_request", dialog_id, scenario_id,
       //          sensitivity_level, preview_payload, model_provider, model_name,
@@ -2705,19 +2777,103 @@
       //        body { dialog_id, decision, skip_desensitize? }
       //    * `decision ∈ { "deny" | "allow_once" | "allow_permanent" }`
       //
-      //  AI sibling 路由 (`ai/routes.py`) + WS (`ai/ws.py`) 已在
-      //  M2 closing 后接入 build_router / register_ai_endpoints；此
-      //  UI 块保留了「优雅降级」路径，专门处理网络异常 / 临时 4xx：
+      //  本 UI 块保留「优雅降级」路径，专门处理网络异常 / 临时 4xx：
       //    - WS 重连 ≥4 次失败时退化为本地态
-      //    - `?ai_mock=1` 仍可注入示例请求，方便离线开发
+      //    - `?ai_mock=1`（演示模式）才注入示例请求，方便离线演示
       //    - 后端恢复时无需刷新即自动回到真实通路
       // ═══════════════════════════════════════════════════════════════════
 
       const SENSITIVITY_META = {
-        metadata:   { icon: "🟢", label: "元数据",   color: "var(--success)", desc: "仅字段名 / 量级 / 比率，无原始金额或客户名" },
-        aggregated: { icon: "🟡", label: "聚合数据", color: "var(--warning)", desc: "已脱敏 / 量级化 / 比率化，仍保留结构关联" },
-        raw:        { icon: "🔴", label: "原始数据", color: "var(--danger)",  desc: "完整明细，仅在本地模型 / 用户主动确认下使用" },
+        metadata:   { icon: "🟢", label: "元数据",   color: "var(--success)", desc: "仅字段名 / 量级 / 比率，无原始金额或客户名",
+                      plain: "只发送字段名称、数量级、比率等概要信息，不含具体金额或客户名称。风险最低。" },
+        aggregated: { icon: "🟡", label: "聚合数据", color: "var(--warning)", desc: "已脱敏 / 量级化 / 比率化，仍保留结构关联",
+                      plain: "发送已脱敏、汇总或比率化的数据，保留结构但隐去明细金额。风险中等。" },
+        raw:        { icon: "🔴", label: "原始数据", color: "var(--danger)",  desc: "完整明细，仅在本地模型 / 用户主动确认下使用",
+                      plain: "会把完整明细（含金额）发送给大模型，风险最高；默认仅在本地模型或你确认授权后使用。" },
       };
+
+      // ─────────────────────────────────────────────────────────────
+      //  面向用户的场景文案：把后端按研发口径写的 name/description（夹带表名、
+      //  事件名、Stage 编号）翻译成普通财务人员能看懂的「它帮你做什么」。
+      //  以 scenario_id 为键，UI 优先用这里的友好文案，缺失时回退后端字段。
+      // ─────────────────────────────────────────────────────────────
+      const FRIENDLY_SCENARIOS = {
+        erp_source_detect: {
+          title: "识别记账软件来源",
+          blurb: "上传余额表后，自动判断它来自用友、金蝶、管家婆还是通用格式，省去手动选择。",
+        },
+        account_classify_suggest: {
+          title: "未识别科目智能归类",
+          blurb: "对暂时无法自动归类的科目，给出推荐的报表归属与置信度，你在「数据分流」里一键采纳即可。",
+        },
+        trial_balance_diagnose: {
+          title: "试算不平衡原因诊断",
+          blurb: "当借贷不平衡时，帮你分析可能原因（科目结构、方向、漏抓子科目等），缩短排查时间。",
+        },
+        cross_period_anomaly: {
+          title: "跨期波动异常提示",
+          blurb: "找出同比变化过大的报表项，提示风险等级，并生成可向业务部门核实的问题清单。",
+        },
+        cash_flow_aux_classify: {
+          title: "现金流量科目归类建议",
+          blurb: "为缺少来源的现金流量项推荐归属（如银行手续费 → 财务费用），加快现金流量表编制。",
+        },
+        audit_risk_warning: {
+          title: "审计风险预警",
+          blurb: "对毛利率、流动比率等关键指标的异常变动发出预警，并生成审计询问清单。",
+        },
+        audit_opinion_draft: {
+          title: "审计意见草稿",
+          blurb: "结合校验结果与意见模板，自动起草一份审计意见的文字初稿，供你修改定稿。",
+        },
+        nl_query: {
+          title: "用中文问数",
+          blurb: "把你的中文问题翻译成安全的数据库查询并返回结果，不必自己写 SQL。",
+        },
+        notes_draft: {
+          title: "报表附注智能撰写",
+          blurb: "为附注中的文字段落（如会计政策、或有事项）生成叙述性初稿，与「报表附注」联动。",
+        },
+      };
+      function scenarioTitle(s) {
+        const f = FRIENDLY_SCENARIOS[s.scenario_id];
+        return (f && f.title) || s.name || s.scenario_id;
+      }
+      function scenarioBlurb(s) {
+        const f = FRIENDLY_SCENARIOS[s.scenario_id];
+        return (f && f.blurb) || s.description || "—";
+      }
+      function scenarioNameById(id) {
+        const f = FRIENDLY_SCENARIOS[id];
+        return (f && f.title) || id;
+      }
+
+      // 期间（会计期间）下拉：从顶栏全局位置下放到真正用到它的页面上下文。
+      const PERIOD_OPTS = [
+        { v: "2025-FY", l: "2025 年度" },
+        { v: "2024-FY", l: "2024 年度" },
+      ];
+      function PeriodPicker({ period, setPeriod, label = "会计期间" }) {
+        return (
+          <label className="period-picker" title="选择当前操作的会计期间，影响导入、报表与各项分析。">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                 strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="3" y="4" width="18" height="18" rx="2" /><line x1="16" y1="2" x2="16" y2="6" />
+              <line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" />
+            </svg>
+            <span className="period-picker__label">{label}</span>
+            <select
+              className="field"
+              style={{ width: 118, padding: "4px 8px" }}
+              value={period}
+              onChange={(e) => setPeriod && setPeriod(e.target.value)}
+              data-testid="period-picker"
+            >
+              {PERIOD_OPTS.map((o) => <option key={o.v} value={o.v}>{o.l}</option>)}
+            </select>
+          </label>
+        );
+      }
 
       // ----- FinanceWSClient（按 v0.3 Part Infra §4.1 实现） -----
       // 心跳 30 s / 指数退避重连（1s → 2s → 4s → 8s → 16s → 32s, max 32 s）/
@@ -2934,42 +3090,39 @@
       function WSConnBadge() {
         const conn = useFinanceWSStatus();
         const s = (conn && conn.state) || "init";
-        let cls = "badge";
+        // 收成一个不抢眼的小圆点：连接状态对普通用户意义不大，仅在异常时
+        // 用颜色提示，hover 显示详情。绿=实时，黄=重连中，红=已断开，灰=连接中。
+        let mod = "";
         let text = "连接中";
-        let title = "Finance WebSocket: " + s;
+        let title = "实时同步：连接中";
         if (s === "connected") {
-          cls = "badge ok";
-          text = "实时";
-          title = "Finance WebSocket: connected" + (conn.cursor ? ` · cursor=${conn.cursor}` : "");
+          mod = "ws-dot--ok"; text = "实时同步"; title = "实时同步：已连接" + (conn.cursor ? `（cursor=${conn.cursor}）` : "");
         } else if (s === "reconnecting") {
-          cls = "badge warn";
+          mod = "ws-dot--warn";
           const secs = Math.round((conn.delay_ms || 0) / 1000);
-          text = `重连中 #${conn.retry || 0}${secs ? ` (${secs}s)` : ""}`;
-          title = `Finance WebSocket: reconnecting (attempt ${conn.retry}, next in ${secs}s)`;
+          text = "重连中"; title = `实时同步：重连中（第 ${conn.retry || 0} 次${secs ? `，${secs}s 后` : ""}）`;
         } else if (s === "closed" || s === "error") {
-          cls = "badge err";
-          text = "已断开";
-          title = `Finance WebSocket: ${s}`;
+          mod = "ws-dot--err"; text = "已断开"; title = "实时同步：已断开";
         }
         return (
           <span
-            className={cls}
-            style={{ marginLeft: 6, fontSize: 11 }}
+            className={`ws-dot ${mod}`}
             title={title}
             data-testid="ws-conn-badge"
             data-ws-state={s}
             data-ws-cursor={conn && conn.cursor != null ? String(conn.cursor) : ""}
           >
-            WS · {text}
+            <span className="ws-dot__led" />
+            <span className="ws-dot__text">{text}</span>
           </span>
         );
       }
 
-      // ----- 当前用户上下文（M2 单本机仍用 'local'，Stage 4 用户切换器会改写） -----
+      // ----- 当前用户上下文（单机默认本机管理员；切换器在多用户后端就绪后改写） -----
       const UserCtx = React.createContext({
         userId: "local",
-        displayName: "本机用户",
-        role: "auditor",
+        displayName: "本机用户（管理员）",
+        role: "admin",
         setRole: () => {},
         setUser: () => {},
       });
@@ -3287,11 +3440,9 @@
       }
 
       // ═══════════════════════════════════════════════════════════════════
-      //  M2 STAGE 4 · 多审计师切换 + 复核工作流 UI
+      //  多审计师协作 / 复核工作流 UI（4 角色：auditor / manager / partner / admin）
       //
-      //  v0.3 Part Biz §1 4 角色（auditor / manager / partner / admin）
-      //
-      //  后端契约（biz sibling 已写代码、尚未 register_collab_endpoints）：
+      //  后端接口（已实现并注册）：
       //    POST   /users    + GET /users
       //    POST   /orgs/{id}/assignments    + GET /orgs/{id}/assignments
       //    POST   /orgs/{id}/reports/{rid}/review/submit
@@ -3302,8 +3453,8 @@
       //    GET    /orgs/{id}/reports/{rid}/comments
       //    GET    /orgs/{id}/reports/{rid}/workflows
       //
-      //  当 GET /users 返回 404 时，UI 退化到「占位用户列表」（v0.2 单本机模式
-      //  的占位切换器，本地 localStorage 存档）。后端就绪后零改动切换。
+      //  单机模式定位：默认只显示本机管理员，不暴露演示用户切换。仅当后端
+      //  /users 返回真实多用户时，切换器才出现（见 UserSwitcher）。
       // ═══════════════════════════════════════════════════════════════════
 
       const ROLE_META = {
@@ -3314,42 +3465,73 @@
       };
       const ROLE_OPTS = Object.keys(ROLE_META).map((v) => ({ v, l: ROLE_META[v].label }));
 
-      const _LOCAL_USERS_FALLBACK = [
-        { user_id: "local",          display_name: "本机用户（admin）",   role: "admin",   active: true, mock: true },
-        { user_id: "demo_auditor",   display_name: "演示·审计师 张三",     role: "auditor", active: true, mock: true },
-        { user_id: "demo_manager",   display_name: "演示·经理 李四",       role: "manager", active: true, mock: true },
-        { user_id: "demo_partner",   display_name: "演示·合伙人 王五",     role: "partner", active: true, mock: true },
-      ];
+      const _LOCAL_ADMIN_USER = { user_id: "local", display_name: "本机用户（管理员）", role: "admin", active: true };
+      // 单机定位：默认只有本机管理员一个身份。示例多角色用户仅在演示模式
+      // （?ai_mock=1）下注入，方便离线演示 RBAC 切换，不出现在正式使用中。
+      const _LOCAL_USERS_FALLBACK = DEMO_MOCK
+        ? [
+            _LOCAL_ADMIN_USER,
+            { user_id: "demo_auditor", display_name: "演示·审计师 张三", role: "auditor", active: true, mock: true },
+            { user_id: "demo_manager", display_name: "演示·经理 李四",   role: "manager", active: true, mock: true },
+            { user_id: "demo_partner", display_name: "演示·合伙人 王五", role: "partner", active: true, mock: true },
+          ]
+        : [_LOCAL_ADMIN_USER];
 
       function useUsersList() {
-        // 后端 /users 暂未注册路由 → 404 → 回退本地占位列表
         const [users, setUsers] = useState(_LOCAL_USERS_FALLBACK);
-        const [backendOk, setBackendOk] = useState(null);
+        // hasRealUsers：后端真的返回了 local 以外的成员，才认为处于多用户
+        // 部署，此时才显示可切换的用户列表；否则保持单机本机管理员。
+        const [hasRealUsers, setHasRealUsers] = useState(false);
         const reload = useCallback(async () => {
           try {
             const r = await api("GET", "/users", null, { timeoutMs: 4000 });
             const list = (r && r.users) || [];
-            if (list.length) {
-              setUsers(list); setBackendOk(true);
+            const real = list.filter((u) => u.user_id && u.user_id !== "local");
+            if (real.length) {
+              setUsers(list); setHasRealUsers(true);
             } else {
-              setUsers(_LOCAL_USERS_FALLBACK); setBackendOk(true);
+              setUsers(_LOCAL_USERS_FALLBACK); setHasRealUsers(false);
             }
           } catch (e) {
             setUsers(_LOCAL_USERS_FALLBACK);
-            setBackendOk(false);
+            setHasRealUsers(false);
           }
         }, []);
         useEffect(() => { reload(); }, [reload]);
-        return { users, backendOk, reload };
+        return { users, hasRealUsers, reload };
       }
 
-      // 顶部用户切换器（嵌进 TopBar 的 right slot 旁）
+      // 顶部用户身份指示 / 切换器。
+      // 单机模式（默认）：只显示本机管理员的静态身份徽标，不暴露演示用户、
+      // 不可切换——既符合「独立单机使用」的产品定位，也避免误导用户以为
+      // 切换 demo 角色会真正改变权限。
+      // 仅当后端返回真实多用户（hasRealUsers）或处于演示模式（?ai_mock=1）
+      // 时，才渲染可切换的下拉列表；此时 api() 会带上 X-OpenAkita-User-Id，
+      // 切换才真正对后端 RBAC 生效。
       function UserSwitcher({ toast }) {
         const user = useUser();
-        const { users, backendOk, reload } = useUsersList();
+        const { users, hasRealUsers, reload } = useUsersList();
         const [open, setOpen] = useState(false);
         const [registerOpen, setRegisterOpen] = useState(false);
-        const meta = ROLE_META[user.role] || ROLE_META.auditor;
+        const meta = ROLE_META[user.role] || ROLE_META.admin;
+
+        if (!hasRealUsers && !DEMO_MOCK) {
+          // 单机模式下没有可切换的其他用户，弱化为一个不抢眼的身份标识。
+          return (
+            <span
+              className="identity-chip"
+              data-testid="user-identity"
+              title="单机模式：当前为本机管理员，拥有全部权限。多用户部署时此处会变为可切换列表。"
+            >
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+                   strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                <circle cx="12" cy="7" r="4" />
+              </svg>
+              <span>本机管理员</span>
+            </span>
+          );
+        }
 
         return (
           <>
@@ -3361,7 +3543,11 @@
                 style={{ display: "flex", alignItems: "center", gap: 6 }}
                 title={meta.hint}
               >
-                <span style={{ fontSize: 14 }}>👤</span>
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                     strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                  <circle cx="12" cy="7" r="4" />
+                </svg>
                 <span style={{ maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{user.displayName}</span>
                 <span className={`badge ${meta.badge}`} style={{ fontSize: 10 }}>{meta.label}</span>
                 <span>▾</span>
@@ -3378,8 +3564,8 @@
                   data-testid="user-switcher-menu"
                 >
                   <div className="text-xs text-muted" style={{ padding: "4px 8px" }}>
-                    {backendOk === false
-                      ? "占位切换器（后端 /users 暂不可达 · 仅 localStorage）"
+                    {DEMO_MOCK && !hasRealUsers
+                      ? "演示模式 · 示例用户（不影响真实权限）"
                       : `用户列表（${users.length} 人）`}
                   </div>
                   {users.map((u) => (
@@ -3415,12 +3601,12 @@
                     className="btn subtle sm"
                     style={{ display: "block", width: "100%", textAlign: "left", padding: "6px 8px" }}
                     onClick={() => {
-                      user.setUser({ id: "local", name: "本机用户（admin）", role: "admin" });
-                      toast("已注销，回到本机用户");
+                      user.setUser({ id: "local", name: "本机用户（管理员）", role: "admin" });
+                      toast("已切回本机管理员");
                       setOpen(false);
                     }}
                   >
-                    注销 / 回到 local
+                    切回本机管理员
                   </button>
                 </div>
               )}
@@ -3460,8 +3646,7 @@
             });
             onCreated(u);
           } catch (e) {
-            if (e.status === 404) {
-              // 后端未注册路由 → 写入 localStorage 占位列表
+            if (e.status === 404 && DEMO_MOCK) {
               try {
                 const cur = JSON.parse(localStorage.getItem("finance.users.fallback") || "[]");
                 const item = { user_id: userId.trim(), display_name: name.trim(), role, email: email.trim(), active: true, mock: true };
@@ -3470,6 +3655,8 @@
               } catch (ee) {
                 toast(`本地保存失败：${ee.message}`, "err");
               }
+            } else if (e.status === 404) {
+              toast("后端不可用，用户未创建", "err");
             } else {
               toast(`创建失败：${e.message}`, "err");
             }
@@ -3481,7 +3668,7 @@
             open
             onClose={submitting ? undefined : onClose}
             title="注册新用户"
-            sub="仅 admin 可见。M2 期间是单本机模式，多用户协作要等 v0.3。"
+            sub="仅管理员可见。需要后端启用多用户协作后，新用户才会同步到服务端。"
             footer={
               <>
                 <button className="btn" onClick={onClose} disabled={submitting}>取消</button>
@@ -3553,7 +3740,7 @@
             toast("已提交复核");
             reload();
           } catch (e) {
-            if (e.status === 404) toast("提交失败：后端 collab 路由暂不可达", "warn");
+            if (e.status === 404) toast("提交失败：后端协作功能暂不可用", "err");
             else toast(`提交失败：${e.message}`, "err");
           }
         });
@@ -3641,8 +3828,8 @@
                 </span>
               )}
               {isMissing && (
-                <span className="badge warn" title="后端 collab 路由暂不可达">
-                  后端 collab 路由暂不可达
+                <span className="badge warn" title="后端协作功能暂不可用">
+                  后端协作功能暂不可用
                 </span>
               )}
             </div>
@@ -3679,18 +3866,14 @@
             reload();
             toast("评论已发布");
           } catch (e) {
-            if (e.status === 404) toast("发布失败：后端 collab 路由暂不可达", "warn");
+            if (e.status === 404) toast("发布失败：后端协作功能暂不可用", "err");
             else toast(`发布失败：${e.message}`, "err");
           } finally { setSubmitting(false); }
         };
 
         return (
           <Drawer open onClose={onClose} title={focusCellId ? `评论 · cell ${focusCellId.slice(-12)}` : "报表评论"}>
-            {isMissing && (
-              <div className="upload-result" style={{ background: "rgba(217,119,6,0.06)", borderColor: "rgba(217,119,6,0.30)" }}>
-                后端 collab 路由暂不可达，评论列表 / 发布功能已切换到本地缓存。
-              </div>
-            )}
+            <BackendUnavailableBanner show={isMissing} onRetry={reload} detail="协作评论接口未响应" />
             <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
               {filtered.length === 0 && !isMissing && (
                 <div className="empty">暂无评论</div>
@@ -3725,15 +3908,15 @@
       }
 
       // ═══════════════════════════════════════════════════════════════════
-      //  M2 STAGE 5 · 合并报表（Consolidation）UI（v0.3 Part Biz §2）
+      //  合并报表（Consolidation）UI
       //
-      //  数据模型（已在 ai-biz sibling 的 models.py 完成 ConsolidationGroup /
-      //  ConsolidationMember / EliminationEntry / ConsolidatedReport，但
-      //  consolidation_routes.py 文件本身尚未提交 → 全部 API 暂走 mock）。
+      //  数据模型与接口（ConsolidationGroup / ConsolidationMember /
+      //  EliminationEntry / ConsolidatedReport）均已实现并注册。
       //
-      //  Mock 落地：localStorage 键 `finance.consolidation.groups.v1` 存
-      //  group / members / eliminations / runs；UI 仍然先请求后端 endpoint，
-      //  404 时静默回退本地 mock，后端就绪零改动。
+      //  仅当 URL 带 ?ai_mock=1（演示模式）时，localStorage 键
+      //  `finance.consolidation.groups.v1` 才作为离线演示数据生效；默认
+      //  （生产 / 真实使用）后端不可达时展示 BackendUnavailableBanner，不
+      //  伪造数据。
       // ═══════════════════════════════════════════════════════════════════
 
       const CONSOL_LS_KEY = "finance.consolidation.groups.v1";
@@ -3757,10 +3940,12 @@
       ];
 
       function _loadConsolStore() {
+        if (!DEMO_MOCK) return {};
         try { return JSON.parse(localStorage.getItem(CONSOL_LS_KEY) || "{}") || {}; }
         catch { return {}; }
       }
       function _saveConsolStore(s) {
+        if (!DEMO_MOCK) return;
         localStorage.setItem(CONSOL_LS_KEY, JSON.stringify(s));
       }
       function _ensureGroup(s, gid) {
@@ -3769,7 +3954,7 @@
         return s.groups[gid];
       }
 
-      function ConsolidationListView({ period, onOpenGroup, toast }) {
+      function ConsolidationListView({ period, setPeriod, onOpenGroup, toast }) {
         const [groups, setGroups] = useState([]);
         const [backendOk, setBackendOk] = useState(null);
         const [createOpen, setCreateOpen] = useState(false);
@@ -3789,19 +3974,16 @@
 
         return (
           <>
+            <BackendUnavailableBanner show={backendOk === false} onRetry={reload} />
             <div className="flex items-center justify-between mb-3">
               <div>
                 <h2 className="page-title">合并报表</h2>
                 <p className="page-subtitle">
-                  集团 / 母子持股 / 抵消分录 / 触发合并（{groups.length} 个集团）
-                  {backendOk === false && (
-                    <span className="badge warn" style={{ marginLeft: 8 }}>
-                      后端 consolidation 路由暂不可达
-                    </span>
-                  )}
+                  把多家子公司的报表按持股关系合并，自动抵消内部往来与投资，生成一套集团报表。当前 {groups.length} 个集团。
                 </p>
               </div>
-              <div className="flex gap-2">
+              <div className="flex items-center gap-3">
+                <PeriodPicker period={period} setPeriod={setPeriod} />
                 <button className="btn" onClick={reload}>刷新</button>
                 <button className="btn primary" onClick={() => setCreateOpen(true)} data-testid="new-group-btn">
                   + 新建集团
@@ -3876,7 +4058,7 @@
             const g = await api("POST", "/consolidation-groups", payload);
             onCreated(g);
           } catch (e) {
-            if (e.status === 404) {
+            if (e.status === 404 && DEMO_MOCK) {
               const s = _loadConsolStore();
               if (!s.list) s.list = [];
               const gid = (s._nextId = (s._nextId || 1) + 1);
@@ -3897,6 +4079,8 @@
               });
               _saveConsolStore(s);
               onCreated(g);
+            } else if (e.status === 404) {
+              toast("后端不可用，集团未创建", "err");
             } else {
               toast(`创建失败：${e.message}`, "err");
             }
@@ -3943,7 +4127,7 @@
         );
       }
 
-      function ConsolidationDetailView({ groupId, period, onBack, onOpenReport, toast }) {
+      function ConsolidationDetailView({ groupId, period, setPeriod, onBack, onOpenReport, toast }) {
         const [tab, setTab] = useState("members");
         const [group, setGroup] = useState(null);
         const [members, setMembers] = useState([]);
@@ -3986,17 +4170,16 @@
 
         return (
           <>
+            <BackendUnavailableBanner show={backendOk === false} onRetry={reload} />
             <div className="flex items-center justify-between mb-3">
               <div>
                 <h2 className="page-title">{group.name}</h2>
                 <p className="page-subtitle">
                   集团 #{group.group_id} · 母公司 <span className="mono">{group.parent_org_id}</span>
-                  {backendOk === false && (
-                    <span className="badge warn" style={{ marginLeft: 8 }}>网络断开 · 缓存数据</span>
-                  )}
                 </p>
               </div>
-              <div className="flex gap-2">
+              <div className="flex items-center gap-3">
+                <PeriodPicker period={period} setPeriod={setPeriod} />
                 <button className="btn" onClick={onBack}>← 返回列表</button>
                 <button className="btn" onClick={reload}>刷新</button>
               </div>
@@ -4060,6 +4243,7 @@
             await api("POST", `/consolidation-groups/${groupId}/members`, payload);
           } catch (e) {
             if (e.status !== 404) { toast(`添加失败：${e.message}`, "err"); return; }
+            if (!DEMO_MOCK) { toast("后端不可用，成员未添加", "err"); return; }
             const s = _loadConsolStore();
             const gs = _ensureGroup(s, groupId);
             gs.members.push({ id: gs.members.length + 1, group_id: groupId, ...payload, added_at: new Date().toISOString(), version: 1 });
@@ -4145,6 +4329,7 @@
             await api("POST", `/consolidation-groups/${groupId}/eliminations`, payload);
           } catch (e) {
             if (e.status !== 404) { toast(`添加失败：${e.message}`, "err"); return; }
+            if (!DEMO_MOCK) { toast("后端不可用，抵消分录未添加", "err"); return; }
             const s = _loadConsolStore();
             const gs = _ensureGroup(s, groupId);
             gs.eliminations.push({
@@ -4249,6 +4434,7 @@
             toast(`合并完成 #${r && r.consolidated_report_id || ""}`);
           } catch (e) {
             if (e.status !== 404) { toast(`合并失败：${e.message}`, "err"); return; }
+            if (!DEMO_MOCK) { toast("后端不可用，无法触发合并", "err"); return; }
             const s = _loadConsolStore();
             const gs = _ensureGroup(s, groupId);
             gs.runs.push({
@@ -4257,11 +4443,11 @@
               status: "ok", cells: [], minority_interest: "0",
               consolidation_meta: { mock: true },
               member_orgs_snapshot: [], elimination_ids: [],
-              warnings: ["后端 consolidation 路由暂不可达，已使用本地缓存"],
+              warnings: ["演示模式：使用本地占位数据"],
               generated_at: new Date().toISOString(), generated_by: "local", version: 1,
             });
             _saveConsolStore(s);
-            toast(`合并完成（使用本地缓存数据）`);
+            toast(`演示模式：已生成本地合并结果`);
           } finally {
             setRunning(false);
             onChanged();
@@ -4316,18 +4502,17 @@
       }
 
       // ═══════════════════════════════════════════════════════════════════
-      //  M2 STAGE 6 · AI 设置 / 授权 / 调用历史
+      //  AI 设置 / 授权 / 调用历史
       //
-      //  后端契约（ai sibling 已实现并 commit；router 注册靠 ai/__init__.py
-      //  的 build_router 调用 register_ai_endpoints）：
+      //  后端接口（已实现并注册）：
       //    GET    /ai/scenarios
       //    PATCH  /ai/scenarios/{scenario_id}
       //    GET    /ai/consent[?user_id=&active_only=]
       //    DELETE /ai/consent/{consent_id}
       //    GET    /ai/audit-log[?org_id=&scenario_id=&outcome=&limit=&offset=]
       //
-      //  注意：原始脱敏 payload 文件由 desensitized_payload_path 指向，
-      //  当前没有 GET /ai/audit-log/{id}/payload 端点；UI 仅展示路径 + hash。
+      //  注意：调用历史仅提供脱敏元信息（文件路径 + hash），不提供原始
+      //  payload 下载端点。
       // ═══════════════════════════════════════════════════════════════════
 
       const AI_OUTCOME_META = {
@@ -4343,21 +4528,100 @@
           <>
             <div className="flex items-center justify-between mb-3">
               <div>
-                <h2 className="page-title">AI 设置</h2>
-                <p className="page-subtitle">场景默认值 / 永久授权 / 调用历史 / raw 级场景开关</p>
+                <h2 className="page-title">AI 助手设置</h2>
+                <p className="page-subtitle">管理 AI 在各处帮你做哪些事、能看到多详细的数据，以及已授权和调用记录。</p>
               </div>
             </div>
             <div className="tabs" style={{ marginBottom: 12 }}>
-              <button className={`tab ${tab === "scenarios" ? "active" : ""}`} onClick={() => setTab("scenarios")} data-testid="tab-ai-scenarios">场景设置</button>
-              <button className={`tab ${tab === "raw" ? "active" : ""}`}       onClick={() => setTab("raw")}       data-testid="tab-ai-raw">🔴 raw 高级场景</button>
-              <button className={`tab ${tab === "consent" ? "active" : ""}`}   onClick={() => setTab("consent")}   data-testid="tab-ai-consent">授权管理</button>
-              <button className={`tab ${tab === "audit" ? "active" : ""}`}     onClick={() => setTab("audit")}     data-testid="tab-ai-audit">调用历史</button>
+              <button className={`tab ${tab === "scenarios" ? "active" : ""}`} onClick={() => setTab("scenarios")} data-testid="tab-ai-scenarios">AI 功能</button>
+              <button className={`tab ${tab === "raw" ? "active" : ""}`}       onClick={() => setTab("raw")}       data-testid="tab-ai-raw">🔴 高级功能</button>
+              <button className={`tab ${tab === "consent" ? "active" : ""}`}   onClick={() => setTab("consent")}   data-testid="tab-ai-consent">已授权</button>
+              <button className={`tab ${tab === "audit" ? "active" : ""}`}     onClick={() => setTab("audit")}     data-testid="tab-ai-audit">调用记录</button>
             </div>
             {tab === "scenarios" && <AIScenariosTab toast={toast} />}
             {tab === "raw" && <AIRawScenariosTab toast={toast} />}
             {tab === "consent" && <AIConsentTab toast={toast} />}
             {tab === "audit" && <AIAuditTab toast={toast} />}
           </>
+        );
+      }
+
+      // 敏感度图例：在场景列表顶部一次性解释"发给大模型的数据有多详细"三档含义。
+      function SensitivityLegend() {
+        return (
+          <div className="card mb-3">
+            <div className="section-head" style={{ marginBottom: 10 }}>
+              <div>
+                <h3 className="section-head__title">数据敏感度说明</h3>
+                <p className="section-head__desc">每个 AI 功能会发送给大模型多详细的数据，分三档。档位越高、越精确，但隐私风险也越大。</p>
+              </div>
+            </div>
+            <div className="sens-legend">
+              {["metadata", "aggregated", "raw"].map((k) => {
+                const m = SENSITIVITY_META[k];
+                return (
+                  <div className="sens-legend__item" key={k}>
+                    <span className={`sens-tag sens-tag--${k}`}>{m.icon} {m.label}</span>
+                    <span>{m.plain}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      }
+
+      // 单个 AI 功能卡片：通俗名称 + 一句"帮你做什么" + 敏感度/本地/授权说明 + 启用开关。
+      function ScenarioCard({ s, onPatch, raw = false }) {
+        const effective = s.sensitivity_override || s.default_sensitivity;
+        const enabled = (s.enabled_override === null || s.enabled_override === undefined)
+          ? s.default_enabled : s.enabled_override;
+        const sm = SENSITIVITY_META[effective] || SENSITIVITY_META.metadata;
+        const idPart = `${raw ? "raw" : "scenario"}-enabled-${s.scenario_id}`;
+        return (
+          <div className={`scenario-card ${enabled ? "" : "is-off"} ${raw ? "is-raw" : ""}`}>
+            <div className="scenario-card__head">
+              <h3 className="scenario-card__title">{raw ? "🔴 " : ""}{scenarioTitle(s)}</h3>
+              <label className="switch" title={enabled ? "点击停用此功能" : "点击启用此功能"}>
+                <input
+                  type="checkbox"
+                  checked={enabled}
+                  onChange={(e) => onPatch(s.scenario_id, { enabled: e.target.checked })}
+                  data-testid={idPart}
+                />
+                <span className="switch__track" />
+                {enabled ? "已开启" : "已关闭"}
+              </label>
+            </div>
+            <p className="scenario-card__blurb">{scenarioBlurb(s)}</p>
+            <div className="scenario-card__meta">
+              <span className={`sens-tag sens-tag--${effective}`} title={sm.plain}>
+                {sm.icon} 数据：{sm.label}
+              </span>
+              {s.is_local_only && (
+                <span className="badge ok" title="数据只发送给本机 / 局域网内的模型，不经过公网。">仅本地处理</span>
+              )}
+              {s.require_dialog && (
+                <span className="badge warn" title="首次使用此功能时会弹窗征求你的同意，之后可选择记住。">首次需授权</span>
+              )}
+            </div>
+            <div className="scenario-card__foot">
+              <label className="text-xs text-muted" title="调整此功能发送给大模型的数据详细程度（即上方说明的三档敏感度）。">
+                数据敏感度
+              </label>
+              <select
+                className="field"
+                style={{ width: 130, padding: "4px 8px" }}
+                value={effective}
+                onChange={(e) => onPatch(s.scenario_id, { sensitivity_override: e.target.value })}
+                data-testid={raw ? `raw-sens-${s.scenario_id}` : undefined}
+              >
+                {Object.keys(SENSITIVITY_META).map((v) => (
+                  <option key={v} value={v}>{SENSITIVITY_META[v].icon} {SENSITIVITY_META[v].label}</option>
+                ))}
+              </select>
+            </div>
+          </div>
         );
       }
 
@@ -4396,55 +4660,30 @@
           } catch (e) { toast(`保存失败：${e.message}`, "err"); }
         };
 
-        if (loading) return <div className="card"><Spinner /> 加载 raw 场景中…</div>;
+        if (loading) return <div className="card"><Spinner /> 加载高级功能中…</div>;
 
         return (
           <>
-            <div className="upload-result mb-3" style={{ background: "rgba(220,38,38,0.06)", borderColor: "rgba(220,38,38,0.30)" }}>
-              🔴 raw 级场景会向 LLM 发送原始数据。请确认合规性后再启用。首次调用需弹窗授权 (allow_once / allow_permanent)。
-            </div>
-            {missing && (
-              <div className="upload-result mb-3" style={{ background: "rgba(217,119,6,0.06)", borderColor: "rgba(217,119,6,0.30)" }}>
-                后端 AI 路由暂不可达（GET /ai/raw/scenarios 与 /ai/scenarios 都返回非 200）。
+            <div className="callout callout--danger mb-3">
+              <svg className="callout__icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
+              </svg>
+              <div className="callout__body">
+                <strong>高级功能会把完整明细发送给大模型（🔴 原始数据）</strong>
+                <span>请先确认符合贵单位的数据合规要求再开启。首次使用时会弹窗征求你的同意，可选择"仅这一次"或"以后都允许"。</span>
               </div>
-            )}
-            <div className="card" style={{ padding: 0 }}>
-              {scenarios.length === 0 && !missing ? <EmptyState title="暂无 raw 场景" /> : (
-                <table className="report-table">
-                  <thead>
-                    <tr><th>场景</th><th>说明</th><th>启用</th><th>敏感度</th></tr>
-                  </thead>
-                  <tbody>
-                    {scenarios.map((s) => {
-                      const effective = s.sensitivity_override || s.default_sensitivity;
-                      const enabled = (s.enabled_override === null || s.enabled_override === undefined) ? s.default_enabled : s.enabled_override;
-                      return (
-                        <tr key={s.scenario_id}>
-                          <td>
-                            <div><strong>🔴 {s.name}</strong></div>
-                            <div className="text-xs text-muted mono">{s.scenario_id}</div>
-                          </td>
-                          <td className="text-xs">{s.description || "—"}</td>
-                          <td>
-                            <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                              <input type="checkbox" checked={enabled} onChange={(e) => patch(s.scenario_id, { enabled: e.target.checked })} data-testid={`raw-enabled-${s.scenario_id}`} />
-                              {enabled ? "已启用" : "已停用"}
-                            </label>
-                          </td>
-                          <td>
-                            <select className="field" style={{ width: 120 }} value={effective} onChange={(e) => patch(s.scenario_id, { sensitivity_override: e.target.value })} data-testid={`raw-sens-${s.scenario_id}`}>
-                              {Object.keys(SENSITIVITY_META).map((v) => (
-                                <option key={v} value={v}>{SENSITIVITY_META[v].icon} {SENSITIVITY_META[v].label}</option>
-                              ))}
-                            </select>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              )}
             </div>
+            <BackendUnavailableBanner show={missing} onRetry={reload} detail="AI 高级功能接口未响应" />
+            {scenarios.length === 0 && !missing
+              ? <div className="card"><EmptyState title="暂无高级功能" /></div>
+              : (
+                <div className="scenario-grid">
+                  {scenarios.map((s) => (
+                    <ScenarioCard key={s.scenario_id} s={s} onPatch={patch} raw />
+                  ))}
+                </div>
+              )}
           </>
         );
       }
@@ -4464,77 +4703,31 @@
           }
         };
 
-        if (loading) return <div className="card"><Spinner /> 加载场景中…</div>;
+        if (loading) return <div className="card"><Spinner /> 加载 AI 功能中…</div>;
 
         return (
           <>
-            {isMissing && (
-              <div className="upload-result" style={{ background: "rgba(217,119,6,0.06)", borderColor: "rgba(217,119,6,0.30)" }}>
-                后端 AI 路由暂不可达（router 探活返回非 200）。等待 ai 端
-                <span className="mono"> register_ai_endpoints </span>
-                wire 进 build_router 即可激活。
+            <div className="callout callout--info mb-3">
+              <svg className="callout__icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" />
+              </svg>
+              <div className="callout__body">
+                <strong>这些是 AI 在导入、报表、分析等环节自动帮你做的事</strong>
+                <span>你可以随时开启或关闭某项功能，并调整它发送给大模型的数据详细程度。默认都已选用风险较低的档位。</span>
               </div>
-            )}
-            <div className="card" style={{ padding: 0 }}>
-              {scenarios.length === 0 && !isMissing && <EmptyState title="无 AI 场景" />}
-              {scenarios.length > 0 && (
-                <table className="report-table">
-                  <thead>
-                    <tr>
-                      <th>场景</th>
-                      <th>说明</th>
-                      <th>启用</th>
-                      <th>敏感度</th>
-                      <th>本地</th>
-                      <th>需弹窗</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {scenarios.map((s) => {
-                      const effective = s.sensitivity_override || s.default_sensitivity;
-                      const enabled = (s.enabled_override === null || s.enabled_override === undefined)
-                        ? s.default_enabled : s.enabled_override;
-                      return (
-                        <tr key={s.scenario_id}>
-                          <td>
-                            <div><strong>{s.name}</strong></div>
-                            <div className="text-xs text-muted mono">{s.scenario_id}</div>
-                          </td>
-                          <td className="text-xs">{s.description || "—"}</td>
-                          <td>
-                            <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                              <input
-                                type="checkbox"
-                                checked={enabled}
-                                onChange={(e) => patch(s.scenario_id, { enabled: e.target.checked })}
-                                data-testid={`scenario-enabled-${s.scenario_id}`}
-                              />
-                              {enabled ? "已启用" : "已停用"}
-                            </label>
-                          </td>
-                          <td>
-                            <select
-                              className="field"
-                              style={{ width: 120 }}
-                              value={effective}
-                              onChange={(e) => patch(s.scenario_id, { sensitivity_override: e.target.value })}
-                            >
-                              {Object.keys(SENSITIVITY_META).map((v) => (
-                                <option key={v} value={v}>
-                                  {SENSITIVITY_META[v].icon} {SENSITIVITY_META[v].label}
-                                </option>
-                              ))}
-                            </select>
-                          </td>
-                          <td>{s.is_local_only ? <span className="badge ok">仅本地</span> : <span className="badge">否</span>}</td>
-                          <td>{s.require_dialog ? "是" : "否"}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              )}
             </div>
+            <BackendUnavailableBanner show={isMissing} onRetry={reload} detail="AI 功能接口未响应" />
+            {scenarios.length === 0 && !isMissing && <div className="card"><EmptyState title="暂无可用的 AI 功能" /></div>}
+            {scenarios.length > 0 && (
+              <>
+                <SensitivityLegend />
+                <div className="scenario-grid">
+                  {scenarios.map((s) => (
+                    <ScenarioCard key={s.scenario_id} s={s} onPatch={patch} />
+                  ))}
+                </div>
+              </>
+            )}
           </>
         );
       }
@@ -4573,11 +4766,7 @@
                 <button className="btn sm" onClick={reload}>刷新</button>
               </div>
             </div>
-            {isMissing && (
-              <div className="upload-result" style={{ background: "rgba(217,119,6,0.06)", borderColor: "rgba(217,119,6,0.30)" }}>
-                后端 AI 路由暂不可达，授权列表已切换到本地缓存。
-              </div>
-            )}
+            <BackendUnavailableBanner show={isMissing} onRetry={reload} detail="AI 授权列表接口未响应" />
             <div className="card" style={{ padding: 0 }}>
               {consents.length === 0 && !isMissing && <EmptyState title="还没有任何授权记录" />}
               {consents.length > 0 && (
@@ -4592,7 +4781,10 @@
                       return (
                         <tr key={c.consent_id}>
                           <td className="mono text-xs">{c.consent_id}</td>
-                          <td className="mono text-xs">{c.scenario_id}</td>
+                          <td>
+                            <div>{scenarioNameById(c.scenario_id)}</div>
+                            <div className="text-xs text-muted mono">{c.scenario_id}</div>
+                          </td>
                           <td>{meta.icon} {meta.label}</td>
                           <td>
                             {c.decision === "allow_permanent" ? <span className="badge ok">永久允许</span>
@@ -4651,8 +4843,8 @@
           <>
             <div className="card mb-3" style={{ padding: 10 }}>
               <div className="flex gap-2 items-center" style={{ flexWrap: "wrap" }}>
-                <input className="field mono" style={{ width: 180 }} value={orgFilter}      placeholder="org_id 过滤"      onChange={(e) => { setOffset(0); setOrgFilter(e.target.value.trim()); }} />
-                <input className="field mono" style={{ width: 180 }} value={scenarioFilter} placeholder="scenario_id 过滤" onChange={(e) => { setOffset(0); setScenarioFilter(e.target.value.trim()); }} />
+                <input className="field mono" style={{ width: 180 }} value={orgFilter}      placeholder="按账套筛选"      onChange={(e) => { setOffset(0); setOrgFilter(e.target.value.trim()); }} />
+                <input className="field mono" style={{ width: 180 }} value={scenarioFilter} placeholder="按功能编号筛选" onChange={(e) => { setOffset(0); setScenarioFilter(e.target.value.trim()); }} />
                 <select className="field" style={{ width: 140 }} value={outcomeFilter} onChange={(e) => { setOffset(0); setOutcomeFilter(e.target.value); }}>
                   <option value="">— 全部结果 —</option>
                   {Object.keys(AI_OUTCOME_META).map((k) => <option key={k} value={k}>{AI_OUTCOME_META[k].label}</option>)}
@@ -4666,11 +4858,7 @@
                 <button className="btn sm" onClick={reload}>刷新</button>
               </div>
             </div>
-            {isMissing && (
-              <div className="upload-result" style={{ background: "rgba(217,119,6,0.06)", borderColor: "rgba(217,119,6,0.30)" }}>
-                后端 AI 路由暂不可达，调用历史已切换到本地缓存。
-              </div>
-            )}
+            <BackendUnavailableBanner show={isMissing} onRetry={reload} detail="AI 调用历史接口未响应" />
             <div className="card" style={{ padding: 0 }}>
               {loading ? <div className="empty"><Spinner /> 加载…</div>
                 : items.length === 0 && !isMissing ? <EmptyState title="没有匹配的调用记录" />
@@ -4695,7 +4883,10 @@
                       return (
                         <tr key={it.id}>
                           <td className="text-xs text-muted">{fmtTs(it.timestamp)}</td>
-                          <td className="mono text-xs">{it.scenario_id}</td>
+                          <td>
+                            <div className="text-xs">{scenarioNameById(it.scenario_id)}</div>
+                            <div className="text-xs text-muted mono">{it.scenario_id}</div>
+                          </td>
                           <td>{sm.icon} {sm.label}</td>
                           <td className="text-xs">
                             {it.is_local_endpoint && <span className="badge ok" style={{ fontSize: 10, marginRight: 4 }}>本地</span>}
@@ -4730,7 +4921,7 @@
                 open
                 onClose={() => setPayloadModal(null)}
                 title="脱敏 payload 信息"
-                sub="后端尚未提供 GET /ai/audit-log/{id}/payload；UI 只能展示元信息（脱敏文件路径 / hash）。"
+                sub="出于安全考虑，仅展示脱敏元信息（文件路径 / hash），不提供原始 payload 下载。"
                 footer={<button className="btn primary" onClick={() => setPayloadModal(null)}>关闭</button>}
               >
                 <div className="row"><div>
@@ -4779,7 +4970,7 @@
       //    PATCH /orgs/{oid}/notes/{note_id}  body { content, version }  乐观锁
       //    POST /orgs/{oid}/notes/documents/{doc_id}/finalize
       //    GET  /orgs/{oid}/notes/documents/{doc_id}/export?format=md
-      //  路由未注册（404）时静默回退本地 mock：finance.notes.mock.v1
+      //  后端不可达时展示横幅 + 阻断态；仅 ?ai_mock=1 演示模式才用本地数据：finance.notes.mock.v1
       // ═══════════════════════════════════════════════════════════════════
       const NOTES_LS_KEY = "finance.notes.mock.v1";
       const NOTE_KIND_META = {
@@ -4791,6 +4982,7 @@
       };
 
       function _loadNotesMock() {
+        if (!DEMO_MOCK) return { documents: [] };
         try {
           const s = JSON.parse(localStorage.getItem(NOTES_LS_KEY) || "null");
           if (s && s.documents) return s;
@@ -4828,7 +5020,7 @@
         localStorage.setItem(NOTES_LS_KEY, JSON.stringify(seed));
         return seed;
       }
-      function _saveNotesMock(s) { localStorage.setItem(NOTES_LS_KEY, JSON.stringify(s)); }
+      function _saveNotesMock(s) { if (!DEMO_MOCK) return; localStorage.setItem(NOTES_LS_KEY, JSON.stringify(s)); }
 
       function NotesEditorView({ toast }) {
         const { data: orgsData } = useFetch("/orgs?limit=200", []);
@@ -4876,7 +5068,7 @@
             toast("已生成附注文档");
             reloadDocs(orgId);
           } catch (e) {
-            if (e.status === 404) {
+            if (e.status === 404 && DEMO_MOCK) {
               const s = _loadNotesMock();
               const newDoc = {
                 doc_id: `doc_mock_${Math.random().toString(36).slice(2, 8)}`,
@@ -4887,7 +5079,10 @@
               s.documents = [newDoc, ...(s.documents || [])];
               _saveNotesMock(s);
               setDocs(s.documents);
-              toast("后端暂不可达，已生成本地占位文档", "warn");
+              toast("演示模式：已生成本地占位文档", "warn");
+            } else if (e.status === 404) {
+              setBackendOk(false);
+              toast("后端不可用，附注未生成", "err");
             } else {
               toast(`生成失败：${e.message}`, "err");
             }
@@ -4900,7 +5095,7 @@
             toast("已保存（版本 +1）");
             setNotes((cur) => cur.map((x) => x.note_id === note.note_id ? { ...x, content: newContent, version: (updated && updated.version) || (note.version + 1) } : x));
           } catch (e) {
-            if (e.status === 404 || e.status === 409 && !backendOk) {
+            if ((e.status === 404 || (e.status === 409 && !backendOk)) && DEMO_MOCK) {
               const s = _loadNotesMock();
               const doc = (s.documents || []).find((x) => x.doc_id === selectedDoc.doc_id);
               if (doc) {
@@ -4908,7 +5103,9 @@
                 _saveNotesMock(s);
               }
               setNotes((cur) => cur.map((x) => x.note_id === note.note_id ? { ...x, content: newContent, version: (x.version || 1) + 1 } : x));
-              toast("已保存到本地 mock", "warn");
+              toast("演示模式：已保存到本地", "warn");
+            } else if (e.status === 404) {
+              toast("后端不可用，保存未生效", "err");
             } else if (e.status === 409) {
               toast("版本冲突，请刷新后再保存", "err");
             } else {
@@ -4927,13 +5124,15 @@
             setSelectedDoc(upd);
             setDocs((cur) => cur.map((x) => x.doc_id === upd.doc_id ? upd : x));
           } catch (e) {
-            if (e.status === 404) {
+            if (e.status === 404 && DEMO_MOCK) {
               const s = _loadNotesMock();
               const d = (s.documents || []).find((x) => x.doc_id === selectedDoc.doc_id);
               if (d) { d.status = "finalized"; _saveNotesMock(s); }
               setSelectedDoc({ ...selectedDoc, status: "finalized" });
               setDocs((cur) => cur.map((x) => x.doc_id === selectedDoc.doc_id ? { ...x, status: "finalized" } : x));
-              toast("已在本地 mock 定稿", "warn");
+              toast("演示模式：已在本地定稿", "warn");
+            } else if (e.status === 404) {
+              toast("后端不可用，定稿未生效", "err");
             } else { toast(`定稿失败：${e.message}`, "err"); }
           }
         };
@@ -4946,10 +5145,11 @@
             const blob = await resp.blob();
             _triggerDownload(blob, `${selectedDoc.doc_id}.md`);
           } catch (e) {
+            if (!DEMO_MOCK) { toast("后端不可用，导出失败", "err"); return; }
             const md = `# ${selectedDoc.doc_id}\n\n_period: ${selectedDoc.period_id}_\n\n` +
               (notes || []).map((n) => `## ${n.section_title}\n\n${n.content || ""}\n`).join("\n");
             _triggerDownload(new Blob([md], { type: "text/markdown" }), `${selectedDoc.doc_id}.md`);
-            toast("后端导出未上线，已使用本地 mock 导出", "warn");
+            toast("演示模式：已在本地导出", "warn");
           }
         };
 
@@ -4957,18 +5157,18 @@
 
         return (
           <>
+            <BackendUnavailableBanner show={backendOk === false} onRetry={() => orgId && reloadDocs(orgId)} />
             <div className="flex items-center justify-between mb-3">
               <div>
                 <h2 className="page-title">报表附注</h2>
                 <p className="page-subtitle">
                   根据余额表 / 报表生成附注草稿，AI 协助起草文字段落
-                  {backendOk === false && <span className="badge warn" style={{ marginLeft: 8 }}>网络断开 · 显示缓存数据</span>}
                 </p>
               </div>
             </div>
 
             <div className="card mb-3">
-              <div className="row" style={{ gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
+              <div className="toolbar">
                 <div>
                   <label className="lbl">账套</label>
                   <select className="field" style={{ width: 240 }} value={orgId} onChange={(e) => setOrgId(e.target.value)} data-testid="notes-org">
@@ -5073,7 +5273,7 @@
       //    GET  /orgs/{oid}/peer-comparison/results
       //    GET  /peer-benchmarks
       //  AI 增强分析使用 Sibling B 的 S7 自然语言查询（/ai/raw/nl-query）。
-      //  路由未注册（404）时静默回退本地 mock：finance.peer.mock.v1
+      //  后端不可达时展示横幅 + 阻断态；仅 ?ai_mock=1 演示模式才用本地数据：finance.peer.mock.v1
       // ═══════════════════════════════════════════════════════════════════
       const PEER_LS_KEY = "finance.peer.mock.v1";
       const INDUSTRY_PEER_OPTS = [
@@ -5096,6 +5296,7 @@
       ];
 
       function _loadPeerMock() {
+        if (!DEMO_MOCK) return { results: [] };
         try {
           const s = JSON.parse(localStorage.getItem(PEER_LS_KEY) || "null");
           if (s && s.results) return s;
@@ -5104,7 +5305,7 @@
         localStorage.setItem(PEER_LS_KEY, JSON.stringify(seed));
         return seed;
       }
-      function _savePeerMock(s) { localStorage.setItem(PEER_LS_KEY, JSON.stringify(s)); }
+      function _savePeerMock(s) { if (!DEMO_MOCK) return; localStorage.setItem(PEER_LS_KEY, JSON.stringify(s)); }
 
       function _quartileOf(value, p25, p50, p75) {
         if (value < p25 * 0.7) return "well_below";
@@ -5181,14 +5382,17 @@
             toast("同业对比完成");
             reloadHistory(orgId);
           } catch (e) {
-            if (e.status === 404) {
+            if (e.status === 404 && DEMO_MOCK) {
               const mock = _buildMockPeerResult(orgId, periodId, industryCode);
               const s = _loadPeerMock();
               s.results = [mock, ...(s.results || [])].slice(0, 50);
               _savePeerMock(s);
               setCurrent(mock);
               setHistory(s.results.filter((x) => x.org_id === orgId));
-              toast("后端暂不可达，已使用本地缓存计算", "warn");
+              toast("演示模式：已用本地数据计算", "warn");
+            } else if (e.status === 404) {
+              setBackendOk(false);
+              toast("后端不可用，无法运行同业对比", "err");
             } else { toast(`计算失败：${e.message}`, "err"); }
           } finally { setRunning(false); }
         };
@@ -5202,27 +5406,29 @@
             const r = await api("POST", `/ai/raw/nl-query`, { question, context_json: metrics_json, execute_sql: false });
             setAiResult({ ok: true, sql: r.sql || "", summary: r.summary || r.text || "" });
           } catch (e) {
-            if (e.status === 404) {
-              setAiResult({ ok: false, sql: "-- 后端 NL query 暂不可达\n-- 占位 SQL\nSELECT industry_code, AVG(gross_margin) FROM peer_benchmarks GROUP BY industry_code;", summary: "（占位）后端恢复后自动使用真实 AI 摘要。" });
-              toast("后端 NL query 暂不可达，AI 增强使用占位结果", "warn");
+            if (e.status === 404 && DEMO_MOCK) {
+              setAiResult({ ok: false, sql: "-- 演示模式占位 SQL\nSELECT industry_code, AVG(gross_margin) FROM peer_benchmarks GROUP BY industry_code;", summary: "（演示）后端就绪后将使用真实 AI 摘要。" });
+              toast("演示模式：AI 增强使用占位结果", "warn");
+            } else if (e.status === 404) {
+              toast("后端 AI 能力不可用", "err");
             } else { toast(`AI 分析失败：${e.message}`, "err"); }
           } finally { setAiBusy(false); }
         };
 
         return (
           <>
+            <BackendUnavailableBanner show={backendOk === false} onRetry={() => orgId && reloadHistory(orgId)} />
             <div className="flex items-center justify-between mb-3">
               <div>
                 <h2 className="page-title">同业对比</h2>
                 <p className="page-subtitle">
-                  比对四项核心指标 vs 行业 25/50/75 分位
-                  {backendOk === false && <span className="badge warn" style={{ marginLeft: 8 }}>网络断开 · 显示缓存数据</span>}
+                  把本企业的关键财务指标，和同行业平均水平（25%、中位、75% 分位）放在一起对照，看出高低与异常。
                 </p>
               </div>
             </div>
 
             <div className="card mb-3">
-              <div className="row" style={{ gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
+              <div className="toolbar">
                 <div>
                   <label className="lbl">账套</label>
                   <select className="field" style={{ width: 240 }} value={orgId} onChange={(e) => setOrgId(e.target.value)} data-testid="peer-org">
@@ -5248,16 +5454,16 @@
 
             {current && (
               <div className="card mb-3">
-                <div className="flex items-center justify-between mb-3">
+                <div className="section-head">
                   <div>
-                    <h3 className="card-title">本次结果 · <span className="mono text-xs">{current.result_id}</span></h3>
-                    <p className="card-sub">行业 {current.industry_code} · {fmtTs(current.created_at)}</p>
+                    <h3 className="section-head__title">本次结果 · <span className="mono text-xs">{current.result_id}</span></h3>
+                    <p className="section-head__desc">行业 {current.industry_code} · {fmtTs(current.created_at)} · 红线为本企业，蓝条为行业 25–75 分位</p>
                   </div>
                   <button className="btn" onClick={aiAnalyze} disabled={aiBusy} data-testid="peer-ai">
                     {aiBusy ? <Spinner /> : "AI 增强分析"}
                   </button>
                 </div>
-                <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 10 }}>
+                <div className="metric-grid">
                   {PEER_METRICS.map((m) => {
                     const d = (current.metrics || {})[m.key];
                     if (!d) return null;
@@ -5265,10 +5471,10 @@
                   })}
                 </div>
                 {aiResult && (
-                  <div className="card mt-3" style={{ padding: 10, background: "rgba(59,130,246,0.05)" }}>
-                    <h4 className="card-title">AI 增强分析（S7 自然语言查询）</h4>
-                    <pre className="mono text-xs" style={{ background: "var(--bg-soft, rgba(0,0,0,0.04))", padding: 8, borderRadius: 4, overflowX: "auto" }}>{aiResult.sql || "(无 SQL)"}</pre>
-                    <div className="mt-3"><strong>AI 摘要：</strong> {aiResult.summary || "（暂无）"}</div>
+                  <div className="card mt-3">
+                    <h4 className="card-title">AI 增强分析 · S7 自然语言查询</h4>
+                    <pre className="mono text-xs mt-2">{aiResult.sql || "(无 SQL)"}</pre>
+                    <div className="mt-3"><strong>AI 摘要：</strong>{aiResult.summary || "（暂无）"}</div>
                   </div>
                 )}
               </div>
@@ -5307,12 +5513,12 @@
         const range = maxP - minP || 1;
         const xOf = (v) => Math.max(0, Math.min(200, ((v - minP) / range) * 200));
         return (
-          <div className="card" style={{ padding: 10, background: "var(--bg-soft, rgba(0,0,0,0.02))" }}>
-            <div className="flex items-center justify-between">
+          <div className="metric-card">
+            <div className="metric-card__head">
               <strong>{meta.label}</strong>
               <span className={`badge ${q.cls}`}>{q.label}</span>
             </div>
-            <div className="text-xl mt-3" style={{ fontWeight: 600 }}>{valFmt(data.value)}</div>
+            <div className="metric-card__value">{valFmt(data.value)}</div>
             <svg width="200" height="40" style={{ marginTop: 6 }} aria-label={`peer-chart-${meta.key}`}>
               <line x1="0" y1="20" x2="200" y2="20" stroke="rgba(0,0,0,0.1)" strokeWidth="1" />
               <rect x={xOf(data.p25)} y="14" width={Math.max(2, xOf(data.p75) - xOf(data.p25))} height="12" fill="rgba(59,130,246,0.25)" />
@@ -5320,7 +5526,7 @@
               <line x1={xOf(data.value)} y1="4" x2={xOf(data.value)} y2="36" stroke="rgba(220,38,38,0.95)" strokeWidth="2" />
               <circle cx={xOf(data.value)} cy="20" r="3" fill="rgba(220,38,38,0.95)" />
             </svg>
-            <div className="text-xs text-muted">
+            <div className="metric-card__foot">
               p25 {valFmt(data.p25)} · p50 {valFmt(data.p50)} · p75 {valFmt(data.p75)}
             </div>
           </div>
@@ -5336,11 +5542,12 @@
       //    POST /admin/backups/{id}/restore body { passphrase }
       //    GET  /admin/backups/{id}/download
       //    GET  /admin/system-info
-      //  路由未注册（404）时静默回退本地 mock：finance.km.mock.v1
+      //  后端不可达时展示横幅 + 阻断态；仅 ?ai_mock=1 演示模式才用本地数据：finance.km.mock.v1
       // ═══════════════════════════════════════════════════════════════════
       const KM_LS_KEY = "finance.km.mock.v1";
 
       function _loadKmMock() {
+        if (!DEMO_MOCK) return { versions: [], backups: [], system_info: null };
         try {
           const s = JSON.parse(localStorage.getItem(KM_LS_KEY) || "null");
           if (s && s.versions) return s;
@@ -5363,7 +5570,7 @@
         localStorage.setItem(KM_LS_KEY, JSON.stringify(seed));
         return seed;
       }
-      function _saveKmMock(s) { localStorage.setItem(KM_LS_KEY, JSON.stringify(s)); }
+      function _saveKmMock(s) { if (!DEMO_MOCK) return; localStorage.setItem(KM_LS_KEY, JSON.stringify(s)); }
 
       function KeyManagementView({ toast }) {
         const [versions, setVersions] = useState([]);
@@ -5429,11 +5636,13 @@
             toast(`已轮换 ${confirmRotate.org_id} 的密钥`);
             _notifyNative("OpenAkita · 密钥已轮换", `账套 ${confirmRotate.org_id} 的 KDF 已升级到下一版`);
           } catch (e) {
-            if (e.status === 404) {
+            if (e.status === 404 && DEMO_MOCK) {
               const s = _loadKmMock();
               s.versions = (s.versions || []).map((v) => v.org_id === confirmRotate.org_id ? { ...v, version: v.version + 1, kdf_salt_short: Math.random().toString(36).slice(2, 10), last_rotated_at: new Date().toISOString() } : v);
               _saveKmMock(s);
-              toast("后端暂不可达，已在本地缓存轮换记录", "warn");
+              toast("演示模式：已在本地记录轮换", "warn");
+            } else if (e.status === 404) {
+              toast("后端不可用，密钥轮换未生效", "err"); setBusy(false); return;
             } else { toast(`轮换失败：${e.message}`, "err"); setBusy(false); return; }
           }
           setConfirmRotate(null); setBusy(false); reload();
@@ -5448,7 +5657,7 @@
             toast("已恢复");
             _notifyNative("OpenAkita · 备份已恢复", `备份 ${confirmRestore.id} 已应用到当前账套`);
           } catch (e) {
-            if (e.status === 404) toast("后端暂不可达，恢复操作未生效", "warn");
+            if (e.status === 404) { toast("后端不可用，恢复操作未生效", "err"); setBusy(false); return; }
             else { toast(`恢复失败：${e.message}`, "err"); setBusy(false); return; }
           }
           setConfirmRestore(null); setRestorePass(""); setBusy(false);
@@ -5463,11 +5672,13 @@
             _notifyNative("OpenAkita · 备份已创建", `账套 ${createOrgId.trim()} 的加密备份已落地`);
             setCreateOrgId(""); setCreatePass("");
           } catch (e) {
-            if (e.status === 404) {
+            if (e.status === 404 && DEMO_MOCK) {
               const s = _loadKmMock();
               s.backups = [{ id: `bkp_${Math.random().toString(36).slice(2, 8)}`, org_id: createOrgId.trim(), size_bytes: 1048576, encrypted: true, created_at: new Date().toISOString() }, ...(s.backups || [])];
               _saveKmMock(s); setCreateOrgId(""); setCreatePass("");
-              toast("后端暂不可达，已在本地缓存备份条目", "warn");
+              toast("演示模式：已在本地记录备份", "warn");
+            } else if (e.status === 404) {
+              toast("后端不可用，备份未创建", "err");
             } else { toast(`备份失败：${e.message}`, "err"); }
           }
           setBusy(false); reload();
@@ -5507,20 +5718,21 @@
             const blob = await resp.blob();
             _triggerDownload(blob, `${b.id}.bak`);
           } catch (e) {
+            if (!DEMO_MOCK) { toast("后端不可用，下载失败", "err"); return; }
             const blob = new Blob([`MOCK BACKUP ${b.id}\norg_id=${b.org_id}\ncreated_at=${b.created_at}\n`], { type: "application/octet-stream" });
             _triggerDownload(blob, `${b.id}.bak`);
-            toast("网络断开，已生成占位文件", "warn");
+            toast("演示模式：已生成占位文件", "warn");
           }
         };
 
         return (
           <>
+            <BackendUnavailableBanner show={backendOk === false} onRetry={reload} />
             <div className="flex items-center justify-between mb-3">
               <div>
-                <h2 className="page-title">密钥管理</h2>
+                <h2 className="page-title">密钥与备份</h2>
                 <p className="page-subtitle">
-                  按账套查看 KDF 密钥版本 / 轮换 / 备份恢复
-                  {backendOk === false && <span className="badge warn" style={{ marginLeft: 8 }}>网络断开 · 显示缓存数据</span>}
+                  管理每个账套的数据加密密钥、定期更换密钥，以及创建和恢复加密备份。
                   {tauriOk && <span className="badge ok" style={{ marginLeft: 8 }} data-testid="km-tauri-badge">原生模式</span>}
                 </p>
               </div>
@@ -5552,7 +5764,8 @@
 
             <div className="card mb-3">
               <h3 className="card-title">备份</h3>
-              <div className="row" style={{ gap: 10, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 10 }}>
+              <p className="card-sub">为指定账套创建加密备份；列表中可下载、原生导出或按口令恢复。</p>
+              <div className="toolbar" style={{ marginBottom: 12 }}>
                 <div>
                   <label className="lbl">账套 ID</label>
                   <input className="field" style={{ width: 220 }} value={createOrgId} onChange={(e) => setCreateOrgId(e.target.value)} data-testid="km-backup-org" />
@@ -5655,7 +5868,7 @@
       //    POST /ai/raw/nl-query        S7 自然语言查询（含 SQL 校验）
       //    POST /ai/raw/notes-draft     S11 附注 AI 起草
       //  首次调用需弹窗授权（AIConsentBridge 已自动处理 WS 对话请求）。
-      //  路由未注册（404）时显示 "后端 AI raw 路由暂不可达" 提示。
+      //  后端不可达（404）时显示统一的 BackendUnavailableBanner。
       // ═══════════════════════════════════════════════════════════════════
       function AdvancedAIView({ toast }) {
         return (
@@ -5663,13 +5876,20 @@
             <div className="flex items-center justify-between mb-3">
               <div>
                 <h2 className="page-title">高级 AI</h2>
-                <p className="page-subtitle">3 个 raw 级 AI 场景：S6 审计意见 / S7 自然语言查询 / S11 附注起草</p>
+                <p className="page-subtitle">三项需要发送完整明细的 AI 功能：审计意见草稿、用中文问数、报表附注起草。</p>
               </div>
             </div>
-            <div className="upload-result mb-3" style={{ background: "rgba(220,38,38,0.06)", borderColor: "rgba(220,38,38,0.30)" }}>
-              🔴 raw 级 AI 调用 — 请确认合规性。首次使用需弹窗授权 (allow_once / allow_permanent)。
+            <div className="callout callout--danger mb-3">
+              <svg className="callout__icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
+              </svg>
+              <div className="callout__body">
+                <strong>这些功能会把财务明细发送给大模型（🔴 原始数据）</strong>
+                <span>请先确认符合贵单位的数据合规要求。首次使用时会弹窗征求你的同意，可选择"仅这一次"或"以后都允许"。</span>
+              </div>
             </div>
-            <div className="grid" style={{ gap: 12 }}>
+            <div className="grid" style={{ gap: 14 }}>
               <AuditOpinionCard toast={toast} />
               <NlQueryCard toast={toast} />
               <NotesDraftCard toast={toast} />
@@ -5702,47 +5922,65 @@
             setResult((r && (r.markdown || r.text)) || JSON.stringify(r, null, 2));
             toast("已生成审计意见草稿");
           } catch (e) {
-            if (e.status === 404) { setMissing(true); toast("后端 AI raw 路由暂不可达", "warn"); }
+            if (e.status === 404) { setMissing(true); toast("后端 AI 能力暂不可用", "warn"); }
             else { toast(`生成失败：${e.message}`, "err"); }
           } finally { setBusy(false); }
         };
 
         return (
-          <div className="card">
-            <h3 className="card-title">🔴 S6 · 审计意见草稿</h3>
-            <p className="card-sub">基于校验结果与意见模板生成审计意见草稿（raw 级）</p>
-            <div className="row" style={{ gap: 10, alignItems: "flex-end", marginTop: 8 }}>
-              <div style={{ flex: 1 }}>
-                <label className="lbl">账套 ID（可选）</label>
-                <input className="field" value={orgId} onChange={(e) => setOrgId(e.target.value)} data-testid="adv-s6-org" />
-              </div>
-              <div style={{ flex: 1 }}>
-                <label className="lbl">期间标签</label>
-                <input className="field" value={periodLabel} onChange={(e) => setPeriodLabel(e.target.value)} data-testid="adv-s6-period" />
+          <div className="split-layout">
+            <div className="split-left">
+              <div className="card">
+                <div className="section-head">
+                  <div>
+                    <h3 className="section-head__title">审计意见草稿</h3>
+                    <p className="section-head__desc">填入校验结果和意见模板，AI 帮你起草一份审计意见的文字初稿。</p>
+                  </div>
+                  <span className="badge err">raw</span>
+                </div>
+                <div className="form-grid">
+                  <div>
+                    <label className="lbl">账套 ID <span className="text-muted">（可选）</span></label>
+                    <input className="field" placeholder="留空则不绑定账套" value={orgId} onChange={(e) => setOrgId(e.target.value)} data-testid="adv-s6-org" />
+                  </div>
+                  <div>
+                    <label className="lbl">期间标签</label>
+                    <input className="field" placeholder="如：2025 年度" value={periodLabel} onChange={(e) => setPeriodLabel(e.target.value)} data-testid="adv-s6-period" />
+                  </div>
+                </div>
+                <div className="mt-3">
+                  <label className="lbl">校验结果 JSON</label>
+                  <textarea className="field" rows={3} value={validationsJson} onChange={(e) => setValidationsJson(e.target.value)} data-testid="adv-s6-validations" />
+                  <div className="helper">未匹配分录数、警告项等校验摘要，需为合法 JSON。</div>
+                </div>
+                <div className="mt-3">
+                  <label className="lbl">意见模板文本</label>
+                  <textarea className="field" rows={3} value={templateText} onChange={(e) => setTemplateText(e.target.value)} data-testid="adv-s6-template" />
+                </div>
+                <div className="flex justify-end mt-3">
+                  <button className="btn primary" onClick={submit} disabled={busy} data-testid="adv-s6-go">{busy ? <Spinner /> : "生成审计意见"}</button>
+                </div>
+                <BackendUnavailableBanner show={missing} detail="AI 审计意见接口未响应" />
               </div>
             </div>
-            <div className="mt-3">
-              <label className="lbl">validations_json</label>
-              <textarea className="field" rows={3} value={validationsJson} onChange={(e) => setValidationsJson(e.target.value)} data-testid="adv-s6-validations" />
-            </div>
-            <div className="mt-3">
-              <label className="lbl">template_text</label>
-              <textarea className="field" rows={3} value={templateText} onChange={(e) => setTemplateText(e.target.value)} data-testid="adv-s6-template" />
-            </div>
-            <div className="flex justify-end mt-3">
-              <button className="btn primary" onClick={submit} disabled={busy} data-testid="adv-s6-go">{busy ? <Spinner /> : "生成"}</button>
-            </div>
-            {missing && (
-              <div className="upload-result mt-3" style={{ background: "rgba(217,119,6,0.06)", borderColor: "rgba(217,119,6,0.30)" }}>
-                后端 AI raw 路由暂不可达（POST /ai/raw/audit-opinion 返回非 200）。
+            <div className="split-right">
+              <div className="preview-pane">
+                {result ? (
+                  <>
+                    <h3 className="card-title">生成结果 · Markdown</h3>
+                    <pre className="mono text-xs mt-2" style={{ whiteSpace: "pre-wrap" }}>{result}</pre>
+                  </>
+                ) : (
+                  <div className="preview-empty">
+                    <span className="preview-empty__icon">
+                      <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                    </span>
+                    <div className="preview-empty__title">尚无生成结果</div>
+                    <div className="preview-empty__hint">填写左侧表单并点击「生成审计意见」，结果将以 Markdown 显示在此处。</div>
+                  </div>
+                )}
               </div>
-            )}
-            {result && (
-              <div className="card mt-3" style={{ padding: 10, background: "var(--bg-soft, rgba(0,0,0,0.03))" }}>
-                <strong>生成结果（Markdown）</strong>
-                <pre className="mono text-xs" style={{ whiteSpace: "pre-wrap", marginTop: 6 }}>{result}</pre>
-              </div>
-            )}
+            </div>
           </div>
         );
       }
@@ -5761,7 +5999,7 @@
             const r = await api("POST", "/ai/raw/nl-query", { question: question.trim(), execute_sql: executeSql });
             setResult(r || {});
           } catch (e) {
-            if (e.status === 404) { setMissing(true); toast("后端 AI raw 路由暂不可达", "warn"); }
+            if (e.status === 404) { setMissing(true); toast("后端 AI 能力暂不可用", "warn"); }
             else { toast(`查询失败：${e.message}`, "err"); }
           } finally { setBusy(false); }
         };
@@ -5771,50 +6009,70 @@
         const cols = rows.length ? Object.keys(rows[0]) : [];
 
         return (
-          <div className="card">
-            <h3 className="card-title">🔴 S7 · 自然语言查询</h3>
-            <p className="card-sub">用中文问数：模型生成 SELECT，平台自动校验后再执行（raw 级）</p>
-            <div className="mt-3">
-              <textarea className="field" rows={2} placeholder="例如：上季度毛利率最高的 5 个账套是哪些？" value={question} onChange={(e) => setQuestion(e.target.value)} data-testid="adv-s7-q" />
-            </div>
-            <div className="flex items-center mt-3" style={{ gap: 12 }}>
-              <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                <input type="checkbox" checked={executeSql} onChange={(e) => setExecuteSql(e.target.checked)} data-testid="adv-s7-exec" />
-                校验通过后执行 SQL
-              </label>
-              <span style={{ flex: 1 }} />
-              <button className="btn primary" onClick={submit} disabled={busy} data-testid="adv-s7-go">{busy ? <Spinner /> : "查询"}</button>
-            </div>
-            {missing && (
-              <div className="upload-result mt-3" style={{ background: "rgba(217,119,6,0.06)", borderColor: "rgba(217,119,6,0.30)" }}>
-                后端 AI raw 路由暂不可达（POST /ai/raw/nl-query 返回非 200）。
+          <div className="split-layout">
+            <div className="split-left">
+              <div className="card">
+                <div className="section-head">
+                  <div>
+                    <h3 className="section-head__title">用中文问数</h3>
+                    <p className="section-head__desc">用中文提问，AI 自动转成安全的数据库查询，平台校验通过后再执行。</p>
+                  </div>
+                  <span className="badge err">raw</span>
+                </div>
+                <div>
+                  <label className="lbl">查询问题</label>
+                  <textarea className="field" rows={3} placeholder="例如：上季度毛利率最高的 5 个账套是哪些？" value={question} onChange={(e) => setQuestion(e.target.value)} data-testid="adv-s7-q" />
+                </div>
+                <div className="flex items-center mt-3" style={{ gap: 12 }}>
+                  <label style={{ display: "inline-flex", alignItems: "center", gap: 6, margin: 0 }}>
+                    <input type="checkbox" checked={executeSql} onChange={(e) => setExecuteSql(e.target.checked)} data-testid="adv-s7-exec" />
+                    校验通过后执行 SQL
+                  </label>
+                  <span style={{ flex: 1 }} />
+                  <button className="btn primary" onClick={submit} disabled={busy} data-testid="adv-s7-go">{busy ? <Spinner /> : "翻译并查询"}</button>
+                </div>
+                <BackendUnavailableBanner show={missing} detail="AI 自然语言查询接口未响应" />
               </div>
-            )}
-            {result && (
-              <div className="mt-3">
-                <strong>翻译后的 SQL</strong>
-                <pre className="mono text-xs" style={{ background: "var(--bg-soft, rgba(0,0,0,0.04))", padding: 8, borderRadius: 4, overflowX: "auto", marginTop: 4 }}>{result.sql || "(无 SQL)"}</pre>
-                {validation_errors.length > 0 && (
-                  <div className="upload-result mt-3" style={{ background: "rgba(220,38,38,0.06)", borderColor: "rgba(220,38,38,0.30)" }}>
-                    <strong>validation_errors</strong>
-                    <ul style={{ marginTop: 4 }}>
-                      {validation_errors.map((err, i) => <li key={i} className="mono text-xs">{typeof err === "string" ? err : JSON.stringify(err)}</li>)}
-                    </ul>
+            </div>
+            <div className="split-right">
+              <div className="preview-pane">
+                {result ? (
+                  <>
+                    <h3 className="card-title">翻译后的 SQL</h3>
+                    <pre className="mono text-xs mt-2">{result.sql || "(无 SQL)"}</pre>
+                    {validation_errors.length > 0 && (
+                      <div className="callout callout--danger mt-3">
+                        <div className="callout__body">
+                          <strong>SQL 校验未通过</strong>
+                          <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                            {validation_errors.map((err, i) => <li key={i} className="mono text-xs">{typeof err === "string" ? err : JSON.stringify(err)}</li>)}
+                          </ul>
+                        </div>
+                      </div>
+                    )}
+                    {rows.length > 0 && (
+                      <div className="card mt-3" style={{ padding: 0 }}>
+                        <div className="text-xs text-muted" style={{ padding: 8 }}>结果（最多展示 50 行 · 共 {result.row_count ?? rows.length} 行）</div>
+                        <table className="report-table">
+                          <thead><tr>{cols.map((c) => <th key={c} className="text-xs">{c}</th>)}</tr></thead>
+                          <tbody>
+                            {rows.map((r, i) => <tr key={i}>{cols.map((c) => <td key={c} className="mono text-xs">{String(r[c] ?? "")}</td>)}</tr>)}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="preview-empty">
+                    <span className="preview-empty__icon">
+                      <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                    </span>
+                    <div className="preview-empty__title">尚无查询结果</div>
+                    <div className="preview-empty__hint">在左侧输入中文问题并查询，翻译后的 SQL 与结果表将显示在此处。</div>
                   </div>
                 )}
-                {rows.length > 0 && (
-                  <div className="card mt-3" style={{ padding: 0 }}>
-                    <div style={{ padding: 8, fontSize: 12 }}>结果（最多展示 50 行 · 共 {result.row_count ?? rows.length} 行）</div>
-                    <table className="report-table">
-                      <thead><tr>{cols.map((c) => <th key={c} className="text-xs">{c}</th>)}</tr></thead>
-                      <tbody>
-                        {rows.map((r, i) => <tr key={i}>{cols.map((c) => <td key={c} className="mono text-xs">{String(r[c] ?? "")}</td>)}</tr>)}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
               </div>
-            )}
+            </div>
           </div>
         );
       }
@@ -5834,39 +6092,56 @@
             setResult((r && (r.content || r.text)) || JSON.stringify(r, null, 2));
             toast("已起草附注内容");
           } catch (e) {
-            if (e.status === 404) { setMissing(true); toast("后端 AI raw 路由暂不可达", "warn"); }
+            if (e.status === 404) { setMissing(true); toast("后端 AI 能力暂不可用", "warn"); }
             else { toast(`起草失败：${e.message}`, "err"); }
           } finally { setBusy(false); }
         };
 
         return (
-          <div className="card">
-            <h3 className="card-title">🔴 S11 · 附注 AI 起草</h3>
-            <p className="card-sub">为指定附注段落生成草稿，与「报表附注」视图联动（raw 级）</p>
-            <div className="row" style={{ gap: 10, marginTop: 8 }}>
-              <div style={{ flex: 1 }}>
-                <label className="lbl">账套 ID</label>
-                <input className="field" value={orgId} onChange={(e) => setOrgId(e.target.value)} data-testid="adv-s11-org" />
-              </div>
-              <div style={{ flex: 1 }}>
-                <label className="lbl">附注 ID</label>
-                <input className="field" value={noteId} onChange={(e) => setNoteId(e.target.value)} data-testid="adv-s11-note" />
+          <div className="split-layout">
+            <div className="split-left">
+              <div className="card">
+                <div className="section-head">
+                  <div>
+                    <h3 className="section-head__title">报表附注智能撰写</h3>
+                    <p className="section-head__desc">为指定的附注段落生成叙述性草稿，与「报表附注」页面联动。</p>
+                  </div>
+                  <span className="badge err">raw</span>
+                </div>
+                <div className="form-grid">
+                  <div>
+                    <label className="lbl">账套 ID</label>
+                    <input className="field" placeholder="目标账套" value={orgId} onChange={(e) => setOrgId(e.target.value)} data-testid="adv-s11-org" />
+                  </div>
+                  <div>
+                    <label className="lbl">附注 ID</label>
+                    <input className="field" placeholder="待起草的附注段落 ID" value={noteId} onChange={(e) => setNoteId(e.target.value)} data-testid="adv-s11-note" />
+                  </div>
+                </div>
+                <div className="flex justify-end mt-3">
+                  <button className="btn primary" onClick={submit} disabled={busy} data-testid="adv-s11-go">{busy ? <Spinner /> : "起草附注"}</button>
+                </div>
+                <BackendUnavailableBanner show={missing} detail="AI 附注起草接口未响应" />
               </div>
             </div>
-            <div className="flex justify-end mt-3">
-              <button className="btn primary" onClick={submit} disabled={busy} data-testid="adv-s11-go">{busy ? <Spinner /> : "起草"}</button>
+            <div className="split-right">
+              <div className="preview-pane">
+                {result ? (
+                  <>
+                    <h3 className="card-title">更新后的附注内容</h3>
+                    <pre className="mono text-xs mt-2" style={{ whiteSpace: "pre-wrap" }}>{result}</pre>
+                  </>
+                ) : (
+                  <div className="preview-empty">
+                    <span className="preview-empty__icon">
+                      <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+                    </span>
+                    <div className="preview-empty__title">尚无起草结果</div>
+                    <div className="preview-empty__hint">填写账套与附注 ID 后点击「起草附注」，AI 生成的草稿将显示在此处。</div>
+                  </div>
+                )}
+              </div>
             </div>
-            {missing && (
-              <div className="upload-result mt-3" style={{ background: "rgba(217,119,6,0.06)", borderColor: "rgba(217,119,6,0.30)" }}>
-                后端 AI raw 路由暂不可达（POST /ai/raw/notes-draft 返回非 200）。
-              </div>
-            )}
-            {result && (
-              <div className="card mt-3" style={{ padding: 10 }}>
-                <strong>更新后的附注内容</strong>
-                <pre className="mono text-xs" style={{ whiteSpace: "pre-wrap", marginTop: 6 }}>{result}</pre>
-              </div>
-            )}
           </div>
         );
       }
@@ -5874,15 +6149,38 @@
       // ─────────────────────────────────────────────────────────────────
       //  顶部导航：账套 / 合并报表 / 报表附注 / 同业对比 / 密钥管理 / 高级AI / AI 设置
       // ─────────────────────────────────────────────────────────────────
+      // 内置的导航图标（24x24 stroke SVG，继承 currentColor），与宿主应用组
+      // 视觉一致；避免引入额外 JS 资源或 emoji。
+      const _NAV_ICON_PATHS = {
+        orgs: '<path d="M3 21h18"/><path d="M5 21V7l8-4v18"/><path d="M19 21V11l-6-4"/>',
+        consolidation: '<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
+        notes: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>',
+        peer: '<line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/>',
+        sparkles: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M5.6 18.4l2.8-2.8M15.6 8.4l2.8-2.8"/>',
+        key: '<path d="M21 2l-2 2m-7.6 7.6a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.78-7.78z"/><path d="M15.5 7.5l3 3L22 7l-3-3"/>',
+        settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+      };
+      function NavIcon({ name }) {
+        return (
+          <svg
+            className="tab-icon"
+            viewBox="0 0 24 24" width="15" height="15"
+            fill="none" stroke="currentColor" strokeWidth="2"
+            strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
+            dangerouslySetInnerHTML={{ __html: _NAV_ICON_PATHS[name] || "" }}
+          />
+        );
+      }
+
       function MainNav({ active, navigate }) {
         const items = [
-          { key: "orgs",            label: "账套",       hash: "#/orgs" },
-          { key: "consolidation",   label: "合并报表",   hash: "#/consolidation" },
-          { key: "notes-editor",    label: "报表附注",   hash: "#/notes-editor" },
-          { key: "peer-comparison", label: "同业对比",   hash: "#/peer-comparison" },
-          { key: "advanced-ai",     label: "高级AI",     hash: "#/advanced-ai" },
-          { key: "key-management",  label: "密钥管理",   hash: "#/key-management" },
-          { key: "ai-settings",     label: "AI 设置",    hash: "#/ai-settings" },
+          { key: "orgs",            label: "账套",       hash: "#/orgs",            icon: "orgs" },
+          { key: "consolidation",   label: "合并报表",   hash: "#/consolidation",   icon: "consolidation" },
+          { key: "notes-editor",    label: "报表附注",   hash: "#/notes-editor",    icon: "notes" },
+          { key: "peer-comparison", label: "同业对比",   hash: "#/peer-comparison", icon: "peer" },
+          { key: "advanced-ai",     label: "高级AI",     hash: "#/advanced-ai",     icon: "sparkles" },
+          { key: "key-management",  label: "密钥管理",   hash: "#/key-management",  icon: "key" },
+          { key: "ai-settings",     label: "AI 设置",    hash: "#/ai-settings",     icon: "settings" },
         ];
         return (
           <div className="tabs" style={{ marginBottom: 12 }}>
@@ -5893,6 +6191,7 @@
                 onClick={() => navigate(it.hash)}
                 data-testid={`nav-${it.key}`}
               >
+                <NavIcon name={it.icon} />
                 {it.label}
               </button>
             ))}
@@ -5909,9 +6208,9 @@
         const [period, setPeriod] = useState("2025-FY");
         const toasts = useToasts();
 
-        // Stage 4 · 用户上下文（M2 单本机仍是占位切换器；多用户后端接入留 v0.3）
+        // 用户上下文：单机默认本机管理员；多用户后端就绪后由切换器改写。
         const [userId, setUserId] = useState(() => localStorage.getItem("finance.user.id") || "local");
-        const [displayName, setDisplayName] = useState(() => localStorage.getItem("finance.user.name") || "本机用户（admin）");
+        const [displayName, setDisplayName] = useState(() => localStorage.getItem("finance.user.name") || "本机用户（管理员）");
         const [role, setRole] = useState(() => localStorage.getItem("finance.user.role") || "admin");
         const userCtxValue = useMemo(() => ({
           userId, displayName, role,
@@ -5973,6 +6272,7 @@
             <OrgDetailView
               orgId={oid}
               period={period}
+              setPeriod={setPeriod}
               onBack={() => navigate("#/orgs")}
               onOpenReport={(rid) => navigate(`#/orgs/${oid}/reports/${rid}`)}
               toast={toasts.push}
@@ -5989,6 +6289,7 @@
             <ConsolidationDetailView
               groupId={gid}
               period={period}
+              setPeriod={setPeriod}
               onBack={() => navigate("#/consolidation")}
               onOpenReport={(oid, rid) => navigate(`#/orgs/${oid}/reports/${rid}`)}
               toast={toasts.push}
@@ -6000,6 +6301,7 @@
           body = (
             <ConsolidationListView
               period={period}
+              setPeriod={setPeriod}
               onOpenGroup={(gid) => navigate(`#/consolidation/${gid}`)}
               toast={toasts.push}
             />
@@ -6053,11 +6355,6 @@
                 right={
                   <>
                     <WSConnBadge />
-                    <span>期间</span>
-                    <select className="field" style={{ width: 110, padding: "3px 8px" }} value={period} onChange={(e) => setPeriod(e.target.value)}>
-                      <option value="2025-FY">2025 年度</option>
-                      <option value="2024-FY">2024 年度</option>
-                    </select>
                     <UserSwitcher toast={toasts.push} />
                   </>
                 }

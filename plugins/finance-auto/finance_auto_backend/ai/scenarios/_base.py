@@ -26,12 +26,36 @@ from ..audit import maybe_persist_debug_snapshot, record_llm_call
 from ..consent import ConsentDenied, check_consent
 from ..desensitizer import SensitivityLevel, desensitize
 from ..models import LLMOutcome
-from ..router import FinanceAIRouter, LLMResponse, MockLLMResponder
+from ..router import FinanceAIRouter, HostBrainResponder, LLMResponse, MockLLMResponder
 
 if TYPE_CHECKING:
     from ...routes import FinanceAutoService
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_router(
+    service: FinanceAutoService, router: FinanceAIRouter | None
+) -> FinanceAIRouter:
+    """Pick the router every scenario should use.
+
+    Resolution order:
+
+    1. An explicit ``router`` (tests inject a controlled responder here).
+    2. A router backed by the host Brain when the plugin was granted
+       ``brain.access`` — ``plugin.py`` stores the brain on the service
+       as ``host_brain``. This routes completions through OpenAkita's
+       own configured LLM provider.
+    3. :class:`MockLLMResponder` — the offline default used by the
+       acceptance suite and any deployment without ``brain.access``.
+    """
+    if router is not None:
+        return router
+    getter = getattr(service, "get_host_brain", None)
+    brain = getter() if callable(getter) else None
+    if brain is not None:
+        return FinanceAIRouter(responder=HostBrainResponder(brain))
+    return FinanceAIRouter(responder=MockLLMResponder())
 
 
 @dataclass
@@ -143,7 +167,7 @@ async def execute_scenario(
     callback; if omitted we use :func:`parse_json_response`.
     """
     started = time.perf_counter()
-    router = router or FinanceAIRouter(responder=MockLLMResponder())
+    router = resolve_router(service, router)
     parser = parser or parse_json_response
 
     safe_payload = desensitize(payload, level)
@@ -259,4 +283,5 @@ __all__ = [
     "execute_scenario",
     "parse_json_response",
     "render_prompt",
+    "resolve_router",
 ]

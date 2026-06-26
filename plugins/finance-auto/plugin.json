@@ -20,11 +20,7 @@
     "config.read",
     "config.write",
     "data.own",
-    "file.read",
-    "file.write",
-    "keyring",
-    "native.dialog",
-    "websocket.serve"
+    "brain.access"
   ],
   "requires": {
     "openakita": ">=1.27.0",

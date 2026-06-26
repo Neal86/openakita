@@ -46,6 +46,22 @@ OpenAkita 桌面/服务实例：
 
 完整清单见 [`requirements.txt`](./requirements.txt)。
 
+### 2.1 插件清单权限 vs 运行时能力
+
+`plugin.json` 的 `permissions` 字段只能声明 **宿主插件系统认得的权限名**
+（见 `src/openakita/plugins/manifest.py` 的 `ALL_PERMISSIONS`）。本插件实际
+使用的有效权限是：`log` / `routes.register` / `config.read` /
+`config.write` / `data.own`。宿主会静默丢弃它不认识的名字，因此清单里
+**不再**写入下列条目——它们是「运行时能力」而非宿主权限，由 Python 依赖
+或桌面外壳提供，无需也无法通过 `permissions` 申请：
+
+| 能力 | 来源 | 说明 |
+| --- | --- | --- |
+| 密钥环读写 | `keyring` 依赖 | OS 凭据库存放加密 seed，进程内直接调用 |
+| 文件读写 | `data.own` 数据目录 | 插件仅在宿主分配的 `data/` 目录内读写 SQLite / 备份 |
+| 原生对话框 / 系统通知 | Tauri 外壳 `finance-native` 能力 | 桌面端通过 bridge 握手协商，Web 预览自动降级为禁用按钮 |
+| WebSocket 服务 | `routes.register` 注册的 `/ws` 路由 | WS 端点挂在插件 router 上，不需要单独的服务权限 |
+
 ---
 
 ## §3 安装

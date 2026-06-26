@@ -26,7 +26,7 @@ from openakita.plugins.api import PluginAPI, PluginBase
 logger = logging.getLogger(__name__)
 
 PLUGIN_ID = "finance-auto"
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "1.0.0-rc1"
 
 
 class Plugin(PluginBase):
@@ -64,16 +64,28 @@ class Plugin(PluginBase):
         self._db = FinanceAutoDB(db_path)
         self._service = FinanceAutoService(self._db)
 
+        # Wire the host LLM (OpenAkita Brain) into the AI scenarios. The host
+        # attaches its Brain *after* plugins load, so we keep the PluginAPI
+        # handle and resolve the brain lazily per request (see
+        # ``FinanceAutoService.get_host_brain``). With ``brain.access`` granted
+        # the AI scenarios reuse the host's configured model/provider; without
+        # it they stay on the offline MockLLMResponder.
+        self._service.plugin_api = api
+        ai_backend = (
+            "host-LLM (brain.access)"
+            if api.has_permission("brain.access")
+            else "mock (offline)"
+        )
+
         router = build_router(self._service)
         api.register_api_routes(router)
 
-        self._init_task = api.spawn_task(
-            self._async_init(), name=f"{PLUGIN_ID}:db-init"
-        )
+        self._init_task = api.spawn_task(self._async_init(), name=f"{PLUGIN_ID}:db-init")
 
+        route_count = len(getattr(router, "routes", []))
         api.log(
-            f"finance-auto v{PLUGIN_VERSION} loaded — 5 routes registered, "
-            f"SQLite path={db_path}"
+            f"finance-auto v{PLUGIN_VERSION} loaded — {route_count} routes "
+            f"registered, SQLite path={db_path}, AI backend={ai_backend}"
         )
 
     async def _async_init(self) -> None:

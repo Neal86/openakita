@@ -30,6 +30,7 @@ import asyncio
 import logging
 import os
 import random
+import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Literal, Protocol
 
@@ -235,6 +236,81 @@ class MockLLMResponder:
             provider=self.provider,
             is_local=self.is_local,
             duration_ms=0,
+            raw=None,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Host-brain responder — routes completions through OpenAkita's own Brain
+# ---------------------------------------------------------------------------
+
+
+class HostBrainResponder:
+    """Adapter that satisfies :class:`LLMResponder` by calling the host's
+    ``Brain.think_lightweight`` one-shot completion.
+
+    This is how the plugin reuses OpenAkita's already-configured LLM
+    provider (the same model picker / API keys the user set up in the
+    host) instead of asking the user to wire a second set of credentials
+    inside the plugin. The host grants access via the ``brain.access``
+    permission; ``plugin.py`` fetches the brain with ``api.get_brain()``
+    and hands it to :class:`FinanceAutoService`. When the permission is
+    absent the service keeps a ``None`` brain and the scenarios fall back
+    to :class:`MockLLMResponder` (so the offline acceptance suite is
+    unaffected).
+    """
+
+    def __init__(self, brain: Any) -> None:
+        self._brain = brain
+
+    @staticmethod
+    def _extract_text(response: Any) -> str:
+        if isinstance(response, str):
+            return response
+        for attr in ("content", "text"):
+            value = getattr(response, attr, None)
+            if value:
+                return str(value)
+        if isinstance(response, dict):
+            return str(response.get("content") or response.get("text") or "")
+        return str(response or "")
+
+    async def complete(
+        self,
+        *,
+        prompt: str,
+        endpoint_name: str,
+        sensitivity_level: SensitivityLevel,
+        scenario_id: str = "",
+    ) -> LLMResponse:
+        started = time.perf_counter()
+        system = (
+            "You are a finance/accounting assistant embedded in the "
+            "OpenAkita finance-auto plugin. Follow the task instructions "
+            "in the user message exactly. When asked for JSON, return "
+            "strict JSON with no commentary."
+        )
+        response = await self._brain.think_lightweight(
+            prompt=prompt,
+            system=system,
+            max_tokens=2048,
+        )
+        text = self._extract_text(response)
+        model_id = ""
+        provider = ""
+        try:
+            info = self._brain.get_current_endpoint_info()
+            if isinstance(info, dict):
+                model_id = str(info.get("model") or "")
+                provider = str(info.get("name") or "")
+        except Exception:  # noqa: BLE001 — endpoint introspection is best-effort
+            pass
+        return LLMResponse(
+            text=text,
+            model_id=model_id or "host-brain",
+            provider=provider or "openakita-host",
+            is_local=False,
+            duration_ms=int((time.perf_counter() - started) * 1000),
             raw=None,
         )
 
@@ -506,6 +582,7 @@ __all__ = [
     "DEFAULT_LLM_RETRIES",
     "EndpointDescriptor",
     "FinanceAIRouter",
+    "HostBrainResponder",
     "LLMResponder",
     "LLMResponse",
     "LLM_BACKOFF_BASE_ENV",
