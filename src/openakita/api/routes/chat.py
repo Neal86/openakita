@@ -947,7 +947,7 @@ def _schedule_background_save(
     full_reply_snapshot: str,
     collected_artifacts: list,
     save_done: bool,
-    todo_snapshot: dict | None,
+    todo_snapshot: dict | None = None,
     collected_sources: list | None = None,
     collected_mcp_calls: list | None = None,
 ) -> None:
