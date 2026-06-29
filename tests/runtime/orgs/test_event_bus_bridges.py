@@ -69,6 +69,24 @@ def test_event_bus_default_backend_has_add_tap_surface() -> None:
     assert hasattr(bus, "remove_tap")
 
 
+def test_event_store_command_id_filter() -> None:
+    """case id: events.query.command_id_filter (low-pri follow-up)
+
+    ``/activity`` + ``/events`` accept ``command_id`` so the backend (not just
+    the UI) can scope a feed to a single command's events.
+    """
+    from openakita.orgs._runtime_event_store import OrgEventStore
+
+    store = OrgEventStore("o-cmd")
+    store.append({"type": "a", "command_id": "cmd-1"})
+    store.append({"type": "b", "command_id": "cmd-2"})
+    store.append({"type": "c", "command_id": "cmd-1"})
+    only1 = store.query(command_id="cmd-1", limit=50)
+    assert [e["type"] for e in only1] == ["a", "c"]
+    assert store.query(command_id="cmd-2", limit=50)[0]["type"] == "b"
+    assert len(store.query(limit=50)) == 3  # no filter -> all
+
+
 def test_persist_tap_appends_dispatch_event_to_org_event_store() -> None:
     """case id: h4.persist_tap.events_land_on_store
 

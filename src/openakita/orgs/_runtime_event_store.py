@@ -91,6 +91,7 @@ class OrgEventStore:
         until: str | None = None,
         chain_id: str | None = None,
         task_id: str | None = None,
+        command_id: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """Filter + tail by ``limit`` (most recent suffix)."""
@@ -100,6 +101,11 @@ class OrgEventStore:
             items = [
                 e for e in items if e.get("event_type") == event_type or e.get("type") == event_type
             ]
+        if command_id:
+            # Backend-side per-command filter (low-pri follow-up): the UI used to
+            # filter ``/activity`` client-side; doing it here keeps the wire small
+            # and lets the timeline scope strictly to one command's events.
+            items = [e for e in items if e.get("command_id") == command_id]
         if actor:
             # A4 fix: dispatch/agent-run events stamp the acting node on
             # the top-level ``node_id`` field, not ``actor``. The node

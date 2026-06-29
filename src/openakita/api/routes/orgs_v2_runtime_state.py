@@ -167,6 +167,7 @@ def query_events(request: Request, org_id: str) -> list[dict[str, Any]]:
         until=qp.get("until"),
         chain_id=qp.get("chain_id"),
         task_id=qp.get("task_id"),
+        command_id=qp.get("command_id"),
         limit=_safe_int(qp.get("limit"), 100),
     )
 
@@ -181,7 +182,9 @@ def query_activity(request: Request, org_id: str) -> dict[str, Any]:
         return {"items": [], "count": 0}
     qp = request.query_params
     limit = max(1, min(_safe_int(qp.get("limit"), 100), 500))
-    events = es.query(since=qp.get("since"), limit=limit) or []
+    events = es.query(
+        since=qp.get("since"), command_id=qp.get("command_id"), limit=limit
+    ) or []
     return {"items": events, "count": len(events)}
 
 
