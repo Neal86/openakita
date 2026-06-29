@@ -6184,6 +6184,161 @@
         );
       }
 
+      // ═══════════════════════════════════════════════════════════════════
+      //  次区 · 设置（密钥 / AI / 科目映射）—— 把原密钥管理 + AI 设置 + 科目
+      //  映射收进一个「设置」入口，二级 tab 切换；旧路由 #/ai-settings /
+      //  #/key-management 仍可直达对应 tab（向后兼容）。
+      // ═══════════════════════════════════════════════════════════════════
+      function SettingsView({ initialTab = "keys", toast }) {
+        const [tab, setTab] = useState(initialTab);
+        useEffect(() => { setTab(initialTab); }, [initialTab]);
+        return (
+          <>
+            <h2 className="page-title">设置</h2>
+            <p className="page-subtitle">密钥与加密备份、AI 模型 / 脱敏 / 授权策略、以及科目映射与待确认科目编码集中在这里。</p>
+            <div className="tabs">
+              <button className={`tab ${tab === "keys" ? "active" : ""}`} onClick={() => setTab("keys")} data-testid="settings-tab-keys">密钥管理</button>
+              <button className={`tab ${tab === "ai" ? "active" : ""}`} onClick={() => setTab("ai")} data-testid="settings-tab-ai">AI 设置</button>
+              <button className={`tab ${tab === "subjects" ? "active" : ""}`} onClick={() => setTab("subjects")} data-testid="settings-tab-subjects">科目映射</button>
+            </div>
+            {tab === "keys" && <KeyManagementView toast={toast} />}
+            {tab === "ai" && <AISettingsView toast={toast} />}
+            {tab === "subjects" && <SubjectMappingCard toast={toast} />}
+          </>
+        );
+      }
+
+      // M1 W1 三个企业准则科目编码（使用权资产 / 合同负债 / 租赁负债）业务方
+      // 尚未敲定，模板里以 code="TBD" 占位、渲染为 0。这里不硬编码任何猜测值，
+      // 而是给出可配置输入 + 友好说明：让用户按自己代账软件的实际科目号填写。
+      // 填写结果存在浏览器本地（localStorage），作为追溯指引；真正落到报表数值
+      // 仍走「调整与追溯」步骤里的手工输入（manual-inputs），二者互不冲突。
+      const _M1W1_SUBJECTS = [
+        { key: "right_of_use_asset", label: "使用权资产", hint: "资产类 · 新租赁准则下承租人确认的使用权资产，常见挂在「固定资产」或单列。" },
+        { key: "contract_liability", label: "合同负债", hint: "负债类 · 新收入准则下的预收性质科目，旧准则常记在「预收账款」。" },
+        { key: "lease_liability",    label: "租赁负债", hint: "负债类 · 新租赁准则下承租人确认的租赁负债，区分一年内到期部分。" },
+      ];
+      function SubjectMappingCard({ toast }) {
+        const LS_KEY = "finance.subjectMap.m1w1";
+        const [map, setMap] = useState(() => {
+          try { return JSON.parse(localStorage.getItem(LS_KEY) || "{}"); } catch { return {}; }
+        });
+        const [dirty, setDirty] = useState(false);
+        const set = (k, v) => { setMap((m) => ({ ...m, [k]: v })); setDirty(true); };
+        const save = () => {
+          try {
+            localStorage.setItem(LS_KEY, JSON.stringify(map));
+            setDirty(false);
+            toast("科目映射已保存到本地");
+          } catch { toast("本地存储不可用，未能保存", "err"); }
+        };
+        return (
+          <>
+            <div className="oa-config-banner oa-config-banner--info" style={{ marginBottom: 14 }}>
+              <span className="oa-config-banner__icon"><NavIcon name="settings" /></span>
+              <div className="oa-config-banner__text">
+                <strong>这三个科目的编码由业务方决定，系统不替你猜。</strong>
+                请按你所用代账软件（金蝶 / 用友 / 管家婆等）里的实际科目号填写。未填写时，
+                相关报表行会标为 <span className="oa-pill pending">TBD</span> 并按 0 处理；填写后这里作为
+                追溯指引，报表数值仍可在「调整与追溯」步骤手工录入。
+              </div>
+            </div>
+            <div className="oa-card">
+              <h3>M1 · 新准则待确认科目</h3>
+              <p>使用权资产 / 合同负债 / 租赁负债 —— 填你自己账套里的对应科目编码。</p>
+              {_M1W1_SUBJECTS.map((s) => (
+                <div className="oa-row" key={s.key} style={{ alignItems: "flex-start" }}>
+                  <div style={{ flex: "0 0 150px" }}>
+                    <label className="oa-label" style={{ marginBottom: 2 }}>{s.label}</label>
+                    <div style={{ fontSize: 11, color: "var(--oa-text-muted)", lineHeight: 1.4 }}>{s.hint}</div>
+                  </div>
+                  <input
+                    className="oa-input"
+                    style={{ flex: 1, minWidth: 160 }}
+                    placeholder="例如 1521 / 2203 / 2701（按你的代账软件填）"
+                    value={map[s.key] || ""}
+                    onChange={(e) => set(s.key, e.target.value)}
+                    data-testid={`subjmap-${s.key}`}
+                  />
+                </div>
+              ))}
+              <div className="oa-row" style={{ justifyContent: "flex-end", marginTop: 6 }}>
+                <button className="oa-btn oa-btn-primary" onClick={save} disabled={!dirty} data-testid="subjmap-save">保存映射</button>
+              </div>
+            </div>
+          </>
+        );
+      }
+
+      // ═══════════════════════════════════════════════════════════════════
+      //  次区 · 复核中心 —— 把原本藏在「报表查看页」里的多审计师复核工作流
+      //  提升成一个顶级入口：选账套 → 看其报表 → 进报表做复核 / 批注。
+      // ═══════════════════════════════════════════════════════════════════
+      function ReviewCenterView({ onOpenReport, toast }) {
+        const orgs = useFetch("/orgs", []);
+        const list = (orgs.data && orgs.data.organizations) || [];
+        const [orgId, setOrgId] = useState(null);
+        useEffect(() => {
+          if (!orgId && list.length > 0) setOrgId(list[0].id);
+        }, [list, orgId]);
+        return (
+          <>
+            <h2 className="page-title">复核中心</h2>
+            <p className="page-subtitle">多审计师协作复核：选择账套查看其报表，进入报表即可发起 / 推进复核流程与单元格批注。</p>
+            {orgs.error && (
+              <div className="oa-error-coach">
+                <div className="cause">无法加载账套</div>
+                <div className="why">读取账套列表失败</div>
+                <div className="what">{orgs.error.message}</div>
+              </div>
+            )}
+            {!orgs.loading && list.length === 0 && (
+              <div className="oa-config-banner oa-config-banner--info">
+                <span className="oa-config-banner__icon"><NavIcon name="review" /></span>
+                <div className="oa-config-banner__text">
+                  <strong>还没有账套。</strong>先到「账套工作台」新建账套并生成报表，复核流程会在这里出现。
+                </div>
+              </div>
+            )}
+            {list.length > 0 && (
+              <div className="oa-card">
+                <h3>选择账套</h3>
+                <select className="oa-select" value={orgId || ""} onChange={(e) => setOrgId(e.target.value)} data-testid="review-org-select">
+                  {list.map((o) => <option key={o.id} value={o.id}>{o.name}（{o.code}）</option>)}
+                </select>
+              </div>
+            )}
+            {orgId && <ReviewOrgReports orgId={orgId} onOpenReport={onOpenReport} />}
+          </>
+        );
+      }
+
+      function ReviewOrgReports({ orgId, onOpenReport }) {
+        const reports = useFetch(`/orgs/${orgId}/reports`, [orgId]);
+        const items = (reports.data && reports.data.reports) || [];
+        return (
+          <div className="oa-card">
+            <h3>该账套的报表（{items.length}）</h3>
+            {reports.loading && <div className="oa-thinking"><span className="dot" /><span className="dot" /><span className="dot" /> 加载中</div>}
+            {!reports.loading && items.length === 0 && (
+              <p>该账套还没有生成报表。先在「账套工作台 · 生成报表」步骤生成，再回来复核。</p>
+            )}
+            {items.map((r) => (
+              <div className="oa-row" key={r.id} style={{ justifyContent: "space-between", borderTop: "1px solid var(--oa-border)", paddingTop: 8 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>
+                    {(REPORT_KINDS.find((x) => x.v === r.sheet_kind) || {}).l || r.sheet_kind}
+                    <span className="mono" style={{ color: "var(--oa-text-muted)", marginLeft: 8, fontSize: 11 }}>{r.period_id}</span>
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--oa-text-muted)" }}>{fmtTs(r.generated_at)} · {r.cell_count} 行</div>
+                </div>
+                <button className="oa-btn oa-btn-primary" onClick={() => onOpenReport(orgId, r.id)} data-testid={`review-open-${r.id}`}>打开复核 →</button>
+              </div>
+            ))}
+          </div>
+        );
+      }
+
       // ─────────────────────────────────────────────────────────────────
       //  顶部导航：账套 / 合并报表 / 报表附注 / 同业对比 / 密钥管理 / 高级AI / AI 设置
       // ─────────────────────────────────────────────────────────────────
@@ -6297,6 +6452,8 @@
         const mPeer = route.match(/^#\/peer-comparison\/?$/);
         const mKM = route.match(/^#\/key-management\/?$/);
         const mAdv = route.match(/^#\/advanced-ai\/?$/);
+        const mSettings = route.match(/^#\/settings\/?$/);
+        const mReview = route.match(/^#\/review-center\/?$/);
 
         let body, crumbs;
         let activeNav = "orgs";
@@ -6359,11 +6516,21 @@
               toast={toasts.push}
             />
           );
-        } else if (mAI) {
-          activeNav = "ai-settings";
-          crumbs = [{ label: "AI 设置" }];
+        } else if (mSettings || mAI || mKM) {
+          activeNav = "settings";
+          const initialTab = mAI ? "ai" : "keys";
+          crumbs = [{ label: "设置" }];
           body = (
-            <AISettingsView toast={toasts.push} />
+            <SettingsView initialTab={initialTab} toast={toasts.push} />
+          );
+        } else if (mReview) {
+          activeNav = "review-center";
+          crumbs = [{ label: "复核中心" }];
+          body = (
+            <ReviewCenterView
+              onOpenReport={(oid, rid) => navigate(`#/orgs/${oid}/reports/${rid}`)}
+              toast={toasts.push}
+            />
           );
         } else if (mNotes) {
           activeNav = "notes-editor";
@@ -6377,15 +6544,9 @@
           body = (
             <PeerComparisonView toast={toasts.push} />
           );
-        } else if (mKM) {
-          activeNav = "key-management";
-          crumbs = [{ label: "密钥管理" }];
-          body = (
-            <KeyManagementView toast={toasts.push} />
-          );
         } else if (mAdv) {
           activeNav = "advanced-ai";
-          crumbs = [{ label: "高级AI" }];
+          crumbs = [{ label: "高级 AI" }];
           body = (
             <AdvancedAIView toast={toasts.push} />
           );
@@ -6412,9 +6573,9 @@
                   </>
                 }
               />
-              <div className="main">
+              <div className="fa-body">
                 <MainNav active={activeNav} navigate={navigate} />
-                {body}
+                <main className="fa-content">{body}</main>
               </div>
               {toasts.view}
               <AIConsentBridge toast={toasts.push} />
