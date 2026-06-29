@@ -1035,20 +1035,37 @@
         const confirmUndo = async () => {
           if (!undoTarget) return;
           const runId = undoTarget.run_id;
+          // 后端撤销路由按 rule 维度暴露：
+          //   POST /orgs/{org_id}/reclassification-rules/{rule_id}/undo
+          // （回滚该规则最近一次 apply）。旧前端误调
+          //   /reclassification-runs/{run_id}/undo —— 该路由不存在，永远 404。
+          // 一个 run 可应用多条规则，故从 run.items 提取去重后的 rule_id 逐条撤销。
+          const ruleIds = Array.from(
+            new Set((undoTarget.items || []).map((it) => it.rule_id).filter((id) => id != null)),
+          );
+          if (ruleIds.length === 0) {
+            toast(`Run #${runId} 无可撤销的规则明细，请刷新列表`, "warn");
+            setUndoTarget(null);
+            return;
+          }
           setBusy(true);
           try {
-            const r = await api(
-              "POST",
-              `/orgs/${orgId}/reclassification-runs/${runId}/undo`,
-              { triggered_by: "ui" },
-              { timeoutMs: 15000 },
-            );
-            toast(`Run #${runId} 已撤销（回滚 ${r.items_rolled_back ?? undoTarget.items_count ?? "?"} 条记录）`, "ok");
+            let rolledBack = 0;
+            for (const ruleId of ruleIds) {
+              const r = await api(
+                "POST",
+                `/orgs/${orgId}/reclassification-rules/${ruleId}/undo?actor_id=ui`,
+                null,
+                { timeoutMs: 15000 },
+              );
+              rolledBack += (r && (r.deleted_parse_issues ?? 0)) || 0;
+            }
+            toast(`Run #${runId} 已撤销（回滚 ${rolledBack} 项 · ${ruleIds.length} 条规则）`, "ok");
             setRefresh((x) => x + 1);
           } catch (e) {
             // 撤销接口返回 404 时给出明确提示，而不是模糊的红色错误。
             if (e.status === 404) {
-              toast(`Run #${runId} 不存在或已被移除，请刷新列表`, "warn");
+              toast(`Run #${runId} 已无可撤销的 apply（可能已撤销），请刷新列表`, "warn");
             } else if (e.status === 409) {
               toast(`Run #${runId} 状态已变更（可能已被撤销），请刷新`, "warn");
             } else {
