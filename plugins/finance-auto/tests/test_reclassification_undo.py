@@ -169,6 +169,45 @@ def test_undo_on_unapplied_rule_returns_404(app_and_rule) -> None:
     assert res.status_code == 404, res.text
 
 
+def test_run_list_reflects_undone_at_after_undo(app_and_rule) -> None:
+    """Regression: after POST /undo the run-list must surface ``undone_at``.
+
+    The run header's ``status`` column is pinned to
+    ('ok','failed','partial') by the v9 CHECK constraint, so an undone
+    run cannot flip its own status.  The undo marker only lives in
+    ``reclassification_history``; the run serializer must join it back in
+    so the list API stops rendering an undone run as live.
+    """
+    client, _svc, org_id, period_id, rule_id = app_and_rule
+
+    # apply, then confirm run-list shows the run as NOT undone.
+    client.post(
+        f"{BASE}/orgs/{org_id}/reclassification-runs/apply",
+        json={"period_id": period_id, "triggered_by": "alice"},
+    )
+    pre = client.get(f"{BASE}/orgs/{org_id}/reclassification-runs")
+    assert pre.status_code == 200, pre.text
+    pre_runs = pre.json()
+    assert len(pre_runs) >= 1
+    assert all(r.get("undone_at") is None for r in pre_runs)
+
+    # undo.
+    undo = client.post(
+        f"{BASE}/orgs/{org_id}/reclassification-rules/{rule_id}/undo"
+        "?actor_id=bob"
+    )
+    assert undo.status_code == 200, undo.text
+
+    # run-list must now reflect the undo without any reload/race.
+    post = client.get(f"{BASE}/orgs/{org_id}/reclassification-runs")
+    assert post.status_code == 200, post.text
+    post_runs = post.json()
+    undone = [r for r in post_runs if r.get("undone_at")]
+    assert len(undone) == 1, post.text
+    assert undone[0]["undone_by"] == "bob"
+    assert undone[0]["undone_at"]
+
+
 def test_double_undo_returns_404(app_and_rule) -> None:
     client, _svc, org_id, period_id, rule_id = app_and_rule
     client.post(

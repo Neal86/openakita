@@ -398,6 +398,30 @@ class ReclassificationService:
         items = [
             ReclassificationRunItemModel(**dict(zip(icols, row))) for row in item_rows
         ]
+
+        # EX-P2-9 follow-up: backfill the undo marker straight from the
+        # history table so the serialized run reflects an undo the instant
+        # POST /undo commits.  Previously the run header alone was queried,
+        # but it never records undo state (the status CHECK constraint
+        # forbids 'undone'), so a freshly-undone run still serialized as
+        # live in the run-list.  Best-effort: minimal unit-test DBs may
+        # lack the v13 history table, in which case the run stays un-undone.
+        undone_at: str | None = None
+        undone_by: str | None = None
+        try:
+            async with self._conn.execute(
+                "SELECT undone_at, undone_by FROM reclassification_history "
+                "WHERE run_id=? AND status='undone' "
+                "ORDER BY undone_at DESC, history_id DESC LIMIT 1",
+                (run_id,),
+            ) as cur:
+                hist = await cur.fetchone()
+            if hist is not None:
+                undone_at = hist[0]
+                undone_by = hist[1]
+        except aiosqlite.OperationalError:
+            pass
+
         return ReclassificationRunModel(
             run_id=run_d["run_id"],
             org_id=run_d["org_id"],
@@ -415,6 +439,8 @@ class ReclassificationService:
             notes=run_d.get("notes"),
             items=items,
             version=int(run_d.get("version") or 1),
+            undone_at=undone_at,
+            undone_by=undone_by,
         )
 
     async def list_runs(

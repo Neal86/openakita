@@ -1072,6 +1072,14 @@ class ReclassificationRunModel(BaseModel):
     notes: str | None = None
     items: list[ReclassificationRunItemModel] = Field(default_factory=list)
     version: int = 1
+    # EX-P2-9 follow-up: the run header's ``status`` column is pinned to
+    # ('ok','failed','partial') by a v9 CHECK constraint, so an undone run
+    # cannot flip its own status.  The authoritative "was this run undone?"
+    # signal lives in ``reclassification_history``; we surface it here so the
+    # run-list API reflects the undone state immediately after POST /undo
+    # instead of still rendering the run as live.
+    undone_at: str | None = None
+    undone_by: str | None = None
 
 
 # ---------------------------------------------------------------------------
