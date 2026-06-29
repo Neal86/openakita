@@ -1528,6 +1528,9 @@
       const REPORT_KINDS = [
         { v: "balance_sheet",    l: "资产负债表" },
         { v: "income_statement", l: "利润表" },
+        // 现金流量表入口：后端已为 general_enterprise 标准注册间接法模板
+        // （cas/other→general_enterprise 现返回 201），故在生成器里放开此项。
+        { v: "cash_flow",        l: "现金流量表" },
       ];
       const ACCT_STD_OPTS = [
         { v: "general_enterprise", l: "企业会计准则", note: "上市 / 一般企业" },
@@ -2231,6 +2234,17 @@
       }
 
       // 右键菜单：单元格简化开关 + 添加评论占位（评论由 Stage 4 填充）
+      // 只有「能简化」的单元格才该显示简化开关：后端对标题 / 合计 / section /
+      // 公式 / TBD 行返回 400（它们 back 不到可简化的科目规则）。UI 提前收口，
+      // 避免用户点了必然报错的开关（重设计方案 §0-5 的 UX 隐患修复）。
+      function cellCanSimplify(c) {
+        if (!c) return false;
+        if (c.data_source === "section") return false;
+        if (c.is_total || c.is_tbd) return false;
+        if (c.formula) return false;
+        return ((c.source_rows || []).length > 0) || !!c.simplified;
+      }
+
       function CellContextMenu({ cell, x, y, onClose, onSimplifyToggle }) {
         useEffect(() => {
           const off = () => onClose();
@@ -2249,17 +2263,22 @@
           borderRadius: "var(--radius)", boxShadow: "0 6px 20px rgba(15,23,42,0.18)",
           minWidth: 200, zIndex: 200, padding: 4,
         };
+        const canSimplify = cellCanSimplify(cell);
         return (
           <div style={style} onClick={(e) => e.stopPropagation()} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }} data-testid="cell-context-menu">
-            <button
-              className="btn subtle sm"
-              style={{ display: "block", width: "100%", textAlign: "left", borderRadius: 0 }}
-              onClick={() => onSimplifyToggle(cell, !cell.simplified)}
-              data-testid="ctx-toggle-simplify"
-            >
-              {cell.simplified ? "禁用简化" : "启用简化"}（仅辅助核算项）
-            </button>
-            <div className="divider" />
+            {canSimplify && (
+              <>
+                <button
+                  className="btn subtle sm"
+                  style={{ display: "block", width: "100%", textAlign: "left", borderRadius: 0 }}
+                  onClick={() => onSimplifyToggle(cell, !cell.simplified)}
+                  data-testid="ctx-toggle-simplify"
+                >
+                  {cell.simplified ? "禁用简化" : "启用简化"}（仅辅助核算项）
+                </button>
+                <div className="divider" />
+              </>
+            )}
             <button
               className="btn subtle sm"
               style={{ display: "block", width: "100%", textAlign: "left", borderRadius: 0 }}
@@ -2333,7 +2352,7 @@
                     : (cell.formula
                         ? "由公式计算得到，没有直接的余额表源行。"
                         : (cell.is_tbd
-                            ? "TBD 行：业务方尚未确认对应科目编码。"
+                            ? "TBD 行：业务方尚未确认对应科目编码。可在「设置 · 科目映射」记录贵司代账软件里的实际科目号，并在「调整与追溯」手工录入数值。"
                             : "没有匹配到任何余额表行（可能是科目过滤结果为空）。"))}
                 </div>
               )}
