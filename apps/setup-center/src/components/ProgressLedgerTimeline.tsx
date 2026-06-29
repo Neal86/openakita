@@ -82,6 +82,16 @@ interface Segment {
   ts: string;
   /** Monotonic order index of the most recent update (drives "active"). */
   lastSeq: number;
+  /**
+   * How many CONSECUTIVE activations of the same node this step merges.
+   * The v21 flow opened a brand-new step on every re-activation, so a root
+   * coordinator that re-ran many times in a row showed up as "主编 × 8"
+   * back-to-back rows (redundant). We now merge consecutive same-node
+   * activations into ONE step and surface the count here — without folding
+   * NON-consecutive turns (a 主编 turn after a child turn stays its own
+   * step, preserving the time-ordered flow).
+   */
+  rounds: number;
 }
 
 const TERMINAL: ReadonlySet<SegStatus> = new Set<SegStatus>(["done", "incomplete", "failed"]);
@@ -221,6 +231,11 @@ export function ProgressLedgerTimeline({
     let seq = 0;
     let consecutiveKey = "";
     let consecutiveNode = "";
+    // rawId of the step most recently APPENDED to ``order`` ("" for a
+    // coordinator/ledger turn). Drives the consecutive-same-node merge:
+    // a coordinator or different-node step in between breaks the run so
+    // only genuinely back-to-back same-node activations collapse.
+    let lastOrderRawId = "";
     for (const e of meaningful) {
       seq += 1;
       const rawId = (e.nodeId || "").trim();
@@ -237,8 +252,25 @@ export function ProgressLedgerTimeline({
         // node's current step already finished (a fresh round = a fresh step).
         const needNew = phase === "start" || !openSeg || TERMINAL.has(openSeg.status);
         if (needNew) {
-          groupKey = `node:${rawId}#${seq}`;
-          openByNode.set(rawId, groupKey);
+          // Consecutive same-node merge: if the immediately-preceding step
+          // in the flow is THIS node, fold the re-activation into it as
+          // another round instead of stacking a redundant new row. A step
+          // belonging to any other node (or a coordinator turn) sits in
+          // between -> we keep them separate so the time-ordered flow and
+          // interleaving stay legible.
+          const prevKey = order.length ? order[order.length - 1] : "";
+          const prevSeg = prevKey ? byKey.get(prevKey) : undefined;
+          if (lastOrderRawId === rawId && prevSeg) {
+            groupKey = prevKey;
+            prevSeg.rounds += 1;
+            // Re-activation reopens a previously-terminal step so its live
+            // status reflects that the node is working again.
+            if (TERMINAL.has(prevSeg.status)) prevSeg.status = "running";
+            openByNode.set(rawId, groupKey);
+          } else {
+            groupKey = `node:${rawId}#${seq}`;
+            openByNode.set(rawId, groupKey);
+          }
         } else {
           groupKey = openKey!;
         }
@@ -265,9 +297,13 @@ export function ProgressLedgerTimeline({
           satisfied: false,
           ts: e.ts,
           lastSeq: seq,
+          rounds: 1,
         };
         byKey.set(groupKey, seg);
         order.push(groupKey);
+        // Remember what kind of step this newly-appended row is, so the
+        // NEXT activation can decide whether to merge (same node, no gap).
+        lastOrderRawId = rawId;
       }
       seg.lastSeq = seq;
       seg.ts = e.ts || seg.ts;
@@ -353,6 +389,14 @@ export function ProgressLedgerTimeline({
                 onClick={() => setOpenKeys((p) => ({ ...p, [seg.key]: !open }))}
               >
                 <span className="plt-node">{seg.node}</span>
+                {seg.rounds > 1 && (
+                  <span
+                    className="plt-rounds"
+                    title={`该节点连续执行了 ${seg.rounds} 次（已合并为一个步骤，避免同节点多段刷屏）`}
+                  >
+                    × {seg.rounds} 轮
+                  </span>
+                )}
                 <span className={STATUS_CLASS[seg.status]} title={STATUS_TOOLTIP[seg.status]}>{STATUS_LABEL[seg.status]}</span>
                 <span className="plt-time">{fmtTs(seg.ts)}</span>
                 {seg.lines.length > 0 && (

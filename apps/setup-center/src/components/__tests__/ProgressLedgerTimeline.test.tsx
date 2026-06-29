@@ -156,6 +156,80 @@ describe("ProgressLedgerTimeline", () => {
     expect(screen.getAllByText("主编最终汇报").length).toBeGreaterThan(0);
   });
 
+  // Timeline aggregation (2026-06): consecutive same-node activations (no
+  // other node in between) merge into ONE step with a round badge, instead
+  // of stacking redundant back-to-back rows ("主编 × 8"). Non-consecutive
+  // turns still stay separate (covered by the test above).
+  it("merges consecutive same-node activations into one step with a round badge", () => {
+    const mk = (
+      id: string,
+      node: string,
+      phase: ProgressLedgerEvent["phase"],
+      ts: string,
+      instruction: string,
+    ): ProgressLedgerEvent => ({
+      id,
+      ts,
+      is_request_satisfied: false,
+      is_in_loop: false,
+      is_progress_being_made: true,
+      next_speaker: node,
+      instruction_or_question: instruction,
+      nodeId: node,
+      phase,
+      commandId: "cmd_1",
+    });
+    const events: ProgressLedgerEvent[] = [
+      mk("1", "editor", "start", "1000", "主编第一轮"),
+      mk("2", "editor", "done", "1100", "主编第一轮完成"),
+      // editor re-activates immediately (no other node between) x2 more.
+      mk("3", "editor", "start", "1200", "主编第二轮"),
+      mk("4", "editor", "done", "1300", "主编第二轮完成"),
+      mk("5", "editor", "start", "1400", "主编第三轮"),
+      mk("6", "editor", "done", "1500", "主编第三轮完成"),
+    ];
+    render(<ProgressLedgerTimeline events={events} running={false} />);
+    const entries = screen.getAllByTestId("progress-ledger-entry");
+    // All three consecutive editor activations collapse into ONE step.
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toHaveTextContent("editor");
+    // The round badge surfaces the merged count.
+    expect(screen.getByText("× 3 轮")).toBeInTheDocument();
+  });
+
+  it("does NOT merge same-node steps separated by another node", () => {
+    const mk = (
+      id: string,
+      node: string,
+      phase: ProgressLedgerEvent["phase"],
+      ts: string,
+    ): ProgressLedgerEvent => ({
+      id,
+      ts,
+      is_request_satisfied: false,
+      is_in_loop: false,
+      is_progress_being_made: true,
+      next_speaker: node,
+      instruction_or_question: `${node}-${phase}`,
+      nodeId: node,
+      phase,
+      commandId: "cmd_1",
+    });
+    const events: ProgressLedgerEvent[] = [
+      mk("1", "editor", "start", "1000"),
+      mk("2", "editor", "done", "1100"),
+      mk("3", "planner", "start", "1200"),
+      mk("4", "planner", "done", "1300"),
+      mk("5", "editor", "start", "1400"),
+      mk("6", "editor", "done", "1500"),
+    ];
+    render(<ProgressLedgerTimeline events={events} running={false} />);
+    const entries = screen.getAllByTestId("progress-ledger-entry");
+    // editor | planner | editor stay as 3 distinct time-ordered steps.
+    expect(entries).toHaveLength(3);
+    expect(screen.queryByText(/× \d+ 轮/)).toBeNull();
+  });
+
   it("always keeps command-less (global) entries regardless of scoping", () => {
     const events: ProgressLedgerEvent[] = [
       { ...ev("g", { next_speaker: "globalNode", is_progress_being_made: true }), ts: "500" },

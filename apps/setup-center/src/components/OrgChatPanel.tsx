@@ -2617,6 +2617,11 @@ const CHAT_CSS = `
 }
 .plt-node { font-size: 12px; font-weight: 600; color: var(--fg, #e2e8f0); }
 :root[data-theme="light"] .plt-node { color: #0f172a; }
+.plt-rounds {
+  font-size: 10px; padding: 1px 6px; border-radius: 999px; font-weight: 600;
+  white-space: nowrap; background: rgba(99,102,241,.12); color: #a5b4fc;
+}
+:root[data-theme="light"] .plt-rounds { background: rgba(99,102,241,.12); color: #4f46e5; }
 .plt-pill {
   font-size: 10px; padding: 1px 7px; border-radius: 999px; font-weight: 600;
   white-space: nowrap;
