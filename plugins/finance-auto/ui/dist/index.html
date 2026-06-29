@@ -4325,14 +4325,14 @@
               </div>
               <div className="flex items-center gap-3">
                 <PeriodPicker period={period} setPeriod={setPeriod} />
-                <button className="btn" onClick={reload}>刷新</button>
-                <button className="btn primary" onClick={() => setCreateOpen(true)} data-testid="new-group-btn">
+                <button className="oa-btn" onClick={reload}>刷新</button>
+                <button className="oa-btn oa-btn-primary" onClick={() => setCreateOpen(true)} data-testid="new-group-btn">
                   + 新建集团
                 </button>
               </div>
             </div>
 
-            <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+            <div className="oa-card" style={{ padding: 0, overflow: "hidden" }}>
               {groups.length === 0
                 ? <EmptyState title="还没有集团" desc="点击右上角「+ 新建集团」开始创建" />
                 : (
@@ -4436,8 +4436,8 @@
             sub="创建后可在详情页添加子公司、抵消分录并触发合并。"
             footer={
               <>
-                <button className="btn" onClick={onClose} disabled={submitting}>取消</button>
-                <button className="btn primary" onClick={submit} disabled={submitting}>
+                <button className="oa-btn" onClick={onClose} disabled={submitting}>取消</button>
+                <button className="oa-btn oa-btn-primary" onClick={submit} disabled={submitting}>
                   {submitting && <Spinner />}创建
                 </button>
               </>
@@ -4445,14 +4445,14 @@
           >
             <div className="row">
               <div>
-                <label className="lbl">集团名称<span className="required">*</span></label>
-                <input className="field" value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：集团 ABC" data-testid="group-name" />
+                <label className="oa-label">集团名称<span className="required">*</span></label>
+                <input className="oa-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：集团 ABC" data-testid="group-name" />
               </div>
             </div>
             <div className="row mt-3">
               <div>
-                <label className="lbl">母公司账套<span className="required">*</span></label>
-                <select className="field" value={parentOrgId} onChange={(e) => setParentOrgId(e.target.value)} data-testid="group-parent">
+                <label className="oa-label">母公司账套<span className="required">*</span></label>
+                <select className="oa-select" value={parentOrgId} onChange={(e) => setParentOrgId(e.target.value)} data-testid="group-parent">
                   <option value="">— 选择 —</option>
                   {orgs.map((o) => <option key={o.org_id} value={o.org_id}>{o.name}（{o.org_id.slice(-8)}）</option>)}
                 </select>
@@ -4460,8 +4460,8 @@
             </div>
             <div className="row mt-3">
               <div>
-                <label className="lbl">备注（可选）</label>
-                <textarea className="field" rows={2} value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="可在此说明合并范围、报告期等" />
+                <label className="oa-label">备注（可选）</label>
+                <textarea className="oa-textarea" rows={2} value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="可在此说明合并范围、报告期等" />
               </div>
             </div>
           </Modal>
@@ -4501,10 +4501,10 @@
         }, [groupId]);
         useEffect(() => { reload(); }, [reload]);
 
-        if (loading) return <div className="card"><Spinner /> 加载中…</div>;
+        if (loading) return <div className="oa-card"><Spinner /> 加载中…</div>;
         if (!group) return (
-          <div className="card">
-            <button className="btn mb-3" onClick={onBack}>← 返回</button>
+          <div className="oa-card">
+            <button className="oa-btn mb-3" onClick={onBack}>← 返回</button>
             <div className="upload-result err">找不到集团 {groupId}</div>
           </div>
         );
@@ -4521,8 +4521,8 @@
               </div>
               <div className="flex items-center gap-3">
                 <PeriodPicker period={period} setPeriod={setPeriod} />
-                <button className="btn" onClick={onBack}>← 返回列表</button>
-                <button className="btn" onClick={reload}>刷新</button>
+                <button className="oa-btn" onClick={onBack}>← 返回列表</button>
+                <button className="oa-btn" onClick={reload}>刷新</button>
               </div>
             </div>
 
@@ -4599,10 +4599,10 @@
 
         return (
           <>
-            <div className="card mb-3">
-              <button className="btn primary sm" onClick={() => setAdding(true)} data-testid="add-member-btn">+ 添加子公司</button>
+            <div className="oa-card mb-3">
+              <button className="oa-btn oa-btn-primary" onClick={() => setAdding(true)} data-testid="add-member-btn">+ 添加子公司</button>
             </div>
-            <div className="card" style={{ padding: 0 }}>
+            <div className="oa-card" style={{ padding: 0 }}>
               {members.length === 0 ? <EmptyState title="还没有成员" /> : (
                 <table className="report-table">
                   <thead>
@@ -4627,23 +4627,23 @@
                 open
                 onClose={() => setAdding(false)}
                 title="添加子公司"
-                footer={<><button className="btn" onClick={() => setAdding(false)}>取消</button><button className="btn primary" onClick={submit} data-testid="add-member-submit">添加</button></>}
+                footer={<><button className="oa-btn" onClick={() => setAdding(false)}>取消</button><button className="oa-btn oa-btn-primary" onClick={submit} data-testid="add-member-submit">添加</button></>}
               >
                 <div className="row"><div>
-                  <label className="lbl">子公司账套<span className="required">*</span></label>
-                  <select className="field" value={orgId} onChange={(e) => setOrgId(e.target.value)}>
+                  <label className="oa-label">子公司账套<span className="required">*</span></label>
+                  <select className="oa-select" value={orgId} onChange={(e) => setOrgId(e.target.value)}>
                     <option value="">— 选择 —</option>
                     {orgs.map((o) => <option key={o.org_id} value={o.org_id}>{o.name}（{o.org_id.slice(-8)}）</option>)}
                   </select>
                 </div></div>
                 <div className="row cols-2 mt-3">
                   <div>
-                    <label className="lbl">持股比例（%）</label>
-                    <input className="field" value={pct} onChange={(e) => setPct(e.target.value)} placeholder="100" />
+                    <label className="oa-label">持股比例（%）</label>
+                    <input className="oa-input" value={pct} onChange={(e) => setPct(e.target.value)} placeholder="100" />
                   </div>
                   <div>
-                    <label className="lbl">合并方法</label>
-                    <select className="field" value={method} onChange={(e) => setMethod(e.target.value)}>
+                    <label className="oa-label">合并方法</label>
+                    <select className="oa-select" value={method} onChange={(e) => setMethod(e.target.value)}>
                       {Object.keys(JOIN_METHOD_META).map((k) => <option key={k} value={k}>{JOIN_METHOD_META[k].label}</option>)}
                     </select>
                   </div>
@@ -4686,10 +4686,10 @@
 
         return (
           <>
-            <div className="card mb-3">
-              <button className="btn primary sm" onClick={() => setAdding(true)} data-testid="add-elim-btn">+ 添加抵消分录</button>
+            <div className="oa-card mb-3">
+              <button className="oa-btn oa-btn-primary" onClick={() => setAdding(true)} data-testid="add-elim-btn">+ 添加抵消分录</button>
             </div>
-            <div className="card" style={{ padding: 0 }}>
+            <div className="oa-card" style={{ padding: 0 }}>
               {elims.length === 0 ? <EmptyState title="还没有抵消分录" /> : (
                 <table className="report-table">
                   <thead>
@@ -4716,46 +4716,46 @@
                 onClose={() => setAdding(false)}
                 title="添加抵消分录"
                 sub="借方 / 贷方 target 一般填 cell_id 或 account_code，由后端解析。"
-                footer={<><button className="btn" onClick={() => setAdding(false)}>取消</button><button className="btn primary" onClick={submit}>添加</button></>}
+                footer={<><button className="oa-btn" onClick={() => setAdding(false)}>取消</button><button className="oa-btn oa-btn-primary" onClick={submit}>添加</button></>}
               >
                 <div className="row cols-2">
                   <div>
-                    <label className="lbl">期间</label>
-                    <input className="field mono" value={form.period_id} onChange={(e) => setForm({ ...form, period_id: e.target.value })} />
+                    <label className="oa-label">期间</label>
+                    <input className="oa-input mono" value={form.period_id} onChange={(e) => setForm({ ...form, period_id: e.target.value })} />
                   </div>
                   <div>
-                    <label className="lbl">类型</label>
-                    <select className="field" value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>
+                    <label className="oa-label">类型</label>
+                    <select className="oa-select" value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>
                       {ELIM_KIND_OPTS.map((o) => <option key={o.v} value={o.v}>{o.l}</option>)}
                     </select>
                   </div>
                 </div>
                 <div className="row cols-2 mt-3">
                   <div>
-                    <label className="lbl">借方目标</label>
-                    <input className="field" value={form.debit_target} onChange={(e) => setForm({ ...form, debit_target: e.target.value })} placeholder="例如：1122_应收账款" />
+                    <label className="oa-label">借方目标</label>
+                    <input className="oa-input" value={form.debit_target} onChange={(e) => setForm({ ...form, debit_target: e.target.value })} placeholder="例如：1122_应收账款" />
                   </div>
                   <div>
-                    <label className="lbl">贷方目标</label>
-                    <input className="field" value={form.credit_target} onChange={(e) => setForm({ ...form, credit_target: e.target.value })} placeholder="例如：2202_应付账款" />
+                    <label className="oa-label">贷方目标</label>
+                    <input className="oa-input" value={form.credit_target} onChange={(e) => setForm({ ...form, credit_target: e.target.value })} placeholder="例如：2202_应付账款" />
                   </div>
                 </div>
                 <div className="row cols-2 mt-3">
                   <div>
-                    <label className="lbl">金额</label>
-                    <input className="field mono" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder="0" />
+                    <label className="oa-label">金额</label>
+                    <input className="oa-input mono" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder="0" />
                   </div>
                   <div>
-                    <label className="lbl">需复核</label>
-                    <select className="field" value={form.review_required ? "y" : "n"} onChange={(e) => setForm({ ...form, review_required: e.target.value === "y" })}>
+                    <label className="oa-label">需复核</label>
+                    <select className="oa-select" value={form.review_required ? "y" : "n"} onChange={(e) => setForm({ ...form, review_required: e.target.value === "y" })}>
                       <option value="y">是</option>
                       <option value="n">否</option>
                     </select>
                   </div>
                 </div>
                 <div className="row mt-3"><div>
-                  <label className="lbl">说明（可选）</label>
-                  <textarea className="field" rows={2} value={form.rationale} onChange={(e) => setForm({ ...form, rationale: e.target.value })} />
+                  <label className="oa-label">说明（可选）</label>
+                  <textarea className="oa-textarea" rows={2} value={form.rationale} onChange={(e) => setForm({ ...form, rationale: e.target.value })} />
                 </div></div>
               </Modal>
             )}
@@ -4797,21 +4797,21 @@
 
         return (
           <>
-            <div className="card mb-3">
+            <div className="oa-card mb-3">
               <div className="flex gap-2 items-center">
                 <span style={{ fontSize: 12 }}>期间</span>
-                <input className="field mono" style={{ width: 120 }} value={periodId} onChange={(e) => setPeriodId(e.target.value)} />
+                <input className="oa-input mono" style={{ width: 120 }} value={periodId} onChange={(e) => setPeriodId(e.target.value)} />
                 <span style={{ fontSize: 12 }}>报表类型</span>
-                <select className="field" style={{ width: 160 }} value={kind} onChange={(e) => setKind(e.target.value)}>
+                <select className="oa-select" style={{ width: 160 }} value={kind} onChange={(e) => setKind(e.target.value)}>
                   {REPORT_KIND_OPTS.map((o) => <option key={o.v} value={o.v}>{o.l}</option>)}
                 </select>
-                <button className="btn primary sm" onClick={trigger} disabled={running} data-testid="trigger-run">
+                <button className="oa-btn oa-btn-primary" onClick={trigger} disabled={running} data-testid="trigger-run">
                   {running && <Spinner />}触发合并
                 </button>
                 {backendOk === false && <span className="badge warn">网络断开 · 缓存数据</span>}
               </div>
             </div>
-            <div className="card" style={{ padding: 0 }}>
+            <div className="oa-card" style={{ padding: 0 }}>
               {runs.length === 0 ? <EmptyState title="还没有合并报表" desc="点击「触发合并」开始一次合并。" /> : (
                 <table className="report-table">
                   <thead>
@@ -4890,7 +4890,7 @@
       // 敏感度图例：在场景列表顶部一次性解释"发给大模型的数据有多详细"三档含义。
       function SensitivityLegend() {
         return (
-          <div className="card mb-3">
+          <div className="oa-card mb-3">
             <div className="section-head" style={{ marginBottom: 10 }}>
               <div>
                 <h3 className="section-head__title">数据敏感度说明</h3>
@@ -4951,7 +4951,7 @@
                 数据敏感度
               </label>
               <select
-                className="field"
+                className="oa-input"
                 style={{ width: 130, padding: "4px 8px" }}
                 value={effective}
                 onChange={(e) => onPatch(s.scenario_id, { sensitivity_override: e.target.value })}
@@ -5001,7 +5001,7 @@
           } catch (e) { toast(`保存失败：${e.message}`, "err"); }
         };
 
-        if (loading) return <div className="card"><Spinner /> 加载高级功能中…</div>;
+        if (loading) return <div className="oa-card"><Spinner /> 加载高级功能中…</div>;
 
         return (
           <>
@@ -5017,7 +5017,7 @@
             </div>
             <BackendUnavailableBanner show={missing} onRetry={reload} detail="AI 高级功能接口未响应" />
             {scenarios.length === 0 && !missing
-              ? <div className="card"><EmptyState title="暂无高级功能" /></div>
+              ? <div className="oa-card"><EmptyState title="暂无高级功能" /></div>
               : (
                 <div className="scenario-grid">
                   {scenarios.map((s) => (
@@ -5044,7 +5044,7 @@
           }
         };
 
-        if (loading) return <div className="card"><Spinner /> 加载 AI 功能中…</div>;
+        if (loading) return <div className="oa-card"><Spinner /> 加载 AI 功能中…</div>;
 
         return (
           <>
@@ -5058,7 +5058,7 @@
               </div>
             </div>
             <BackendUnavailableBanner show={isMissing} onRetry={reload} detail="AI 功能接口未响应" />
-            {scenarios.length === 0 && !isMissing && <div className="card"><EmptyState title="暂无可用的 AI 功能" /></div>}
+            {scenarios.length === 0 && !isMissing && <div className="oa-card"><EmptyState title="暂无可用的 AI 功能" /></div>}
             {scenarios.length > 0 && (
               <>
                 <SensitivityLegend />
@@ -5091,11 +5091,11 @@
           } catch (e) { toast(`撤销失败：${e.message}`, "err"); }
         };
 
-        if (loading) return <div className="card"><Spinner /> 加载授权记录…</div>;
+        if (loading) return <div className="oa-card"><Spinner /> 加载授权记录…</div>;
 
         return (
           <>
-            <div className="card mb-3" style={{ padding: 10 }}>
+            <div className="oa-card mb-3" style={{ padding: 10 }}>
               <div className="flex items-center gap-2">
                 <span className="text-xs text-muted">用户：<span className="mono">{user.userId}</span></span>
                 <span style={{ flex: 1 }} />
@@ -5104,11 +5104,11 @@
                   仅显示生效中
                 </label>
                 <span className="badge ok">生效永久授权 {active}</span>
-                <button className="btn sm" onClick={reload}>刷新</button>
+                <button className="oa-btn" onClick={reload}>刷新</button>
               </div>
             </div>
             <BackendUnavailableBanner show={isMissing} onRetry={reload} detail="AI 授权列表接口未响应" />
-            <div className="card" style={{ padding: 0 }}>
+            <div className="oa-card" style={{ padding: 0 }}>
               {consents.length === 0 && !isMissing && <EmptyState title="还没有任何授权记录" />}
               {consents.length > 0 && (
                 <table className="report-table">
@@ -5182,11 +5182,11 @@
 
         return (
           <>
-            <div className="card mb-3" style={{ padding: 10 }}>
+            <div className="oa-card mb-3" style={{ padding: 10 }}>
               <div className="flex gap-2 items-center" style={{ flexWrap: "wrap" }}>
-                <input className="field mono" style={{ width: 180 }} value={orgFilter}      placeholder="按账套筛选"      onChange={(e) => { setOffset(0); setOrgFilter(e.target.value.trim()); }} />
-                <input className="field mono" style={{ width: 180 }} value={scenarioFilter} placeholder="按功能编号筛选" onChange={(e) => { setOffset(0); setScenarioFilter(e.target.value.trim()); }} />
-                <select className="field" style={{ width: 140 }} value={outcomeFilter} onChange={(e) => { setOffset(0); setOutcomeFilter(e.target.value); }}>
+                <input className="oa-input mono" style={{ width: 180 }} value={orgFilter}      placeholder="按账套筛选"      onChange={(e) => { setOffset(0); setOrgFilter(e.target.value.trim()); }} />
+                <input className="oa-input mono" style={{ width: 180 }} value={scenarioFilter} placeholder="按功能编号筛选" onChange={(e) => { setOffset(0); setScenarioFilter(e.target.value.trim()); }} />
+                <select className="oa-select" style={{ width: 140 }} value={outcomeFilter} onChange={(e) => { setOffset(0); setOutcomeFilter(e.target.value); }}>
                   <option value="">— 全部结果 —</option>
                   {Object.keys(AI_OUTCOME_META).map((k) => <option key={k} value={k}>{AI_OUTCOME_META[k].label}</option>)}
                 </select>
@@ -5196,11 +5196,11 @@
                     汇总：{Object.keys(summary).map((k) => `${(AI_OUTCOME_META[k] || {}).label || k} ${summary[k]}`).join(" · ")}
                   </span>
                 )}
-                <button className="btn sm" onClick={reload}>刷新</button>
+                <button className="oa-btn" onClick={reload}>刷新</button>
               </div>
             </div>
             <BackendUnavailableBanner show={isMissing} onRetry={reload} detail="AI 调用历史接口未响应" />
-            <div className="card" style={{ padding: 0 }}>
+            <div className="oa-card" style={{ padding: 0 }}>
               {loading ? <div className="empty"><Spinner /> 加载…</div>
                 : items.length === 0 && !isMissing ? <EmptyState title="没有匹配的调用记录" />
                 : items.length > 0 && (
@@ -5253,8 +5253,8 @@
             </div>
             <div className="flex items-center gap-2 mt-3" style={{ justifyContent: "flex-end" }}>
               <span className="text-xs text-muted">共 {total} 条 · 第 {page}/{totalPages} 页</span>
-              <button className="btn sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - limit))}>上一页</button>
-              <button className="btn sm" disabled={page >= totalPages} onClick={() => setOffset(offset + limit)}>下一页</button>
+              <button className="oa-btn" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - limit))}>上一页</button>
+              <button className="oa-btn" disabled={page >= totalPages} onClick={() => setOffset(offset + limit)}>下一页</button>
             </div>
 
             {payloadModal && (
@@ -5263,25 +5263,25 @@
                 onClose={() => setPayloadModal(null)}
                 title="脱敏 payload 信息"
                 sub="出于安全考虑，仅展示脱敏元信息（文件路径 / hash），不提供原始 payload 下载。"
-                footer={<button className="btn primary" onClick={() => setPayloadModal(null)}>关闭</button>}
+                footer={<button className="oa-btn oa-btn-primary" onClick={() => setPayloadModal(null)}>关闭</button>}
               >
                 <div className="row"><div>
-                  <label className="lbl">scenario_id</label>
+                  <label className="oa-label">scenario_id</label>
                   <div className="mono text-xs">{payloadModal.scenario_id}</div>
                 </div></div>
                 <div className="row mt-3"><div>
-                  <label className="lbl">payload_hash</label>
+                  <label className="oa-label">payload_hash</label>
                   <div className="mono text-xs" style={{ wordBreak: "break-all" }}>{payloadModal.payload_hash}</div>
                 </div></div>
                 <div className="row mt-3"><div>
-                  <label className="lbl">desensitized_payload_path</label>
+                  <label className="oa-label">desensitized_payload_path</label>
                   <div className="mono text-xs" style={{ wordBreak: "break-all" }}>
                     {payloadModal.desensitized_payload_path || "（未持久化）"}
                   </div>
                 </div></div>
                 {payloadModal.error_message && (
                   <div className="row mt-3"><div>
-                    <label className="lbl">error_message</label>
+                    <label className="oa-label">error_message</label>
                     <div className="mono text-xs upload-result err" style={{ padding: 8 }}>
                       {payloadModal.error_message}
                     </div>
@@ -5289,11 +5289,11 @@
                 )}
                 <div className="row cols-2 mt-3">
                   <div>
-                    <label className="lbl">payload_size_bytes</label>
+                    <label className="oa-label">payload_size_bytes</label>
                     <div className="mono text-xs">{payloadModal.payload_size_bytes}</div>
                   </div>
                   <div>
-                    <label className="lbl">duration_ms</label>
+                    <label className="oa-label">duration_ms</label>
                     <div className="mono text-xs">{payloadModal.duration_ms ?? "—"}</div>
                   </div>
                 </div>
@@ -5508,27 +5508,27 @@
               </div>
             </div>
 
-            <div className="card mb-3">
+            <div className="oa-card mb-3">
               <div className="toolbar">
                 <div>
-                  <label className="lbl">账套</label>
-                  <select className="field" style={{ width: 240 }} value={orgId} onChange={(e) => setOrgId(e.target.value)} data-testid="notes-org">
+                  <label className="oa-label">账套</label>
+                  <select className="oa-select" style={{ width: 240 }} value={orgId} onChange={(e) => setOrgId(e.target.value)} data-testid="notes-org">
                     <option value="">— 请选择 —</option>
                     {orgs.map((o) => <option key={o.id} value={o.id}>{o.name || o.id}</option>)}
                   </select>
                 </div>
                 <div>
-                  <label className="lbl">期间</label>
-                  <input className="field" style={{ width: 120 }} value={periodId} onChange={(e) => setPeriodId(e.target.value)} data-testid="notes-period" />
+                  <label className="oa-label">期间</label>
+                  <input className="oa-input" style={{ width: 120 }} value={periodId} onChange={(e) => setPeriodId(e.target.value)} data-testid="notes-period" />
                 </div>
-                <button className="btn primary" onClick={generate} disabled={!orgId || generating} data-testid="notes-generate">
+                <button className="oa-btn oa-btn-primary" onClick={generate} disabled={!orgId || generating} data-testid="notes-generate">
                   {generating ? <Spinner /> : "生成附注"}
                 </button>
-                <button className="btn" onClick={() => orgId && reloadDocs(orgId)} disabled={!orgId}>刷新</button>
+                <button className="oa-btn" onClick={() => orgId && reloadDocs(orgId)} disabled={!orgId}>刷新</button>
               </div>
             </div>
 
-            <div className="card" style={{ padding: 0, marginBottom: 12 }}>
+            <div className="oa-card" style={{ padding: 0, marginBottom: 12 }}>
               {(!orgId || docs.length === 0) ? <EmptyState title={orgId ? "暂无附注文档" : "请先选择账套"} />
                 : (
                   <table className="report-table">
@@ -5549,15 +5549,15 @@
             </div>
 
             {selectedDoc && (
-              <div className="card">
+              <div className="oa-card">
                 <div className="flex items-center justify-between mb-3">
                   <div>
                     <h3 className="card-title">附注详情 · <span className="mono text-xs">{selectedDoc.doc_id}</span></h3>
                     <p className="card-sub">期间 {selectedDoc.period_id} · {(notes || []).length} 个段落</p>
                   </div>
                   <div className="flex gap-2">
-                    <button className="btn" onClick={exportMd} data-testid="notes-export">导出 Markdown</button>
-                    <button className="btn primary" onClick={finalize} disabled={isFinalized} data-testid="notes-finalize">
+                    <button className="oa-btn" onClick={exportMd} data-testid="notes-export">导出 Markdown</button>
+                    <button className="oa-btn oa-btn-primary" onClick={finalize} disabled={isFinalized} data-testid="notes-finalize">
                       {isFinalized ? "已定稿" : "定稿"}
                     </button>
                   </div>
@@ -5577,7 +5577,7 @@
         useEffect(() => { setContent(note.content || ""); }, [note.note_id, note.version]);
         const meta = NOTE_KIND_META[note.kind] || { label: note.kind, cls: "" };
         return (
-          <div className="card" style={{ padding: 10, background: "var(--bg-soft, rgba(0,0,0,0.02))" }}>
+          <div className="oa-card" style={{ padding: 10, background: "var(--bg-soft, rgba(0,0,0,0.02))" }}>
             <div className="flex items-center justify-between" style={{ cursor: "pointer" }} onClick={() => setOpen(!open)}>
               <div className="flex items-center gap-2">
                 <strong>{note.section_title}</strong>
@@ -5588,10 +5588,10 @@
             </div>
             {open && (
               <div className="mt-3">
-                <textarea className="field" rows={4} value={content} disabled={disabled}
+                <textarea className="oa-textarea" rows={4} value={content} disabled={disabled}
                   onChange={(e) => setContent(e.target.value)} data-testid={`note-content-${note.note_id}`} />
                 <div className="flex justify-end mt-3">
-                  <button className="btn primary sm" disabled={disabled || content === note.content}
+                  <button className="oa-btn oa-btn-primary" disabled={disabled || content === note.content}
                     onClick={() => onSave(content)} data-testid={`note-save-${note.note_id}`}>保存</button>
                 </div>
               </div>
@@ -5768,39 +5768,39 @@
               </div>
             </div>
 
-            <div className="card mb-3">
+            <div className="oa-card mb-3">
               <div className="toolbar">
                 <div>
-                  <label className="lbl">账套</label>
-                  <select className="field" style={{ width: 240 }} value={orgId} onChange={(e) => setOrgId(e.target.value)} data-testid="peer-org">
+                  <label className="oa-label">账套</label>
+                  <select className="oa-select" style={{ width: 240 }} value={orgId} onChange={(e) => setOrgId(e.target.value)} data-testid="peer-org">
                     <option value="">— 请选择 —</option>
                     {orgs.map((o) => <option key={o.id} value={o.id}>{o.name || o.id}</option>)}
                   </select>
                 </div>
                 <div>
-                  <label className="lbl">期间</label>
-                  <input className="field" style={{ width: 120 }} value={periodId} onChange={(e) => setPeriodId(e.target.value)} />
+                  <label className="oa-label">期间</label>
+                  <input className="oa-input" style={{ width: 120 }} value={periodId} onChange={(e) => setPeriodId(e.target.value)} />
                 </div>
                 <div>
-                  <label className="lbl">行业</label>
-                  <select className="field" style={{ width: 160 }} value={industryCode} onChange={(e) => setIndustryCode(e.target.value)} data-testid="peer-industry">
+                  <label className="oa-label">行业</label>
+                  <select className="oa-select" style={{ width: 160 }} value={industryCode} onChange={(e) => setIndustryCode(e.target.value)} data-testid="peer-industry">
                     {INDUSTRY_PEER_OPTS.map((x) => <option key={x.v} value={x.v}>{x.l}</option>)}
                   </select>
                 </div>
-                <button className="btn primary" onClick={run} disabled={!orgId || running} data-testid="peer-run">
+                <button className="oa-btn oa-btn-primary" onClick={run} disabled={!orgId || running} data-testid="peer-run">
                   {running ? <Spinner /> : "运行对比"}
                 </button>
               </div>
             </div>
 
             {current && (
-              <div className="card mb-3">
+              <div className="oa-card mb-3">
                 <div className="section-head">
                   <div>
                     <h3 className="section-head__title">本次结果 · <span className="mono text-xs">{current.result_id}</span></h3>
                     <p className="section-head__desc">行业 {current.industry_code} · {fmtTs(current.created_at)} · 红线为本企业，蓝条为行业 25–75 分位</p>
                   </div>
-                  <button className="btn" onClick={aiAnalyze} disabled={aiBusy} data-testid="peer-ai">
+                  <button className="oa-btn" onClick={aiAnalyze} disabled={aiBusy} data-testid="peer-ai">
                     {aiBusy ? <Spinner /> : "AI 增强分析"}
                   </button>
                 </div>
@@ -5812,7 +5812,7 @@
                   })}
                 </div>
                 {aiResult && (
-                  <div className="card mt-3">
+                  <div className="oa-card mt-3">
                     <h4 className="card-title">AI 增强分析 · S7 自然语言查询</h4>
                     <pre className="mono text-xs mt-2">{aiResult.sql || "(无 SQL)"}</pre>
                     <div className="mt-3"><strong>AI 摘要：</strong>{aiResult.summary || "（暂无）"}</div>
@@ -5821,7 +5821,7 @@
               </div>
             )}
 
-            <div className="card" style={{ padding: 0 }}>
+            <div className="oa-card" style={{ padding: 0 }}>
               <div style={{ padding: 10, borderBottom: "1px solid var(--border, rgba(0,0,0,0.08))" }}>
                 <strong>历史结果</strong> <span className="text-xs text-muted">{history.length} 条</span>
               </div>
@@ -6077,10 +6077,10 @@
                   {tauriOk && <span className="badge ok" style={{ marginLeft: 8 }} data-testid="km-tauri-badge">原生模式</span>}
                 </p>
               </div>
-              <button className="btn" onClick={reload}>刷新</button>
+              <button className="oa-btn" onClick={reload}>刷新</button>
             </div>
 
-            <div className="card mb-3" style={{ padding: 0 }}>
+            <div className="oa-card mb-3" style={{ padding: 0 }}>
               <div style={{ padding: 10, borderBottom: "1px solid var(--border, rgba(0,0,0,0.08))" }}>
                 <strong>当前密钥版本</strong>
               </div>
@@ -6103,19 +6103,19 @@
               )}
             </div>
 
-            <div className="card mb-3">
+            <div className="oa-card mb-3">
               <h3 className="card-title">备份</h3>
               <p className="card-sub">为指定账套创建加密备份；列表中可下载、原生导出或按口令恢复。</p>
               <div className="toolbar" style={{ marginBottom: 12 }}>
                 <div>
-                  <label className="lbl">账套 ID</label>
-                  <input className="field" style={{ width: 220 }} value={createOrgId} onChange={(e) => setCreateOrgId(e.target.value)} data-testid="km-backup-org" />
+                  <label className="oa-label">账套 ID</label>
+                  <input className="oa-input" style={{ width: 220 }} value={createOrgId} onChange={(e) => setCreateOrgId(e.target.value)} data-testid="km-backup-org" />
                 </div>
                 <div>
-                  <label className="lbl">备份口令</label>
-                  <input className="field" type="password" style={{ width: 200 }} value={createPass} onChange={(e) => setCreatePass(e.target.value)} data-testid="km-backup-pass" />
+                  <label className="oa-label">备份口令</label>
+                  <input className="oa-input" type="password" style={{ width: 200 }} value={createPass} onChange={(e) => setCreatePass(e.target.value)} data-testid="km-backup-pass" />
                 </div>
-                <button className="btn primary" onClick={doCreate} disabled={busy} data-testid="km-backup-create">创建备份</button>
+                <button className="oa-btn oa-btn-primary" onClick={doCreate} disabled={busy} data-testid="km-backup-create">创建备份</button>
               </div>
               {backups.length === 0 ? <EmptyState title="暂无备份" /> : (
                 <table className="report-table">
@@ -6151,7 +6151,7 @@
             </div>
 
             {sysInfo && (
-              <div className="card">
+              <div className="oa-card">
                 <h3 className="card-title">
                   系统信息
                   {tauriOk && (
@@ -6159,10 +6159,10 @@
                   )}
                 </h3>
                 <div className="row cols-2" style={{ gap: 10 }}>
-                  <div><label className="lbl">Tauri 版本</label><div className="mono text-xs" data-testid="km-sysinfo-tauri-version">{sysInfo.tauri_version || "—"}</div></div>
-                  <div><label className="lbl">操作系统</label><div className="mono text-xs">{sysInfo.os || (sysInfo.arch ? `${sysInfo.os || ""} ${sysInfo.arch}` : "—")}</div></div>
-                  <div><label className="lbl">OpenAkita 版本</label><div className="mono text-xs">{sysInfo.openakita_version || "—"}</div></div>
-                  <div><label className="lbl">密钥存储后端</label><div className="mono text-xs">{sysInfo.key_store_backend || "—"}</div></div>
+                  <div><label className="oa-label">Tauri 版本</label><div className="mono text-xs" data-testid="km-sysinfo-tauri-version">{sysInfo.tauri_version || "—"}</div></div>
+                  <div><label className="oa-label">操作系统</label><div className="mono text-xs">{sysInfo.os || (sysInfo.arch ? `${sysInfo.os || ""} ${sysInfo.arch}` : "—")}</div></div>
+                  <div><label className="oa-label">OpenAkita 版本</label><div className="mono text-xs">{sysInfo.openakita_version || "—"}</div></div>
+                  <div><label className="oa-label">密钥存储后端</label><div className="mono text-xs">{sysInfo.key_store_backend || "—"}</div></div>
                 </div>
               </div>
             )}
@@ -6174,7 +6174,7 @@
               sub={confirmRotate ? `账套 ${confirmRotate.org_id} · 当前 v${confirmRotate.version}` : ""}
               footer={
                 <>
-                  <button className="btn" onClick={() => !busy && setConfirmRotate(null)} disabled={busy}>取消</button>
+                  <button className="oa-btn" onClick={() => !busy && setConfirmRotate(null)} disabled={busy}>取消</button>
                   <button className="btn danger" onClick={doRotate} disabled={busy} data-testid="km-rotate-confirm">{busy ? <Spinner /> : "确认轮换"}</button>
                 </>
               }
@@ -6191,13 +6191,13 @@
               sub={confirmRestore ? `备份 ${confirmRestore.id}` : ""}
               footer={
                 <>
-                  <button className="btn" onClick={() => !busy && (setConfirmRestore(null), setRestorePass(""))} disabled={busy}>取消</button>
+                  <button className="oa-btn" onClick={() => !busy && (setConfirmRestore(null), setRestorePass(""))} disabled={busy}>取消</button>
                   <button className="btn warn" onClick={doRestore} disabled={busy} data-testid="km-restore-confirm">{busy ? <Spinner /> : "确认恢复"}</button>
                 </>
               }
             >
               <div className="text-sm mb-3">恢复将覆盖当前账套数据，操作不可撤销。请输入备份口令：</div>
-              <input className="field" type="password" value={restorePass} onChange={(e) => setRestorePass(e.target.value)} placeholder="备份口令" data-testid="km-restore-pass" />
+              <input className="oa-input" type="password" value={restorePass} onChange={(e) => setRestorePass(e.target.value)} placeholder="备份口令" data-testid="km-restore-pass" />
             </Modal>
           </>
         );
@@ -6271,7 +6271,7 @@
         return (
           <div className="split-layout">
             <div className="split-left">
-              <div className="card">
+              <div className="oa-card">
                 <div className="section-head">
                   <div>
                     <h3 className="section-head__title">审计意见草稿</h3>
@@ -6281,25 +6281,25 @@
                 </div>
                 <div className="form-grid">
                   <div>
-                    <label className="lbl">账套 ID <span className="text-muted">（可选）</span></label>
-                    <input className="field" placeholder="留空则不绑定账套" value={orgId} onChange={(e) => setOrgId(e.target.value)} data-testid="adv-s6-org" />
+                    <label className="oa-label">账套 ID <span className="text-muted">（可选）</span></label>
+                    <input className="oa-input" placeholder="留空则不绑定账套" value={orgId} onChange={(e) => setOrgId(e.target.value)} data-testid="adv-s6-org" />
                   </div>
                   <div>
-                    <label className="lbl">期间标签</label>
-                    <input className="field" placeholder="如：2025 年度" value={periodLabel} onChange={(e) => setPeriodLabel(e.target.value)} data-testid="adv-s6-period" />
+                    <label className="oa-label">期间标签</label>
+                    <input className="oa-input" placeholder="如：2025 年度" value={periodLabel} onChange={(e) => setPeriodLabel(e.target.value)} data-testid="adv-s6-period" />
                   </div>
                 </div>
                 <div className="mt-3">
-                  <label className="lbl">校验结果 JSON</label>
-                  <textarea className="field" rows={3} value={validationsJson} onChange={(e) => setValidationsJson(e.target.value)} data-testid="adv-s6-validations" />
+                  <label className="oa-label">校验结果 JSON</label>
+                  <textarea className="oa-textarea" rows={3} value={validationsJson} onChange={(e) => setValidationsJson(e.target.value)} data-testid="adv-s6-validations" />
                   <div className="helper">未匹配分录数、警告项等校验摘要，需为合法 JSON。</div>
                 </div>
                 <div className="mt-3">
-                  <label className="lbl">意见模板文本</label>
-                  <textarea className="field" rows={3} value={templateText} onChange={(e) => setTemplateText(e.target.value)} data-testid="adv-s6-template" />
+                  <label className="oa-label">意见模板文本</label>
+                  <textarea className="oa-textarea" rows={3} value={templateText} onChange={(e) => setTemplateText(e.target.value)} data-testid="adv-s6-template" />
                 </div>
                 <div className="flex justify-end mt-3">
-                  <button className="btn primary" onClick={submit} disabled={busy} data-testid="adv-s6-go">{busy ? <Spinner /> : "生成审计意见"}</button>
+                  <button className="oa-btn oa-btn-primary" onClick={submit} disabled={busy} data-testid="adv-s6-go">{busy ? <Spinner /> : "生成审计意见"}</button>
                 </div>
                 <BackendUnavailableBanner show={missing} detail="AI 审计意见接口未响应" />
               </div>
@@ -6352,7 +6352,7 @@
         return (
           <div className="split-layout">
             <div className="split-left">
-              <div className="card">
+              <div className="oa-card">
                 <div className="section-head">
                   <div>
                     <h3 className="section-head__title">用中文问数</h3>
@@ -6361,8 +6361,8 @@
                   <span className="badge err">raw</span>
                 </div>
                 <div>
-                  <label className="lbl">查询问题</label>
-                  <textarea className="field" rows={3} placeholder="例如：上季度毛利率最高的 5 个账套是哪些？" value={question} onChange={(e) => setQuestion(e.target.value)} data-testid="adv-s7-q" />
+                  <label className="oa-label">查询问题</label>
+                  <textarea className="oa-textarea" rows={3} placeholder="例如：上季度毛利率最高的 5 个账套是哪些？" value={question} onChange={(e) => setQuestion(e.target.value)} data-testid="adv-s7-q" />
                 </div>
                 <div className="flex items-center mt-3" style={{ gap: 12 }}>
                   <label style={{ display: "inline-flex", alignItems: "center", gap: 6, margin: 0 }}>
@@ -6370,7 +6370,7 @@
                     校验通过后执行 SQL
                   </label>
                   <span style={{ flex: 1 }} />
-                  <button className="btn primary" onClick={submit} disabled={busy} data-testid="adv-s7-go">{busy ? <Spinner /> : "翻译并查询"}</button>
+                  <button className="oa-btn oa-btn-primary" onClick={submit} disabled={busy} data-testid="adv-s7-go">{busy ? <Spinner /> : "翻译并查询"}</button>
                 </div>
                 <BackendUnavailableBanner show={missing} detail="AI 自然语言查询接口未响应" />
               </div>
@@ -6392,7 +6392,7 @@
                       </div>
                     )}
                     {rows.length > 0 && (
-                      <div className="card mt-3" style={{ padding: 0 }}>
+                      <div className="oa-card mt-3" style={{ padding: 0 }}>
                         <div className="text-xs text-muted" style={{ padding: 8 }}>结果（最多展示 50 行 · 共 {result.row_count ?? rows.length} 行）</div>
                         <table className="report-table">
                           <thead><tr>{cols.map((c) => <th key={c} className="text-xs">{c}</th>)}</tr></thead>
@@ -6441,7 +6441,7 @@
         return (
           <div className="split-layout">
             <div className="split-left">
-              <div className="card">
+              <div className="oa-card">
                 <div className="section-head">
                   <div>
                     <h3 className="section-head__title">报表附注智能撰写</h3>
@@ -6451,16 +6451,16 @@
                 </div>
                 <div className="form-grid">
                   <div>
-                    <label className="lbl">账套 ID</label>
-                    <input className="field" placeholder="目标账套" value={orgId} onChange={(e) => setOrgId(e.target.value)} data-testid="adv-s11-org" />
+                    <label className="oa-label">账套 ID</label>
+                    <input className="oa-input" placeholder="目标账套" value={orgId} onChange={(e) => setOrgId(e.target.value)} data-testid="adv-s11-org" />
                   </div>
                   <div>
-                    <label className="lbl">附注 ID</label>
-                    <input className="field" placeholder="待起草的附注段落 ID" value={noteId} onChange={(e) => setNoteId(e.target.value)} data-testid="adv-s11-note" />
+                    <label className="oa-label">附注 ID</label>
+                    <input className="oa-input" placeholder="待起草的附注段落 ID" value={noteId} onChange={(e) => setNoteId(e.target.value)} data-testid="adv-s11-note" />
                   </div>
                 </div>
                 <div className="flex justify-end mt-3">
-                  <button className="btn primary" onClick={submit} disabled={busy} data-testid="adv-s11-go">{busy ? <Spinner /> : "起草附注"}</button>
+                  <button className="oa-btn oa-btn-primary" onClick={submit} disabled={busy} data-testid="adv-s11-go">{busy ? <Spinner /> : "起草附注"}</button>
                 </div>
                 <BackendUnavailableBanner show={missing} detail="AI 附注起草接口未响应" />
               </div>
