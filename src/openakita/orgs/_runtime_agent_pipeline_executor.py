@@ -18,6 +18,7 @@ import asyncio
 import inspect
 import logging
 import os
+import re
 import secrets
 import time
 from collections.abc import Mapping
@@ -183,14 +184,31 @@ _QUOTA_AUTH_HINTS: tuple[str, ...] = (
     "billing",
     "insufficient",
     "exhausted",
-    "401",
-    "403",
+    "payment required",
     "unauthorized",
     "forbidden",
+    "authorization",
+    "authentication",
     "invalid api key",
     "invalid_api_key",
     "permission_denied",
 )
+
+# Structured error categories (carried by ``AllEndpointsFailedError``)
+# that authoritatively mean "quota / auth" regardless of the message.
+_QUOTA_AUTH_CATEGORIES: frozenset[str] = frozenset({"quota", "auth"})
+
+# HTTP status codes that mean quota/auth (429 rate-limit, 401/403 authz,
+# 402 payment-required). Matched on the exception's ``status_code`` /
+# ``status`` attribute so a bare "401" appearing in unrelated prose
+# (e.g. "processed 401 records") does NOT trip the classifier.
+_QUOTA_AUTH_STATUS: frozenset[int] = frozenset({401, 402, 403, 429})
+
+# Parenthesised HTTP codes ("(401)" / "(402)" / "(403)" / "(429)") as
+# emitted by the relay's "Error (401)" phrasing. This keeps the
+# message-level detection for those codes while avoiding the bare-number
+# false positive that plain substring matching of "401"/"403" caused.
+_PAREN_CODE_RE = re.compile(r"\(\s*(?:401|402|403|429)\s*\)")
 
 
 class _AgentRunCallable(Protocol):
@@ -236,26 +254,51 @@ def _run_accepts_cancel_event(run: Any) -> bool:
 
 
 def _looks_like_quota_or_auth_error(exc: BaseException) -> bool:
-    """Best-effort string-sniff of an LLM exception (v1 parity).
+    """Classify an LLM exception as quota/auth (-> pause the org) — v1 parity.
 
-    v1 ``_is_quota_auth_error`` walks the exception chain
-    and a couple of attributes; v2 just probes the message
-    + ``status_code`` attr. Good enough for the executor''s
-    pause-org branch; the parity test fixture covers known
-    Anthropic / OpenAI message shapes.
+    Restores the v1 ``_is_quota_auth_error`` contract that the P9.6f2
+    refactor accidentally narrowed to a bare substring sniff (which both
+    ignored the structured ``error_categories`` signal and false-matched a
+    plain "401" in unrelated prose). The classification, in order:
+
+    1. ``error_categories`` (``AllEndpointsFailedError``): a ``quota`` /
+       ``auth`` category is authoritative; ``structural`` / ``transient``
+       alone are not (they fall through to the message checks below).
+    2. A quota/auth HTTP ``status_code`` / ``status`` (401/402/403/429)
+       anywhere on the ``__cause__`` / ``__context__`` chain.
+    3. Keyword hints in the joined message text (quota / billing /
+       unauthorized / forbidden / authentication / …).
+    4. A parenthesised HTTP code such as "(401)" — relay phrasing —
+       without re-introducing the bare-"401"-in-prose false positive.
     """
+
+    cats = getattr(exc, "error_categories", None)
+    if isinstance(cats, (set, frozenset)) and cats & _QUOTA_AUTH_CATEGORIES:
+        return True
 
     parts: list[str] = []
     cur: BaseException | None = exc
-    while cur is not None:
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
         parts.append(str(cur))
         parts.append(type(cur).__name__)
-        sc = getattr(cur, "status_code", None) or getattr(cur, "status", None)
+        sc = getattr(cur, "status_code", None)
+        if sc is None:
+            sc = getattr(cur, "status", None)
         if sc is not None:
+            try:
+                if int(sc) in _QUOTA_AUTH_STATUS:
+                    return True
+            except (TypeError, ValueError):
+                pass
             parts.append(str(sc))
         cur = cur.__cause__ or cur.__context__
+
     blob = " ".join(parts).lower()
-    return any(h in blob for h in _QUOTA_AUTH_HINTS)
+    if any(h in blob for h in _QUOTA_AUTH_HINTS):
+        return True
+    return bool(_PAREN_CODE_RE.search(blob))
 
 
 class AgentPipelineExecutor:
