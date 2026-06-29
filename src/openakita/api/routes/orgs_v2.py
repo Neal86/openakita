@@ -364,11 +364,27 @@ def _orgv2_dict_to_organization_data(payload: dict[str, Any]) -> dict[str, Any]:
     """
     nodes_raw = payload.get("nodes") or []
     edges_raw = payload.get("edges") or []
+    # v2-instantiate parity fix (template level dual-path, 2026-06): the
+    # OrgV2 ``NodeV2`` wire shape has NO ``level`` field — hierarchy lives
+    # in EdgeKind.HIERARCHY edges (``registry.instantiate`` also caches it
+    # as ``parent_id``). The legacy v1 dict templates (_runtime_templates.py)
+    # carry an explicit ``level`` per node, so v1-path orgs persisted correct
+    # 0/1/2 levels while v2-instantiated orgs persisted level=0 for EVERY node
+    # (the projection below simply never set it). We close the gap here — the
+    # single OrgV2 -> org.json choke point — by deriving each node's depth
+    # along HIERARCHY edges so BOTH paths land correct ``level`` metadata.
+    levels = _derive_node_levels(nodes_raw, edges_raw)
     data: dict[str, Any] = {
         "id": payload.get("id") or "",
         "name": payload.get("name") or "",
         "description": payload.get("description") or "",
-        "nodes": [_orgv2_node_dict_to_orgnode_data(n) for n in nodes_raw],
+        "nodes": [
+            _orgv2_node_dict_to_orgnode_data(
+                n,
+                level=levels.get(str(n.get("id") or ""), 0),
+            )
+            for n in nodes_raw
+        ],
         "edges": [_orgv2_edge_dict_to_orgedge_data(e) for e in edges_raw],
     }
     # Status mapping: OrgV2 (CREATED/ACTIVE/RUNNING/PAUSED/STOPPED) ->
@@ -387,7 +403,69 @@ def _orgv2_dict_to_organization_data(payload: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
-def _orgv2_node_dict_to_orgnode_data(node_dict: dict[str, Any]) -> dict[str, Any]:
+def _derive_node_parents(edges_raw: list[dict[str, Any]]) -> dict[str, str]:
+    """Map ``child_id -> parent_id`` from HIERARCHY edges only.
+
+    COLLABORATE / CONSULT edges connect peers/advisors and are NOT
+    parent relationships (parity with
+    :meth:`TemplateRegistry.instantiate`). A node may have at most one
+    hierarchy parent; if the payload somehow carries two, the last one
+    wins (we don't raise here — projection must never reject a payload
+    the registry already validated).
+    """
+    parents: dict[str, str] = {}
+    hier = EdgeKind.HIERARCHY.value
+    for e in edges_raw or []:
+        kind = (e.get("kind") or hier).lower()
+        if kind != hier:
+            continue
+        dst = str(e.get("dst") or "")
+        src = str(e.get("src") or "")
+        if dst and src:
+            parents[dst] = src
+    return parents
+
+
+def _derive_node_levels(
+    nodes_raw: list[dict[str, Any]], edges_raw: list[dict[str, Any]]
+) -> dict[str, int]:
+    """Compute each node's hierarchy depth (``level``) along HIERARCHY edges.
+
+    Roots (no incoming hierarchy edge) are level 0; every HIERARCHY hop
+    deepens the level by 1. This mirrors the explicit 0/1/2 levels the
+    legacy v1 dict templates hard-code, so a v2-instantiated content_ops
+    org lands editor_in_chief=0, planner/seo/data=1, writers/visual=2.
+
+    BFS from the roots; a ``seen`` guard makes a malformed cyclic payload
+    terminate instead of looping. Nodes unreachable from any root (should
+    not happen for a validated template) default to 0.
+    """
+    parents = _derive_node_parents(edges_raw)
+    children: dict[str, list[str]] = {}
+    for child, parent in parents.items():
+        children.setdefault(parent, []).append(child)
+    all_ids = [str(n.get("id") or "") for n in nodes_raw if n.get("id")]
+    levels: dict[str, int] = dict.fromkeys(all_ids, 0)
+    roots = [nid for nid in all_ids if nid not in parents]
+    queue: list[tuple[str, int]] = [(r, 0) for r in roots]
+    seen: set[str] = set()
+    while queue:
+        nid, depth = queue.pop(0)
+        if nid in seen:
+            continue
+        seen.add(nid)
+        levels[nid] = depth
+        for child in children.get(nid, []):
+            if child not in seen:
+                queue.append((child, depth + 1))
+    return levels
+
+
+def _orgv2_node_dict_to_orgnode_data(
+    node_dict: dict[str, Any],
+    *,
+    level: int = 0,
+) -> dict[str, Any]:
     """Project one OrgV2 NodeV2 jsonable into an OrgNode jsonable.
 
     Field mapping:
@@ -401,6 +479,11 @@ def _orgv2_node_dict_to_orgnode_data(node_dict: dict[str, Any]) -> dict[str, Any
     * ``persona_prompt`` -> ``custom_prompt``
     * ``tool_subset`` -> ``external_tools``
     * ``workbench`` -> ``plugin_origin`` (when present)
+    * ``level`` -> derived by the caller from HIERARCHY edges (NodeV2 has
+      no level field of its own); see :func:`_derive_node_levels`. v1
+      ``OrgNode`` keys hierarchy on ``level`` + edges (it has no
+      ``parent_id`` field), so we set only ``level`` for parity with the
+      legacy dict-template path.
     * everything else: dropped (not representable in OrgNode)
     """
     role = (node_dict.get("role") or "").strip()
@@ -420,6 +503,7 @@ def _orgv2_node_dict_to_orgnode_data(node_dict: dict[str, Any]) -> dict[str, Any
         "custom_prompt": node_dict.get("persona_prompt") or "",
         "external_tools": list(node_dict.get("tool_subset") or []),
         "plugin_origin": plugin_origin,
+        "level": level,
     }
 
 

@@ -325,3 +325,85 @@ def test_crud_returns_404_when_v2_disabled(disabled_client: TestClient) -> None:
     assert disabled_client.get("/api/v2/orgs-spec/x").status_code == 404
     assert disabled_client.patch("/api/v2/orgs-spec/x", json={}).status_code == 404
     assert disabled_client.delete("/api/v2/orgs-spec/x").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Node ``level`` derivation (template level dual-path fix, 2026-06)
+# ---------------------------------------------------------------------------
+#
+# Root cause: the OrgV2 ``NodeV2`` wire shape has no ``level`` field
+# (hierarchy lives in HIERARCHY edges). The OrgV2 -> v1 org.json
+# projection (``_orgv2_node_dict_to_orgnode_data``) never set ``level``,
+# so v2-instantiated orgs persisted ``level=0`` for EVERY node while the
+# v1 dict templates (``_runtime_templates.CONTENT_OPS``) hard-code the
+# right 0/1/2 levels. We now derive depth along HIERARCHY edges so BOTH
+# paths land identical, correct levels.
+
+
+def test_derive_node_levels_ignores_collaborate_and_handles_depth() -> None:
+    from openakita.api.routes.orgs_v2 import _derive_node_levels
+
+    nodes = [{"id": n} for n in ("root", "mid_a", "mid_b", "leaf", "peer")]
+    edges = [
+        {"src": "root", "dst": "mid_a", "kind": "hierarchy"},
+        {"src": "root", "dst": "mid_b", "kind": "hierarchy"},
+        {"src": "mid_a", "dst": "leaf", "kind": "hierarchy"},
+        # COLLABORATE must NOT deepen a node's level.
+        {"src": "leaf", "dst": "peer", "kind": "collaborate"},
+        {"src": "mid_b", "dst": "peer", "kind": "hierarchy"},
+    ]
+    levels = _derive_node_levels(nodes, edges)
+    assert levels == {"root": 0, "mid_a": 1, "mid_b": 1, "leaf": 2, "peer": 2}
+
+
+def test_derive_node_levels_terminates_on_cycle() -> None:
+    from openakita.api.routes.orgs_v2 import _derive_node_levels
+
+    nodes = [{"id": "a"}, {"id": "b"}]
+    edges = [
+        {"src": "a", "dst": "b", "kind": "hierarchy"},
+        {"src": "b", "dst": "a", "kind": "hierarchy"},  # malformed cycle
+    ]
+    # Must not hang; ``a`` is a root only if it has no incoming hierarchy
+    # edge. Here both have one, so neither is a root -> all default 0.
+    assert _derive_node_levels(nodes, edges) == {"a": 0, "b": 0}
+
+
+def test_v1_content_ops_dict_levels_match_derived_depth() -> None:
+    """v1 dict path parity: the hard-coded CONTENT_OPS levels must equal
+    the depth our algorithm derives from the SAME hierarchy edges."""
+    from openakita.api.routes.orgs_v2 import _derive_node_levels
+    from openakita.orgs._runtime_templates import CONTENT_OPS
+
+    nodes = [{"id": n["id"]} for n in CONTENT_OPS["nodes"]]
+    edges = [
+        {"src": e["source"], "dst": e["target"], "kind": e["edge_type"]}
+        for e in CONTENT_OPS["edges"]
+    ]
+    derived = _derive_node_levels(nodes, edges)
+    hardcoded = {n["id"]: n["level"] for n in CONTENT_OPS["nodes"]}
+    assert derived == hardcoded
+    # Sanity: it really is a 3-level pyramid, not a degenerate all-zero map.
+    assert set(hardcoded.values()) == {0, 1, 2}
+
+
+def test_instantiate_content_ops_projects_correct_levels(client: TestClient) -> None:
+    """v2 instantiate path: the projected org.json must carry derived
+    levels (editor=0, planner/seo/data=1, writers/visual=2) instead of the
+    pre-fix all-zero degenerate map."""
+    from openakita.api.routes.orgs_v2 import _orgv2_dict_to_organization_data
+
+    org = _instantiate(client, name="Levels")
+    data = _orgv2_dict_to_organization_data(org)
+    # role-handle ('role') survives into ``agent_profile_id`` on the
+    # projected v1 node, so we can map level -> the roles at that depth.
+    by_role = {n["agent_profile_id"]: n["level"] for n in data["nodes"]}
+    assert by_role["editor_in_chief"] == 0
+    assert by_role["content_planner"] == 1
+    assert by_role["seo_optimizer"] == 1
+    assert by_role["data_analyst"] == 1
+    assert by_role["visual_designer"] == 2
+    # two writers share role "writer"
+    writer_levels = [n["level"] for n in data["nodes"] if n["agent_profile_id"] == "writer"]
+    assert writer_levels == [2, 2]
+    assert {n["level"] for n in data["nodes"]} == {0, 1, 2}
