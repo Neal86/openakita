@@ -452,7 +452,18 @@ def persist_node_artifact(
     org_dir = _resolve_org_dir(get_org_dir, org_id)
     if org_dir is None:
         return None
-    target_dir = org_dir / "artifacts"
+    # Per-command physical isolation (adversarial re-test, 2026-06): the
+    # auto-persisted node deliverable used to land in the SHARED
+    # ``<org>/artifacts/`` directory, so every command's outputs piled into
+    # one folder — cross-topic clutter that made it easy to mis-pick a stale
+    # artefact and bloated the listing. The file *tools* already sandbox
+    # writes under ``<org>/commands/<cid>/artifacts/output/``; we now mirror
+    # that for auto-persist so a command's deliverables stay together under
+    # ``<org>/commands/<cid>/artifacts/``. The returned absolute path is
+    # still under the workspace root, so the ``/api/files`` download +
+    # ``file_output_registered`` registration chains keep working unchanged.
+    cmd_seg = safe_path_segment(command_id, fallback="cmd")
+    target_dir = org_dir / "commands" / cmd_seg / "artifacts"
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
     except Exception:  # noqa: BLE001 -- best-effort

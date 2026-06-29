@@ -156,10 +156,11 @@ def test_persist_node_artifact_writes_file_and_returns_path(
 ) -> None:
     """case id: p0_2.artifact.basic_write
 
-    The minimum-viable contract: a UTF-8 ``.txt`` lands under
-    ``<org_dir>/artifacts/`` containing the LLM output verbatim. The
-    return value is the resolved path so the executor can stamp it
-    into the ``agent_run_finished`` event payload.
+    The minimum-viable contract: a UTF-8 ``.md`` lands under the
+    PER-COMMAND ``<org_dir>/commands/<cid>/artifacts/`` directory
+    (per-command physical isolation, 2026-06) containing the LLM output
+    verbatim. The return value is the resolved path so the executor can
+    stamp it into the ``agent_run_finished`` event payload.
     """
 
     monkeypatch.delenv("OPENAKITA_ORGS_V2_PERSIST_ARTIFACTS", raising=False)
@@ -173,14 +174,50 @@ def test_persist_node_artifact_writes_file_and_returns_path(
     assert path_str is not None
     p = Path(path_str)
     assert p.is_file()
+    # Per-command isolation: <org_dir>/commands/<cid>/artifacts/<file>
     assert p.parent.name == "artifacts"
-    assert p.parent.parent == tmp_path
+    assert p.parent.parent.name == "cmd_a"
+    assert p.parent.parent.parent.name == "commands"
+    assert p.parent.parent.parent.parent == tmp_path
     body = p.read_text(encoding="utf-8")
     assert body == "# 季度营销方案\n第二段中文内容"
     # ★ Filename now LEADS with the semantic title derived from the
     # deliverable's own heading, then node + timestamp for uniqueness.
     assert p.name.startswith("季度营销方案_producer_")
     assert p.suffix == ".md"
+
+
+def test_persist_node_artifact_isolates_two_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """case id: p0_2.artifact.per_command_isolation
+
+    Two commands in the SAME org must land their auto-persisted
+    deliverables in SEPARATE ``commands/<cid>/artifacts/`` folders so a
+    later command never sees / mis-picks an earlier topic's artefact.
+    """
+
+    monkeypatch.delenv("OPENAKITA_ORGS_V2_PERSIST_ARTIFACTS", raising=False)
+    p1 = persist_node_artifact(
+        org_id="o1",
+        command_id="cmd_jianlai",
+        node_id="writer",
+        output="# 剑来报告\n正文",
+        get_org_dir=lambda _oid: tmp_path,
+    )
+    p2 = persist_node_artifact(
+        org_id="o1",
+        command_id="cmd_fanren",
+        node_id="writer",
+        output="# 凡人修仙传报告\n正文",
+        get_org_dir=lambda _oid: tmp_path,
+    )
+    assert p1 and p2
+    assert Path(p1).parent == tmp_path / "commands" / "cmd_jianlai" / "artifacts"
+    assert Path(p2).parent == tmp_path / "commands" / "cmd_fanren" / "artifacts"
+    # The first command's dir holds exactly its own one deliverable.
+    assert len(list((tmp_path / "commands" / "cmd_jianlai" / "artifacts").iterdir())) == 1
+    assert len(list((tmp_path / "commands" / "cmd_fanren" / "artifacts").iterdir())) == 1
 
 
 def test_persist_node_artifact_falls_back_to_idname_without_title(
@@ -447,7 +484,8 @@ def test_executor_persists_artifact_and_memory_on_success(
     )
 
     assert result["status"] == "ok"
-    artifacts = list((tmp_path / "artifacts").iterdir())
+    # Per-command isolation: auto-persist lands under commands/<cid>/artifacts/.
+    artifacts = list((tmp_path / "commands" / "cmd_e" / "artifacts").iterdir())
     memories = list((tmp_path / "memory").iterdir())
     assert len(artifacts) == 1
     assert len(memories) == 1
@@ -494,7 +532,7 @@ def test_executor_strips_thinking_from_persisted_artifact_and_output(
     assert "<thinking>" not in out and "我注意到下属里没有 writer-a" not in out
     assert "# 季度营销方案" in out and "这是真正的成文交付物内容" in out
 
-    artifacts = list((tmp_path / "artifacts").iterdir())
+    artifacts = list((tmp_path / "commands" / "cmd_th" / "artifacts").iterdir())
     assert len(artifacts) == 1
     body = artifacts[0].read_text(encoding="utf-8")
     assert "<thinking>" not in body and "</thinking>" not in body
@@ -569,7 +607,9 @@ def test_executor_persists_child_with_parent_chain_filename(
         )
     )
     assert result["status"] == "ok"
-    artifacts = sorted((tmp_path / "artifacts").iterdir(), key=lambda p: p.name)
+    artifacts = sorted(
+        (tmp_path / "commands" / "cmd_child" / "artifacts").iterdir(), key=lambda p: p.name
+    )
     # Two artefact files: producer (entry) + screenwriter (child). The
     # filenames now lead with a semantic title, so we identify each file by
     # the node-id uniqueness segment embedded in the name rather than by a
