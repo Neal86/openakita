@@ -1628,6 +1628,13 @@ class OrgRuntime:
                     {"org_id": org_id, "node_id": nid, "status": "idle"},
                 )
 
+    @staticmethod
+    def _iso_now() -> str:
+        """Current UTC time as an ISO-8601 string (P4 Gantt timestamp source)."""
+        from datetime import UTC, datetime
+
+        return datetime.now(UTC).isoformat()
+
     def _resolve_node_department(self, org_id: str, node_id: str | None) -> str:
         """Best-effort node -> department name (empty when unknown)."""
         if not node_id:
@@ -1829,7 +1836,9 @@ class OrgRuntime:
                         chain_id=chain_id,
                         parent_task_id=parent_task_id,
                         depth=ev_depth,
-                        started_at=None,
+                        # P4 (甘特图): stamp the dispatch time so the project
+                        # timeline can draw a real start->end bar per subtask.
+                        started_at=self._iso_now(),
                     )
                     ps.add_task(pid, task)
             elif event_name == "agent_run_finished" and node_id:
@@ -1901,6 +1910,10 @@ class OrgRuntime:
                             ]
                         if open_tasks:
                             t = open_tasks[-1]
+                            # P4 (甘特图): the DELIVERED transition auto-stamps
+                            # ``delivered_at`` in update_task -> the timeline bar
+                            # gets a real end (``completed_at`` stays reserved for
+                            # the user 验收/accepted transition).
                             updates: dict[str, Any] = {
                                 "status": "delivered",
                                 "progress_pct": 100,
