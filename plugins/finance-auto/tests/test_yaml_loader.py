@@ -85,6 +85,26 @@ def test_load_income_statement_general_has_six_new_lines() -> None:
     assert new_codes <= {r.reference_code for r in tpl.rules}
 
 
+def test_load_cash_flow_general_enterprise_indirect() -> None:
+    """The indirect-method CF template (cf_indirect_ge_v1) must load cleanly
+    so the cash_flow:general_enterprise resolver key has a backing file."""
+    tpl = load_template(
+        SHIPPED_TEMPLATES / "cash_flow_indirect_general_enterprise.yaml"
+    )
+    assert tpl.template_id == "cf_indirect_ge_v1"
+    assert tpl.sheet_kind == "cash_flow"
+    assert tpl.accounting_standard == "general_enterprise"
+    codes = {r.reference_code for r in tpl.rules}
+    assert {"CF_NET_PROFIT", "CF_OPERATING_NET", "CF_NET_CHANGE"} <= codes
+    # Every manual_input rule must name a cf_* key the engine publishes.
+    mi_keys = {
+        r.manual_input_key
+        for r in tpl.rules
+        if r.data_source == "manual_input"
+    }
+    assert all(k and k.startswith("cf_") for k in mi_keys)
+
+
 def test_invalid_data_source_raises(tmp_path: Path) -> None:
     bad = tmp_path / "bad.yaml"
     bad.write_text(

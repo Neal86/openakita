@@ -282,6 +282,86 @@ async def test_put_with_expected_version_on_empty_slot(api):
 
 
 @pytest.mark.asyncio
+async def test_cash_flow_report_for_default_cas_org(api):
+    """Regression for the P0 bug: a default account set (standard='cas')
+    maps to general_enterprise, which previously had no registered cash-flow
+    template and returned 400.  After wiring cf_indirect_ge_v1 the same call
+    must return 201 with non-empty cells, both with and without an explicit
+    body override."""
+    client, service = api
+    base = "/api/plugins/finance-auto"
+
+    # Default standard for the desktop "新建账套" flow is CAS.
+    r = client.post(
+        f"{base}/orgs",
+        json={"name": "CAS 默认账套", "code": "CF_CAS", "industry": "general",
+              "standard": "cas"},
+    )
+    assert r.status_code == 201, r.text
+    org_id = r.json()["id"]
+
+    await service.ensure_period(org_id=org_id, period_id="2025-FY")
+    imp = await service.insert_pending_import(
+        org_id=org_id, period_id="2025-FY", source_file="seed.xlsx",
+        file_size=0, file_sha256=None,
+    )
+    await service.persist_rows(
+        import_id=imp.id, org_id=org_id, period_id="2025-FY",
+        rows=[
+            ParsedRow(
+                row_index=1, raw_code="1001", parent_code="1001",
+                child_code=None, full_code="1001", account_name="库存现金",
+                opening_debit=0, opening_credit=0, period_debit=0,
+                period_credit=0, closing_debit=500000, closing_credit=0,
+            ),
+            ParsedRow(
+                row_index=2, raw_code="1122.01", parent_code="1122",
+                child_code="01", full_code="1122.01", account_name="应收账款",
+                opening_debit=0, opening_credit=0, period_debit=0,
+                period_credit=0, closing_debit=200000, closing_credit=0,
+            ),
+        ],
+    )
+    await service.finalise_import(
+        import_id=imp.id, parser_used="seed", row_count=2,
+        status="ok", error_message=None,
+    )
+
+    # Persist the cf_* synthetic keys so the indirect template renders real
+    # numbers (no prior period -> deltas equal current side only).
+    r = client.post(
+        f"{base}/orgs/{org_id}/cash-flow/persist",
+        json={"period_id": "2025-FY"},
+    )
+    assert r.status_code == 201, r.text
+
+    # The headline assertion: cash_flow generation no longer 400s for a CAS
+    # org and produces a populated report.
+    r = client.post(
+        f"{base}/orgs/{org_id}/reports/cash_flow/generate",
+        json={"period_id": "2025-FY"},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["report"]["accounting_standard"] == "general_enterprise"
+    assert body["report"]["template_version"] >= 1
+    cells = {c["reference_code"]: c for c in body["cells"]}
+    assert len(cells) >= 20, "indirect CF template should emit 20+ cells"
+    assert "CF_NET_CHANGE" in cells
+    # cf_ar_delta = 0 - 200000 = -200000 was persisted, so the AR line is
+    # non-zero -> proves the cells are actually populated, not all-zero.
+    assert cells["CF_AR_DELTA"]["value"] == pytest.approx(-200000.0)
+
+    # The body override to small_enterprise must still work (regression).
+    r = client.post(
+        f"{base}/orgs/{org_id}/reports/cash_flow/generate",
+        json={"period_id": "2025-FY", "accounting_standard": "small_enterprise"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["report"]["accounting_standard"] == "small_enterprise"
+
+
+@pytest.mark.asyncio
 async def test_cash_flow_warns_on_missing_manual_inputs(api):
     client, service = api
     base = "/api/plugins/finance-auto"

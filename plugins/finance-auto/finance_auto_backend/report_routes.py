@@ -72,6 +72,13 @@ _KIND_TO_FILENAME = {
     "income_statement:general_enterprise": "income_statement_general_enterprise.yaml",
     # M1 W3 Stage 4: minimal cash-flow template wired to manual_inputs.
     "cash_flow:small_enterprise": "cash_flow_small_enterprise.yaml",
+    # M2 Biz Stage 4: indirect-method cash-flow for the general / CAS
+    # standard.  The template was shipped (cf_indirect_ge_v1) but never
+    # wired into the resolver, so the default CAS org -> general_enterprise
+    # path returned 400.  It consumes the cf_* synthetic keys produced by
+    # IndirectCashFlowEngine (via /cash-flow/persist) through the existing
+    # manual_input data_source -- no generator change needed.
+    "cash_flow:general_enterprise": "cash_flow_indirect_general_enterprise.yaml",
 }
 
 
