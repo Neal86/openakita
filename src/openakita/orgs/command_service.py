@@ -79,6 +79,27 @@ logger = logging.getLogger(__name__)
 _CMD_TTL = 3600
 
 
+# Kickoff/派单稿 markers -- kept in sync with ``runtime.py`` and
+# ``runtime/supervisor.py`` so all three layers agree on "never ship a kickoff".
+# Used only to decide whether the in-memory best-effort deliverable is weak
+# enough to be replaced by the root's on-disk integration file (test13 fix b).
+_KICKOFF_TEXT_MARKERS: tuple[str, ...] = (
+    "项目启动指令",
+    "项目正式启动",
+    "[dispatched to ",
+    "[from node `",
+    "层级分解",
+    "dispatched to ",
+)
+
+
+def _looks_like_kickoff_text(text: str) -> bool:
+    """True when a candidate deliverable string is a kickoff/派单 aggregation."""
+    if not text:
+        return False
+    return any(marker in text for marker in _KICKOFF_TEXT_MARKERS)
+
+
 # ---------------------------------------------------------------------------
 # Public service Protocol
 # ---------------------------------------------------------------------------
@@ -2096,6 +2117,41 @@ class OrgCommandService:
                     popped_cid,
                 )
 
+    def _root_disk_deliverable(self, command_id: str) -> str | None:
+        """Return the root node's on-disk integration report for this command.
+
+        test13 fix (b): the runtime records the root's substantial, non-kickoff
+        ``.md`` in ``_root_final_artifact`` (from ``file_output_registered`` the
+        moment write_file lands it, so it survives a cancelled finalization). We
+        read a bounded prefix here so the degrade path can fill
+        ``command_done.final_message`` from the REAL integrated report on disk
+        rather than an in-memory派单稿/downstream product. Returns ``None`` when
+        no such file was recorded or it cannot be read.
+        """
+        store = getattr(self._runtime, "_root_final_artifact", None)
+        if not isinstance(store, dict):
+            return None
+        rec = store.get(command_id)
+        if not rec:
+            return None
+        try:
+            _node_id, path = rec
+        except (TypeError, ValueError):
+            return None
+        from pathlib import Path as _Path
+
+        try:
+            body = _Path(str(path)).read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        if not body or _looks_like_kickoff_text(body):
+            return None
+        # Bound so a large report doesn't bloat the command_done WS frame; the
+        # full document remains downloadable via the rendered PDF / .md attachment.
+        if len(body) > 12000:
+            body = body[:12000] + "\n\n…（内容较长已截断，完整版本见附件文件）"
+        return body
+
     def _reflect_supervisor_outcome(
         self,
         command_id: str,
@@ -2113,6 +2169,23 @@ class OrgCommandService:
         final_cp = getattr(outcome, "final_checkpoint_id", None)
         final_msg = getattr(outcome, "final_message", "") or ""
         deliverable = str(getattr(outcome, "deliverable", "") or "")
+
+        # test13 fix (b): when the forced root finalization was skipped/cut short
+        # by the budget/hard-ceiling, the supervisor's in-memory
+        # ``best_effort_deliverable`` can only pick "the longest surviving output"
+        # -- possibly a downstream product or (before the kickoff guard) the派单稿.
+        # If the ROOT node actually wrote a substantial integrated .md TO DISK
+        # (captured in ``_root_final_artifact`` even when its run was cancelled),
+        # prefer THAT as the delivered text so the final bubble matches the PDF.
+        # Only overrides a weak/empty/kickoff-shaped deliverable so a healthy
+        # finalization's own summary is left untouched.
+        disk_deliverable = self._root_disk_deliverable(command_id)
+        if disk_deliverable and (
+            not deliverable.strip() or _looks_like_kickoff_text(deliverable)
+        ):
+            deliverable = disk_deliverable
+            if not final_msg.strip() or _looks_like_kickoff_text(final_msg):
+                final_msg = disk_deliverable
 
         # RC-conv (优雅降级): OUT_OF_TURNS / REPLAN_BUDGET_EXHAUSTED are budget
         # exits, not crashes. When the run actually produced a usable
