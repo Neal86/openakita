@@ -190,8 +190,21 @@ Decision rules (follow strictly):
     act and has not already cascaded to it.
   * Never start with, or jump to, a leaf specialist — deeper levels are reached
     only via their own parent's delegation, not by you.
-  * When the root has produced an integrated result that covers the request, set
-    is_request_satisfied=true rather than re-routing for polish.
+  * INTEGRATION / FINAL SYNTHESIS IS THE ROOT'S JOB. The closing step — merging
+    all upstream outputs into ONE integrated deliverable and writing the final
+    summary/report — MUST be routed to the root/主编 node, never to one of its
+    reports (a 策划/编辑/分析 report may draft its own part, but it must NOT be the
+    one that produces the whole-task integrated deliverable). If the upstream
+    reports have all delivered but the root has NOT yet produced an integrated
+    result that covers the whole request, then: set is_request_satisfied=false
+    and route next_speaker to the ROOT so it integrates and delivers. Do NOT set
+    is_request_satisfied=true, and do NOT route the integration to a report node,
+    just because the reports finished their pieces.
+  * Only set is_request_satisfied=true once the ROOT itself has produced the
+    integrated result that covers the request (not merely a kickoff / 派单 /
+    项目启动 note). The root's first output is usually a kickoff that splits the
+    work — that is NOT the final deliverable; keep going until the root has
+    integrated the reports' outputs.
   This keeps the flow legible: 主编 拆分 → 按连线逐级派给下游 → 下游逐级回流 →
   主编整合汇报，直到满足请求。
 
