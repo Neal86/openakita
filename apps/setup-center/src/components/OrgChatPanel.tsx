@@ -1070,7 +1070,10 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
             // command_done had fired during the refresh gap. Accept both so a
             // partial/ceiling result with a real report still gets its bubble.
             const st = String(d?.status || "");
-            if (st !== "done" && st !== "error") return;
+            // test16: "partial" is the backend's delivered-but-hit-a-limit
+            // terminal (a real report exists) -- render it like done. "error"
+            // is kept for legacy records that still carry a final_message.
+            if (st !== "done" && st !== "error" && st !== "partial") return;
             const text = extractCommandResultText(
               d.result as Record<string, unknown> | null | undefined,
             );
@@ -1438,7 +1441,8 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
           );
           const cd = await r.json();
           const st = String(cd?.status || "");
-          if (st !== "done" && st !== "error") return;
+          // test16: accept the delivered-but-limited "partial" terminal.
+          if (st !== "done" && st !== "error" && st !== "partial") return;
           const text = extractCommandResultText(
             cd.result as Record<string, unknown> | null | undefined,
           );
@@ -2096,6 +2100,24 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
       }
     };
 
+    // test16: a "delivered but hit a limit" command completes successfully but
+    // should carry a gentle note that it wrapped up at a time/budget ceiling,
+    // rather than either hiding it or looking like a failure.
+    const partialDeliveryNote = (
+      result: Record<string, unknown> | null | undefined,
+    ): string | undefined => {
+      const reason = result && typeof result.degraded_reason === "string"
+        ? String(result.degraded_reason)
+        : "";
+      if (reason === "wall_clock_ceiling") {
+        return "本次任务因触达运行时限而收尾，以上为已交付的尽力而为成果（部分内容可能未完全展开）。";
+      }
+      if (reason === "turn_budget" || reason === "replan_budget") {
+        return "本次任务因触达执行预算而收尾，以上为已交付的尽力而为成果（部分内容可能未完全展开）。";
+      }
+      return "本次任务在触达处理上限后收尾，以上为已交付的尽力而为成果（部分内容可能未完全展开）。";
+    };
+
     const wrapWithProcess = (
       resultText: string,
       opts?: { stoppedByWatchdog?: boolean; warning?: string; files?: FileAttachment[] }
@@ -2215,7 +2237,9 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
           const resultText = getCommandResultText(result, error, d);
           const stopped = !!(result && result.stopped_by_watchdog);
           const cancelled = !!(result && result.cancelled_by_user);
-          const warning = result && typeof result.warning === "string" ? result.warning as string : undefined;
+          const partialDelivery = !stopped && !!(result && result.partial);
+          const warning = (result && typeof result.warning === "string" ? result.warning as string : undefined)
+            || (partialDelivery ? partialDeliveryNote(result as Record<string, unknown>) : undefined);
           setTimeout(() => {
             const files = collectAllFiles();
             finalContent = wrapWithProcess(resultText, { stoppedByWatchdog: stopped, warning, files });
@@ -2239,13 +2263,15 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
                 updatePreview();
               }
             }
-            if (pd.status === "done" || pd.status === "error") {
+            if (pd.status === "done" || pd.status === "error" || pd.status === "partial") {
               if (!resolved) {
                 resolved = true;
                 const resultText = getCommandResultText(pd.result, pd.error, pd);
                 const stopped = !!(pd.result && pd.result.stopped_by_watchdog);
                 const cancelled = !!(pd.result && pd.result.cancelled_by_user);
-                const warning = pd.result && typeof pd.result.warning === "string" ? pd.result.warning : undefined;
+                const partialDelivery = !stopped && (pd.status === "partial" || !!(pd.result && pd.result.partial));
+                const warning = (pd.result && typeof pd.result.warning === "string" ? pd.result.warning : undefined)
+                  || (partialDelivery ? partialDeliveryNote(pd.result as Record<string, unknown>) : undefined);
                 const files = collectAllFiles();
                 finalContent = wrapWithProcess(resultText, { stoppedByWatchdog: stopped, warning, files });
                 finalizeResult(finalContent, files);
