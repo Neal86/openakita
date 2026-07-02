@@ -420,6 +420,10 @@ function activityItemsToMessages(
         content: cmdSummaryFull,
         timestamp: activityTs(cmdItem),
         inputAttachments: reloadedInputAtts.length > 0 ? reloadedInputAtts : undefined,
+        // test17 Task3: stamp the owning command so the reloaded history can be
+        // regrouped into per-command blocks (用户指令 → 编排过程 → 总结) after a
+        // refresh, matching the live path.
+        commandId: cmdItem.command_id ? String(cmdItem.command_id) : undefined,
       });
     }
     // 图1 fix: the reconstructed flat "🗂 编排过程" system bubble used to be
@@ -2434,6 +2438,101 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
     </div>
   );
 
+  // test17 Task3: render the v2 command center as a multi-round conversation.
+  // Each command is ONE block (用户指令 → 编排过程 → 根节点总结气泡+附件); blocks
+  // are chronological; the in-flight command's process stays expanded while
+  // historical commands' processes fold away (they still exist -- click to
+  // expand). Messages with no owning command (system errors, legacy bubbles)
+  // are interleaved by timestamp so nothing is lost.
+  const renderV2Conversation = () => {
+    const parseCid = (m: ChatMsg): string =>
+      m.commandId ||
+      (m.id.startsWith("final-report-") ? m.id.slice("final-report-".length) : "") ||
+      (m.id.startsWith("user-cmd-") ? m.id.slice("user-cmd-".length) : "");
+
+    interface Block { cid: string; user?: ChatMsg; report?: ChatMsg; ts: number }
+    const blocks = new Map<string, Block>();
+    const loose: ChatMsg[] = [];
+    const cmdOrder: string[] = [];
+    const touch = (cid: string, ts: number): Block => {
+      let b = blocks.get(cid);
+      if (!b) { b = { cid, ts }; blocks.set(cid, b); cmdOrder.push(cid); }
+      b.ts = Math.min(b.ts, ts);
+      return b;
+    };
+
+    for (const m of messages) {
+      if (m.streaming) continue; // v2 live process lives in the timeline
+      const cid = parseCid(m);
+      if (m.kind === "final_report") {
+        if (cid) touch(cid, m.timestamp).report = m;
+        else loose.push(m);
+        continue;
+      }
+      if (m.role === "user" && cid) {
+        touch(cid, m.timestamp).user = m;
+        continue;
+      }
+      loose.push(m); // system / activity / un-attributed bubbles
+    }
+    // Commands that only produced ledger events so far (process started before
+    // any bubble exists) still deserve a block.
+    for (const e of v2LedgerEvents) {
+      const cid = (e.commandId || "").trim();
+      if (cid && !blocks.has(cid)) {
+        const tnum = /^\d+$/.test(e.ts || "") ? Number(e.ts) : Date.parse(e.ts || "") || 0;
+        touch(cid, tnum);
+      }
+    }
+
+    type Unit = { ts: number; el: JSX.Element };
+    const units: Unit[] = [];
+    for (const m of loose) units.push({ ts: m.timestamp, el: renderMsgBubble(m) });
+
+    for (const cid of cmdOrder) {
+      const b = blocks.get(cid)!;
+      const evForCmd = v2LedgerEvents.filter(e => (e.commandId || "").trim() === cid);
+      const isActive = pendingCmdId === cid;
+      const timeline = evForCmd.length > 0 ? (
+        <ProgressLedgerTimeline
+          events={evForCmd}
+          nodeNameOf={(id) => nodeNamesRef.current?.[id] || id}
+          running={isActive && (sending || !!pendingCmdId)}
+          activeCommandId={cid}
+        />
+      ) : null;
+      const el = (
+        <div className="ocp-cmd-block" key={`cmd-${cid}`} data-command-id={cid}>
+          {b.user && renderMsgBubble(b.user)}
+          {timeline && (
+            isActive ? (
+              <div className="ocp-process" data-testid="ocp-v2-timeline">
+                <div className="ocp-process-title">
+                  <span className="ocp-process-spark" />
+                  {t("org.chat.liveProcessTitle", "编排过程")}
+                </div>
+                {timeline}
+              </div>
+            ) : (
+              <details className="ocp-process ocp-process-collapsed" data-testid="ocp-v2-timeline">
+                <summary className="ocp-process-title">
+                  {t("org.chat.processDetailsHeading", "执行过程")}
+                </summary>
+                {timeline}
+              </details>
+            )
+          )}
+          {b.report && renderMsgBubble(b.report)}
+        </div>
+      );
+      units.push({ ts: b.ts, el });
+    }
+
+    units.sort((a, b) => a.ts - b.ts);
+    // Each unit's element already carries a stable key (msg id / cmd id).
+    return <>{units.map((u) => u.el)}</>;
+  };
+
   return (
     <div className="ocp-root">
       {showHeader && (
@@ -2505,44 +2604,22 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
             <div className="ocp-empty-hint">{t("org.chat.inputTip")}</div>
           </div>
         )}
-        {messages.map(m => {
-          // v21 命令中心读作：用户指令 → 编排过程(时间线) → 最终汇报。
-          // (1) 图1 删除：v2 组织的实时进度已由下方 ProgressLedgerTimeline
-          //     完整呈现，不再渲染 "组织正在处理中…" 流式占位气泡。
-          if (m.streaming && runtime === "v2") return null;
-          // (2) 最终汇报气泡 + 可下载卡片移到时间线【下方】渲染（见下），
-          //     这里跳过它，避免重复出现在时间线上方。
-          if (m.kind === "final_report") return null;
-          return renderMsgBubble(m);
-        })}
-        {/* UI redesign: the v2 live-process feed now lives INSIDE the single
-            message scroll column (was a detached 168px strip above it), so the
-            command center reads as one continuous conversation that scrolls as
-            one. It renders nothing when idle/empty, so the old "暂无进度记录…"
-            banner never sits permanently above a finished task. */}
-        {runtime === "v2" && v2LedgerEvents.length > 0 && (
-          <div className="ocp-process" data-testid="ocp-v2-timeline">
-            <div className="ocp-process-title">
-              <span className="ocp-process-spark" />
-              {t("org.chat.liveProcessTitle", "编排过程")}
-            </div>
-            <ProgressLedgerTimeline
-              events={v2LedgerEvents}
-              nodeNameOf={(id) => nodeNamesRef.current?.[id] || id}
-              running={sending || !!pendingCmdId}
-              // Item 3: while a command is in-flight, pin the timeline to it;
-              // when idle, the timeline auto-selects the latest command id so a
-              // multi-run org shows only its CURRENT command, never a mix of
-              // historical commands' stale segments.
-              activeCommandId={pendingCmdId || undefined}
-            />
-          </div>
+        {runtime !== "v2" ? (
+          <>
+            {messages.map(m => {
+              if (m.kind === "final_report") return null;
+              return renderMsgBubble(m);
+            })}
+            {messages.filter(m => m.kind === "final_report").map(m => renderMsgBubble(m))}
+          </>
+        ) : (
+          // test17 Task3 命令中心多轮历史：不再是 [全部用户指令]→[仅最新时间线]
+          // →[全部汇报]，而是按【每条命令一段】渲染：用户指令 → 编排过程(历史命令
+          // 自动折叠) → 根节点总结气泡+附件。新命令追加、取消也保留，刷新后由
+          // reload 路径重建同样的分组（user-cmd 气泡 / final-report 气泡 / ledger
+          // 事件都带 commandId）。无 commandId 的零散消息（系统错误等）按时间穿插。
+          renderV2Conversation()
         )}
-        {/* v21 最终交付：根节点(主编)的总结汇报气泡 + 可下载卡片落在指挥台
-            【底部】，位于编排过程之后；reload 后由 activityItemsToMessages 从
-            command_done / final_report_pdf / agent_run_finished 事件重建，
-            因此刷新也仍在（图片/视频由 FileAttachmentCard 内嵌预览）。 */}
-        {messages.filter(m => m.kind === "final_report").map(m => renderMsgBubble(m))}
       </div>
 
       {/* Non-header mode: show clear button inline */}
@@ -2882,6 +2959,20 @@ const CHAT_CSS = `
   font-size: 11px; font-weight: 600; letter-spacing: .02em;
   color: var(--muted, #64748b); margin-bottom: 8px;
 }
+/* test17 Task3: one command == one block (用户指令 → 编排过程 → 总结). */
+.ocp-cmd-block {
+  display: flex; flex-direction: column; align-self: stretch; gap: 2px;
+}
+/* Historical commands' process folds away (still one click to reopen), so a
+   multi-round command center no longer looks like a stack of bare 用户指令. */
+.ocp-process-collapsed { padding: 6px 12px; }
+.ocp-process-collapsed > summary {
+  cursor: pointer; margin-bottom: 0; list-style: none; user-select: none;
+}
+.ocp-process-collapsed > summary::-webkit-details-marker { display: none; }
+.ocp-process-collapsed > summary::before { content: "▸ "; color: #6366f1; }
+.ocp-process-collapsed[open] > summary { margin-bottom: 8px; }
+.ocp-process-collapsed[open] > summary::before { content: "▾ "; }
 .ocp-process-spark {
   width: 6px; height: 6px; border-radius: 50%;
   background: #6366f1; box-shadow: 0 0 0 0 rgba(99,102,241,.5);
