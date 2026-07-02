@@ -46,6 +46,13 @@ interface ChatMsg {
    * 颜色覆盖。
    */
   kind?: "activity" | "final_report";
+  /**
+   * test17: the org command this message belongs to. Lets the command center
+   * group a multi-run history into per-command blocks (用户指令 → 编排过程 →
+   * 根节点总结) and gives the final-report bubble a stable, dedupable identity
+   * across the live / reload / always-on paths.
+   */
+  commandId?: string;
 }
 
 /** 指挥台 composer 待发送的输入附件（上传中/已上传/失败）。 */
@@ -164,6 +171,19 @@ interface PendingCmd {
   segmentCount: number;
   allFiles: FileAttachment[];
   finalContent: string | null;
+  /**
+   * test17: id of the right-side user bubble that kicked off this command, so
+   * the command_id can be stamped onto it once the POST returns (enables
+   * per-command history grouping).
+   */
+  userMsgId?: string;
+  /**
+   * test17: once the terminal report bubble is built we must stop the live
+   * progress handler from rewriting the (now retired) streaming placeholder --
+   * a late ``final_report_pdf`` / ``node_status idle`` event used to overwrite
+   * the finalized bubble back to "组织正在处理中…", making the report vanish.
+   */
+  finalized?: boolean;
 }
 const _pendingCmds = new Map<string, PendingCmd>();
 
@@ -1100,6 +1120,7 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
               // v21: tag so it renders at the BOTTOM of the command center
               // (below the 编排过程 timeline), consistent with the live finalize.
               kind: "final_report",
+              commandId: cid,
             });
           } catch {
             /* best effort: a missing/old command must not break history load */
@@ -1464,6 +1485,7 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
             timestamp: Date.now(),
             attachments: files.length > 0 ? files : undefined,
             kind: "final_report",
+            commandId: cid,
           };
           if (!mountedRef.current) return;
           setMessages(prev => {
@@ -2070,31 +2092,55 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
 
     const finalizeResult = (content: string, files?: FileAttachment[], role: "assistant" | "system" = "assistant") => {
       const pending = _pendingCmds.get(convId);
+      const cmdId = pending?.commandId || "";
       if (pending) {
         if (pending.placeholderId !== placeholderId) return;
         pending.finalContent = content;
+        // test17: mark finalized BEFORE deleting so any in-flight updatePreview
+        // that already captured ``pending`` bails out instead of resurrecting
+        // the "组织正在处理中…" placeholder over the report.
+        pending.finalized = true;
         _pendingCmds.delete(convId);
       }
       const atts = files && files.length > 0 ? files : undefined;
+      // test17 ROOT FIX: the closing report is its OWN bottom bubble with a
+      // stable ``final-report-<cid>`` id -- NOT the streaming placeholder. The
+      // placeholder is retired here so a late ``final_report_pdf`` /
+      // ``node_status idle`` event (which fires seconds AFTER command_done and
+      // calls updatePreview -> rewrites the placeholder) can no longer clobber
+      // the finalized report. This also unifies the live path with the reload /
+      // always-on paths, which already key the receipt by ``final-report-<cid>``.
+      const finalId = cmdId ? `final-report-${cmdId}` : placeholderId;
+      const finalMsg: ChatMsg = {
+        id: finalId,
+        role,
+        content,
+        timestamp: Date.now(),
+        attachments: atts,
+        kind: "final_report",
+        commandId: cmdId || undefined,
+      };
       if (mountedRef.current) {
         setMessages(prev => {
-          const next = prev.map(m =>
-            // v21: tag the finalized deliverable so the render can place it +
-            // its downloadable cards at the BOTTOM of the command center
-            // (用户指令 → 编排过程 → 最终汇报), and so the reload path can
-            // reconstruct it from the persisted command_done event.
-            m.id === placeholderId
-              ? { ...m, content, streaming: false, role, attachments: atts, kind: "final_report" as const }
-              : m
-          );
+          // Drop the streaming placeholder (its live process lives in the
+          // ProgressLedgerTimeline for v2; v1 keeps the process embedded in the
+          // report content itself), then upsert the stable report bubble.
+          const withoutPlaceholder = prev.filter(m => m.id !== placeholderId);
+          const idx = withoutPlaceholder.findIndex(m => m.id === finalId);
+          const next = idx >= 0
+            ? withoutPlaceholder.map((m, i) => (i === idx ? { ...m, ...finalMsg } : m))
+            : [...withoutPlaceholder, finalMsg];
           messagesRef.current = next;
           return next;
         });
       } else {
         const existing = loadFromLocalStorage(convId);
-        const msg: ChatMsg = { id: placeholderId, role, content, timestamp: Date.now(), attachments: atts, kind: "final_report" };
         const hasUser = existing.some(m => m.id === userMsg.id);
-        const toSave = hasUser ? [...existing, msg] : [...existing, userMsg, msg];
+        const base = (hasUser ? existing : [...existing, userMsg]).filter(m => m.id !== placeholderId);
+        const idx = base.findIndex(m => m.id === finalId);
+        const toSave = idx >= 0
+          ? base.map((m, i) => (i === idx ? { ...m, ...finalMsg } : m))
+          : [...base, finalMsg];
         saveToLocalStorage(convId, toSave);
         persistToBackend(apiBaseUrl, convId, toSave.map(m => ({ role: m.role, content: m.content })), true);
       }
@@ -2118,7 +2164,12 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
       return "本次任务在触达处理上限后收尾，以上为已交付的尽力而为成果（部分内容可能未完全展开）。";
     };
 
-    const wrapWithProcess = (
+    // test17: the pure "任务完成汇报" block (heading + report + deliverables
+    // manifest + optional limit note + done banner), WITHOUT the collapsed
+    // 执行过程. v2 command centers render this as the standalone bottom bubble
+    // because the process already lives in the ProgressLedgerTimeline; only the
+    // legacy v1 path (no separate timeline) wraps it with the process below.
+    const buildReportBlock = (
       resultText: string,
       opts?: { stoppedByWatchdog?: boolean; warning?: string; files?: FileAttachment[] }
     ): string => {
@@ -2129,17 +2180,23 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
       const warningLine = opts?.warning
         ? `\n\n> ${opts.warning}`
         : "";
-      // UI issue #4: present the final result as a prominent "任务完成汇报"
-      // section so the user clearly sees the receipt, not just a wall of text.
       const reportHeading = stopped ? "" : `### 📋 ${t("org.chat.finalReportHeading", "任务完成汇报")}\n\n`;
-      // UI issue #4/#7: a textual deliverables manifest above the file cards
-      // (the cards themselves render as attachments below the bubble).
       const files = opts?.files || [];
       const manifest = files.length > 0
         ? `\n\n**📎 ${t("org.chat.deliverablesHeading", "交付物清单")}（${files.length}）**\n\n`
           + files.map(f => `- \`${f.filename || (f.file_path || "").split(/[\\/]/).pop() || "file"}\``).join("\n")
         : "";
-      const reportBlock = `${reportHeading}${resultText}${manifest}${warningLine}${banner}`;
+      return `${reportHeading}${resultText}${manifest}${warningLine}${banner}`;
+    };
+
+    const wrapWithProcess = (
+      resultText: string,
+      opts?: { stoppedByWatchdog?: boolean; warning?: string; files?: FileAttachment[] }
+    ): string => {
+      const reportBlock = buildReportBlock(resultText, opts);
+      // v2 keeps the process in the timeline, so the bottom bubble is just the
+      // report; only v1 (no timeline) embeds the collapsed 执行过程 below it.
+      if (runtime === "v2") return reportBlock;
       if (segments.length === 0) return reportBlock;
       const allCollapsed = segments.map(seg => {
         const body = seg.lines.join("\n\n");
@@ -2223,8 +2280,16 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
           JSON.stringify(data);
         finalizeResult(finalContent);
       } else {
-        _pendingCmds.set(convId, { commandId, orgId, placeholderId, lastRendered: "", segmentCount: 0, allFiles: [], finalContent: null });
+        _pendingCmds.set(convId, { commandId, orgId, placeholderId, lastRendered: "", segmentCount: 0, allFiles: [], finalContent: null, userMsgId: userMsg.id });
         setPendingCmdId(commandId);
+        // test17: stamp the command_id onto the user bubble + placeholder so the
+        // command center can group this run's (用户指令 → 编排过程 → 总结) block
+        // and rebuild it per-command after a refresh.
+        if (mountedRef.current) {
+          setMessages(prev => prev.map(m =>
+            m.id === userMsg.id || m.id === placeholderId ? { ...m, commandId } : m
+          ));
+        }
 
         let resolved = false;
         const unsubDone = onWsEvent((evt, raw) => {
