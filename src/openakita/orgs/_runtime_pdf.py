@@ -53,8 +53,40 @@ def _inline(text: str) -> str:
     return out
 
 
+def _is_table_sep(line: str) -> bool:
+    """A GFM table separator row, e.g. ``| --- | :--: | ---: |``."""
+    s = line.strip()
+    if "|" not in s or "-" not in s:
+        return False
+    cells = [c.strip() for c in s.strip("|").split("|")]
+    return bool(cells) and all(re.fullmatch(r":?-{1,}:?", c or "") for c in cells)
+
+
+def _split_row(line: str) -> list[str]:
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [c.strip() for c in s.split("|")]
+
+
+def _cell_align(spec: str) -> str:
+    spec = spec.strip()
+    if spec.startswith(":") and spec.endswith(":"):
+        return "center"
+    if spec.endswith(":"):
+        return "right"
+    return "left"
+
+
 def markdown_to_html(md: str) -> str:
-    """Convert a markdown body to an HTML fragment (block-level + inline)."""
+    """Convert a markdown body to an HTML fragment.
+
+    Handles headings, bold/italic/code, ordered/unordered lists, blockquotes,
+    fenced code, GFM pipe tables, and horizontal rules -- enough structure for a
+    presentable final-report PDF (test17 item 5) without a markdown dependency.
+    """
     lines = (md or "").replace("\r\n", "\n").split("\n")
     html_parts: list[str] = []
     list_stack: list[str] = []  # "ul" / "ol"
@@ -71,7 +103,10 @@ def markdown_to_html(md: str) -> str:
         while list_stack:
             html_parts.append(f"</{list_stack.pop()}>")
 
-    for raw_line in lines:
+    i = 0
+    n = len(lines)
+    while i < n:
+        raw_line = lines[i]
         line = raw_line.rstrip()
         fence = line.strip().startswith("```")
         if fence:
@@ -85,13 +120,43 @@ def markdown_to_html(md: str) -> str:
                 flush_para()
                 close_lists()
                 in_code = True
+            i += 1
             continue
         if in_code:
             code_buf.append(raw_line)
+            i += 1
             continue
         if not line.strip():
             flush_para()
             close_lists()
+            i += 1
+            continue
+        # GFM pipe table: a header row followed by a separator row.
+        if "|" in line and i + 1 < n and _is_table_sep(lines[i + 1]):
+            flush_para()
+            close_lists()
+            headers = _split_row(line)
+            aligns = [_cell_align(c) for c in _split_row(lines[i + 1])]
+            rows: list[list[str]] = []
+            j = i + 2
+            while j < n and "|" in lines[j] and lines[j].strip():
+                rows.append(_split_row(lines[j]))
+                j += 1
+            thead = "".join(
+                f'<th style="text-align:{aligns[k] if k < len(aligns) else "left"}">{_inline(h)}</th>'
+                for k, h in enumerate(headers)
+            )
+            body_rows = []
+            for r in rows:
+                tds = "".join(
+                    f'<td style="text-align:{aligns[k] if k < len(aligns) else "left"}">{_inline(c)}</td>'
+                    for k, c in enumerate(r)
+                )
+                body_rows.append(f"<tr>{tds}</tr>")
+            html_parts.append(
+                f"<table><thead><tr>{thead}</tr></thead><tbody>{''.join(body_rows)}</tbody></table>"
+            )
+            i = j
             continue
         heading = re.match(r"^(#{1,6})\s+(.*)$", line)
         if heading:
@@ -99,6 +164,13 @@ def markdown_to_html(md: str) -> str:
             close_lists()
             level = len(heading.group(1))
             html_parts.append(f"<h{level}>{_inline(heading.group(2))}</h{level}>")
+            i += 1
+            continue
+        if re.fullmatch(r"\s*([-*_])\s*(\1\s*){2,}", line):
+            flush_para()
+            close_lists()
+            html_parts.append("<hr>")
+            i += 1
             continue
         ol = re.match(r"^\s*\d+[.)]\s+(.*)$", line)
         ul = re.match(r"^\s*[-*+]\s+(.*)$", line)
@@ -111,13 +183,16 @@ def markdown_to_html(md: str) -> str:
                 list_stack.append(want)
             item = (ol or ul).group(1)
             html_parts.append(f"<li>{_inline(item)}</li>")
+            i += 1
             continue
         if line.strip().startswith(">"):
             flush_para()
             close_lists()
             html_parts.append(f"<blockquote>{_inline(line.strip()[1:].strip())}</blockquote>")
+            i += 1
             continue
         para_buf.append(line.strip())
+        i += 1
 
     if in_code and code_buf:
         html_parts.append("<pre><code>" + _html.escape("\n".join(code_buf)) + "</code></pre>")
@@ -128,27 +203,41 @@ def markdown_to_html(md: str) -> str:
 
 _HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"><style>
-  @page {{ size: A4; margin: 16mm 14mm; }}
+  @page {{ size: A4; margin: 18mm 16mm; }}
   * {{ box-sizing: border-box; }}
-  body {{ font-family: "Microsoft YaHei","PingFang SC","Noto Sans CJK SC","Segoe UI",sans-serif;
-    color: #1f2937; font-size: 12.5px; line-height: 1.7; }}
-  .doc-header {{ border-bottom: 3px solid #6366f1; padding-bottom: 10px; margin-bottom: 18px; }}
-  .doc-title {{ font-size: 20px; font-weight: 700; color: #4338ca; margin: 0; }}
-  .doc-meta {{ color: #6b7280; font-size: 11px; margin-top: 4px; }}
-  h1 {{ font-size: 18px; color: #4338ca; border-bottom: 1px solid #e5e7eb; padding-bottom: 4px; }}
-  h2 {{ font-size: 16px; color: #4f46e5; }}
-  h3 {{ font-size: 14px; color: #4f46e5; }}
+  body {{ font-family: "Microsoft YaHei","PingFang SC","Noto Sans CJK SC","Source Han Sans SC","Segoe UI",sans-serif;
+    color: #1f2937; font-size: 12.5px; line-height: 1.75; margin: 0;
+    -webkit-font-smoothing: antialiased; }}
+  .doc-header {{ border-bottom: 3px solid #6366f1; padding-bottom: 12px; margin-bottom: 22px; }}
+  .doc-title {{ font-size: 22px; font-weight: 700; color: #3730a3; margin: 0; letter-spacing: .3px; }}
+  .doc-meta {{ color: #6b7280; font-size: 11px; margin-top: 6px; }}
+  h1, h2, h3, h4, h5, h6 {{ font-weight: 700; line-height: 1.35;
+    page-break-after: avoid; break-after: avoid; }}
+  h1 {{ font-size: 19px; color: #3730a3; border-bottom: 2px solid #e5e7eb;
+    padding-bottom: 5px; margin: 22px 0 12px; }}
+  h2 {{ font-size: 16px; color: #4338ca; margin: 18px 0 9px;
+    border-left: 4px solid #6366f1; padding-left: 9px; }}
+  h3 {{ font-size: 14px; color: #4f46e5; margin: 14px 0 7px; }}
+  h4 {{ font-size: 13px; color: #5b21b6; margin: 12px 0 6px; }}
   p {{ margin: 8px 0; }}
-  ul, ol {{ margin: 8px 0; padding-left: 24px; }}
-  li {{ margin: 3px 0; }}
+  ul, ol {{ margin: 8px 0; padding-left: 26px; }}
+  li {{ margin: 4px 0; }}
+  li > ul, li > ol {{ margin: 4px 0; }}
   code {{ background: #f1f5f9; padding: 1px 5px; border-radius: 4px;
     font-family: Consolas,Menlo,monospace; font-size: 11.5px; color: #be123c; }}
   pre {{ background: #0f172a; color: #e2e8f0; padding: 12px 14px; border-radius: 8px;
-    overflow-x: auto; }}
+    overflow-x: auto; page-break-inside: avoid; break-inside: avoid; }}
   pre code {{ background: transparent; color: inherit; padding: 0; }}
-  blockquote {{ border-left: 4px solid #c7d2fe; margin: 8px 0; padding: 4px 12px;
-    color: #475569; background: #f8fafc; }}
-  a {{ color: #4f46e5; }}
+  blockquote {{ border-left: 4px solid #c7d2fe; margin: 10px 0; padding: 6px 14px;
+    color: #475569; background: #f8fafc; border-radius: 0 6px 6px 0; }}
+  a {{ color: #4f46e5; word-break: break-all; }}
+  hr {{ border: none; border-top: 1px solid #e5e7eb; margin: 18px 0; }}
+  table {{ border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 11.5px;
+    page-break-inside: avoid; break-inside: avoid; }}
+  th, td {{ border: 1px solid #d1d5db; padding: 6px 10px; vertical-align: top; }}
+  thead th {{ background: #eef2ff; color: #3730a3; font-weight: 700;
+    border-bottom: 2px solid #c7d2fe; }}
+  tbody tr:nth-child(even) {{ background: #f8fafc; }}
 </style></head><body>
 <div class="doc-header">
   <p class="doc-title">{title}</p>
