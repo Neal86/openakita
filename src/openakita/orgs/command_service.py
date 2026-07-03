@@ -106,22 +106,45 @@ def _looks_like_kickoff_text(text: str) -> bool:
 # When a NEW command starts, the supervisor/root gets NO memory of what the
 # organization already handled, so a follow-up like "再补一版" or "把上次的
 # 方案改成…" lands with zero context. We inject a compact digest of the most
-# recent prior commands (each command's user instruction + the root node's
-# FINAL summary) as background. Aggressive budget control keeps the prompt from
-# bloating: at most a few commands, each field head-truncated, with a hard total
-# cap. Source = the persisted per-org event store (survives restarts), not the
-# in-memory ``_commands`` map (which is purged).
+# recent prior commands as background. Aggressive budget control keeps the
+# prompt from bloating: at most a few commands, each field head-truncated, with
+# a hard total cap. Source = the persisted per-org event store (survives
+# restarts), not the in-memory ``_commands`` map (which is purged).
+#
+# test17 issue C (regression fix): the first cut embedded ~400 chars of the
+# previous command's FINISHED deliverable body as a "最终成果摘要" and told the
+# root to "复用已定结论 / 不要重复交付历史成果". Real logs (org_24da7db5285b)
+# proved this made the root treat the task as already done -- after the change,
+# a repeat instruction produced subtask_assigned=0 and only editor-in-chief ran
+# (no dispatch at all), versus subtask_assigned=2/3 with 4 distinct nodes before
+# the change. So the digest now carries only a short topic HEADLINE (never the
+# deliverable body) and a hard instruction to re-plan and dispatch normally.
 # ---------------------------------------------------------------------------
 ORG_HISTORY_MAX_COMMANDS = 3
 ORG_HISTORY_INSTRUCTION_CHARS = 160
-ORG_HISTORY_SUMMARY_CHARS = 400
-ORG_HISTORY_TOTAL_CHARS = 2000
+# Only a one-line topic headline of the prior deliverable, NOT its body -- a
+# longer excerpt is what let the root mistake history for a finished answer.
+ORG_HISTORY_SUMMARY_CHARS = 80
+ORG_HISTORY_TOTAL_CHARS = 1200
 
 
 def _clip(text: str, limit: int) -> str:
     """Head-truncate ``text`` to ``limit`` chars with an ellipsis marker."""
     text = " ".join(str(text or "").split())
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
+def _headline(text: str, limit: int) -> str:
+    """First meaningful line of ``text`` (a title), stripped of md/quote marks.
+
+    Deliberately returns only a topic-level headline so the injected history can
+    never be mistaken for a ready-to-ship deliverable body (test17 issue C).
+    """
+    for raw in str(text or "").splitlines():
+        line = raw.strip().lstrip("#>*-—• \t").strip()
+        if line:
+            return _clip(line, limit)
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -1724,11 +1747,13 @@ class OrgCommandService:
     ) -> str:
         """Compact, budget-capped digest of this org's recent command history.
 
-        Reads the persisted event store (``user_command`` + ``command_done``),
-        pairs each prior command's instruction with its root final summary, and
-        returns a short markdown block (most-recent ``ORG_HISTORY_MAX_COMMANDS``
-        commands, each field head-truncated, hard total cap). Empty string when
-        there is no usable history. Best-effort: any read error yields "".
+        Reads the persisted event store (``user_command`` + ``command_done``)
+        and returns a short markdown block pairing each prior command's
+        instruction with a one-line topic HEADLINE of its deliverable (never the
+        body -- see issue C) plus a hard re-dispatch mandate. Most-recent
+        ``ORG_HISTORY_MAX_COMMANDS`` commands, each field head-truncated, hard
+        total cap. Empty string when there is no usable history. Best-effort:
+        any read error yields "".
         """
         es = self._runtime.get_event_store(org_id)
         if es is None or not hasattr(es, "query"):
@@ -1775,21 +1800,32 @@ class OrgCommandService:
         for i, cid in enumerate(recent, 1):
             instr = _clip(instr_by_cmd[cid][0], ORG_HISTORY_INSTRUCTION_CHARS)
             status, summ = summary_by_cmd.get(cid, ("", ""))
-            line = [f"{i}. 指令：{instr}"]
-            if summ:
-                line.append(f"   最终成果摘要：{_clip(summ, ORG_HISTORY_SUMMARY_CHARS)}")
-            elif status:
-                line.append(f"   （该指令终态：{status}，无最终成果摘要）")
-            blocks.append("\n".join(line))
+            # test17 issue C: only a topic headline (title), NEVER the body, so
+            # the root cannot mistake history for a finished deliverable to ship.
+            head = _headline(summ, ORG_HISTORY_SUMMARY_CHARS) if summ else ""
+            parts = [f"{i}. 历史指令：{instr}"]
+            tail = []
+            if status:
+                tail.append(f"终态：{status}")
+            if head:
+                tail.append(f"交付主题：{head}")
+            if tail:
+                parts.append(f"（{'；'.join(tail)}）")
+            blocks.append(" ".join(parts))
 
         body = "\n".join(blocks)
         if len(body) > ORG_HISTORY_TOTAL_CHARS:
             body = body[:ORG_HISTORY_TOTAL_CHARS].rstrip() + "…"
+        # NOTE: the framing MUST NOT invite the root to reuse/finish from history
+        # (an earlier "复用已定结论 / 不要重复交付历史成果" wording collapsed
+        # dispatch). It is background context only + a hard re-dispatch mandate.
         return (
-            "[组织历史参考｜仅供背景，非本次任务]\n"
-            "以下是本组织最近处理过的指令及其最终成果摘要，供你理解组织语境与"
-            "延续性。请聚焦【本次指令】，不要重复交付历史成果；若本次与历史相关，"
-            "可自然衔接、复用已定结论。\n\n"
+            "[组织历史背景｜仅供理解语境，不是本次任务的成品或答案]\n"
+            "以下是本组织最近处理过的指令概览，仅帮助你理解组织的延续性与既往主题，"
+            "不包含任何可直接交付的成品内容。\n"
+            "【硬性要求】无论本次指令与历史多么相似、甚至完全相同，你都必须按组织的"
+            "正常流程重新规划并分派（dispatch）给下级节点执行；严禁把历史成果当作"
+            "本次交付，严禁因“看起来已完成”而跳过分派、由根节点自行一次性收尾。\n\n"
             f"{body}\n\n[本次指令]"
         )
 

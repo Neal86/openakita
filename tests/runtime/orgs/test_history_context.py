@@ -100,14 +100,19 @@ def test_history_context_digests_prior_commands() -> None:
     svc = OrgCommandService(_runtime_with_store(store))
     ctx = svc._build_history_context("o1", "root1", current_command_id="cmd_current")
     assert ctx
-    assert "组织历史参考" in ctx
+    assert "组织历史背景" in ctx
     assert ctx.rstrip().endswith("[本次指令]")
-    # both prior instructions + summaries present, chronological order
+    # both prior instructions present, chronological order
     assert "策划一份AI沙龙方案" in ctx
     assert "补一版宣传文案" in ctx
+    # a topic headline is kept (title-level), chronological
     assert "沙龙方案V1" in ctx
     assert "宣传材料包" in ctx
     assert ctx.index("策划一份AI沙龙方案") < ctx.index("补一版宣传文案")
+    # issue C: it must MANDATE re-dispatch and NOT invite reuse/finish.
+    assert "必须" in ctx and "dispatch" in ctx and "跳过分派" in ctx
+    assert "复用已定结论" not in ctx
+    assert "不要重复交付历史成果" not in ctx
 
 
 def test_history_context_excludes_current_and_returns_empty_without_history() -> None:
@@ -140,12 +145,42 @@ def test_history_context_enforces_budget_caps() -> None:
     svc = OrgCommandService(_runtime_with_store(store))
     ctx = svc._build_history_context("o1", "root1", current_command_id="none")
     # At most ORG_HISTORY_MAX_COMMANDS numbered entries.
-    assert ctx.count("\n1. 指令：") + ctx.count("1. 指令：") >= 1
+    assert ctx.count("历史指令：") == ORG_HISTORY_MAX_COMMANDS
     for n in range(ORG_HISTORY_MAX_COMMANDS + 1, ORG_HISTORY_MAX_COMMANDS + 4):
-        assert f"{n}. 指令：" not in ctx
+        assert f"{n}. 历史指令：" not in ctx
     # Field-level truncation applied (no full 500/5000-char field survives).
     assert ("指" * (ORG_HISTORY_INSTRUCTION_CHARS + 1)) not in ctx
     assert ("果" * (ORG_HISTORY_SUMMARY_CHARS + 1)) not in ctx
+
+
+def test_history_context_never_leaks_deliverable_body_and_mandates_dispatch() -> None:
+    """issue C regression: history must not read as a finished answer.
+
+    A previous command's polished multi-line deliverable body must NOT be
+    embedded (only its title headline), and the block must hard-require the root
+    to re-plan + dispatch -- otherwise the root treats the repeat instruction as
+    already done and stops delegating (subtask_assigned=0 in the real logs).
+    """
+    body = (
+        "# AIR780 线下交流分享会策划案（全文）\n"
+        "## 一、活动背景\n本次活动面向嵌入式开发者，预算 8000 元，场地已敲定为……\n"
+        "## 二、议程\n09:00 签到；09:30 主题演讲；11:00 动手实验……\n"
+        "## 三、宣传材料\n海报文案：一起用 AIR780 点亮你的第一个物联网项目！……\n"
+    )
+    store = _FakeStore([
+        {"type": "user_command", "command_id": "cmd_p", "content": "整理AIR780分享会策划案", "ts": 10.0},
+        {"type": "command_done", "command_id": "cmd_p", "status": "done",
+         "result": {"final_message": body}},
+    ])
+    svc = OrgCommandService(_runtime_with_store(store))
+    ctx = svc._build_history_context("o1", "root1", current_command_id="cur")
+    # ONLY the title headline survives; the body sections must not leak.
+    assert "AIR780 线下交流分享会策划案" in ctx
+    assert "活动背景" not in ctx
+    assert "预算 8000 元" not in ctx
+    assert "海报文案" not in ctx
+    # hard re-dispatch mandate present.
+    assert "必须" in ctx and "dispatch" in ctx and "跳过分派" in ctx
 
 
 @pytest.mark.asyncio
@@ -185,7 +220,9 @@ async def test_submit_prepends_history_for_fresh_command_only() -> None:
     if inflight is not None:
         await asyncio.wait_for(inflight, timeout=5.0)
     task = captured.get("task", "")
-    assert "组织历史参考" in task
+    assert "组织历史背景" in task
     assert "把上次的方案改成30人精简版" in task
     # the user's real instruction still appears AFTER the history block
-    assert task.index("组织历史参考") < task.index("把上次的方案改成30人精简版")
+    assert task.index("组织历史背景") < task.index("把上次的方案改成30人精简版")
+    # issue C: the injected task hard-requires dispatch, never invites reuse.
+    assert "dispatch" in task and "跳过分派" in task
