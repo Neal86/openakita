@@ -632,13 +632,17 @@ class Supervisor:
             # being force-cancelled into ``status=error`` at the wall clock.
             if self._soft_budget_exceeded():
                 elapsed = self._elapsed_s()
+                # User-facing note prepended to the final report — keep it in
+                # friendly Simplified Chinese (release-notes tone) instead of the
+                # raw internal English budget string (test18 item #4). The
+                # machine-readable outcome stays OUT_OF_TURNS; only this display
+                # text changed.
                 return await self._terminate(
                     FinalOutcome.OUT_OF_TURNS,
                     (
-                        f"wall-clock soft budget reached after {elapsed:.0f}s / "
-                        f"{self._wall_clock_soft_budget_s:.0f}s "
-                        f"({self.stall_detector.n_turns} turns); finishing "
-                        f"gracefully with the best result produced so far"
+                        f"本次任务已达到预设的时间预算（约 {elapsed:.0f} 秒、"
+                        f"共 {self.stall_detector.n_turns} 轮），已在时限内尽力完成"
+                        f"并交付当前阶段的最佳结果。"
                     ),
                 )
 
