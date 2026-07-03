@@ -11,8 +11,7 @@ vi.mock("../../platform", () => ({
 vi.mock("../../platform/auth", () => ({ getAccessToken: () => "test-token" }));
 vi.mock("../../views/chat/hooks/useMdModules", () => ({ useMdModules: () => null }));
 
-const blobFn = vi.fn(async () => new Blob(["%PDF-1.4 fake"], { type: "application/pdf" }));
-const safeFetch = vi.fn(async () => ({ ok: true, status: 200, blob: blobFn } as unknown as Response));
+const safeFetch = vi.fn(async () => ({ ok: true, status: 200 } as unknown as Response));
 vi.mock("../../providers", () => ({ safeFetch: (...a: unknown[]) => safeFetch(...(a as [string])) }));
 
 import { FileAttachmentCard } from "../FileAttachmentCard";
@@ -21,12 +20,9 @@ describe("FileAttachmentCard PDF preview (test18)", () => {
   beforeEach(() => {
     saveAttachment.mockClear();
     safeFetch.mockClear();
-    // jsdom has no object-URL impl.
-    (URL as unknown as { createObjectURL: unknown }).createObjectURL = vi.fn(() => "blob:mock-pdf");
-    (URL as unknown as { revokeObjectURL: unknown }).revokeObjectURL = vi.fn();
   });
 
-  it("previews a PDF via an authed blob object URL, not a bare src, and does NOT download", async () => {
+  it("previews a PDF via a direct authed inline URL (CSP-allowed), not blob, and does NOT download", async () => {
     const { getByTitle } = render(
       <FileAttachmentCard
         file={{ filename: "最终报告.pdf", file_path: "D:/o/最终报告.pdf" }}
@@ -41,12 +37,17 @@ describe("FileAttachmentCard PDF preview (test18)", () => {
     await waitFor(() => {
       const iframe = document.body.querySelector("iframe");
       expect(iframe).not.toBeNull();
-      expect(iframe?.getAttribute("src")).toBe("blob:mock-pdf");
+      const src = iframe?.getAttribute("src") || "";
+      // Direct backend inline URL (CSP frame-src allows the local origin),
+      // carrying the middleware ?token= so online auth passes. NOT a blob: URL
+      // (which the Tauri CSP frame-src blocks).
+      expect(src).not.toMatch(/^blob:/);
+      expect(src).toContain("inline=1");
+      expect(src).toContain("token=test-token");
     });
-    // Fetched through the authed path (safeFetch), against the inline URL.
-    expect(safeFetch).toHaveBeenCalled();
-    expect(String(safeFetch.mock.calls[0][0])).toContain("inline=1");
-    // Preview must never trigger a download.
+    // A bare PDF preview must not fetch the body itself (the iframe does) and
+    // must never trigger a download.
+    expect(safeFetch).not.toHaveBeenCalled();
     expect(saveAttachment).not.toHaveBeenCalled();
   });
 });

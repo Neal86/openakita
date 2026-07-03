@@ -98,33 +98,22 @@ export function FileAttachmentCard({ file, apiBaseUrl, inline = false }: FileAtt
   const [docText, setDocText] = useState<string | null>(null);
   const [docLoading, setDocLoading] = useState(false);
   const [docError, setDocError] = useState<string | null>(null);
-  // PDF is rendered from an AUTHED blob object URL rather than a bare iframe
-  // src. In online mode the iframe src cannot carry the bearer token, so the
-  // request 401s and the viewer is blank (test18 图1). Fetching via safeFetch
-  // (authenticated) and handing the iframe a ``blob:`` URL renders reliably --
-  // the same self-contained approach the media-strategy plugin uses.
-  const [pdfBlobUrl, setPdfBlobUrl] = useState<string | null>(null);
+  // PDF is rendered by pointing the iframe at the backend's inline URL DIRECTLY
+  // (with the middleware ``?token=`` so online auth passes). test18 图3 root
+  // cause: last round used a ``blob:`` object URL, but the Tauri desktop CSP
+  // ``frame-src`` allow-list is ``'self' http://127.0.0.1:* http://localhost:*
+  // https://*.alibaba.com`` and does NOT include ``blob:`` -- so the blob
+  // iframe was blocked by CSP and the viewer showed "未能加载 PDF 文档". A direct
+  // URL to the local backend IS on that allow-list (and the backend already
+  // serves ``Content-Type: application/pdf`` + ``Content-Disposition: inline``),
+  // so the native viewer loads it. The CSP was also widened to allow ``blob:``
+  // as defense-in-depth.
+  const pdfViewerUrl = useMemo(() => withAuthToken(inlineUrl), [inlineUrl]);
 
   const openDocPreview = useCallback(async () => {
     if (!docKind) return;
     setDocPreviewOpen(true);
-    if (docKind === "pdf") {
-      if (pdfBlobUrl) return; // already loaded
-      setDocLoading(true);
-      setDocError(null);
-      try {
-        const res = await safeFetch(inlineUrl);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const blob = await res.blob();
-        const pdfBlob = blob.type === "application/pdf" ? blob : new Blob([blob], { type: "application/pdf" });
-        setPdfBlobUrl(URL.createObjectURL(pdfBlob));
-      } catch (e) {
-        setDocError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setDocLoading(false);
-      }
-      return;
-    }
+    if (docKind === "pdf") return; // rendered via <iframe src=pdfViewerUrl>
     if (docText !== null) return; // already loaded
     setDocLoading(true);
     setDocError(null);
@@ -137,17 +126,7 @@ export function FileAttachmentCard({ file, apiBaseUrl, inline = false }: FileAtt
     } finally {
       setDocLoading(false);
     }
-  }, [docKind, docText, mediaUrl, inlineUrl, pdfBlobUrl]);
-
-  // Revoke the blob URL when the preview closes / the component unmounts so we
-  // don't leak object URLs across repeated previews.
-  useEffect(() => {
-    if (!docPreviewOpen && pdfBlobUrl) {
-      URL.revokeObjectURL(pdfBlobUrl);
-      setPdfBlobUrl(null);
-    }
-  }, [docPreviewOpen, pdfBlobUrl]);
-  useEffect(() => () => { if (pdfBlobUrl) URL.revokeObjectURL(pdfBlobUrl); }, [pdfBlobUrl]);
+  }, [docKind, docText, mediaUrl]);
 
   const handleDownload = useCallback(async () => {
     try {
@@ -324,19 +303,11 @@ export function FileAttachmentCard({ file, apiBaseUrl, inline = false }: FileAtt
           background: docKind === "pdf" ? "#525659" : "var(--panel2)",
         }}>
           {docKind === "pdf" ? (
-            docLoading ? (
-              <div style={{ padding: 24, color: "#e5e7eb", fontSize: 13 }}>正在加载 PDF 预览…</div>
-            ) : docError ? (
-              <div style={{ padding: 24, color: "#fbbf24", fontSize: 13 }}>
-                PDF 预览加载失败（{docError}）。你可以改为下载后查看。
-              </div>
-            ) : pdfBlobUrl ? (
-              <iframe
-                src={pdfBlobUrl}
-                title={file.filename}
-                style={{ width: "100%", height: "100%", border: "none" }}
-              />
-            ) : null
+            <iframe
+              src={pdfViewerUrl}
+              title={file.filename}
+              style={{ width: "100%", height: "100%", border: "none" }}
+            />
           ) : docLoading ? (
             <div style={{ padding: 24, color: "var(--muted)", fontSize: 13 }}>正在加载预览…</div>
           ) : docError ? (
