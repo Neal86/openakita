@@ -222,3 +222,50 @@ async def test_get_status_overlays_event_ref_and_error_during_running_window() -
     assert snap is not None
     assert snap.get("event_ref") == "agent_run_failed"
     assert "agent_build_failed" in (snap.get("error") or "")
+
+
+def test_get_status_reconstructs_from_events_after_restart() -> None:
+    """case id: test18.get_status.event_store_fallback
+
+    test18 (a): after a backend restart the in-memory ``_commands`` map is
+    empty, so ``get_status`` used to return ``None`` -> ``/commands/<cid>`` 404
+    -> the command center could not rebuild the final-report bubble on reload.
+    The durable ``command_done`` event still carries the full result, so
+    ``get_status`` must reconstruct an authoritative snapshot from the event
+    store instead of 404ing.
+    """
+
+    done_event = {
+        "type": "command_done",
+        "command_id": "cmd_old",
+        "status": "done",
+        "root_node_id": "root1",
+        "result": {"final_message": "最终交付报告正文", "deliverable": "d", "partial": False},
+    }
+    rt = _make_runtime()
+    rt.get_event_store = MagicMock(
+        return_value=MagicMock(
+            query=lambda **kw: [done_event] if kw.get("event_type") == "command_done" else []
+        )
+    )
+    svc = OrgCommandService(rt)
+    # Nothing in the in-memory map (simulates a fresh process after restart).
+    assert svc._commands == {}
+
+    snap = svc.get_status("o1", "cmd_old")
+    assert snap is not None, "must reconstruct from events, not 404"
+    assert snap["status"] == "done"
+    assert snap["result"]["final_message"] == "最终交付报告正文"
+    assert snap["root_node_id"] == "root1"
+    assert snap.get("reconstructed_from_events") is True
+
+
+def test_get_status_returns_none_for_truly_unknown_command() -> None:
+    """case id: test18.get_status.unknown_still_none
+
+    The event-store fallback must not fabricate a record for a command that
+    was never run -- an empty store still yields ``None`` (-> 404).
+    """
+
+    svc = OrgCommandService(_make_runtime())  # event store returns []
+    assert svc.get_status("o1", "cmd_never") is None

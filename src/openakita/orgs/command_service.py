@@ -871,7 +871,15 @@ class OrgCommandService:
         """
         cmd = self._commands.get(command_id)
         if not cmd or cmd.get("org_id") != org_id:
-            return None
+            # test18 (a): the in-memory ``_commands`` map is purged on backend
+            # restart / eviction, so a command that finished before a restart
+            # 404s here even though its terminal ``command_done`` (with the full
+            # ``final_message`` + deliverable) is durably persisted in
+            # events.jsonl. That silently dropped the command center's final
+            # report bubble on reload. Reconstruct a stable, authoritative
+            # snapshot from the persisted event store so ``/commands/<cid>``
+            # keeps returning the closing report forever.
+            return self._reconstruct_status_from_events(org_id, command_id)
         try:
             live = self._runtime.get_command_tracker_snapshot(org_id, command_id)
         except Exception:
@@ -1787,6 +1795,60 @@ class OrgCommandService:
             "left off without redoing finished work.\n\n"
             f"{context}\n\n[new user instruction]\n{content}"
         )
+
+    def _reconstruct_status_from_events(
+        self, org_id: str, command_id: str
+    ) -> dict[str, Any] | None:
+        """Rebuild a terminal command snapshot from the persisted event store.
+
+        test18 (a): used as the fallback for :meth:`get_status` when the
+        in-memory ``_commands`` record is gone (backend restart / purge). The
+        durable ``command_done`` event carries the same ``status`` + ``result``
+        (``final_message`` / ``deliverable`` …) the live path returned, so the
+        command center can rebuild its final-report bubble identically after a
+        reload. Returns ``None`` only when no terminal event exists for the id
+        (genuinely unknown command). Best-effort: any read error yields
+        ``None`` so the endpoint degrades to its old 404 rather than raising.
+        """
+        try:
+            es = self._runtime.get_event_store(org_id)
+        except Exception:  # noqa: BLE001
+            return None
+        if es is None or not hasattr(es, "query"):
+            return None
+        try:
+            done_cmds = es.query(event_type="command_done", limit=200) or []
+        except Exception:  # noqa: BLE001
+            return None
+        record: dict[str, Any] | None = None
+        for e in done_cmds:
+            if str(e.get("command_id") or "") == command_id:
+                record = e  # keep scanning so the LAST (newest) wins
+        if record is None:
+            return None
+        result = record.get("result")
+        if not isinstance(result, dict):
+            result = {}
+        root_node_id = str(
+            record.get("root_node_id")
+            or record.get("root")
+            or result.get("root_node_id")
+            or ""
+        )
+        status = str(record.get("status") or "done")
+        return {
+            "command_id": command_id,
+            "status": status,
+            "phase": status,
+            "root_node_id": root_node_id,
+            "result": result,
+            "error": record.get("error"),
+            "elapsed_s": None,
+            "cancel_requested_by_user": False,
+            "origin_surface": record.get("origin_surface"),
+            "output_scope": record.get("output_scope"),
+            "reconstructed_from_events": True,
+        }
 
     def _build_history_context(
         self, org_id: str, root_node_id: str, current_command_id: str
