@@ -201,50 +201,80 @@ def markdown_to_html(md: str) -> str:
     return "\n".join(html_parts)
 
 
+# Visual language ported from the media-strategy plugin's report view
+# (``plugins/media-strategy/ui/dist/index.html`` ``.report`` rules): a teal
+# ``--primary`` (#0F766E) accent, a readable 1.8 line height, headings that step
+# down with clear rhythm (h1 underlined, h2 with a teal left rule, h3/h4 tinted),
+# rounded bordered tables with a teal header band + subtle zebra rows, soft
+# blockquotes, and a gradient horizontal rule. Tuned for print (A4) rather than
+# screen: slightly larger body text, page-break-avoidance on headings, and
+# repeating table headers so tables that span a page keep their header row.
 _HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"><style>
-  @page {{ size: A4; margin: 18mm 16mm; }}
+  @page {{ size: A4; margin: 18mm 16mm 16mm; }}
   * {{ box-sizing: border-box; }}
-  body {{ font-family: "Microsoft YaHei","PingFang SC","Noto Sans CJK SC","Source Han Sans SC","Segoe UI",sans-serif;
-    color: #1f2937; font-size: 12.5px; line-height: 1.75; margin: 0;
-    -webkit-font-smoothing: antialiased; }}
-  .doc-header {{ border-bottom: 3px solid #6366f1; padding-bottom: 12px; margin-bottom: 22px; }}
-  .doc-title {{ font-size: 22px; font-weight: 700; color: #3730a3; margin: 0; letter-spacing: .3px; }}
-  .doc-meta {{ color: #6b7280; font-size: 11px; margin-top: 6px; }}
-  h1, h2, h3, h4, h5, h6 {{ font-weight: 700; line-height: 1.35;
+  body {{ font-family: "Microsoft YaHei","PingFang SC","Noto Sans CJK SC","Source Han Sans SC","Segoe UI",Arial,sans-serif;
+    color: #0f172a; font-size: 12.5px; line-height: 1.8; margin: 0;
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }}
+  .doc-header {{ border-bottom: 3px solid #0F766E; padding-bottom: 13px; margin-bottom: 24px; }}
+  .doc-title {{ font-size: 23px; font-weight: 700; color: #0F766E; margin: 0; letter-spacing: .3px; }}
+  .doc-meta {{ color: #64748b; font-size: 11px; margin-top: 7px; }}
+  h1, h2, h3, h4, h5, h6 {{ font-weight: 700; line-height: 1.4; color: #0f172a;
     page-break-after: avoid; break-after: avoid; }}
-  h1 {{ font-size: 19px; color: #3730a3; border-bottom: 2px solid #e5e7eb;
-    padding-bottom: 5px; margin: 22px 0 12px; }}
-  h2 {{ font-size: 16px; color: #4338ca; margin: 18px 0 9px;
-    border-left: 4px solid #6366f1; padding-left: 9px; }}
-  h3 {{ font-size: 14px; color: #4f46e5; margin: 14px 0 7px; }}
-  h4 {{ font-size: 13px; color: #5b21b6; margin: 12px 0 6px; }}
-  p {{ margin: 8px 0; }}
-  ul, ol {{ margin: 8px 0; padding-left: 26px; }}
-  li {{ margin: 4px 0; }}
+  h1 {{ font-size: 20px; border-bottom: 1px solid #cbd5e1;
+    padding-bottom: 8px; margin: 26px 0 14px; }}
+  h2 {{ font-size: 16.5px; margin: 22px 0 10px;
+    border-left: 4px solid #0F766E; padding-left: 11px; }}
+  h3 {{ font-size: 14.5px; color: #0F766E; margin: 18px 0 8px; }}
+  h4 {{ font-size: 13px; color: #0D9488; margin: 14px 0 7px; }}
+  h5, h6 {{ font-size: 12.5px; color: #475569; margin: 12px 0 6px; }}
+  .doc-body > :first-child {{ margin-top: 0; }}
+  p {{ margin: 9px 0; }}
+  strong {{ color: #0f172a; font-weight: 700; }}
+  ul, ol {{ margin: 9px 0; padding-left: 26px; }}
+  li {{ margin: 5px 0; }}
   li > ul, li > ol {{ margin: 4px 0; }}
-  code {{ background: #f1f5f9; padding: 1px 5px; border-radius: 4px;
-    font-family: Consolas,Menlo,monospace; font-size: 11.5px; color: #be123c; }}
-  pre {{ background: #0f172a; color: #e2e8f0; padding: 12px 14px; border-radius: 8px;
-    overflow-x: auto; page-break-inside: avoid; break-inside: avoid; }}
-  pre code {{ background: transparent; color: inherit; padding: 0; }}
-  blockquote {{ border-left: 4px solid #c7d2fe; margin: 10px 0; padding: 6px 14px;
-    color: #475569; background: #f8fafc; border-radius: 0 6px 6px 0; }}
-  a {{ color: #4f46e5; word-break: break-all; }}
-  hr {{ border: none; border-top: 1px solid #e5e7eb; margin: 18px 0; }}
-  table {{ border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 11.5px;
-    page-break-inside: avoid; break-inside: avoid; }}
-  th, td {{ border: 1px solid #d1d5db; padding: 6px 10px; vertical-align: top; }}
-  thead th {{ background: #eef2ff; color: #3730a3; font-weight: 700;
-    border-bottom: 2px solid #c7d2fe; }}
+  code {{ background: #f0fdfa; padding: 1.5px 6px; border-radius: 5px; border: 1px solid #cbd5e1;
+    font-family: Consolas,Menlo,"Courier New",monospace; font-size: 11.5px; color: #0f766e; }}
+  pre {{ background: #0f172a; color: #e2e8f0; padding: 13px 15px; border-radius: 8px; line-height: 1.6;
+    overflow-x: auto; page-break-inside: avoid; break-inside: avoid; font-size: 11.5px; }}
+  pre code {{ background: transparent; color: inherit; padding: 0; border: 0; }}
+  blockquote {{ border-left: 3px solid #0F766E; margin: 12px 0; padding: 8px 14px;
+    color: #475569; background: #f0fdfa; border-radius: 0 8px 8px 0; }}
+  a {{ color: #0F766E; text-decoration: none;
+    border-bottom: 1px dotted rgba(15,118,110,.45); word-break: break-all; }}
+  hr {{ height: 1px; border: 0; margin: 20px 0;
+    background: linear-gradient(90deg, transparent, #cbd5e1, transparent); }}
+  table {{ width: 100%; border-collapse: separate; border-spacing: 0; margin: 14px 0;
+    font-size: 11.5px; border: 1px solid #cbd5e1; border-radius: 10px; overflow: hidden; }}
+  thead {{ display: table-header-group; }}
+  tr {{ page-break-inside: avoid; break-inside: avoid; }}
+  th, td {{ padding: 8px 11px; border-bottom: 1px solid #e2e8f0; vertical-align: top; text-align: left; }}
+  th {{ background: #f0fdfa; color: #0f766e; font-weight: 700; border-bottom: 2px solid #99f6e4; }}
   tbody tr:nth-child(even) {{ background: #f8fafc; }}
+  tbody tr:last-child td {{ border-bottom: 0; }}
 </style></head><body>
 <div class="doc-header">
   <p class="doc-title">{title}</p>
   <p class="doc-meta">{meta}</p>
 </div>
+<div class="doc-body">
 {body}
+</div>
 </body></html>"""
+
+
+# Chromium print footer: attribution on the left, page numbers on the right.
+# The ``.pageNumber`` / ``.totalPages`` spans are populated by Chromium; the
+# explicit font-size is required because the template default is ~0.
+_FOOTER_TEMPLATE = (
+    '<div style="font-size:8px;width:100%;margin:0 16mm;color:#94a3b8;'
+    'display:flex;justify-content:space-between;align-items:center;'
+    'border-top:1px solid #e2e8f0;padding-top:4px;">'
+    "<span>{note}</span>"
+    '<span>第 <span class="pageNumber"></span> / <span class="totalPages"></span> 页</span>'
+    "</div>"
+)
 
 
 def build_report_html(*, title: str, meta: str, markdown_body: str) -> str:
@@ -266,7 +296,12 @@ def _configure_launch() -> dict:
 
 
 async def render_markdown_to_pdf(
-    *, markdown_body: str, out_path: str, title: str = "交付报告", meta: str = ""
+    *,
+    markdown_body: str,
+    out_path: str,
+    title: str = "交付报告",
+    meta: str = "",
+    footer_note: str = "OpenAkita 组织编排",
 ) -> str | None:
     """Render ``markdown_body`` to a PDF at ``out_path``. Returns the path or None.
 
@@ -283,17 +318,24 @@ async def render_markdown_to_pdf(
         _LOGGER.debug("pdf render skipped: playwright unavailable")
         return None
     html_doc = build_report_html(title=title, meta=meta, markdown_body=markdown_body)
+    footer_html = _FOOTER_TEMPLATE.format(note=_html.escape(footer_note or "OpenAkita 组织编排"))
     try:
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(**_configure_launch())
             try:
                 page = await browser.new_page()
                 await page.set_content(html_doc, wait_until="load")
+                # displayHeaderFooter with an empty header suppresses Chromium's
+                # default date/title banner; the footer carries attribution +
+                # page numbers. Bottom margin must leave room for the footer.
                 await page.pdf(
                     path=str(out_path),
                     format="A4",
                     print_background=True,
-                    margin={"top": "16mm", "right": "14mm", "bottom": "16mm", "left": "14mm"},
+                    display_header_footer=True,
+                    header_template="<div></div>",
+                    footer_template=footer_html,
+                    margin={"top": "16mm", "right": "14mm", "bottom": "18mm", "left": "14mm"},
                 )
                 await page.close()
             finally:

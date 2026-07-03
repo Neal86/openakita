@@ -3,7 +3,11 @@ rules and heading hierarchy so the final report PDF is presentable."""
 
 from __future__ import annotations
 
-from openakita.orgs._runtime_pdf import build_report_html, markdown_to_html
+from openakita.orgs._runtime_pdf import (
+    _FOOTER_TEMPLATE,
+    build_report_html,
+    markdown_to_html,
+)
 
 
 def test_pipe_table_renders_as_html_table() -> None:
@@ -59,3 +63,26 @@ def test_build_report_html_wraps_body_with_table_css() -> None:
     # the print stylesheet must style tables (borders/zebra) for the PDF.
     assert "border-collapse" in html
     assert "<table>" in html
+
+
+def test_report_html_uses_media_strategy_teal_style() -> None:
+    """test18: the PDF stylesheet is retitled to the media-strategy palette."""
+    html = build_report_html(title="交付报告", meta="主编 · 2026", markdown_body="# 标题\n正文")
+    # Teal primary accent (media-strategy --primary #0F766E), not the old indigo.
+    assert "#0F766E" in html
+    assert "#6366f1" not in html and "#3730a3" not in html
+    # Rounded bordered table with a teal header band + repeating header row so a
+    # table spanning a page keeps its header.
+    assert "border-radius: 10px" in html
+    assert "background: #f0fdfa" in html  # table header band
+    assert "display: table-header-group" in html  # thead repeats across pages
+    # Body is wrapped so the first heading can drop its top margin.
+    assert 'class="doc-body"' in html
+
+
+def test_footer_template_has_page_numbers_and_note() -> None:
+    """test18: the print footer carries attribution + Chromium page-number spans."""
+    footer = _FOOTER_TEMPLATE.format(note="OpenAkita 组织编排")
+    assert 'class="pageNumber"' in footer
+    assert 'class="totalPages"' in footer
+    assert "OpenAkita 组织编排" in footer
