@@ -616,6 +616,57 @@ function extractCommandResultText(
 const _DELIVERABLE_RE =
   /\.(md|markdown|txt|pdf|png|jpe?g|gif|webp|svg|mp4|mov|webm|csv|json|html?|docx?|pptx?|xlsx?|zip)$/i;
 
+// test17 item 3: only the FINAL, user-facing outputs belong in the command
+// center 交付清单; pure process files (kickoff notes, per-node drafts, project
+// scaffolding briefs, SEO/visual working notes) stay on disk / the blackboard
+// for traceability but must not clutter the receipt. This is a deterministic
+// classifier over the registered file paths (root-node marking is the ideal but
+// LLM-dependent; see report). It is intentionally conservative: when it cannot
+// tell, it KEEPS the file so a real deliverable is never hidden.
+const _PROCESS_FILE_RE =
+  /(^|[\\/_-])(kickoff|启动|project[_-]?brief|brief|draft|草稿|初稿|wip|scratch|intermediate|中间稿?|working[_-]?notes?|需求清单|需求说明)([\\/_.-]|$)/i;
+const _FINAL_PACKAGE_RE =
+  /(full[_-]?package|final[_-]?package|_package([\\/]|$)|全套|交付物?|deliverables?|成品|终稿|定稿)/i;
+
+function _isPdf(name: string): boolean {
+  return /\.pdf$/i.test(name || "");
+}
+
+/**
+ * Partition a command's registered files into user-facing deliverables. The
+ * final PDF is always kept. If the root assembled a "final package" folder, the
+ * receipt shows that package + the PDF only; otherwise every non-process file is
+ * kept. Falls back to the full list if the filter would hide everything.
+ */
+export function filterDeliverables(files: FileAttachment[]): FileAttachment[] {
+  if (!files || files.length === 0) return files || [];
+  const pathOf = (f: FileAttachment) => (f.file_path || f.filename || "").replace(/\\/g, "/");
+  const pdfs = files.filter(f => _isPdf(f.filename || pathOf(f)));
+  const pkg = files.filter(f => !_isPdf(f.filename || pathOf(f)) && _FINAL_PACKAGE_RE.test(pathOf(f)));
+  let kept: FileAttachment[];
+  if (pkg.length > 0) {
+    // A final package exists -> that + the PDF is the deliverable set.
+    kept = [...pdfs, ...pkg];
+  } else {
+    const nonProcess = files.filter(
+      f => _isPdf(f.filename || pathOf(f)) || !_PROCESS_FILE_RE.test(pathOf(f)),
+    );
+    kept = nonProcess;
+  }
+  // Never hide everything: if the filter removed all files, show them all.
+  if (kept.length === 0) return files;
+  // De-dup by path, preserve first occurrence order.
+  const seen = new Set<string>();
+  const out: FileAttachment[] = [];
+  for (const f of kept) {
+    const k = pathOf(f);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(f);
+  }
+  return out;
+}
+
 // test15: reconstruct a command's registered deliverables (md/pdf/media) from
 // the org event store, filtered to a single command_id. Used by the always-on
 // final-report listener so a LIVE completion (of a command this panel did NOT
@@ -646,7 +697,7 @@ async function fetchCommandDeliverables(
       const size = Number(isFileOut ? e?.size_bytes : e?.output_len) || undefined;
       out.push({ filename: fname, file_path: apath, file_size: size });
     }
-    return out;
+    return filterDeliverables(out);
   } catch {
     return [];
   }
@@ -1065,6 +1116,8 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
       } catch {
         /* best effort: events query failure must not break history load */
       }
+      // test17 item 3: keep only user-facing deliverables per command.
+      for (const [cid, arr] of byCmd) byCmd.set(cid, filterDeliverables(arr));
       return byCmd;
     };
 
@@ -2095,8 +2148,45 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
           out.push(f);
         }
       }
-      return out;
+      // test17 item 3: the timeline segments carry every node's intermediate
+      // write; the receipt only lists the final user-facing deliverables.
+      return filterDeliverables(out);
     }
+
+    // test17 item 4: pull the (possibly late) final-report PDF + any file the
+    // timeline missed into the finalized report bubble. Retries a couple times
+    // because ``final_report_pdf`` lands a few seconds after ``command_done``.
+    const reconcileReportDeliverables = async (cmdId: string, finalId: string) => {
+      for (const delay of [1500, 4000, 8000]) {
+        await new Promise(r => setTimeout(r, delay));
+        if (!mountedRef.current) return;
+        let latest: FileAttachment[] = [];
+        try {
+          latest = await fetchCommandDeliverables(apiBaseUrl, orgId, cmdId);
+        } catch { latest = []; }
+        if (latest.length === 0) continue;
+        let changed = false;
+        setMessages(prev => {
+          const idx = prev.findIndex(m => m.id === finalId);
+          if (idx < 0) return prev;
+          const cur = prev[idx].attachments || [];
+          const seen = new Set(cur.map(f => f.file_path || f.filename));
+          const merged = [...cur];
+          for (const f of latest) {
+            const k = f.file_path || f.filename;
+            if (k && !seen.has(k)) { seen.add(k); merged.push(f); changed = true; }
+          }
+          if (!changed) return prev;
+          // PDFs lead the receipt (the polished final report first).
+          merged.sort((a, b) => (_isPdf(a.filename) ? 0 : 1) - (_isPdf(b.filename) ? 0 : 1));
+          const next = prev.map((m, i) => (i === idx ? { ...m, attachments: merged } : m));
+          messagesRef.current = next;
+          saveToLocalStorage(convId, next);
+          return next;
+        });
+        if (changed) return; // reconciled; stop polling
+      }
+    };
 
     const finalizeResult = (content: string, files?: FileAttachment[], role: "assistant" | "system" = "assistant") => {
       const pending = _pendingCmds.get(convId);
@@ -2141,6 +2231,13 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
           messagesRef.current = next;
           return next;
         });
+        // test17 item 4: the final report PDF (``final_report_pdf``) is emitted
+        // a few seconds AFTER ``command_done``, so ``collectAllFiles`` (timeline
+        // segments) does not have it yet and the PDF was missing from the
+        // command-center receipt while the blackboard showed it. Reconcile the
+        // bubble against the persisted event store (which DOES include the PDF)
+        // shortly after finalize, and union it into the attachments by path.
+        if (cmdId) void reconcileReportDeliverables(cmdId, finalId);
       } else {
         const existing = loadFromLocalStorage(convId);
         const hasUser = existing.some(m => m.id === userMsg.id);
@@ -2465,6 +2562,17 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
       return Number.isNaN(p) ? 0 : p;
     };
     const sig = (m: ChatMsg): string => `${m.role}\u0000${(m.content || "").trim()}`;
+    // Issue 1 (order恒定): the command_id embeds its creation epoch-ms as the
+    // first numeric segment (``cmd_<ms>_<seq>_<hash>``). That is the ONLY key
+    // that is byte-for-byte identical on the live path and on every reload /
+    // fold / refresh, so ordering blocks by it makes the sequence immune to
+    // whatever timestamps /history, /activity or the ledger happen to carry.
+    const cidCreatedTs = (cid: string): number => {
+      const m = /^cmd_(\d{10,})/.exec(cid || "");
+      if (!m) return NaN;
+      const n = Number(m[1]);
+      return Number.isFinite(n) ? (n < 1e12 ? n * 1000 : n) : NaN;
+    };
 
     interface Block { cid: string; user?: ChatMsg; report?: ChatMsg; createTs: number; ledgerTs: number }
     const blocks = new Map<string, Block>();
@@ -2532,12 +2640,17 @@ export function OrgChatPanel({ orgId, nodeId, apiBaseUrl, compact, showHeader, t
 
     for (const cid of cmdOrder) {
       const b = blocks.get(cid)!;
-      // Stable creation-ordered position: the user instruction time if known,
-      // else the first orchestration event time. Finishing a command never
-      // changes this, so completed commands stay put (issue B).
-      const blockTs = Number.isFinite(b.createTs)
-        ? b.createTs
-        : (Number.isFinite(b.ledgerTs) ? b.ledgerTs : 0);
+      // Stable creation-ordered position. Prefer the timestamp EMBEDDED in the
+      // command_id (identical live and after reload -> order never changes on
+      // refresh, issue 1). Fall back to the user instruction time, then the
+      // first orchestration event time. Finishing/folding a command never
+      // changes this key, so completed commands stay put.
+      const cidTs = cidCreatedTs(cid);
+      const blockTs = Number.isFinite(cidTs)
+        ? cidTs
+        : Number.isFinite(b.createTs)
+          ? b.createTs
+          : (Number.isFinite(b.ledgerTs) ? b.ledgerTs : 0);
       const evForCmd = v2LedgerEvents.filter(e => (e.commandId || "").trim() === cid);
       const isActive = pendingCmdId === cid;
       const timeline = evForCmd.length > 0 ? (
