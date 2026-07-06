@@ -7,7 +7,7 @@ android {
         applicationId "com.openakita.mobile"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 12732
+        versionCode 12733
         versionName "1.27.26"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
