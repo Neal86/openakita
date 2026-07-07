@@ -429,13 +429,14 @@ export type ChatProgressEvent =
   | {
       type: "todo_step_updated";
       seq?: number;
+      planId?: string;
       stepId?: string;
       stepIdx?: number;
       status?: ChatTodoStep["status"];
       result?: string | null;
     }
-  | { type: "todo_completed"; seq?: number }
-  | { type: "todo_cancelled"; seq?: number };
+  | { type: "todo_completed"; seq?: number; planId?: string }
+  | { type: "todo_cancelled"; seq?: number; planId?: string };
 
 export type PlanApprovalEvent = {
   conversation_id: string;

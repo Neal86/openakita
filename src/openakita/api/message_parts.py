@@ -80,6 +80,10 @@ def normalize_progress_event(event: dict | None, *, seq: int | None = None) -> d
     if seq is not None:
         out["seq"] = seq
 
+    plan_id = event.get("planId") or event.get("plan_id")
+    if plan_id:
+        out["planId"] = str(plan_id)
+
     if event_type == "todo_created":
         plan = serialize_plan_to_chat_todo(event.get("plan"))
         if not (plan and plan.get("steps")):

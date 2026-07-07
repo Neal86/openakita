@@ -5521,6 +5521,16 @@ class ReasoningEngine:
                         # 显式置 None（policy: side-channel hint 只反映 handler
                         # 内部产生的可纠正配置问题，不污染 user-initiated 中断）。
                         _stream_hint: ConfigHint | None = None
+                        _active_plan_id_before_tool = ""
+                        if tool_name in {"update_todo_step", "complete_todo"}:
+                            try:
+                                from ..tools.handlers.plan import get_active_plan_id
+
+                                _active_plan_id_before_tool = (
+                                    get_active_plan_id(conversation_id) or ""
+                                )
+                            except Exception:
+                                _active_plan_id_before_tool = ""
                         try:
                             tool_exec_task = asyncio.create_task(
                                 self._tool_executor.execute_tool_with_policy(
@@ -5751,13 +5761,28 @@ class ReasoningEngine:
                                 }
                         elif tool_name == "update_todo_step" and isinstance(tool_args, dict):
                             step_id = tool_args.get("step_id", "")
-                            yield {
+                            _todo_step_event = {
                                 "type": "todo_step_updated",
                                 "stepId": step_id,
                                 "status": tool_args.get("status", "completed"),
                             }
+                            if _active_plan_id_before_tool:
+                                _todo_step_event["planId"] = _active_plan_id_before_tool
+                            yield _todo_step_event
                         elif tool_name == "complete_todo":
-                            yield {"type": "todo_completed"}
+                            _complete_succeeded = False
+                            if _active_plan_id_before_tool:
+                                try:
+                                    from ..tools.handlers.plan import has_active_todo
+
+                                    _complete_succeeded = not has_active_todo(conversation_id)
+                                except Exception:
+                                    _complete_succeeded = result_text.startswith("✅ 计划")
+                            if _complete_succeeded:
+                                _todo_done_event = {"type": "todo_completed"}
+                                if _active_plan_id_before_tool:
+                                    _todo_done_event["planId"] = _active_plan_id_before_tool
+                                yield _todo_done_event
 
                         _tr_entry: dict = {
                             "type": "tool_result",

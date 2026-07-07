@@ -159,6 +159,18 @@ def test_progress_event_journal_projects_latest_todo_state():
     assert todo["steps"][1]["result"] == "built"
 
 
+def test_normalize_progress_events_preserves_lifecycle_plan_id():
+    events = normalize_progress_events(
+        [
+            {"type": "todo_completed", "planId": "plan-1"},
+            {"type": "todo_cancelled", "plan_id": "plan-2"},
+        ]
+    )
+
+    assert events[0]["planId"] == "plan-1"
+    assert events[1]["planId"] == "plan-2"
+
+
 def test_build_message_parts_inlines_progress_event_journal_on_plan_part():
     events = normalize_progress_events(
         [

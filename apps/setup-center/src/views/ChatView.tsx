@@ -3421,6 +3421,40 @@ export function ChatView({
       };
       let currentPlan: ChatTodo | null = null;
       let currentProgressEvents: ChatProgressEvent[] = [];
+      const isActiveTodo = (todo?: ChatTodo | null) =>
+        !!todo && todo.status !== "completed" && todo.status !== "failed" && todo.status !== "cancelled";
+      const terminalizeTodo = (todo: ChatTodo, status: Extract<ChatTodo["status"], "completed" | "cancelled">): ChatTodo => {
+        const stepStatus = status === "cancelled" ? "cancelled" : "completed";
+        return {
+          ...todo,
+          status,
+          steps: todo.steps.map((step) =>
+            step.status === "pending" || step.status === "in_progress"
+              ? { ...step, status: stepStatus }
+              : step
+          ),
+        };
+      };
+      const eventPlanId = (event: { planId?: string; plan_id?: string }) => event.planId || event.plan_id || "";
+      const finalizeExistingTodo = (
+        status: Extract<ChatTodo["status"], "completed" | "cancelled">,
+        planId?: string,
+      ) => {
+        updateMessages((prev) => {
+          let targetIndex = -1;
+          for (let i = prev.length - 1; i >= 0; i -= 1) {
+            const todo = prev[i].todo;
+            if (!isActiveTodo(todo)) continue;
+            if (planId && todo!.id !== planId) continue;
+            targetIndex = i;
+            break;
+          }
+          if (targetIndex < 0) return prev;
+          return prev.map((m, i) =>
+            i === targetIndex && m.todo ? { ...m, todo: terminalizeTodo(m.todo, status) } : m
+          );
+        });
+      };
       let currentAsk: ChatAskUser | null = null;
       let currentAgent: string | null = null;
       let currentArtifacts: ChatArtifact[] = [];
@@ -4065,11 +4099,13 @@ export function ChatView({
               case "todo_step_updated":
                 if (currentPlan) {
                   const stepId = event.step_id || event.stepId;
+                  const planId = eventPlanId(event);
                   currentProgressEvents = [
                     ...currentProgressEvents,
                     {
                       type: "todo_step_updated",
                       seq: currentProgressEvents.length + 1,
+                      ...(planId ? { planId } : {}),
                       ...(stepId ? { stepId } : {}),
                       ...(event.stepIdx != null ? { stepIdx: event.stepIdx } : {}),
                       status: event.status as ChatTodoStep["status"],
@@ -4092,27 +4128,49 @@ export function ChatView({
                 }
                 break;
               case "todo_completed":
-                if (currentPlan) {
-                  currentProgressEvents = [
-                    ...currentProgressEvents,
-                    { type: "todo_completed", seq: currentProgressEvents.length + 1 },
-                  ];
-                  currentPlan = { ...currentPlan, status: "completed" } as ChatTodo;
-                  updateMessages((prev) => prev.map((m) =>
-                    m.id === assistantMsg.id ? { ...m, todo: { ...currentPlan! }, progressEvents: [...currentProgressEvents] } : m
-                  ));
+                {
+                  const planId = eventPlanId(event);
+                  if (currentPlan) {
+                    currentProgressEvents = [
+                      ...currentProgressEvents,
+                      {
+                        type: "todo_completed",
+                        seq: currentProgressEvents.length + 1,
+                        ...(planId ? { planId } : {}),
+                      },
+                    ];
+                    currentPlan = { ...currentPlan, status: "completed" } as ChatTodo;
+                    updateMessages((prev) => prev.map((m) =>
+                      m.id === assistantMsg.id
+                        ? { ...m, todo: { ...currentPlan! }, progressEvents: [...currentProgressEvents] }
+                        : m
+                    ));
+                  } else {
+                    finalizeExistingTodo("completed", planId);
+                  }
                 }
                 break;
               case "todo_cancelled":
-                if (currentPlan) {
-                  currentProgressEvents = [
-                    ...currentProgressEvents,
-                    { type: "todo_cancelled", seq: currentProgressEvents.length + 1 },
-                  ];
-                  currentPlan = { ...currentPlan, status: "cancelled" } as ChatTodo;
-                  updateMessages((prev) => prev.map((m) =>
-                    m.id === assistantMsg.id ? { ...m, todo: { ...currentPlan! }, progressEvents: [...currentProgressEvents] } : m
-                  ));
+                {
+                  const planId = eventPlanId(event);
+                  if (currentPlan) {
+                    currentProgressEvents = [
+                      ...currentProgressEvents,
+                      {
+                        type: "todo_cancelled",
+                        seq: currentProgressEvents.length + 1,
+                        ...(planId ? { planId } : {}),
+                      },
+                    ];
+                    currentPlan = { ...currentPlan, status: "cancelled" } as ChatTodo;
+                    updateMessages((prev) => prev.map((m) =>
+                      m.id === assistantMsg.id
+                        ? { ...m, todo: { ...currentPlan! }, progressEvents: [...currentProgressEvents] }
+                        : m
+                    ));
+                  } else {
+                    finalizeExistingTodo("cancelled", planId);
+                  }
                 }
                 break;
               case "plan_ready_for_approval":
