@@ -7,6 +7,7 @@ DELETE /api/sessions/{conversation_id}, POST /api/sessions/generate-title
 
 from __future__ import annotations
 
+import copy
 import logging
 import re
 from typing import Literal
@@ -349,6 +350,186 @@ def _history_entry(session, conversation_id: str, original_idx: int, msg: dict) 
     return entry
 
 
+_TODO_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+_TODO_CLOSING_EVENT_STATUS = {
+    "todo_completed": "completed",
+    "todo_cancelled": "cancelled",
+}
+_TODO_NON_TERMINAL_STEP_STATUSES = {"pending", "in_progress"}
+
+
+def _todo_id(todo: dict | None) -> str:
+    if not isinstance(todo, dict):
+        return ""
+    return str(todo.get("id") or "").strip()
+
+
+def _event_plan_id(event: dict) -> str:
+    return str(event.get("planId") or event.get("plan_id") or "").strip()
+
+
+def _remove_open_todo(open_order: list[str], plan_id: str) -> None:
+    try:
+        open_order.remove(plan_id)
+    except ValueError:
+        pass
+
+
+def _remember_open_todo(open_order: list[str], plan_id: str) -> None:
+    if not plan_id:
+        return
+    _remove_open_todo(open_order, plan_id)
+    open_order.append(plan_id)
+
+
+def _latest_open_todo_id(open_order: list[str], todos_by_id: dict[str, dict]) -> str:
+    while open_order:
+        plan_id = open_order[-1]
+        todo = todos_by_id.get(plan_id)
+        if isinstance(todo, dict) and todo.get("status") not in _TODO_TERMINAL_STATUSES:
+            return plan_id
+        open_order.pop()
+    return ""
+
+
+def _finalize_todo(todo: dict, status: str) -> dict:
+    out = copy.deepcopy(todo)
+    out["status"] = status
+    step_status = "cancelled" if status == "cancelled" else "completed"
+    for step in out.get("steps") or []:
+        if isinstance(step, dict) and step.get("status") in _TODO_NON_TERMINAL_STEP_STATUSES:
+            step["status"] = step_status
+    return out
+
+
+def _apply_todo_event(todo: dict, event: dict) -> dict:
+    out = copy.deepcopy(todo)
+    event_type = event.get("type")
+    if event_type == "todo_step_updated":
+        step_id = event.get("stepId")
+        step_idx = event.get("stepIdx")
+        for idx, step in enumerate(out.get("steps") or []):
+            if not isinstance(step, dict):
+                continue
+            if (step_id and step.get("id") == step_id) or (
+                isinstance(step_idx, int) and idx == step_idx
+            ):
+                if event.get("status"):
+                    step["status"] = event["status"]
+                if "result" in event:
+                    step["result"] = event.get("result")
+                break
+    elif event_type in _TODO_CLOSING_EVENT_STATUS:
+        out = _finalize_todo(out, _TODO_CLOSING_EVENT_STATUS[event_type])
+    return out
+
+
+def _project_history_todo_final_states(visible: list[tuple[int, dict]]) -> dict[str, dict]:
+    """Infer final todo snapshots across assistant messages in one history.
+
+    Old sessions can contain an in-progress todo snapshot on one assistant
+    message and a later completion-only journal on another. The per-message
+    projection cannot connect those two records, so the history endpoint does
+    this cross-message pass before hydrating the UI.
+    """
+    from openakita.api.message_parts import (
+        normalize_chat_todo,
+        normalize_progress_events,
+        project_progress_events_to_todo,
+        serialize_plan_to_chat_todo,
+    )
+
+    todos_by_id: dict[str, dict] = {}
+    finalized_by_id: dict[str, dict] = {}
+    open_order: list[str] = []
+
+    for _idx, msg in visible:
+        progress_events = normalize_progress_events(msg.get("progress_events"))
+        projected = project_progress_events_to_todo(progress_events)
+        msg_todo = projected or (normalize_chat_todo(msg.get("todo")) if msg.get("todo") else None)
+
+        message_plan_id = _todo_id(msg_todo)
+        if message_plan_id:
+            todos_by_id[message_plan_id] = copy.deepcopy(msg_todo)
+            if msg_todo.get("status") in _TODO_TERMINAL_STATUSES:
+                finalized_by_id[message_plan_id] = copy.deepcopy(msg_todo)
+                _remove_open_todo(open_order, message_plan_id)
+            else:
+                _remember_open_todo(open_order, message_plan_id)
+
+        fallback_plan_id = message_plan_id or _latest_open_todo_id(open_order, todos_by_id)
+        terminal_targets: set[str] = set()
+
+        for event in progress_events:
+            event_type = event.get("type")
+            if event_type == "todo_created":
+                created = serialize_plan_to_chat_todo(event.get("plan"))
+                created_id = _todo_id(created)
+                if created_id:
+                    todos_by_id[created_id] = copy.deepcopy(created)
+                    _remember_open_todo(open_order, created_id)
+                    fallback_plan_id = created_id
+                continue
+
+            target_id = _event_plan_id(event) or fallback_plan_id
+            if not target_id:
+                target_id = _latest_open_todo_id(open_order, todos_by_id)
+            if not target_id or target_id not in todos_by_id:
+                continue
+
+            todos_by_id[target_id] = _apply_todo_event(todos_by_id[target_id], event)
+            if event_type in _TODO_CLOSING_EVENT_STATUS:
+                terminal_targets.add(target_id)
+
+        for target_id in terminal_targets:
+            finalized = todos_by_id.get(target_id)
+            if finalized:
+                finalized_by_id[target_id] = copy.deepcopy(finalized)
+            _remove_open_todo(open_order, target_id)
+
+    return finalized_by_id
+
+
+def _patch_entry_todo(entry: dict, todo: dict) -> None:
+    entry["todo"] = copy.deepcopy(todo)
+    parts = entry.get("parts")
+    if not isinstance(parts, list):
+        return
+    patched_parts: list[dict] = []
+    target_id = _todo_id(todo)
+    for part in parts:
+        if (
+            isinstance(part, dict)
+            and part.get("kind") == "plan"
+            and _todo_id(part.get("todo")) == target_id
+        ):
+            next_part = dict(part)
+            next_part["todo"] = copy.deepcopy(todo)
+            patched_parts.append(next_part)
+        else:
+            patched_parts.append(part)
+    entry["parts"] = patched_parts
+
+
+def _reconcile_history_todo_lifecycle(
+    entries: list[dict],
+    visible: list[tuple[int, dict]],
+) -> list[dict]:
+    finalized_by_id = _project_history_todo_final_states(visible)
+    if not finalized_by_id:
+        return entries
+
+    for entry in entries:
+        todo = entry.get("todo")
+        plan_id = _todo_id(todo)
+        finalized = finalized_by_id.get(plan_id)
+        if not (plan_id and finalized):
+            continue
+        if isinstance(todo, dict) and todo.get("status") != finalized.get("status"):
+            _patch_entry_todo(entry, finalized)
+    return entries
+
+
 @router.get("/api/sessions")
 async def list_sessions(request: Request, channel: str = "desktop"):
     """List sessions for a given channel (default: desktop).
@@ -507,12 +688,14 @@ async def get_session_history(
             "has_more_before": False,
         }
 
-    visible = _visible_history_messages(session)
+    all_visible = _visible_history_messages(session)
+    visible = all_visible
     if before is not None:
         visible = [(idx, msg) for idx, msg in visible if idx < before]
 
     page = visible[-limit:]
     result = [_history_entry(session, conversation_id, idx, msg) for idx, msg in page]
+    result = _reconcile_history_todo_lifecycle(result, all_visible)
     start_index = page[0][0] if page else None
     end_index = page[-1][0] if page else None
 
@@ -535,7 +718,7 @@ async def get_session_history(
 
     return {
         "messages": result,
-        "total": len(_visible_history_messages(session)),
+        "total": len(all_visible),
         "start_index": start_index,
         "end_index": end_index,
         "has_more_before": bool(page and any(idx < page[0][0] for idx, _ in visible)),

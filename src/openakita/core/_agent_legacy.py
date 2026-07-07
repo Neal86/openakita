@@ -6634,9 +6634,19 @@ class Agent:
         # === 停止指令检测 ===
         message_lower = message.strip().lower()
         if message_lower in self.STOP_COMMANDS or message.strip() in self.STOP_COMMANDS:
+            _cancelled_plan_id = ""
+            try:
+                from ..tools.handlers.plan import get_active_plan_id
+
+                _cancelled_plan_id = get_active_plan_id(session_id) or ""
+            except Exception:
+                _cancelled_plan_id = ""
             self.cancel_current_task(f"用户发送停止指令: {message}", session_id=session_id)
             logger.info(f"[StopTask] User requested to stop (session={session_id}): {message}")
-            yield {"type": "todo_cancelled"}
+            _todo_cancelled_event = {"type": "todo_cancelled"}
+            if _cancelled_plan_id:
+                _todo_cancelled_event["planId"] = _cancelled_plan_id
+            yield _todo_cancelled_event
             yield {
                 "type": "text_delta",
                 "content": "✅ 好的，已停止当前任务。有什么其他需要帮助的吗？",
