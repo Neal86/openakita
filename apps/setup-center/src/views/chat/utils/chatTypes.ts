@@ -268,9 +268,11 @@ export type SubAgentEntry = {
 
 /** Sub-agent task progress card data */
 export type SubAgentTask = {
+  run_id?: string;
   agent_id: string;
   profile_id: string;
   session_id: string;
+  chat_id?: string;
   name: string;
   icon: string;
   status: "starting" | "running" | "completed" | "error" | "timeout" | "cancelled";
@@ -282,6 +284,12 @@ export type SubAgentTask = {
   started_at: number;
   tokens_used?: number;
   current_tool_summary?: string;
+  reason?: string;
+  stream_text?: string;
+  stream_preview?: string;
+  stream_events?: number;
+  chain?: ChainGroup[];
+  last_stream_event_at?: number;
   queue_count?: number;
   // P5.1: agent_id of the agent that delegated this task (root tasks omit it).
   // Inferred client-side from agent_handoff / delegate_to_agent / delegate_parallel

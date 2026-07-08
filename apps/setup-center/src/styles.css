@@ -5568,6 +5568,62 @@ button.btnApplyRestart:hover {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
 }
+.sacStreamOutput {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line, rgba(255,255,255,0.06));
+}
+.sacStreamLabel {
+  margin-bottom: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg, #e2e8f0);
+  opacity: 0.55;
+}
+.sacStreamText {
+  max-height: 92px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--fg, #e2e8f0);
+  opacity: 0.82;
+}
+.sacStreamList {
+  display: grid;
+  gap: 4px;
+  max-height: 148px;
+  overflow-y: auto;
+}
+.sacStreamItem {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 6px;
+  align-items: start;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg, #e2e8f0);
+  opacity: 0.72;
+}
+.sacStreamItem > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sacStreamKind {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+  font-size: 10px;
+  color: var(--brand);
+  opacity: 0.72;
+}
+.sacStreamThinking {
+  opacity: 0.62;
+}
+.sacStreamError {
+  color: #f87171;
+}
 
 /* Light theme overrides for sub-agent cards */
 :root[data-theme="light"] .sacCard,
@@ -5612,6 +5668,14 @@ button.btnApplyRestart:hover {
 :root[data-theme="light"] .sacToolBlink,
 [data-theme="light"] .sacToolBlink {
   background: #2563eb;
+}
+:root[data-theme="light"] .sacStreamOutput,
+[data-theme="light"] .sacStreamOutput {
+  border-top-color: rgba(0,0,0,0.08);
+}
+:root[data-theme="light"] .sacStreamError,
+[data-theme="light"] .sacStreamError {
+  color: #dc2626;
 }
 
 /* ──────────────────────────────────────────────────

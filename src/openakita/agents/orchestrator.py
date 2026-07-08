@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import inspect
 import json
 import logging
 import re
@@ -76,6 +77,41 @@ _VALID_TRANSITIONS: dict[SubAgentStatus, frozenset[SubAgentStatus]] = {
 MAX_DELEGATION_DEPTH = 5
 CHECK_INTERVAL = 3.0  # how often to poll progress (matches frontend polling)
 
+_SUB_STREAM_EVENT_TYPES = frozenset(
+    {
+        "iteration_start",
+        "thinking_start",
+        "thinking_delta",
+        "thinking_end",
+        "chain_text",
+        "text_delta",
+        "text_replace",
+        "tool_call_start",
+        "tool_call_end",
+        "config_hint",
+        "source_used",
+        "mcp_call",
+        "artifact",
+        "context_compressed",
+        "security_confirm",
+        "ask_user",
+        "death_switch",
+        "budget_warning",
+        "budget_exceeded",
+        "task_checkpoint",
+        "todo_created",
+        "todo_step_updated",
+        "todo_completed",
+        "todo_cancelled",
+        "done",
+        "error",
+    }
+)
+
+
+class _SubAgentStreamingUnavailable(TypeError):
+    """Raised when an agent does not expose the streaming chat contract."""
+
 # Defaults — overridden at runtime by settings when available.
 # 默认全部 0 = 不做"agent 自检自杀"，对齐 Claude Code 哲学；卡死由用户主动停止。
 _DEFAULT_IDLE_TIMEOUT = 0  # 0 = 禁用无进展超时检测
@@ -115,6 +151,97 @@ def _delegation_notice_title(exit_reason: str) -> str:
     if exit_reason in {"error", "timeout", "cancelled", "loop_terminated", "max_turns"}:
         return "任务结束通知"
     return "任务完成通知"
+
+
+async def _broadcast_sub_stream_event(meta: dict[str, Any], event: dict[str, Any]) -> None:
+    """Forward one child-agent stream event to desktop/web subscribers."""
+    if not isinstance(event, dict):
+        return
+    event_type = str(event.get("type") or "")
+    if event_type not in _SUB_STREAM_EVENT_TYPES:
+        return
+
+    payload = {
+        "conversation_id": meta.get("chat_id") or meta.get("session_id") or "",
+        "session_id": meta.get("session_id") or "",
+        "chat_id": meta.get("chat_id") or meta.get("session_id") or "",
+        "run_id": meta.get("run_id") or "",
+        "agent_id": meta.get("agent_id") or "",
+        "profile_id": meta.get("profile_id") or meta.get("agent_id") or "",
+        "parent_agent_id": meta.get("parent_agent_id") or "",
+        "name": meta.get("name") or "",
+        "icon": meta.get("icon") or "",
+        "reason": meta.get("reason") or "",
+        "event_type": event_type,
+        "event": dict(event),
+        "ts": time.time(),
+    }
+
+    try:
+        from openakita.api.routes.websocket import broadcast_event
+
+        await broadcast_event("agents:sub_stream", payload)
+        if event_type == "security_confirm":
+            promoted_confirm = dict(event)
+            promoted_confirm["conversation_id"] = payload["chat_id"] or payload["session_id"]
+            if event.get("conversation_id") and event.get("conversation_id") != promoted_confirm[
+                "conversation_id"
+            ]:
+                promoted_confirm["backend_conversation_id"] = event.get("conversation_id")
+            await broadcast_event(
+                "security_confirm_promoted",
+                {
+                    "confirm_id": promoted_confirm.get("confirm_id")
+                    or promoted_confirm.get("id")
+                    or "",
+                    "session_id": promoted_confirm.get("conversation_id") or payload["chat_id"],
+                    "backend_session_id": event.get("conversation_id") or payload["session_id"],
+                    "confirm": promoted_confirm,
+                },
+            )
+    except Exception:
+        logger.debug("[Orchestrator] failed to broadcast sub-agent stream event", exc_info=True)
+
+
+async def _call_agent_streaming(
+    agent: Any,
+    session: Any,
+    message: str,
+    *,
+    gateway: Any,
+    mode: str,
+    stream_meta: dict[str, Any],
+) -> str:
+    """Consume a sub-agent stream, forwarding events while preserving final text."""
+    stream_method = getattr(agent, "chat_with_session_stream", None)
+    if not inspect.isasyncgenfunction(stream_method):
+        raise _SubAgentStreamingUnavailable(
+            "agent.chat_with_session_stream is not an async generator function"
+        )
+
+    reply_text = ""
+    session_messages = session.context.get_messages()
+    async for event in stream_method(
+        message=message,
+        session_messages=session_messages,
+        session_id=session.id,
+        session=session,
+        gateway=gateway,
+        mode=mode,
+    ):
+        if not isinstance(event, dict):
+            continue
+        event_type = event.get("type")
+        if event_type == "done" and event.get("content"):
+            reply_text = event.get("content", "") or reply_text
+        elif event_type == "text_delta":
+            reply_text += event.get("content", "")
+        elif event_type == "text_replace":
+            reply_text = event.get("content", "") or ""
+        elif event_type == "ask_user" and not reply_text:
+            reply_text = event.get("question", "") or ""
+        await _broadcast_sub_stream_event(stream_meta, event)
+    return reply_text
 
 
 @dataclass
@@ -506,6 +633,7 @@ class AgentOrchestrator:
                 depth=depth,
                 isolated_browser=isolated_browser,
                 pre_state_key=pre_state_key,
+                parent_agent_id=from_agent or "",
             )
             elapsed_ms = (time.monotonic() - start) * 1000
             health.successful += 1
@@ -632,6 +760,7 @@ class AgentOrchestrator:
         depth: int = 0,
         isolated_browser: Any = None,
         pre_state_key: str | None = None,
+        parent_agent_id: str = "",
     ) -> str:
         """Run an agent with progress-aware timeout instead of a hard wall-clock limit.
 
@@ -684,20 +813,11 @@ class AgentOrchestrator:
             agent.pw_tools = PlaywrightTools(isolated_browser)
             agent.bu_runner = BrowserUseRunner(isolated_browser)
 
-        gw = self._gateway if pass_gateway else None
-
-        task = asyncio.create_task(
-            self._call_agent(agent, session, message, gateway=gw, is_sub_agent=(depth > 0))
-        )
-
-        start = time.monotonic()
-        last_fingerprint: tuple[int, str, int] = (-1, "", 0)
-        last_progress_time = start
-
         state_key = pre_state_key or f"{session.id}:{agent_profile_id}:{uuid.uuid4().hex[:8]}"
         existing_state = self._sub_agent_states.get(state_key, {})
         self._sub_agent_states[state_key] = {
             **existing_state,
+            "run_id": state_key,
             "agent_id": agent_profile_id,
             "profile_id": profile.id,
             "session_id": session.id,
@@ -711,7 +831,41 @@ class AgentOrchestrator:
             "started_at": time.time(),
             "name": existing_state.get("name") or profile.get_display_name(),
             "icon": existing_state.get("icon") or profile.icon or "🤖",
+            "parent_agent_id": existing_state.get("parent_agent_id")
+            or existing_state.get("from_agent")
+            or parent_agent_id,
+            "from_agent": existing_state.get("from_agent") or parent_agent_id,
+            "reason": existing_state.get("reason", ""),
         }
+        stream_meta = {
+            "run_id": state_key,
+            "agent_id": agent_profile_id,
+            "profile_id": profile.id,
+            "session_id": session.id,
+            "chat_id": getattr(session, "chat_id", session.id),
+            "name": self._sub_agent_states[state_key]["name"],
+            "icon": self._sub_agent_states[state_key]["icon"],
+            "parent_agent_id": self._sub_agent_states[state_key].get("parent_agent_id", ""),
+            "reason": self._sub_agent_states[state_key].get("reason", ""),
+        }
+        self._broadcast_sub_state_change(state_key, "starting", self._sub_agent_states[state_key])
+
+        gw = self._gateway if pass_gateway else None
+
+        task = asyncio.create_task(
+            self._call_agent(
+                agent,
+                session,
+                message,
+                gateway=gw,
+                is_sub_agent=(depth > 0),
+                stream_meta=stream_meta if depth > 0 else None,
+            )
+        )
+
+        start = time.monotonic()
+        last_fingerprint: tuple[int, str, int] = (-1, "", 0)
+        last_progress_time = start
 
         try:
             while not task.done():
@@ -885,13 +1039,17 @@ class AgentOrchestrator:
                 return
 
             payload: dict[str, Any] = {
+                "run_id": state_entry.get("run_id", key),
                 "session_id": state_entry.get("session_id", ""),
                 "chat_id": state_entry.get("chat_id", ""),
                 "agent_id": state_entry.get("agent_id", ""),
                 "profile_id": state_entry.get("profile_id", ""),
+                "parent_agent_id": state_entry.get("parent_agent_id", "")
+                or state_entry.get("from_agent", ""),
                 "name": state_entry.get("name", ""),
                 "icon": state_entry.get("icon", ""),
                 "status": status,
+                "reason": state_entry.get("reason", ""),
                 "iteration": state_entry.get("iteration", 0),
                 "tools_executed": state_entry.get("tools_executed", []),
                 "tools_total": state_entry.get("tools_total", 0),
@@ -1010,6 +1168,7 @@ class AgentOrchestrator:
         *,
         gateway: Any = None,
         is_sub_agent: bool = True,
+        stream_meta: dict[str, Any] | None = None,
     ) -> str:
         """Thin wrapper around agent.chat_with_session for use as a task target.
 
@@ -1058,15 +1217,36 @@ class AgentOrchestrator:
             _start = time.time()
             exit_reason = "completed"
             try:
-                session_messages = session.context.get_messages()
-                result = await agent.chat_with_session(
-                    message=message,
-                    session_messages=session_messages,
-                    session_id=session.id,
-                    session=session,
-                    gateway=gateway,
-                    mode=_mode,
-                )
+                if is_sub_agent and stream_meta:
+                    try:
+                        result = await _call_agent_streaming(
+                            agent,
+                            session,
+                            message,
+                            gateway=gateway,
+                            mode=_mode,
+                            stream_meta=stream_meta,
+                        )
+                    except _SubAgentStreamingUnavailable:
+                        session_messages = session.context.get_messages()
+                        result = await agent.chat_with_session(
+                            message=message,
+                            session_messages=session_messages,
+                            session_id=session.id,
+                            session=session,
+                            gateway=gateway,
+                            mode=_mode,
+                        )
+                else:
+                    session_messages = session.context.get_messages()
+                    result = await agent.chat_with_session(
+                        message=message,
+                        session_messages=session_messages,
+                        session_id=session.id,
+                        session=session,
+                        gateway=gateway,
+                        mode=_mode,
+                    )
                 # Persist sub-agent work record into parent session
                 try:
                     _persist_sub_agent_record(agent, session, message, result, _start)
@@ -1312,6 +1492,7 @@ class AgentOrchestrator:
                 profile_name = p.get_display_name()
                 profile_icon = p.icon or "🤖"
         self._sub_agent_states[state_key] = {
+            "run_id": state_key,
             "agent_id": to_agent,
             "profile_id": to_agent,
             "session_id": session.id,
@@ -1324,8 +1505,10 @@ class AgentOrchestrator:
             "tools_total": 0,
             "elapsed_s": 0,
             "from_agent": from_agent,
+            "parent_agent_id": from_agent,
             "reason": reason or "",
         }
+        self._broadcast_sub_state_change(state_key, "starting", self._sub_agent_states[state_key])
 
         # Emit handoff event for SSE stream (session.context.handoff_events)
         if session and hasattr(session, "context") and hasattr(session.context, "handoff_events"):

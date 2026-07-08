@@ -112,6 +112,369 @@ function _asFiniteCount(value: unknown): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 }
 
+type SubAgentStreamPayload = {
+  conversation_id?: string;
+  session_id?: string;
+  chat_id?: string;
+  run_id?: string;
+  agent_id?: string;
+  profile_id?: string;
+  parent_agent_id?: string;
+  name?: string;
+  icon?: string;
+  reason?: string;
+  event?: StreamEvent & Record<string, unknown>;
+};
+
+const SUB_AGENT_STREAM_TEXT_CAP = 4000;
+
+function _subAgentTaskKey(task: Pick<SubAgentTask, "agent_id" | "run_id">): string {
+  return task.run_id || task.agent_id;
+}
+
+function _sameSubAgentTask(
+  a: Pick<SubAgentTask, "agent_id" | "run_id">,
+  b: Pick<SubAgentTask, "agent_id" | "run_id">,
+): boolean {
+  const ak = _subAgentTaskKey(a);
+  const bk = _subAgentTaskKey(b);
+  return !!ak && !!bk && ak === bk;
+}
+
+function _mergeSubAgentTask(existing: SubAgentTask | undefined, patch: SubAgentTask): SubAgentTask {
+  if (!existing) return patch;
+  return {
+    ...existing,
+    ...patch,
+    chain: patch.chain ?? existing.chain,
+    stream_text: patch.stream_text ?? existing.stream_text,
+    stream_preview: patch.stream_preview ?? existing.stream_preview,
+    stream_events: patch.stream_events ?? existing.stream_events,
+    last_stream_event_at: patch.last_stream_event_at ?? existing.last_stream_event_at,
+  };
+}
+
+function _mergeSubAgentTaskPatch(prev: SubAgentTask[], patch: SubAgentTask): SubAgentTask[] {
+  const idx = prev.findIndex((t) => _sameSubAgentTask(t, patch));
+  if (idx < 0) return [...prev, patch];
+  return prev.map((t, i) => i === idx ? _mergeSubAgentTask(t, patch) : t);
+}
+
+function _mergeSubAgentTaskList(existing: SubAgentTask[], incoming: SubAgentTask[]): SubAgentTask[] {
+  let merged = [...existing];
+  for (const task of incoming) {
+    merged = _mergeSubAgentTaskPatch(merged, task);
+  }
+  return merged;
+}
+
+function _subAgentToolCallsFromEntries(entries: ChainEntry[]): ChainToolCall[] {
+  const order: string[] = [];
+  const byId = new Map<string, ChainToolCall>();
+  for (const entry of entries) {
+    if (entry.kind === "tool_start") {
+      const key = entry.toolId || `${entry.tool}-${order.length}`;
+      if (!byId.has(key)) order.push(key);
+      byId.set(key, {
+        toolId: entry.toolId,
+        tool: entry.tool,
+        args: entry.args,
+        status: entry.status === "done" || entry.status === "error" ? entry.status : "running",
+        description: entry.description,
+      });
+    } else if (entry.kind === "tool_end") {
+      const key = entry.toolId || order[order.length - 1];
+      const prev = key ? byId.get(key) : undefined;
+      if (prev) {
+        prev.result = entry.result;
+        prev.status = entry.status;
+      }
+    }
+  }
+  return order.map((key) => byId.get(key)).filter((value): value is ChainToolCall => Boolean(value));
+}
+
+function _withSubAgentGroup(
+  groups: ChainGroup[],
+  iteration?: number,
+): { groups: ChainGroup[]; current: ChainGroup } {
+  if (typeof iteration === "number") {
+    const newGroup: ChainGroup = {
+      iteration,
+      entries: [],
+      toolCalls: [],
+      hasThinking: false,
+      collapsed: false,
+    };
+    return { groups: [...groups, newGroup], current: newGroup };
+  }
+  if (groups.length > 0) return { groups, current: groups[groups.length - 1] };
+  const initial: ChainGroup = {
+    iteration: 1,
+    entries: [],
+    toolCalls: [],
+    hasThinking: false,
+    collapsed: false,
+  };
+  return { groups: [initial], current: initial };
+}
+
+function _replaceLastSubAgentGroup(groups: ChainGroup[], group: ChainGroup): ChainGroup[] {
+  if (!groups.length) return [group];
+  return groups.map((item, index) => index === groups.length - 1 ? group : item);
+}
+
+function _appendSubAgentText(current: string | undefined, delta: string): string {
+  const next = `${current || ""}${delta}`;
+  return next.length > SUB_AGENT_STREAM_TEXT_CAP ? next.slice(-SUB_AGENT_STREAM_TEXT_CAP) : next;
+}
+
+function _safeConfigHintErrorCode(value: unknown): "missing_credential" | "auth_failed" | "rate_limited" | "network_unreachable" | "content_filter" | "unknown" {
+  return value === "missing_credential" ||
+    value === "auth_failed" ||
+    value === "rate_limited" ||
+    value === "network_unreachable" ||
+    value === "content_filter" ||
+    value === "unknown"
+    ? value
+    : "unknown";
+}
+
+function _applySubAgentStreamEvent(
+  task: SubAgentTask,
+  event: StreamEvent & Record<string, unknown>,
+): SubAgentTask {
+  const now = Date.now();
+  let next: SubAgentTask = {
+    ...task,
+    stream_events: (task.stream_events || 0) + 1,
+    last_stream_event_at: now,
+  };
+  let groups = (task.chain ?? []).map((group) => ({
+    ...group,
+    entries: [...group.entries],
+    toolCalls: [...group.toolCalls],
+  }));
+
+  const setCurrentGroup = (group: ChainGroup) => {
+    group.toolCalls = _subAgentToolCallsFromEntries(group.entries);
+    groups = _replaceLastSubAgentGroup(groups, group);
+    next = { ...next, chain: groups };
+  };
+
+  const appendProcessText = (content: string, icon?: string) => {
+    const text = content.trim();
+    if (!text) return;
+    const created = _withSubAgentGroup(groups);
+    groups = created.groups;
+    setCurrentGroup({
+      ...created.current,
+      entries: [
+        ...created.current.entries,
+        { kind: "text", content: text, ...(icon ? { icon } : {}) },
+      ],
+    });
+  };
+
+  switch (event.type) {
+    case "iteration_start": {
+      const created = _withSubAgentGroup(groups, Number(event.iteration || groups.length + 1));
+      groups = created.groups;
+      next = { ...next, iteration: Number(event.iteration || groups.length), chain: groups };
+      break;
+    }
+    case "thinking_start": {
+      const created = _withSubAgentGroup(groups);
+      groups = created.groups;
+      next = { ...next, chain: groups };
+      break;
+    }
+    case "thinking_delta": {
+      const created = _withSubAgentGroup(groups);
+      groups = created.groups;
+      const group = created.current;
+      const entries = [...group.entries];
+      const last = entries[entries.length - 1];
+      if (last?.kind === "thinking") {
+        entries[entries.length - 1] = { kind: "thinking", content: _appendSubAgentText(last.content, event.content || "") };
+      } else {
+        entries.push({ kind: "thinking", content: String(event.content || "") });
+      }
+      setCurrentGroup({ ...group, entries, hasThinking: true });
+      break;
+    }
+    case "thinking_end": {
+      if (groups.length > 0) {
+        const group = groups[groups.length - 1];
+        setCurrentGroup({
+          ...group,
+          durationMs: typeof event.duration_ms === "number" ? event.duration_ms : group.durationMs,
+          hasThinking: Boolean(event.has_thinking ?? group.hasThinking),
+        });
+      }
+      break;
+    }
+    case "chain_text": {
+      appendProcessText(String(event.content || ""), event.icon ? String(event.icon) : undefined);
+      break;
+    }
+    case "text_delta": {
+      const text = _appendSubAgentText(next.stream_text, event.content || "");
+      next = { ...next, stream_text: text, stream_preview: text.slice(-300) };
+      break;
+    }
+    case "text_replace": {
+      const text = String(event.content || "").slice(-SUB_AGENT_STREAM_TEXT_CAP);
+      next = { ...next, stream_text: text, stream_preview: text.slice(-300) };
+      break;
+    }
+    case "tool_call_start": {
+      const toolName = String(event.tool_name || event.tool || "");
+      const toolId = String(event.call_id || event.id || `${toolName}-${now}`);
+      const args = event.args && typeof event.args === "object" ? event.args as Record<string, unknown> : {};
+      const description = String(event.friendly_message || formatToolDescription(toolName, args));
+      const created = _withSubAgentGroup(groups);
+      groups = created.groups;
+      setCurrentGroup({
+        ...created.current,
+        entries: [
+          ...created.current.entries,
+          { kind: "tool_start", toolId, tool: toolName, args, description, status: "running" },
+        ],
+      });
+      next = {
+        ...next,
+        current_tool_summary: description || toolName,
+        tools_executed: [...(next.tools_executed || []), toolName].slice(-20),
+        tools_total: Math.max((next.tools_total || 0) + 1, next.tools_total || 0),
+      };
+      break;
+    }
+    case "tool_call_end": {
+      const toolName = String(event.tool_name || event.tool || "");
+      const toolId = String(event.call_id || event.id || "");
+      const result = String(event.result_summary || event.result || "").slice(0, 500);
+      const created = _withSubAgentGroup(groups);
+      groups = created.groups;
+      const status: "error" | "done" = event.is_error ? "error" : "done";
+      const entries = created.current.entries.map((entry) =>
+        entry.kind === "tool_start" && (!toolId || entry.toolId === toolId)
+          ? { ...entry, status }
+          : entry,
+      );
+      setCurrentGroup({
+        ...created.current,
+        entries: [
+          ...entries,
+          { kind: "tool_end", toolId, tool: toolName, result, status },
+        ],
+      });
+      next = { ...next, current_tool_summary: result || toolName };
+      break;
+    }
+    case "config_hint": {
+      const created = _withSubAgentGroup(groups);
+      groups = created.groups;
+      setCurrentGroup({
+        ...created.current,
+        entries: [
+          ...created.current.entries,
+          {
+            kind: "config_hint",
+            toolId: String(event.tool_use_id || ""),
+            hint: {
+              scope: String(event.scope || ""),
+              error_code: _safeConfigHintErrorCode(event.error_code),
+              title: String(event.title || ""),
+              ...(event.message ? { message: String(event.message) } : {}),
+              ...(Array.isArray(event.actions) ? { actions: event.actions as Record<string, unknown>[] } : {}),
+            },
+          },
+        ],
+      });
+      break;
+    }
+    case "context_compressed": {
+      const created = _withSubAgentGroup(groups);
+      groups = created.groups;
+      setCurrentGroup({
+        ...created.current,
+        entries: [
+          ...created.current.entries,
+          {
+            kind: "compressed",
+            beforeTokens: Number(event.before_tokens || 0),
+            afterTokens: Number(event.after_tokens || 0),
+          },
+        ],
+      });
+      break;
+    }
+    case "source_used": {
+      const label = String(event.hostname || event.final_url || event.requested_url || "");
+      const suffix = event.from_cache ? " (cache)" : "";
+      appendProcessText(`来源 ${label}${suffix}`, "src");
+      break;
+    }
+    case "mcp_call": {
+      const target = `${String(event.server || "")}/${String(event.tool || "")}`.replace(/^\/|\/$/g, "");
+      const status = String(event.status || "");
+      const err = String(event.error || "");
+      appendProcessText(`MCP ${target}${status ? `: ${status}` : ""}${err ? ` - ${err}` : ""}`, "mcp");
+      break;
+    }
+    case "artifact": {
+      const label = String(event.name || event.path || event.file_url || "");
+      appendProcessText(`生成文件 ${label}`, "file");
+      break;
+    }
+    case "security_confirm": {
+      appendProcessText(`等待安全确认: ${String(event.tool || event.confirm_id || "")}`, "sec");
+      break;
+    }
+    case "budget_warning":
+      appendProcessText(String(event.message || event.level || "任务预算接近限制"), "bud");
+      break;
+    case "budget_exceeded":
+      appendProcessText(String(event.message || "任务预算已用尽"), "bud");
+      break;
+    case "task_checkpoint":
+      appendProcessText(String(event.summary || event.next_step_hint || "已保存任务检查点"), "chk");
+      break;
+    case "todo_created": {
+      const plan = _asRecord(event.plan);
+      appendProcessText(String(plan.title || plan.summary || "已创建待办计划"), "todo");
+      break;
+    }
+    case "todo_step_updated":
+      appendProcessText(String(event.result || event.status || "待办步骤已更新"), "todo");
+      break;
+    case "todo_completed":
+      appendProcessText("待办计划已完成", "todo");
+      break;
+    case "todo_cancelled":
+      appendProcessText("待办计划已取消", "todo");
+      break;
+    case "death_switch":
+      appendProcessText(String(event.reason || "自保护状态已变化"), "sec");
+      break;
+    case "ask_user":
+      appendProcessText(`等待用户输入: ${String(event.question || "")}`, "ask");
+      next = { ...next, current_tool_summary: String(event.question || "") };
+      break;
+    case "error":
+      appendProcessText(String(event.message || "子 Agent 出错"), "err");
+      next = { ...next, status: "error", current_tool_summary: String(event.message || "") };
+      break;
+    case "done":
+      next = { ...next, current_tool_summary: String(event.reason || "") || next.current_tool_summary };
+      break;
+    default:
+      break;
+  }
+  return next;
+}
+
 function _hasOwn(record: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(record, key);
 }
@@ -724,6 +1087,10 @@ export function ChatView({
   const [lightbox, setLightbox] = useState<{ url: string; downloadUrl: string; name: string } | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<{ message: string; onConfirm: () => void } | null>(null);
   const [securityConfirm, setSecurityConfirm] = useState<SecurityConfirmData | null>(null);
+  const securityConfirmRef = useRef<SecurityConfirmData | null>(null);
+  useEffect(() => {
+    securityConfirmRef.current = securityConfirm;
+  }, [securityConfirm]);
   // Backend-owned queued count from UIConfirmBus presentation state. The
   // frontend does not keep its own queue or decide RiskGate priority.
   const [securityQueueLen, setSecurityQueueLen] = useState(0);
@@ -2150,11 +2517,16 @@ export function ChatView({
       if (event !== "confirm_revoked") return;
       const convId = String(data.session_id || "");
       const activeConvId = activeConvIdRef.current || "";
-      if (convId && activeConvId && convId !== activeConvId) return;
       const confirmId = String(data.confirm_id || "");
+      const matchedCurrent = Boolean(
+        confirmId && securityConfirmRef.current?.toolId === confirmId,
+      );
       setSecurityConfirm((prev) => (
-        prev && prev.toolId === confirmId ? null : prev
+        prev && prev.toolId === confirmId
+          ? null
+          : prev
       ));
+      if (!matchedCurrent && convId && activeConvId && convId !== activeConvId) return;
       setSecurityQueueLen(_asFiniteCount(data.queued_count));
     });
   }, []);
@@ -2183,14 +2555,57 @@ export function ChatView({
         ? { ...patch, parent_agent_id: patch.parent_agent_id || inferredParent }
         : patch;
 
-      const idx = ctx.subAgentTasks.findIndex((t) => t.agent_id === enrichedPatch.agent_id);
-      if (idx >= 0) {
-        ctx.subAgentTasks = ctx.subAgentTasks.map((t, i) =>
-          i === idx ? { ...t, ...enrichedPatch } : t,
-        );
-      } else if (enrichedPatch.status === "starting" || enrichedPatch.status === "running") {
-        ctx.subAgentTasks = [...ctx.subAgentTasks, enrichedPatch];
+      if (enrichedPatch.status === "starting" || enrichedPatch.status === "running") {
+        ctx.subAgentTasks = _mergeSubAgentTaskPatch(ctx.subAgentTasks, enrichedPatch);
+      } else {
+        const idx = ctx.subAgentTasks.findIndex((t) => _sameSubAgentTask(t, enrichedPatch));
+        if (idx >= 0) {
+          ctx.subAgentTasks = _mergeSubAgentTaskPatch(ctx.subAgentTasks, enrichedPatch);
+        }
       }
+      if (activeConvIdRef.current === convId) {
+        setDisplaySubAgentTasks([...ctx.subAgentTasks]);
+      }
+    });
+  }, []);
+
+  // ── Sub-agent detailed real-time stream via WebSocket ──
+  useEffect(() => {
+    return onWsEvent((event, raw) => {
+      if (event !== "agents:sub_stream") return;
+      const payload = raw as SubAgentStreamPayload | null;
+      if (!payload?.agent_id || !payload.event) return;
+
+      const convId = activeConvIdRef.current;
+      if (!convId) return;
+      const chatId = String(payload.chat_id || payload.conversation_id || payload.session_id || "");
+      if (chatId && chatId !== convId) return;
+
+      const ctx = streamContexts.current.get(convId);
+      if (!ctx) return;
+
+      const baseTask: SubAgentTask = {
+        run_id: payload.run_id || payload.agent_id,
+        agent_id: payload.agent_id,
+        profile_id: payload.profile_id || payload.agent_id,
+        session_id: payload.session_id || chatId || convId,
+        chat_id: chatId || convId,
+        name: payload.name || payload.agent_id,
+        icon: payload.icon || "🤖",
+        status: "running",
+        iteration: 0,
+        tools_executed: [],
+        tools_total: 0,
+        elapsed_s: 0,
+        last_progress_s: 0,
+        started_at: Date.now() / 1000,
+        parent_agent_id: payload.parent_agent_id || undefined,
+        reason: payload.reason || undefined,
+      } as SubAgentTask;
+      const existing = ctx.subAgentTasks.find((t) => _sameSubAgentTask(t, baseTask));
+      const mergedBase = _mergeSubAgentTask(existing, baseTask);
+      const patched = _applySubAgentStreamEvent(mergedBase, payload.event);
+      ctx.subAgentTasks = _mergeSubAgentTaskPatch(ctx.subAgentTasks, patched);
       if (activeConvIdRef.current === convId) {
         setDisplaySubAgentTasks([...ctx.subAgentTasks]);
       }
@@ -3894,8 +4309,11 @@ export function ChatView({
                       .then((r) => r.json())
                       .then((rawData: SubAgentTask[]) => {
                         if (!Array.isArray(rawData)) return;
-                        const data = enrichTasksWithParents(rawData);
                         const c = streamContexts.current.get(thisConvId);
+                        const data = _mergeSubAgentTaskList(
+                          c?.subAgentTasks ?? [],
+                          enrichTasksWithParents(rawData),
+                        );
                         if (c) c.subAgentTasks = data;
                         if (activeConvIdRef.current === thisConvId) setDisplaySubAgentTasks(data);
                         logger.debug("Chat", "Sub-tasks poll result", {
@@ -3951,8 +4369,11 @@ export function ChatView({
                     .then((r) => r.json())
                     .then((rawData: SubAgentTask[]) => {
                       if (!Array.isArray(rawData)) return;
-                      const data = enrichTasksWithParents(rawData);
                       const c = streamContexts.current.get(thisConvId);
+                      const data = _mergeSubAgentTaskList(
+                        c?.subAgentTasks ?? [],
+                        enrichTasksWithParents(rawData),
+                      );
                       if (c) c.subAgentTasks = data;
                       if (activeConvIdRef.current === thisConvId) setDisplaySubAgentTasks(data);
                       const allDone = data.length > 0 && data.every(
@@ -4808,7 +5229,10 @@ export function ChatView({
               .then((r) => r.json())
               .then((rawData: SubAgentTask[]) => {
                 if (!Array.isArray(rawData)) return;
-                const data = enrichTasksWithParents(rawData);
+                const c = streamContexts.current.get(thisConvId);
+                const current = c?.subAgentTasks ?? [];
+                const data = _mergeSubAgentTaskList(current, enrichTasksWithParents(rawData));
+                if (c) c.subAgentTasks = data;
                 if (activeConvIdRef.current === thisConvId) setDisplaySubAgentTasks(data);
                 const allDone = data.length > 0 && data.every(
                   (t) => t.status === "completed" || t.status === "error" || t.status === "timeout" || t.status === "cancelled"

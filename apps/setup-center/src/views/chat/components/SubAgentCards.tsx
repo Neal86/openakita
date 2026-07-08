@@ -44,15 +44,19 @@ type TaskNode = {
 function buildForest(tasks: SubAgentTask[]): TaskNode[] {
   if (!tasks.length) return [];
   const byId = new Map<string, TaskNode>();
+  const byAgentId = new Map<string, TaskNode>();
   for (const task of tasks) {
-    byId.set(task.agent_id, { task, children: [] });
+    const node: TaskNode = { task, children: [] };
+    byId.set(task.run_id || task.agent_id, node);
+    if (!byAgentId.has(task.agent_id)) byAgentId.set(task.agent_id, node);
   }
   const roots: TaskNode[] = [];
   for (const task of tasks) {
-    const node = byId.get(task.agent_id)!;
+    const node = byId.get(task.run_id || task.agent_id)!;
     const parentId = task.parent_agent_id;
-    if (parentId && byId.has(parentId) && parentId !== task.agent_id) {
-      byId.get(parentId)!.children.push(node);
+    const parent = parentId ? byId.get(parentId) || byAgentId.get(parentId) : null;
+    if (parent && parent !== node && parentId !== task.agent_id) {
+      parent.children.push(node);
     } else {
       roots.push(node);
     }
@@ -74,18 +78,19 @@ export function SubAgentCards({ tasks }: { tasks: SubAgentTask[] }) {
   useEffect(() => {
     const timers = fadeTimersRef.current;
     for (const task of tasks) {
+      const taskKey = task.run_id || task.agent_id;
       const isDone = task.status === "completed" || task.status === "error" || task.status === "cancelled" || task.status === "timeout";
-      if (isDone && !fadedIdsRef.current.has(task.agent_id) && !timers.has(task.agent_id)) {
-        timers.set(task.agent_id, setTimeout(() => {
-          setFadedIds((prev) => new Set(prev).add(task.agent_id));
-          timers.delete(task.agent_id);
+      if (isDone && !fadedIdsRef.current.has(taskKey) && !timers.has(taskKey)) {
+        timers.set(taskKey, setTimeout(() => {
+          setFadedIds((prev) => new Set(prev).add(taskKey));
+          timers.delete(taskKey);
         }, FADE_DELAY_MS));
-      } else if (!isDone && timers.has(task.agent_id)) {
-        clearTimeout(timers.get(task.agent_id));
-        timers.delete(task.agent_id);
+      } else if (!isDone && timers.has(taskKey)) {
+        clearTimeout(timers.get(taskKey));
+        timers.delete(taskKey);
         setFadedIds((prev) => {
           const next = new Set(prev);
-          next.delete(task.agent_id);
+          next.delete(taskKey);
           return next;
         });
       }
@@ -99,7 +104,7 @@ export function SubAgentCards({ tasks }: { tasks: SubAgentTask[] }) {
   }, []);
 
   const visibleTasks = useMemo(
-    () => tasks.filter((tk) => !fadedIds.has(tk.agent_id)),
+    () => tasks.filter((tk) => !fadedIds.has(tk.run_id || tk.agent_id)),
     [tasks, fadedIds],
   );
 
@@ -161,24 +166,85 @@ export function SubAgentCards({ tasks }: { tasks: SubAgentTask[] }) {
     return String(n);
   };
 
+  const renderChainEntries = (task: SubAgentTask) => {
+    const entries = (task.chain ?? []).flatMap((group) => group.entries).slice(-8);
+    if (!entries.length) return null;
+    return (
+      <div className="sacStreamList">
+        {entries.map((entry, idx) => {
+          if (entry.kind === "thinking") {
+            return (
+              <div key={`thinking-${idx}`} className="sacStreamItem sacStreamThinking">
+                <span className="sacStreamKind">{t("chat.thinking", "思考")}</span>
+                <span>{entry.content}</span>
+              </div>
+            );
+          }
+          if (entry.kind === "text") {
+            return (
+              <div key={`text-${idx}`} className="sacStreamItem">
+                <span className="sacStreamKind">{entry.icon || "·"}</span>
+                <span>{entry.content}</span>
+              </div>
+            );
+          }
+          if (entry.kind === "tool_start") {
+            return (
+              <div key={`tool-start-${idx}`} className="sacStreamItem">
+                <span className="sacStreamKind">run</span>
+                <span>{entry.description || entry.tool}</span>
+              </div>
+            );
+          }
+          if (entry.kind === "tool_end") {
+            return (
+              <div key={`tool-end-${idx}`} className={`sacStreamItem ${entry.status === "error" ? "sacStreamError" : ""}`}>
+                <span className="sacStreamKind">{entry.status === "error" ? "err" : "done"}</span>
+                <span>{entry.result}</span>
+              </div>
+            );
+          }
+          if (entry.kind === "compressed") {
+            return (
+              <div key={`compressed-${idx}`} className="sacStreamItem">
+                <span className="sacStreamKind">ctx</span>
+                <span>{entry.beforeTokens} → {entry.afterTokens} tokens</span>
+              </div>
+            );
+          }
+          if (entry.kind === "config_hint") {
+            return (
+              <div key={`hint-${idx}`} className="sacStreamItem sacStreamError">
+                <span className="sacStreamKind">hint</span>
+                <span>{entry.hint.title || entry.hint.message}</span>
+              </div>
+            );
+          }
+          return null;
+        })}
+      </div>
+    );
+  };
+
   const renderCard = (node: TaskNode, depth: number): JSX.Element => {
     const task = node.task;
-    const isExpanded = expandedId === task.agent_id;
+    const taskKey = task.run_id || task.agent_id;
+    const isExpanded = expandedId === taskKey;
     const childCount = node.children.length;
-    const collapsed = collapsedParents.has(task.agent_id);
+    const collapsed = collapsedParents.has(taskKey);
     const indent = Math.min(depth, MAX_DEPTH) * INDENT_PX;
     return (
-      <div key={task.agent_id} style={{ marginLeft: indent }}>
+      <div key={taskKey} style={{ marginLeft: indent }}>
         <div
           className={`sacCard ${task.status === "running" || task.status === "starting" ? "sacCardActive" : ""}`}
-          onClick={() => toggleExpand(task.agent_id)}
+          onClick={() => toggleExpand(taskKey)}
           style={{ cursor: "pointer" }}
         >
           <div className="sacCardTop">
             {childCount > 0 && (
               <button
                 className="sacPageBtn"
-                onClick={(e) => { e.stopPropagation(); toggleCollapse(task.agent_id); }}
+                onClick={(e) => { e.stopPropagation(); toggleCollapse(taskKey); }}
                 title={collapsed ? t("chat.expand", "展开") : t("chat.collapse", "折叠")}
                 style={{ padding: "0 6px", minWidth: 18, lineHeight: 1 }}
               >
@@ -245,6 +311,18 @@ export function SubAgentCards({ tasks }: { tasks: SubAgentTask[] }) {
               </div>
             )}
           </div>
+          {isExpanded && task.stream_text && (
+            <div className="sacStreamOutput">
+              <div className="sacStreamLabel">{t("chat.subAgentLiveOutput", "实时输出")}</div>
+              <div className="sacStreamText">{task.stream_text}</div>
+            </div>
+          )}
+          {isExpanded && (task.chain?.length ?? 0) > 0 && (
+            <div className="sacStreamOutput">
+              <div className="sacStreamLabel">{t("chat.subAgentLiveProcess", "实时过程")}</div>
+              {renderChainEntries(task)}
+            </div>
+          )}
         </div>
         {!collapsed && childCount > 0 && depth < MAX_DEPTH && (
           <div>
