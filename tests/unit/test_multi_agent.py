@@ -1039,6 +1039,99 @@ class TestAgentOrchestrator:
         assert "工具调用: 0 次" in result
 
     @pytest.mark.asyncio
+    async def test_sub_agent_stream_events_are_broadcast_to_websocket(
+        self, orchestrator, mock_pool, monkeypatch
+    ):
+        session = _make_session(session_id="sess-stream")
+        captured: list[tuple[str, dict]] = []
+
+        async def fake_broadcast(event_name: str, payload: dict):
+            captured.append((event_name, payload))
+
+        async def fake_stream(**kwargs):
+            assert kwargs["session_id"] == "sess-stream"
+            yield {"type": "iteration_start", "iteration": 1}
+            yield {"type": "chain_text", "content": "正在分析子任务"}
+            yield {
+                "type": "tool_call_start",
+                "tool_name": "search_docs",
+                "call_id": "call-1",
+                "args": {"query": "openakita"},
+            }
+            yield {
+                "type": "security_confirm",
+                "source": "policy_v2",
+                "tool": "run_shell",
+                "args": {"command": "echo ok"},
+                "id": "confirm-1",
+                "confirm_id": "confirm-1",
+                "conversation_id": "sess-stream",
+                "reason": "test",
+                "risk_level": "medium",
+                "needs_sandbox": False,
+                "timeout_seconds": 60,
+                "default_on_timeout": "deny",
+                "approval_class": "execute",
+                "policy_version": 2,
+                "channel": "desktop",
+                "delegate_chain": ["default", "helper"],
+                "root_user_id": "user-1",
+                "decision_chain": [],
+                "display": {},
+                "options": ["allow_once", "deny"],
+                "risk_intent": {},
+                "presentation_state": "active",
+                "queued_count": 0,
+                "queue_position": None,
+                "active_confirm_id": "confirm-1",
+                "pending_count": 1,
+            }
+            yield {"type": "text_delta", "content": "hello "}
+            yield {"type": "text_delta", "content": "world"}
+            yield {"type": "done"}
+
+        monkeypatch.setattr("openakita.api.routes.websocket.broadcast_event", fake_broadcast)
+        mock_agent = mock_pool.get_or_create.return_value
+        mock_agent.chat_with_session_stream = fake_stream
+
+        result = await orchestrator._dispatch(
+            session,
+            "sub task",
+            "helper",
+            depth=1,
+            from_agent="default",
+        )
+        await asyncio.sleep(0)
+
+        assert "hello world" in result
+        mock_agent.chat_with_session.assert_not_awaited()
+
+        stream_events = [payload for name, payload in captured if name == "agents:sub_stream"]
+        assert [payload["event_type"] for payload in stream_events] == [
+            "iteration_start",
+            "chain_text",
+            "tool_call_start",
+            "security_confirm",
+            "text_delta",
+            "text_delta",
+            "done",
+        ]
+        assert {payload["run_id"] for payload in stream_events}
+        assert {payload["agent_id"] for payload in stream_events} == {"helper"}
+        assert {payload["parent_agent_id"] for payload in stream_events} == {"default"}
+        assert stream_events[1]["event"]["content"] == "正在分析子任务"
+
+        promoted_events = [
+            payload for name, payload in captured if name == "security_confirm_promoted"
+        ]
+        assert len(promoted_events) == 1
+        promoted = promoted_events[0]
+        assert promoted["session_id"] == "chat-1"
+        assert promoted["backend_session_id"] == "sess-stream"
+        assert promoted["confirm"]["conversation_id"] == "chat-1"
+        assert promoted["confirm"]["backend_conversation_id"] == "sess-stream"
+
+    @pytest.mark.asyncio
     async def test_handle_message_resets_delegation_chain(self, orchestrator):
         session = _make_session()
         session.context.delegation_chain = [{"old": "data"}]
