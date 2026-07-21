@@ -16,9 +16,8 @@ services:
       retries: 3
       start_period: 20s
     networks:
-      - ha7fwpys0yzsxqvk2udhfj57
+      - coolify
 
 networks:
-  ha7fwpys0yzsxqvk2udhfj57:
-    name: ha7fwpys0yzsxqvk2udhfj57
-    driver: bridge
+  coolify:
+    external: true
