@@ -6,8 +6,6 @@ services:
       - "18900"
     volumes:
       - ./data:/app/data
-      - ./identity:/app/identity
-      - ./skills:/app/skills
     environment:
       API_HOST: 0.0.0.0
       API_PORT: 18900
