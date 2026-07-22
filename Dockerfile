@@ -62,8 +62,5 @@ COPY identity/ identity/
 ENV PYTHONUNBUFFERED=1
 EXPOSE 18900
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:18900/api/health || exit 1
-
 ENTRYPOINT ["openakita"]
 CMD ["serve"]
