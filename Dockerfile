@@ -17,7 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential git \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md LICENSE VERSION hatch_build.py ./
+COPY scripts/ scripts/
 COPY src/ src/
 COPY skills/ skills/
 COPY mcps/ mcps/
