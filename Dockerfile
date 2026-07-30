@@ -55,6 +55,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin/openakita /usr/local/bin/openakita
+COPY --from=frontend /app/apps/setup-center/dist-web/ /app/apps/setup-center/dist-web/
 
 COPY src/ src/
 COPY skills/ skills/
