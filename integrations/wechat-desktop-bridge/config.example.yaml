@@ -1,0 +1,28 @@
+wechat:
+  groups:
+    - 客户群A
+    - 客户群B
+  ignore_senders: []
+  reply_prefix: ""
+  min_send_interval_seconds: 3
+  merge_window_seconds: 2
+  duplicate_ttl_seconds: 600
+
+openakita:
+  command: openakita
+  timeout_seconds: 180
+  working_directory: ""
+  prompt_template: |
+    你正在通过个人微信群接收客户消息。
+    群名称：{group_name}
+    发送人：{sender}
+    客户消息：{message}
+
+    请按照当前 OpenAkita Agent 中已经配置的身份、规则、技能和 MCP 处理该消息。
+    只输出最终要发回微信群的回复正文，不要输出分析过程、Markdown 代码块或系统说明。
+
+runtime:
+  log_level: INFO
+  log_file: logs/wechat-bridge.log
+  state_file: data/wechat-bridge-state.json
+  failed_message_file: data/wechat-bridge-failed.jsonl
