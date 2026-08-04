@@ -1,0 +1,19 @@
+{
+  "id": "wechat-desktop-channel",
+  "name": "微信（桌面版）",
+  "version": "0.1.0",
+  "description": "通过配对的 Windows Connector 连接微信电脑版，并将指定微信账号绑定到 OpenAkita Agent。",
+  "author": "OpenAkita Team",
+  "license": "MIT",
+  "type": "python",
+  "entry": "plugin.py",
+  "permissions": ["channel.register", "hooks.basic", "hooks.message", "channel.send"],
+  "requires": {
+    "openakita": ">=1.5.0",
+    "plugin_api": "~1",
+    "python": ">=3.11"
+  },
+  "provides": {"channels": ["wechat_desktop"]},
+  "category": "channel",
+  "tags": ["wechat", "windows", "desktop", "channel"]
+}
