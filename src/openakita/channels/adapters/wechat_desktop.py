@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import tempfile
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -186,7 +186,7 @@ class WeChatDesktopAdapter(ChannelAdapter):
         text = message.content.text if message.content else ""
         if not text:
             raise ValueError("wechat_desktop currently supports text messages only")
-        request_id = f"wechat-send-{self.bot_id}-{message.id}"
+        request_id = f"wechat-send-{self.bot_id}-{uuid.uuid4().hex[:12]}"
         try:
             await wechat_desktop_manager.send_command(
                 self.node_id,
