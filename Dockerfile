@@ -62,6 +62,8 @@ COPY skills/ skills/
 COPY identity/ identity/
 
 ENV PYTHONUNBUFFERED=1
+ENV API_HOST=0.0.0.0
+ENV API_PORT=18900
 EXPOSE 18900
 
 ENTRYPOINT ["openakita"]
