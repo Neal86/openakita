@@ -62,7 +62,7 @@ dependencies = [
 
     # HTTP API (serve mode + Desktop Terminal)
     "fastapi>=0.110.0,<1",
-    "uvicorn>=0.27.0",
+    "uvicorn[standard]>=0.27.0",
 
     # IM Channels - Telegram (default)
     "python-telegram-bot>=22.7",
