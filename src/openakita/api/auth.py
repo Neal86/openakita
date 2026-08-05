@@ -46,6 +46,10 @@ AUTH_EXEMPT_PATHS = frozenset(
         "/api/auth/setup",
         "/api/auth/setup-status",
         "/api/logs/frontend",
+        # Connector pairing is authenticated by a one-time pairing code.
+        # Keep only the redemption endpoint public; node management and
+        # pairing-code creation still require normal web authentication.
+        "/api/wechat-desktop/pair",
     }
 )
 AUTH_EXEMPT_PREFIXES = ("/web/", "/web", "/ws/", "/docs", "/openapi.json", "/redoc", "/user-docs")

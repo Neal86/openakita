@@ -51,5 +51,21 @@ async def test_pairing_code_is_one_time(tmp_path: Path) -> None:
         await manager.consume_pairing_code(code)
 
 
+@pytest.mark.asyncio
+async def test_node_token_has_no_time_expiry_and_manual_revoke_invalidates_it(tmp_path: Path) -> None:
+    state = tmp_path / "nodes.json"
+    manager = WeChatDesktopManager(state)
+    code = await manager.create_pairing_code("node")
+    node_id, token, _ = await manager.consume_pairing_code(code)
+
+    restored = WeChatDesktopManager(state)
+    assert await restored.authenticate_node(node_id, token) is True
+    assert await restored.revoke_node(node_id) is True
+    assert await restored.authenticate_node(node_id, token) is False
+
+    restarted_after_revoke = WeChatDesktopManager(state)
+    assert await restarted_after_revoke.authenticate_node(node_id, token) is False
+
+
 async def _noop_send(_payload: dict) -> None:
     return None
