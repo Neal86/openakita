@@ -11,9 +11,3 @@ services:
       API_PORT: 18900
     labels:
       - "traefik.http.services.openakita.loadbalancer.server.port=18900"
-    networks:
-      - default
-
-networks:
-  default:
-    driver: bridge
