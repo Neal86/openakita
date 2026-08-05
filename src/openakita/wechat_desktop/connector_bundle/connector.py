@@ -7,16 +7,13 @@ import os
 import queue
 import sys
 import time
-from pathlib import Path
 from typing import Any
 
 import websockets
-import yaml
 from wxauto4 import WeChat
 
-ROOT = Path(__file__).resolve().parent
-CONFIG_PATH = ROOT / "config.yaml"
-LOG_PATH = ROOT / "connector.log"
+from app_paths import CONFIG_PATH, LOG_PATH
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -27,11 +24,13 @@ logger = logging.getLogger("openakita-wechat-connector")
 
 def load_config() -> dict[str, Any]:
     if not CONFIG_PATH.exists():
-        raise RuntimeError("config.yaml 不存在，请先运行 pair.py 完成配对")
+        raise RuntimeError("尚未配对，请先在连接器窗口输入 OA 地址和配对码")
+    import yaml
+
     data = yaml.safe_load(CONFIG_PATH.read_text("utf-8")) or {}
     for key in ("oa_url", "node_id", "node_token"):
         if not str(data.get(key) or "").strip():
-            raise RuntimeError(f"config.yaml 缺少 {key}")
+            raise RuntimeError(f"连接器配置缺少 {key}")
     return data
 
 
@@ -41,7 +40,7 @@ def ws_url(oa_url: str, node_id: str, token: str) -> str:
         base = "wss://" + base[8:]
     elif base.startswith("http://"):
         base = "ws://" + base[7:]
-    return f"{base}/api/wechat-desktop/ws?node_id={node_id}&token={token}&version=1.0.0"
+    return f"{base}/api/wechat-desktop/ws?node_id={node_id}&token={token}&version=1.1.0"
 
 
 class DesktopDriver:
@@ -57,7 +56,7 @@ class DesktopDriver:
             info = self.wx.ChatInfo() or {}
             nickname = str(info.get("account") or info.get("nickname") or nickname)
         except Exception:
-            pass
+            logger.debug("无法读取微信账号昵称", exc_info=True)
         return [{"id": self.active_account_id, "nickname": nickname, "login_status": "logged_in"}]
 
     def conversations(self) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
@@ -66,16 +65,14 @@ class DesktopDriver:
         try:
             sessions = self.wx.GetSessionList() or []
         except Exception:
+            logger.exception("读取微信会话列表失败")
             sessions = []
         for item in sessions:
-            name = str(getattr(item, "name", None) or getattr(item, "who", None) or item)
+            name = str(getattr(item, "name", None) or getattr(item, "who", None) or item).strip()
             if not name:
                 continue
             row = {"id": name, "name": name}
-            if name.endswith("群") or "群" in name:
-                groups.append(row)
-            else:
-                contacts.append(row)
+            (groups if name.endswith("群") or "群" in name else contacts).append(row)
         return groups, contacts
 
     def _on_message(self, msg: Any, chat: Any) -> None:
@@ -85,20 +82,18 @@ class DesktopDriver:
             text = str(getattr(msg, "content", None) or getattr(msg, "text", None) or "").strip()
             if not text:
                 return
-            self._messages.put(
-                {
-                    "message_id": str(getattr(msg, "id", None) or f"{chat_name}:{sender}:{time.time_ns()}"),
-                    "wechat_account_id": self.active_account_id,
-                    "chat_id": chat_name,
-                    "chat_name": chat_name,
-                    "chat_type": "group" if (chat_name.endswith("群") or "群" in chat_name) else "private",
-                    "sender_id": sender,
-                    "sender_name": sender,
-                    "text": text,
-                    "is_mentioned": bool(getattr(msg, "is_at", False)),
-                    "timestamp": time.time(),
-                }
-            )
+            self._messages.put({
+                "message_id": str(getattr(msg, "id", None) or f"{chat_name}:{sender}:{time.time_ns()}"),
+                "wechat_account_id": self.active_account_id,
+                "chat_id": chat_name,
+                "chat_name": chat_name,
+                "chat_type": "group" if (chat_name.endswith("群") or "群" in chat_name) else "private",
+                "sender_id": sender,
+                "sender_name": sender,
+                "text": text,
+                "is_mentioned": bool(getattr(msg, "is_at", False)),
+                "timestamp": time.time(),
+            })
         except Exception:
             logger.exception("处理微信消息回调失败")
 
@@ -115,7 +110,7 @@ class DesktopDriver:
         try:
             self.wx.StartListening()
         except Exception:
-            pass
+            logger.debug("微信监听器已启动或无需显式启动", exc_info=True)
 
     def poll_messages(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -123,8 +118,7 @@ class DesktopDriver:
             try:
                 rows.append(self._messages.get_nowait())
             except queue.Empty:
-                break
-        return rows
+                return rows
 
     def send_text(self, chat_id: str, text: str) -> None:
         self.wx.SendMsg(text, who=chat_id)
@@ -133,7 +127,7 @@ class DesktopDriver:
         try:
             self.wx.StopListening()
         except Exception:
-            pass
+            logger.debug("停止微信监听器时出现非致命错误", exc_info=True)
 
 
 async def run() -> None:
@@ -141,7 +135,6 @@ async def run() -> None:
     driver = DesktopDriver()
     url = ws_url(str(config["oa_url"]), str(config["node_id"]), str(config["node_token"]))
     bot_configs: dict[str, dict[str, Any]] = {}
-
     try:
         while True:
             try:
@@ -162,9 +155,8 @@ async def run() -> None:
                             await asyncio.sleep(0.5)
                             for payload in driver.poll_messages():
                                 for bot_id, cfg in list(bot_configs.items()):
-                                    if str(cfg.get("wechat_account_id") or "") != payload["wechat_account_id"]:
-                                        continue
-                                    await socket.send(json.dumps({"event": "wechat.message.received", "bot_id": bot_id, "payload": payload}, ensure_ascii=False))
+                                    if str(cfg.get("wechat_account_id") or "") == payload["wechat_account_id"]:
+                                        await socket.send(json.dumps({"event": "wechat.message.received", "bot_id": bot_id, "payload": payload}, ensure_ascii=False))
 
                     heartbeat_task = asyncio.create_task(heartbeat())
                     poll_task = asyncio.create_task(poll())
@@ -190,6 +182,8 @@ async def run() -> None:
                     finally:
                         heartbeat_task.cancel()
                         poll_task.cancel()
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 logger.exception("Connector 连接失败: %s", exc)
                 await asyncio.sleep(5)
