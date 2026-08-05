@@ -9,6 +9,5 @@ services:
     environment:
       API_HOST: 0.0.0.0
       API_PORT: 18900
-      OPENAKITA_ENV_PATH: /app/data/.env
     labels:
       - "traefik.http.services.openakita.loadbalancer.server.port=18900"

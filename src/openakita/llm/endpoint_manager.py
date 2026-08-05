@@ -151,12 +151,7 @@ class EndpointManager:
         self._json_path = (
             Path(config_path) if config_path else (self._ws_dir / "data" / "llm_endpoints.json")
         )
-        configured_env_path = os.environ.get("OPENAKITA_ENV_PATH")
-        self._env_path = (
-            Path(configured_env_path).expanduser()
-            if configured_env_path
-            else self._ws_dir / ".env"
-        )
+        self._env_path = self._ws_dir / ".env"
         self._lock = threading.Lock()
 
     @property
