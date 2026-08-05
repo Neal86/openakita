@@ -57,20 +57,17 @@ class ConnectorApp(tk.Tk):
     def _build_ui(self) -> None:
         outer = ttk.Frame(self, padding=20)
         outer.pack(fill="both", expand=True)
-
         ttk.Label(outer, text=APP_TITLE, font=("Microsoft YaHei UI", 18, "bold")).pack(anchor="w")
         ttk.Label(outer, text="连接已登录的 Windows 微信电脑版，并由 OpenAkita Agent 自动收发消息。", foreground="#555555").pack(anchor="w", pady=(4, 18))
 
         card = ttk.LabelFrame(outer, text="连接设置", padding=14)
         card.pack(fill="x")
         card.columnconfigure(1, weight=1)
-
         ttk.Label(card, text="OA 地址").grid(row=0, column=0, sticky="w", padx=(0, 12), pady=6)
         ttk.Entry(card, textvariable=self.oa_url).grid(row=0, column=1, sticky="ew", pady=6)
         ttk.Label(card, text="配对码").grid(row=1, column=0, sticky="w", padx=(0, 12), pady=6)
         ttk.Entry(card, textvariable=self.pair_code, show="•").grid(row=1, column=1, sticky="ew", pady=6)
         ttk.Button(card, text="完成配对", command=self.pair).grid(row=1, column=2, padx=(10, 0), pady=6)
-
         ttk.Separator(card).grid(row=2, column=0, columnspan=3, sticky="ew", pady=10)
         ttk.Label(card, text="微信状态").grid(row=3, column=0, sticky="w", padx=(0, 12), pady=6)
         ttk.Label(card, textvariable=self.wechat_status).grid(row=3, column=1, sticky="w", pady=6)
@@ -126,9 +123,9 @@ class ConnectorApp(tk.Tk):
                     "node_name": data.get("node_name", "Windows 微信节点"),
                 }
                 CONFIG_PATH.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False), "utf-8")
-                self.after(0, lambda: self._pair_succeeded(config["node_name"]))
+                self.after(0, self._pair_succeeded, config["node_name"])
             except Exception as exc:
-                self.after(0, lambda: messagebox.showerror(APP_TITLE, f"配对失败：{exc}"))
+                self.after(0, messagebox.showerror, APP_TITLE, f"配对失败：{exc}")
 
         threading.Thread(target=work, daemon=True).start()
 
