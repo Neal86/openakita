@@ -6,6 +6,7 @@ services:
       - "18900"
     volumes:
       - ./data:/app/data
+      - /opt/devops-repos/openakita-secrets/.env:/app/.env:ro
     environment:
       API_HOST: 0.0.0.0
       API_PORT: 18900
