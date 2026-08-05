@@ -183,6 +183,7 @@ def _create_wechat_desktop(creds: dict, *, channel_name: str, bot_id: str, agent
         mention_only=bool(_cred_bool(creds.get("mention_only")) or False),
         private_chat_enabled=bool(_cred_bool(creds.get("private_chat_enabled")) or False),
         auto_reply=True if creds.get("auto_reply") is None else bool(_cred_bool(creds.get("auto_reply"))),
+        human_takeover=bool(_cred_bool(creds.get("human_takeover")) or False),
         merge_window_seconds=_safe_int(creds.get("merge_window_seconds", 2), 2),
         send_interval_seconds=_safe_int(creds.get("send_interval_seconds", 3), 3),
         duplicate_ttl_seconds=_safe_int(creds.get("duplicate_ttl_seconds", 600), 600),
