@@ -2,3 +2,5 @@ wxauto4>=4.0.0
 websockets>=12.0
 requests>=2.31.0
 PyYAML>=6.0.1
+psutil>=5.9.8
+pyinstaller>=6.10.0
