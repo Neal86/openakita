@@ -85,7 +85,10 @@ def get_workspace_dir(config_path: Path | None = None) -> Path:
 
 
 def get_workspace_env_path(config_path: Path | None = None) -> Path:
-    """Return the .env path associated with an endpoints config path."""
+    """Return the configured secret env path for the current workspace."""
+    configured_path = os.environ.get("OPENAKITA_ENV_PATH")
+    if configured_path:
+        return Path(configured_path).expanduser()
     return get_workspace_dir(config_path) / ".env"
 
 
@@ -209,12 +212,11 @@ def _ensure_workspace_env_loaded(config_path: Path) -> None:
     that point we *know* the concrete config path, so we can derive the
     workspace root reliably: ``config_path`` is ``<workspace>/data/llm_endpoints.json``.
     """
-    ws_root = config_path.parent.parent
-    ws_key = str(ws_root)
-    if ws_key in _workspace_env_loaded:
+    env_path = get_workspace_env_path(config_path)
+    env_key = str(env_path)
+    if env_key in _workspace_env_loaded:
         return
-    _workspace_env_loaded.add(ws_key)
-    env_path = ws_root / ".env"
+    _workspace_env_loaded.add(env_key)
     if env_path.exists():
         _safe_load_dotenv(env_path)
         logger.info("Loaded workspace .env from %s", env_path)
