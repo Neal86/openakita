@@ -1,4 +1,8 @@
-"""WeChat iLink Bot onboarding API — QR code login for personal WeChat bot."""
+"""WeChat onboarding routes.
+
+Keeps the existing iLink QR-login endpoints unchanged and mounts the independent
+Windows WeChat Desktop Connector API under ``/api/wechat-desktop``.
+"""
 
 from __future__ import annotations
 
@@ -8,15 +12,18 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from . import wechat_desktop
+
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/wechat/onboard", tags=["wechat-onboard"])
+router = APIRouter(tags=["wechat-onboard"])
+router.include_router(wechat_desktop.router, tags=["wechat-desktop"])
 
 
 class PollRequest(BaseModel):
     qrcode: str
 
 
-@router.post("/start")
+@router.post("/api/wechat/onboard/start")
 async def onboard_start():
     """Fetch login QR code. Returns qrcode (identifier) and qrcode_url."""
     try:
@@ -33,7 +40,7 @@ async def onboard_start():
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-@router.post("/poll")
+@router.post("/api/wechat/onboard/poll")
 async def onboard_poll(body: PollRequest):
     """Poll QR login status once (long-poll)."""
     try:
