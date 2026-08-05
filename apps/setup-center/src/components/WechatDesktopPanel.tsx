@@ -66,6 +66,7 @@ export function WechatDesktopPanel({ apiBaseUrl }: { apiBaseUrl?: string }) {
   const [pairingName, setPairingName] = useState("客服电脑");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [form, setForm] = useState(emptyForm);
 
   const load = useCallback(async () => {
@@ -210,8 +211,38 @@ export function WechatDesktopPanel({ apiBaseUrl }: { apiBaseUrl?: string }) {
     }
   }
 
-  function downloadConnector() {
-    window.location.href = `${api}/api/wechat-desktop/connector/download`;
+  async function downloadConnector() {
+    if (downloading) return;
+    setDownloading(true);
+    try {
+      const response = await safeFetch(`${api}/api/wechat-desktop/connector/download`);
+      const blob = await response.blob();
+      const disposition = response.headers.get("Content-Disposition") || "";
+      const encodedFilename = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+      const plainFilename = disposition.match(/filename=\"?([^\";]+)\"?/i)?.[1];
+      let filename = plainFilename || "OpenAkita-WeChat-Connector.zip";
+      if (encodedFilename) {
+        try {
+          filename = decodeURIComponent(encodedFilename);
+        } catch {
+          filename = encodedFilename;
+        }
+      }
+
+      const objectUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+      toast.success("Windows Connector 下载已开始");
+    } catch (error) {
+      toast.error(`下载 Windows Connector 失败：${String(error)}`);
+    } finally {
+      setDownloading(false);
+    }
   }
 
   return (
@@ -222,7 +253,7 @@ export function WechatDesktopPanel({ apiBaseUrl }: { apiBaseUrl?: string }) {
           <p className="text-xs text-muted-foreground mt-1">连接 Windows 微信电脑版，并将具体微信账号绑定到指定 Agent。</p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={downloadConnector}><Download size={14} />下载 Windows Connector</Button>
+          <Button variant="outline" size="sm" onClick={downloadConnector} disabled={downloading}>{downloading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}下载 Windows Connector</Button>
           <Button variant="outline" size="sm" onClick={load} disabled={loading}><RefreshCw size={14} className={loading ? "animate-spin" : ""} />刷新</Button>
         </div>
       </div>
