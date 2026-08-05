@@ -10,6 +10,7 @@ IM 通道适配器
 - OneBot (通用协议)
 - QQ 官方机器人
 - 微信个人号（iLink Bot API）
+- 微信（桌面版 Windows Connector）
 """
 
 from .dingtalk import DingTalkAdapter
@@ -18,6 +19,7 @@ from .onebot import OneBotAdapter
 from .qq_official import QQBotAdapter
 from .telegram import TelegramAdapter
 from .wechat import WeChatAdapter
+from .wechat_desktop import WeChatDesktopAdapter
 from .wework_bot import WeWorkBotAdapter
 from .wework_ws import WeWorkWsAdapter
 
@@ -30,4 +32,5 @@ __all__ = [
     "OneBotAdapter",
     "QQBotAdapter",
     "WeChatAdapter",
+    "WeChatDesktopAdapter",
 ]
