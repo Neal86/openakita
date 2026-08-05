@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: build-wechat-connector-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-windows-installer:
     runs-on: windows-latest
