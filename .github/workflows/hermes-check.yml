@@ -1,0 +1,31 @@
+name: Hermes integration check
+
+on:
+  push:
+    branches:
+      - feature/hermes-multi-agent
+  pull_request:
+    paths:
+      - "src/openakita/hermes/**"
+      - "src/openakita/api/routes/hermes*.py"
+      - "tests/hermes/**"
+      - ".github/workflows/hermes-check.yml"
+
+jobs:
+  hermes-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install project and test dependencies
+        run: python -m pip install --upgrade pip && pip install -e ".[dev]"
+      - name: Compile changed modules
+        run: python -m compileall -q src/openakita/hermes src/openakita/api/routes/hermes.py src/openakita/api/routes/hermes_ui.py
+      - name: Import smoke test
+        run: python -c "from openakita.api.routes import agents; from openakita.hermes.router import HermesRouter; print(len(agents.router.routes), HermesRouter.__name__)"
+      - name: Run Hermes tests
+        run: pytest -q tests/hermes
