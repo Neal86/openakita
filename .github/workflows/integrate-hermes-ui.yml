@@ -1,11 +1,10 @@
 name: Integrate Hermes and WeChat UI
 
 on:
-  push:
+  pull_request:
     branches: [feature/hermes-multi-agent]
     paths:
-      - ".github/workflows/integrate-hermes-ui.yml"
-      - "scripts/integrate_wechat_connector_ui.py"
+      - "ci-trigger/**"
   workflow_dispatch:
 
 concurrency:
