@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
-import io
+import asyncio
 import json
-import zipfile
+import os
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from openakita.wechat_desktop import wechat_desktop_manager
 
 router = APIRouter(prefix="/api/wechat-desktop")
+RELEASE_FILENAME = "OpenAkita-WeChat-Connector-Windows-x64.zip"
+DEFAULT_RELEASE_URL = (
+    "https://github.com/Neal86/openakita/releases/download/"
+    f"wechat-connector-latest/{RELEASE_FILENAME}"
+)
 
 
 class PairingCreateRequest(BaseModel):
@@ -23,6 +30,10 @@ class PairingCreateRequest(BaseModel):
 
 
 class PairingConsumeRequest(BaseModel):
+    code: str = Field(min_length=6, max_length=20)
+
+
+class PairingCloseRequest(BaseModel):
     code: str = Field(min_length=6, max_length=20)
 
 
@@ -52,6 +63,11 @@ async def create_pairing_code(body: PairingCreateRequest) -> dict[str, Any]:
     return {"code": code, "expires_in": body.ttl_seconds}
 
 
+@router.post("/pairing-code/close")
+async def close_pairing_code(body: PairingCloseRequest) -> dict[str, bool]:
+    return {"ok": True, "closed": await wechat_desktop_manager.cancel_pairing_code(body.code)}
+
+
 @router.post("/pair")
 async def pair_connector(body: PairingConsumeRequest) -> dict[str, str]:
     try:
@@ -69,30 +85,44 @@ async def get_delivery(request_id: str) -> dict[str, Any]:
     return receipt
 
 
-def _connector_bundle_root() -> Path:
-    package_root = Path(__file__).resolve().parents[2] / "wechat_desktop" / "connector_bundle"
-    if package_root.is_dir():
-        return package_root
-    return Path(__file__).resolve().parents[4] / "apps" / "wechat-connector"
+def _local_release_path() -> Path | None:
+    configured = os.environ.get("OPENAKITA_WECHAT_CONNECTOR_PACKAGE", "").strip()
+    candidates = [
+        Path(configured) if configured else None,
+        Path("data/releases") / RELEASE_FILENAME,
+        Path(__file__).resolve().parents[4] / "dist" / RELEASE_FILENAME,
+    ]
+    return next((path for path in candidates if path and path.is_file()), None)
+
+
+def _download_release_bytes() -> bytes:
+    url = os.environ.get("OPENAKITA_WECHAT_CONNECTOR_DOWNLOAD_URL", DEFAULT_RELEASE_URL).strip()
+    request = urllib.request.Request(url, headers={"User-Agent": "OpenAkita-WeChat-Connector-Downloader/1.0"})
+    with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310 - fixed/admin configured URL
+        return response.read()
 
 
 @router.get("/connector/download")
-async def download_connector() -> StreamingResponse:
-    root = _connector_bundle_root()
-    if not root.is_dir():
-        raise HTTPException(status_code=503, detail="Windows Connector 安装包尚未生成")
-    memory = io.BytesIO()
-    with zipfile.ZipFile(memory, "w", zipfile.ZIP_DEFLATED) as archive:
-        for path in sorted(root.rglob("*")):
-            if path.is_file() and "__pycache__" not in path.parts and ".venv" not in path.parts:
-                archive.write(path, Path("OpenAkita-WeChat-Connector") / path.relative_to(root))
-    memory.seek(0)
+async def download_connector() -> FileResponse | StreamingResponse:
+    local_path = _local_release_path()
+    if local_path is not None:
+        return FileResponse(
+            local_path,
+            media_type="application/zip",
+            filename=RELEASE_FILENAME,
+            headers={"Cache-Control": "no-store"},
+        )
+    try:
+        payload = await asyncio.to_thread(_download_release_bytes)
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="Windows Connector 发布包尚未生成或暂时无法下载") from exc
     return StreamingResponse(
-        memory,
+        iter([payload]),
         media_type="application/zip",
         headers={
-            "Content-Disposition": 'attachment; filename="OpenAkita-WeChat-Connector.zip"',
+            "Content-Disposition": f'attachment; filename="{RELEASE_FILENAME}"',
             "Cache-Control": "no-store",
+            "Content-Length": str(len(payload)),
         },
     )
 
