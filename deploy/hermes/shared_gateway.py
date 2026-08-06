@@ -2,14 +2,14 @@
 """Multi-agent gateway for one-container / isolated-Hermes execution.
 
 Each profile gets a dedicated Hermes child process with its own HOME and API
-port.  The outer gateway selects the child using X-OpenAkita-Agent-Id and
-proxies OpenAI-compatible requests.  This gives process/filesystem isolation
-without requiring one Docker container per Agent.
+port. The outer gateway selects the child using X-OpenAkita-Agent-Id and
+proxies OpenAI-compatible requests.
 """
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import re
 import signal
@@ -18,7 +18,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -38,7 +38,6 @@ def safe_id(value: str) -> str:
 
 
 def free_port(profile_id: str) -> int:
-    # Stable first choice; probe and increment to tolerate stale processes.
     start = 10000 + int(hashlib.sha256(profile_id.encode()).hexdigest()[:4], 16) % 40000
     for port in range(start, min(start + 1000, 65000)):
         with socket.socket() as sock:
@@ -57,6 +56,7 @@ class Child:
     process: subprocess.Popen
     home: Path
     started_at: float
+    log_handle: BinaryIO
 
 
 class ChildManager:
@@ -74,6 +74,7 @@ class ChildManager:
                 return existing
             if existing:
                 self.children.pop(profile_id, None)
+                existing.log_handle.close()
             if len(self.children) >= MAX_CHILDREN:
                 raise HTTPException(status_code=503, detail="共享实例已达到最大 Agent 数")
 
@@ -98,21 +99,28 @@ class ChildManager:
                 "HERMES_DASHBOARD": "0",
                 "HERMES_ALLOW_ROOT_GATEWAY": "1",
             })
-            process = subprocess.Popen(
-                ["hermes", "gateway", "run"],
-                env=env,
-                cwd=str(home / "workspace"),
-                stdout=open(home / "hermes.log", "ab", buffering=0),
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-            child = Child(profile_id, port, process, home, time.time())
+            log_handle = open(home / "hermes.log", "ab", buffering=0)
+            try:
+                process = subprocess.Popen(
+                    ["hermes", "gateway", "run"],
+                    env=env,
+                    cwd=str(home / "workspace"),
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            except Exception:
+                log_handle.close()
+                raise
+            child = Child(profile_id, port, process, home, time.time(), log_handle)
             self.children[profile_id] = child
 
             deadline = time.monotonic() + CHILD_START_TIMEOUT
             async with httpx.AsyncClient(timeout=3) as client:
                 while time.monotonic() < deadline:
                     if process.poll() is not None:
+                        self.children.pop(profile_id, None)
+                        log_handle.close()
                         raise HTTPException(status_code=502, detail=f"Hermes Agent {profile_id} 启动失败")
                     try:
                         response = await client.get(f"http://127.0.0.1:{port}/health")
@@ -126,16 +134,20 @@ class ChildManager:
 
     def stop(self, profile_id: str) -> None:
         child = self.children.pop(safe_id(profile_id), None)
-        if not child or child.process.poll() is not None:
+        if not child:
             return
         try:
-            os.killpg(child.process.pid, signal.SIGTERM)
-            child.process.wait(timeout=20)
-        except Exception:
-            try:
-                os.killpg(child.process.pid, signal.SIGKILL)
-            except Exception:
-                pass
+            if child.process.poll() is None:
+                try:
+                    os.killpg(child.process.pid, signal.SIGTERM)
+                    child.process.wait(timeout=20)
+                except Exception:
+                    try:
+                        os.killpg(child.process.pid, signal.SIGKILL)
+                    except Exception:
+                        pass
+        finally:
+            child.log_handle.close()
 
     def shutdown(self) -> None:
         for profile_id in list(self.children):
@@ -168,18 +180,21 @@ async def proxy(path: str, request: Request):
     body = await request.body()
     headers = {key: value for key, value in request.headers.items() if key.lower() not in {"host", "content-length", "connection"}}
     url = f"http://127.0.0.1:{child.port}/v1/{path}"
-    is_stream = "text/event-stream" in request.headers.get("accept", "") or b'"stream":true' in body.replace(b" ", b"").lower()
+    try:
+        parsed = json.loads(body) if body else {}
+    except json.JSONDecodeError:
+        parsed = {}
+    is_stream = "text/event-stream" in request.headers.get("accept", "") or parsed.get("stream") is True
 
     if is_stream:
         async def stream():
             async with httpx.AsyncClient(timeout=None) as client:
                 async with client.stream(request.method, url, content=body, headers=headers, params=request.query_params) as response:
                     if response.status_code >= 400:
-                        payload = await response.aread()
-                        yield payload
+                        yield await response.aread()
                         return
-                    async for chunk in response.aiter_raw():
-                        yield chunk
+                    async for data in response.aiter_raw():
+                        yield data
         return StreamingResponse(stream(), media_type="text/event-stream", headers={"X-OpenAkita-Agent-Id": child.profile_id})
 
     async with httpx.AsyncClient(timeout=None) as client:
