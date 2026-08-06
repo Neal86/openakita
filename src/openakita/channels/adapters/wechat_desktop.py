@@ -177,7 +177,7 @@ class WeChatDesktopAdapter(ChannelAdapter):
             rows = self._pending.pop(key, [])
             if not rows or not self._running:
                 return
-            first, last = rows[0], rows[-1]
+            last = rows[-1]
             chat_id, sender_id = key
             sender_name = str(last.get("sender_name") or sender_id)
             text = "\n".join(str(row.get("text") or "").strip() for row in rows if str(row.get("text") or "").strip())

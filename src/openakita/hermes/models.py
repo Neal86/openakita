@@ -106,6 +106,6 @@ class HermesNode:
         return data
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "HermesNode":
+    def from_dict(cls, data: dict[str, Any]) -> HermesNode:
         known = cls.__dataclass_fields__
         return cls(**{k: v for k, v in data.items() if k in known})

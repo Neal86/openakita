@@ -83,7 +83,6 @@ def _normalize_remote_event(event: Any) -> dict[str, Any] | None:
         normalized["type"] = "done"
     if "content" not in normalized and "text" in normalized:
         normalized["content"] = normalized.get("text")
-    normalized.setdefault("source", "hermes")
     return normalized
 
 
@@ -117,7 +116,7 @@ def install_agent_hooks() -> None:
 
         chat_with_session._hermes_wrapped = True  # type: ignore[attr-defined]
         chat_with_session._hermes_original = original_chat  # type: ignore[attr-defined]
-        setattr(Agent, "chat_with_session", chat_with_session)
+        Agent.chat_with_session = chat_with_session  # type: ignore[method-assign]
 
     if callable(original_stream) and not getattr(original_stream, "_hermes_wrapped", False):
         async def chat_with_session_stream(self: Any, *args: Any, **kwargs: Any):
@@ -137,7 +136,7 @@ def install_agent_hooks() -> None:
 
         chat_with_session_stream._hermes_wrapped = True  # type: ignore[attr-defined]
         chat_with_session_stream._hermes_original = original_stream  # type: ignore[attr-defined]
-        setattr(Agent, "chat_with_session_stream", chat_with_session_stream)
+        Agent.chat_with_session_stream = chat_with_session_stream  # type: ignore[method-assign]
 
     _INSTALLED = True
     logger.info("Hermes Agent runtime hooks installed")

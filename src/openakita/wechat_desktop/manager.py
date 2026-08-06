@@ -7,9 +7,10 @@ import hashlib
 import json
 import secrets
 from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 SendCallable = Callable[[dict[str, Any]], Awaitable[None]]
 InboundCallback = Callable[[dict[str, Any]], Awaitable[None]]

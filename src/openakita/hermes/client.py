@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any
 
 import httpx
 
@@ -125,8 +126,9 @@ class HermesClient:
         }
         if tools:
             payload["tools"] = tools
-        async with httpx.AsyncClient(timeout=self.node.timeout_seconds) as client:
-            async with client.stream(
+        async with (
+            httpx.AsyncClient(timeout=self.node.timeout_seconds) as client,
+            client.stream(
                 "POST",
                 f"{self.node.base_url}/v1/chat/completions",
                 headers={
@@ -134,7 +136,8 @@ class HermesClient:
                     "Accept": "text/event-stream",
                 },
                 json=payload,
-            ) as response:
+            ) as response,
+        ):
                 response.raise_for_status()
                 event_name = ""
                 async for line in response.aiter_lines():

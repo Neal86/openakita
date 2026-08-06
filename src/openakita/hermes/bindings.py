@@ -35,7 +35,7 @@ class AgentHermesBinding:
         return data
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "AgentHermesBinding":
+    def from_dict(cls, data: dict[str, Any]) -> AgentHermesBinding:
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 

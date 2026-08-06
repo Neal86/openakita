@@ -37,6 +37,6 @@ async function saveBinding(){const p={runtime_provider:runtime_provider.value,he
 refresh();</script></body></html>'''
 
 
-@router.get("/ui", response_class=HTMLResponse, include_in_schema=False)
+@router.get("/ui", response_class=HTMLResponse)
 def hermes_manager_ui() -> HTMLResponse:
     return HTMLResponse(_PAGE)
