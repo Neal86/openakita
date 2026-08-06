@@ -1,7 +1,7 @@
 name: Integrate Hermes and WeChat UI
 
 on:
-  pull_request:
+  push:
     branches: [feature/hermes-multi-agent]
     paths:
       - "ci-trigger/**"
