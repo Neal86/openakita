@@ -6,9 +6,11 @@ from openakita.agent.core import Agent
 
 def test_hermes_routes_mount_once_under_api_prefix():
     paths = {getattr(route, "path", "") for route in agents.router.routes}
-    assert "/hermes/nodes" in paths
-    assert "/hermes/stats" in paths
-    assert "/hermes/ui" in paths
+    assert "/api/hermes/nodes" in paths
+    assert "/api/hermes/stats" in paths
+    assert "/api/hermes/ui" in paths
+    assert "/api/execution/instances" in paths
+    assert "/v1/chat/completions" in paths
     assert not any(path.startswith("/api/api/") for path in paths)
 
 
