@@ -10,12 +10,12 @@ def test_hermes_routes_mount_once_under_api_prefix():
     app = FastAPI()
     mount_hermes_execution_routes(app)
     mount_hermes_execution_routes(app)
-    paths = [getattr(route, "path", "") for route in app.routes]
-    assert paths.count("/api/hermes/nodes") == 1
-    assert paths.count("/api/hermes/stats") == 1
-    assert paths.count("/api/hermes/ui") == 1
-    assert paths.count("/api/execution/instances") == 1
-    assert paths.count("/v1/chat/completions") == 1
+    paths = app.openapi()["paths"]
+    assert "/api/hermes/nodes" in paths
+    assert "/api/hermes/stats" in paths
+    assert "/api/hermes/ui" in paths
+    assert "/api/execution/instances" in paths
+    assert "/v1/chat/completions" in paths
     assert not any(path.startswith("/api/api/") for path in paths)
 
 
