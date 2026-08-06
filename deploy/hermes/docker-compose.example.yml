@@ -1,5 +1,6 @@
 services:
   openakita:
+    container_name: openakita
     build: ../..
     restart: unless-stopped
     expose:
@@ -7,76 +8,57 @@ services:
     volumes:
       - ../../data:/app/data
       - ../../.env:/app/.env:ro
+      # Required only for automatically creating/stopping dedicated Hermes instances.
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       API_HOST: 0.0.0.0
       API_PORT: 18900
-      HERMES_CUSTOMER_API_KEY: ${HERMES_CUSTOMER_API_KEY:?set HERMES_CUSTOMER_API_KEY}
-      HERMES_CONTENT_API_KEY: ${HERMES_CONTENT_API_KEY:?set HERMES_CONTENT_API_KEY}
-    networks: [agents]
+    networks:
+      agents:
+        aliases: [openakita]
     depends_on:
-      hermes-customer:
-        condition: service_healthy
-      hermes-content:
+      hermes-shared:
         condition: service_healthy
 
-  hermes-customer:
+  # Default shared instance. Multiple Hermes Agents use this one container while
+  # OpenAkita keeps their memory/session/workspace directories isolated by profile_id.
+  hermes-shared:
+    container_name: openakita-hermes-shared
     image: nousresearch/hermes-agent:latest
     restart: unless-stopped
     command: gateway run
     expose:
       - "8642"
     volumes:
-      - hermes_customer_data:/opt/data
+      - hermes_shared_data:/root/.hermes
+      - ../../data/hermes_agents:/opt/openakita/agents
     environment:
       API_SERVER_ENABLED: "true"
       API_SERVER_HOST: 0.0.0.0
       API_SERVER_PORT: 8642
-      API_SERVER_KEY: ${HERMES_CUSTOMER_API_KEY:?set HERMES_CUSTOMER_API_KEY}
-      API_SERVER_MODEL_NAME: hermes-customer
       HERMES_DASHBOARD: "0"
       HERMES_ALLOW_ROOT_GATEWAY: "1"
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      # Hermes uses OpenAkita as its only model provider. The static non-secret
+      # value satisfies OpenAI clients that require a non-empty key; Akita's
+      # private Docker-network gateway does not authenticate it.
+      OPENAI_API_KEY: openakita-internal
+      OPENAI_BASE_URL: http://openakita:18900/v1
+      OPENAI_MODEL: openakita-auto
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8642/health"]
       interval: 20s
       timeout: 5s
       retries: 6
       start_period: 60s
-    networks: [agents]
-
-  hermes-content:
-    image: nousresearch/hermes-agent:latest
-    restart: unless-stopped
-    command: gateway run
-    expose:
-      - "8642"
-    volumes:
-      - hermes_content_data:/opt/data
-    environment:
-      API_SERVER_ENABLED: "true"
-      API_SERVER_HOST: 0.0.0.0
-      API_SERVER_PORT: 8642
-      API_SERVER_KEY: ${HERMES_CONTENT_API_KEY:?set HERMES_CONTENT_API_KEY}
-      API_SERVER_MODEL_NAME: hermes-content
-      HERMES_DASHBOARD: "0"
-      HERMES_ALLOW_ROOT_GATEWAY: "1"
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8642/health"]
-      interval: 20s
-      timeout: 5s
-      retries: 6
-      start_period: 60s
-    networks: [agents]
+    networks:
+      agents:
+        aliases: [openakita-hermes-shared]
 
 networks:
   agents:
+    name: openakita-agents
     driver: bridge
 
 volumes:
-  hermes_customer_data:
-  hermes_content_data:
+  hermes_shared_data:
+    name: openakita_hermes_shared_data
