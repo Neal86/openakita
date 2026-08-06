@@ -1,16 +1,11 @@
-"""Runtime hooks that integrate Hermes with the existing Agent chat surface.
-
-The legacy Agent remains authoritative for local execution.  These wrappers
-only intercept profiles explicitly configured for ``hermes`` or ``auto`` and
-fall back byte-for-byte to the original methods otherwise.
-"""
+"""Runtime hooks that integrate Hermes with the existing Agent chat surface."""
 from __future__ import annotations
 
-import inspect
 import logging
 from typing import Any
 
-from .bindings import get_binding_store
+from .bindings import AgentHermesBindingStore
+from .models import HermesRuntimeProvider
 from .runtime import execute_with_hermes_fallback
 
 logger = logging.getLogger(__name__)
@@ -32,14 +27,14 @@ def _session_value(session: Any, key: str, default: Any = None) -> Any:
     if isinstance(metadata, dict) and key in metadata:
         return metadata[key]
     if isinstance(session, dict):
-        metadata = session.get("metadata")
-        if isinstance(metadata, dict) and key in metadata:
-            return metadata[key]
+        nested = session.get("metadata")
+        if isinstance(nested, dict) and key in nested:
+            return nested[key]
         return session.get(key, default)
     return getattr(session, key, default)
 
 
-def _extract_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[str, str, Any]:
+def _extract_call(self: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[str, str, Any]:
     message = kwargs.get("message")
     session = kwargs.get("session")
     if message is None and args:
@@ -54,20 +49,22 @@ def _extract_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[str, s
         or kwargs.get("agent_profile_id")
         or _session_value(session, "agent_profile_id")
         or _session_value(session, "_bot_default_agent")
-        or getattr(kwargs.get("agent"), "profile_id", None)
+        or getattr(self, "profile_id", None)
+        or getattr(getattr(self, "profile", None), "id", None)
         or "default"
     )
     return str(profile_id), str(message or ""), session
 
 
-def _payload(profile_id: str, message: str, session: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+def _runtime_args(profile_id: str, message: str, session: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
     return {
         "profile_id": profile_id,
         "message": message,
-        "session_id": kwargs.get("session_id") or _session_value(session, "id", ""),
-        "messages": kwargs.get("session_messages") or [],
-        "mode": kwargs.get("mode") or "chat",
-        "trace": {
+        "session_id": str(kwargs.get("session_id") or _session_value(session, "id", "") or ""),
+        "system": str(kwargs.get("system") or ""),
+        "tools": kwargs.get("tools") or [],
+        "metadata": {
+            "mode": kwargs.get("mode") or "chat",
             "channel": _session_value(session, "channel", ""),
             "user_id": _session_value(session, "user_id", ""),
         },
@@ -87,22 +84,20 @@ def install_agent_hooks() -> None:
 
     if callable(original_chat) and not getattr(original_chat, "_hermes_wrapped", False):
         async def chat_with_session(self: Any, *args: Any, **kwargs: Any) -> Any:
-            profile_id, message, session = _extract_call(args, kwargs)
-            binding = get_binding_store().get(profile_id)
-            if binding.runtime_provider == "local":
+            profile_id, message, session = _extract_call(self, args, kwargs)
+            binding = AgentHermesBindingStore().get(profile_id)
+            if binding.runtime_provider == HermesRuntimeProvider.LOCAL:
                 return await original_chat(self, *args, **kwargs)
 
-            async def local_fallback() -> Any:
+            async def local_runner() -> Any:
                 return await original_chat(self, *args, **kwargs)
 
             result = await execute_with_hermes_fallback(
-                profile_id=profile_id,
-                payload=_payload(profile_id, message, session, kwargs),
-                local_fallback=local_fallback,
+                **_runtime_args(profile_id, message, session, kwargs),
+                local_runner=local_runner,
             )
-            if isinstance(result, dict):
-                return result.get("content") or result.get("text") or result.get("message") or ""
-            return result
+            content = getattr(result, "content", result)
+            return str(content or "")
 
         chat_with_session._hermes_wrapped = True  # type: ignore[attr-defined]
         chat_with_session._hermes_original = original_chat  # type: ignore[attr-defined]
@@ -110,14 +105,14 @@ def install_agent_hooks() -> None:
 
     if callable(original_stream) and not getattr(original_stream, "_hermes_wrapped", False):
         async def chat_with_session_stream(self: Any, *args: Any, **kwargs: Any):
-            profile_id, message, session = _extract_call(args, kwargs)
-            binding = get_binding_store().get(profile_id)
-            if binding.runtime_provider == "local":
+            profile_id, message, session = _extract_call(self, args, kwargs)
+            binding = AgentHermesBindingStore().get(profile_id)
+            if binding.runtime_provider == HermesRuntimeProvider.LOCAL:
                 async for event in original_stream(self, *args, **kwargs):
                     yield event
                 return
 
-            async def local_fallback() -> Any:
+            async def local_runner() -> Any:
                 text = ""
                 async for event in original_stream(self, *args, **kwargs):
                     if isinstance(event, dict):
@@ -128,14 +123,10 @@ def install_agent_hooks() -> None:
                 return text
 
             result = await execute_with_hermes_fallback(
-                profile_id=profile_id,
-                payload=_payload(profile_id, message, session, kwargs),
-                local_fallback=local_fallback,
+                **_runtime_args(profile_id, message, session, kwargs),
+                local_runner=local_runner,
             )
-            if isinstance(result, dict):
-                text = str(result.get("content") or result.get("text") or result.get("message") or "")
-            else:
-                text = str(result or "")
+            text = str(getattr(result, "content", result) or "")
             if text:
                 yield {"type": "text_delta", "content": text, "source": "hermes"}
             yield {"type": "done", "content": text, "source": "hermes"}
