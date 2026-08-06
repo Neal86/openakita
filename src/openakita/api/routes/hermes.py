@@ -10,7 +10,9 @@ from openakita.hermes.models import HermesNode
 from openakita.hermes.router import HermesRouter
 from openakita.hermes.store import get_hermes_store
 
-router = APIRouter(prefix="/api/hermes", tags=["智能体"])
+# This router is nested under the existing Agents router, which the server mounts
+# with prefix="/api". Keep the local prefix relative to avoid /api/api/hermes.
+router = APIRouter(prefix="/hermes", tags=["智能体"])
 
 
 class HermesNodePayload(BaseModel):
