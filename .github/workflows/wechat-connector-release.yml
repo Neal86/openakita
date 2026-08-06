@@ -153,3 +153,49 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "OpenAkita WeChat Connector Windows x64" \
             --notes "Validated Windows x64 Connector package built from commit $GITHUB_SHA."
+
+  persist-final-result:
+    name: Persist final validation result
+    if: always() && github.event_name != 'pull_request'
+    needs: [connector-checks, windows-release, hermes-final, publish-stable-release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/hermes-multi-agent
+      - name: Write result JSON
+        env:
+          CONNECTOR_RESULT: ${{ needs.connector-checks.result }}
+          WINDOWS_RESULT: ${{ needs.windows-release.result }}
+          HERMES_RESULT: ${{ needs.hermes-final.result }}
+          PUBLISH_RESULT: ${{ needs.publish-stable-release.result }}
+        run: |
+          mkdir -p ci-results
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          results = {
+              "workflow": "WeChat Connector Windows release",
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "head_sha": os.environ["GITHUB_SHA"],
+              "event": os.environ["GITHUB_EVENT_NAME"],
+              "connector_checks": os.environ["CONNECTOR_RESULT"],
+              "windows_release": os.environ["WINDOWS_RESULT"],
+              "hermes_final": os.environ["HERMES_RESULT"],
+              "publish_stable_release": os.environ["PUBLISH_RESULT"],
+          }
+          results["success"] = all(results[key] == "success" for key in (
+              "connector_checks", "windows_release", "hermes_final", "publish_stable_release"
+          ))
+          Path("ci-results/wechat-connector-release.json").write_text(
+              json.dumps(results, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+          )
+          PY
+      - name: Commit result
+        run: |
+          git config user.name "openakita-actions"
+          git config user.email "actions@users.noreply.github.com"
+          git add ci-results/wechat-connector-release.json
+          git commit -m "ci: record WeChat Connector release result [skip ci]" || exit 0
+          git push origin HEAD:feature/hermes-multi-agent
