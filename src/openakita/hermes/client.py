@@ -23,15 +23,15 @@ class HermesResponse:
 class HermesClient:
     """Client for Nous Research Hermes Agent's official API server.
 
-    Hermes exposes an OpenAI-compatible API on port 8642 when
-    ``API_SERVER_ENABLED=true``.  We intentionally target that stable public
-    surface instead of depending on Hermes' private Python internals.
+    Shared OpenAkita Hermes instances use ``X-OpenAkita-Agent-Id`` to select
+    the isolated child process for one Agent profile. Dedicated instances
+    accept the same header, so callers do not need separate code paths.
     """
 
     def __init__(self, node: HermesNode) -> None:
         self.node = node
 
-    def _headers(self, *, session_id: str = "") -> dict[str, str]:
+    def _headers(self, *, session_id: str = "", agent_id: str = "") -> dict[str, str]:
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -42,6 +42,8 @@ class HermesClient:
                 headers["Authorization"] = f"Bearer {key}"
         if session_id:
             headers["X-Hermes-Session-Id"] = session_id
+        if agent_id:
+            headers["X-OpenAkita-Agent-Id"] = agent_id
         return headers
 
     @staticmethod
@@ -71,15 +73,18 @@ class HermesClient:
         tools: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> HermesResponse:
-        payload = {
-            "model": agent_id or "hermes-agent",
+        payload: dict[str, Any] = {
+            "model": f"agent:{agent_id}" if agent_id else "openakita-auto",
             "messages": self._messages(message, system),
             "stream": False,
+            "metadata": {"agent_profile_id": agent_id, **(metadata or {})},
         }
+        if tools:
+            payload["tools"] = tools
         async with httpx.AsyncClient(timeout=self.node.timeout_seconds) as client:
             response = await client.post(
                 f"{self.node.base_url}/v1/chat/completions",
-                headers=self._headers(session_id=session_id),
+                headers=self._headers(session_id=session_id, agent_id=agent_id),
                 json=payload,
             )
             response.raise_for_status()
@@ -97,6 +102,7 @@ class HermesClient:
             metadata={
                 "id": data.get("id"),
                 "model": data.get("model"),
+                "agent_profile_id": agent_id,
                 **(metadata or {}),
             },
         )
@@ -111,17 +117,20 @@ class HermesClient:
         tools: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        payload = {
-            "model": agent_id or "hermes-agent",
+        payload: dict[str, Any] = {
+            "model": f"agent:{agent_id}" if agent_id else "openakita-auto",
             "messages": self._messages(message, system),
             "stream": True,
+            "metadata": {"agent_profile_id": agent_id, **(metadata or {})},
         }
+        if tools:
+            payload["tools"] = tools
         async with httpx.AsyncClient(timeout=self.node.timeout_seconds) as client:
             async with client.stream(
                 "POST",
                 f"{self.node.base_url}/v1/chat/completions",
                 headers={
-                    **self._headers(session_id=session_id),
+                    **self._headers(session_id=session_id, agent_id=agent_id),
                     "Accept": "text/event-stream",
                 },
                 json=payload,
@@ -157,6 +166,8 @@ class HermesClient:
                     content = delta.get("content")
                     if content:
                         yield {"type": "text_delta", "content": str(content)}
+                    if delta.get("tool_calls"):
+                        yield {"type": "tool_call_delta", "tool_calls": delta["tool_calls"]}
                     finish_reason = choices[0].get("finish_reason")
                     if finish_reason:
                         yield {"type": "done", "finish_reason": finish_reason}
