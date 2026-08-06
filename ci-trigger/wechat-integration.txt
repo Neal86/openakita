@@ -1,1 +1,0 @@
-Trigger the same-repository integration workflow for the confirmed WeChat Connector UI changes.
