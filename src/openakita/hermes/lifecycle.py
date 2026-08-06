@@ -20,10 +20,10 @@ from .store import get_hermes_store
 
 class HermesLifecycleService:
     SHARED_ID = "shared"
+    RUNTIME_IMAGE = "openakita-hermes-runtime:latest"
 
     def __init__(self) -> None:
         self.instances = HermesInstanceStore()
-        self.execution = None
         self.containers = HermesContainerManager()
         self.isolation = HermesIsolationManager()
 
@@ -34,12 +34,16 @@ class HermesLifecycleService:
                 id=self.SHARED_ID,
                 name="Hermes 共享实例",
                 mode=HermesInstanceMode.SHARED,
+                image=self.RUNTIME_IMAGE,
                 container_name="openakita-hermes-shared",
                 volume_name="openakita_hermes_shared_data",
                 base_url="http://openakita-hermes-shared:8642",
                 lifecycle_status=InstanceLifecycle.RUNNING,
                 max_concurrency=16,
             )
+            self.instances.upsert(instance)
+        elif instance.image != self.RUNTIME_IMAGE:
+            instance = replace(instance, image=self.RUNTIME_IMAGE)
             self.instances.upsert(instance)
         self._register_node(instance)
         return instance
@@ -73,25 +77,28 @@ class HermesLifecycleService:
             AgentHermesBindingStore().upsert(AgentHermesBinding(profile_id=config.profile_id, runtime_provider=HermesRuntimeProvider.LOCAL))
             return config, None
 
-        paths = self.isolation.ensure(config.profile_id, metadata=profile_metadata or config.to_dict())
+        self.isolation.ensure(config.profile_id, metadata=profile_metadata or config.to_dict())
         if config.hermes_instance_mode == HermesInstanceMode.SHARED:
             instance = self.ensure_shared()
+            config.hermes_instance_id = instance.id
         else:
             instance_id = config.hermes_instance_id or f"dedicated-{config.profile_id}"
             instance = self.instances.get(instance_id) or HermesInstance(
                 id=instance_id,
                 name=f"{config.profile_id} 专属 Hermes",
                 mode=HermesInstanceMode.DEDICATED,
+                image=self.RUNTIME_IMAGE,
                 agent_profile_id=config.profile_id,
                 max_concurrency=4,
             )
+            if instance.image != self.RUNTIME_IMAGE:
+                instance = replace(instance, image=self.RUNTIME_IMAGE)
             if HermesContainerManager.available():
                 try:
                     instance = await self.containers.create_or_start(instance)
                 except Exception as exc:
                     instance = replace(instance, lifecycle_status=InstanceLifecycle.ERROR, last_error=str(exc))
             else:
-                # Saved as pending so a deployment with Docker socket can reconcile it.
                 instance = replace(instance, lifecycle_status=InstanceLifecycle.PENDING, last_error="Docker socket unavailable")
             self.instances.upsert(instance)
             self._register_node(instance)
@@ -118,7 +125,7 @@ class HermesLifecycleService:
     async def restart(self, instance: HermesInstance) -> HermesInstance:
         if not HermesContainerManager.available():
             raise ContainerManagerError("Docker socket unavailable")
-        updated = await self.containers.restart(instance)
+        updated = await self.containers.restart(replace(instance, image=self.RUNTIME_IMAGE))
         self.instances.upsert(updated)
         self._register_node(updated)
         return updated
