@@ -3,6 +3,7 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# This script is intentionally idempotent so validation can safely rerun it.
 
 
 def replace(path: str, old: str, new: str) -> None:
