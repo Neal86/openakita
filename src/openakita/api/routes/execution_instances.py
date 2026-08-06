@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from openakita.hermes.container_manager import ContainerManagerError, HermesContainerManager
 from openakita.hermes.execution import (
@@ -16,7 +16,7 @@ from openakita.hermes.execution import (
 from openakita.hermes.lifecycle import HermesLifecycleService
 from openakita.hermes.router import HermesRouter
 
-router = APIRouter(prefix="/execution", tags=["执行模式"])
+router = APIRouter(prefix="/api/execution", tags=["执行模式"])
 
 
 class ExecutionPayload(BaseModel):
@@ -38,10 +38,7 @@ async def set_agent_execution(profile_id: str, payload: ExecutionPayload) -> dic
     service = HermesLifecycleService()
     config, instance = await service.apply(config)
     AgentExecutionStore().upsert(config)
-    return {
-        "execution": config.to_dict(),
-        "instance": instance.to_dict() if instance else None,
-    }
+    return {"execution": config.to_dict(), "instance": instance.to_dict() if instance else None}
 
 
 @router.delete("/agents/{profile_id}")
@@ -54,6 +51,7 @@ def reset_agent_execution(profile_id: str) -> dict:
 async def list_instances() -> dict:
     service = HermesLifecycleService()
     service.ensure_shared()
+    executions = AgentExecutionStore().list()
     rows = []
     for instance in service.instances.list():
         data = instance.to_dict()
@@ -64,7 +62,15 @@ async def list_instances() -> dict:
                 data["container"] = {"exists": False, "running": False, "error": str(exc)}
         else:
             data["container"] = {"available": False, "error": "Docker socket unavailable"}
-        bindings = [x.to_dict() for x in AgentExecutionStore().list() if x.hermes_instance_id == instance.id or (instance.id == "shared" and x.execution_mode == ExecutionMode.HERMES and x.hermes_instance_mode == HermesInstanceMode.SHARED)]
+        bindings = [
+            x.to_dict() for x in executions
+            if x.hermes_instance_id == instance.id
+            or (
+                instance.id == "shared"
+                and x.execution_mode == ExecutionMode.HERMES
+                and x.hermes_instance_mode == HermesInstanceMode.SHARED
+            )
+        ]
         data["agents"] = bindings
         data["agent_count"] = len(bindings)
         rows.append(data)
