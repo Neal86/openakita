@@ -7,6 +7,7 @@ on:
       - scripts/integrate_hermes_execution_ui.py
       - scripts/integrate_hermes_agent_cleanup.py
       - scripts/integrate_hermes_auth.py
+      - scripts/integrate_hermes_server_routes.py
       - .github/workflows/integrate-hermes-ui.yml
   pull_request:
     branches: [main]
@@ -14,6 +15,7 @@ on:
       - scripts/integrate_hermes_execution_ui.py
       - scripts/integrate_hermes_agent_cleanup.py
       - scripts/integrate_hermes_auth.py
+      - scripts/integrate_hermes_server_routes.py
       - .github/workflows/integrate-hermes-ui.yml
       - apps/setup-center/src/api/executionInstances.ts
       - apps/setup-center/src/components/ExecutionModeSection.tsx
@@ -43,6 +45,7 @@ jobs:
           python scripts/integrate_hermes_auth.py
           python scripts/integrate_hermes_execution_ui.py
           python scripts/integrate_hermes_agent_cleanup.py
+          python scripts/integrate_hermes_server_routes.py
       - name: Commit generated integration
         run: |
           git config user.name "openakita-bot"
@@ -53,7 +56,8 @@ jobs:
             apps/setup-center/src/components/Sidebar.tsx \
             apps/setup-center/src/views/AgentManagerView.tsx \
             src/openakita/api/auth.py \
-            src/openakita/api/routes/agents.py
+            src/openakita/api/routes/agents.py \
+            src/openakita/api/server.py
           if git diff --cached --quiet; then
             echo "Integration is already up to date"
             exit 0
