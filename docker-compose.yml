@@ -33,11 +33,11 @@ services:
     expose:
       - "8642"
     volumes:
-      - hermes_shared_data:/opt/openakita/agents
+      - hermes_shared_data:/opt/data
     environment:
       API_SERVER_HOST: 0.0.0.0
       API_SERVER_PORT: 8642
-      OPENAKITA_HERMES_AGENT_ROOT: /opt/openakita/agents
+      OPENAKITA_HERMES_AGENT_ROOT: /opt/data/openakita-agents
       HERMES_SHARED_MAX_AGENTS: 32
       OPENAI_API_KEY: openakita-internal
       OPENAI_BASE_URL: http://openakita:18900/v1

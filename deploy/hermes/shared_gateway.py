@@ -92,6 +92,7 @@ class ChildManager:
                 "API_SERVER_HOST": "127.0.0.1",
                 "API_SERVER_PORT": str(port),
                 "API_SERVER_MODEL_NAME": f"agent:{profile_id}",
+                "API_SERVER_KEY": env.get("API_SERVER_KEY", "openakita-internal"),
                 "OPENAI_API_KEY": env.get("OPENAI_API_KEY", "openakita-internal"),
                 "OPENAI_BASE_URL": env.get("OPENAI_BASE_URL", "http://openakita:18900/v1"),
                 "OPENAI_MODEL": f"agent:{profile_id}",
@@ -102,7 +103,7 @@ class ChildManager:
             log_handle = open(home / "hermes.log", "ab", buffering=0)
             try:
                 process = subprocess.Popen(
-                    ["hermes", "gateway", "run"],
+                    ["/opt/hermes/.venv/bin/hermes", "gateway", "run"],
                     env=env,
                     cwd=str(home / "workspace"),
                     stdout=log_handle,
