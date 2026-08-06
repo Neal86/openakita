@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import threading
@@ -7,7 +8,10 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from .config_service import LOG_PATH, ensure_app_dir
+try:
+    from .config_service import LOG_PATH, ensure_app_dir
+except ImportError:
+    from config_service import LOG_PATH, ensure_app_dir  # type: ignore
 
 StatusCallback = Callable[[str], None]
 
@@ -23,21 +27,34 @@ class ConnectorService:
     def running(self) -> bool:
         return self._process is not None and self._process.poll() is None
 
+    @staticmethod
+    def _command() -> tuple[list[str], Path]:
+        if getattr(sys, "frozen", False):
+            executable_dir = Path(sys.executable).resolve().parent
+            worker = executable_dir / "OpenAkita-WeChat-Connector-Worker.exe"
+            return [str(worker)], executable_dir
+        target = Path(__file__).with_name("worker.py")
+        return [sys.executable, str(target)], target.parent
+
     def start(self) -> None:
         if self.running:
             return
         ensure_app_dir()
+        command, cwd = self._command()
+        if not Path(command[0]).exists():
+            self._status_callback("Connector Worker 不存在")
+            raise FileNotFoundError(command[0])
         self._stopping = False
         self._status_callback("正在连接")
-        target = Path(__file__).with_name("connector.py")
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         self._process = subprocess.Popen(
-            [sys.executable, str(target)],
-            cwd=str(target.parent),
+            command,
+            cwd=str(cwd),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
             creationflags=creationflags,
+            env={**os.environ, "PYTHONUTF8": "1"},
         )
         self._watcher = threading.Thread(target=self._watch, daemon=True)
         self._watcher.start()
