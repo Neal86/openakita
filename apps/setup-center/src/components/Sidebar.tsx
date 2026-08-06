@@ -189,7 +189,7 @@ export function Sidebar({
 
   const capViews: ViewId[] = ["skills", "mcp", "plugins", "memory", "scheduler"];
   const monViews: ViewId[] = ["token_stats", "skill_usage", "security", "pending_approvals"];
-  const maViews: ViewId[] = ["dashboard", "org_editor", "pixel_office", "agent_manager"];
+  const maViews: ViewId[] = ["dashboard", "org_editor", "pixel_office", "agent_manager", "execution_instances"];
   const stViews: ViewId[] = ["agent_store", "skill_store"];
 
   const prevViewRef = useRef(view);
@@ -348,6 +348,9 @@ export function Sidebar({
             </div>
             <div className={`navItem ${view === "agent_manager" ? "navItemActive" : ""}`} onClick={() => onViewChange("agent_manager")} role="button" tabIndex={0} title={t("sidebar.agentManager")}>
               <IconBot size={16} /> {!collapsed && <span>{t("sidebar.agentManager")}</span>}
+            </div>
+            <div className={`navItem ${view === "execution_instances" ? "navItemActive" : ""}`} onClick={() => onViewChange("execution_instances")} role="button" tabIndex={0} title="执行模式实例">
+              <IconGear size={16} /> {!collapsed && <span>执行模式实例</span>}
             </div>
           </div>
         )}
