@@ -1,9 +1,4 @@
-"""Restricted Docker lifecycle manager for OpenAkita-owned Hermes instances.
-
-Only containers/volumes with the OpenAkita Hermes prefix are touched.  The
-manager uses the Docker CLI so no additional Python dependency is required.
-Mount /var/run/docker.sock into OpenAkita to enable dedicated instances.
-"""
+"""Restricted Docker lifecycle manager for OpenAkita-owned Hermes instances."""
 from __future__ import annotations
 
 import asyncio
@@ -23,14 +18,10 @@ class ContainerManagerError(RuntimeError):
 class HermesContainerManager:
     CONTAINER_PREFIX = "openakita-hermes-"
     VOLUME_PREFIX = "openakita_hermes_"
-    ALLOWED_IMAGE_PREFIXES = ("nousresearch/hermes-agent",)
+    ALLOWED_IMAGE_PREFIXES = ("openakita-hermes-runtime", "nousresearch/hermes-agent")
 
     async def _run(self, *args: str, timeout: int = 60, check: bool = True) -> tuple[int, str, str]:
-        proc = await asyncio.create_subprocess_exec(
-            "docker", *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        proc = await asyncio.create_subprocess_exec("docker", *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except TimeoutError:
@@ -52,9 +43,7 @@ class HermesContainerManager:
 
     async def inspect(self, instance: HermesInstance) -> dict[str, Any]:
         self._validate(instance)
-        code, stdout, _ = await self._run(
-            "inspect", instance.container_name, "--format", "{{json .State}}", check=False
-        )
+        code, stdout, _ = await self._run("inspect", instance.container_name, "--format", "{{json .State}}", check=False)
         if code != 0 or not stdout:
             return {"exists": False, "running": False, "status": "missing"}
         try:
@@ -84,13 +73,15 @@ class HermesContainerManager:
             return replace(instance, lifecycle_status=InstanceLifecycle.RUNNING, last_error=None)
 
         await self._run("volume", "create", instance.volume_name)
+        profile_id = instance.agent_profile_id or "default"
         env = [
-            "-e", "API_SERVER_ENABLED=true",
             "-e", "API_SERVER_HOST=0.0.0.0",
             "-e", "API_SERVER_PORT=8642",
+            "-e", "OPENAI_API_KEY=openakita-internal",
             "-e", "OPENAI_BASE_URL=http://openakita:18900/v1",
-            "-e", f"OPENAI_MODEL=agent:{instance.agent_profile_id or 'default'}",
-            "-e", f"OPENAKITA_AGENT_PROFILE_ID={instance.agent_profile_id or 'default'}",
+            "-e", f"OPENAI_MODEL=agent:{profile_id}",
+            "-e", f"OPENAKITA_AGENT_PROFILE_ID={profile_id}",
+            "-e", "HERMES_SHARED_MAX_AGENTS=1",
         ]
         await self._run(
             "run", "-d", "--name", instance.container_name,
@@ -98,9 +89,9 @@ class HermesContainerManager:
             "--network", instance.network,
             "--label", "openakita.managed=true",
             "--label", f"openakita.hermes.instance={instance.id}",
-            "-v", f"{instance.volume_name}:/root/.hermes",
+            "-v", f"{instance.volume_name}:/opt/openakita/agents",
             *env,
-            instance.image, "gateway", "run",
+            instance.image,
             timeout=180,
         )
         return replace(instance, lifecycle_status=InstanceLifecycle.RUNNING, last_error=None)
