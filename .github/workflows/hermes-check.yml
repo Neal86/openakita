@@ -46,9 +46,10 @@ jobs:
           from openakita.api.routes import agents
           from openakita.hermes.router import HermesRouter
           paths = {getattr(route, "path", "") for route in agents.router.routes}
-          assert "/api/hermes/nodes" in paths
-          assert "/api/execution/instances" in paths
-          assert "/v1/chat/completions" in paths
+          print("mounted routes:", sorted(path for path in paths if "hermes" in path or "execution" in path or path.startswith("/v1")))
+          assert "/api/hermes/nodes" in paths, sorted(paths)
+          assert "/api/execution/instances" in paths, sorted(paths)
+          assert "/v1/chat/completions" in paths, sorted(paths)
           print(len(paths), HermesRouter.__name__)
           PY
       - name: Run Hermes tests
