@@ -6,10 +6,19 @@ on:
     paths:
       - scripts/integrate_hermes_execution_ui.py
       - .github/workflows/integrate-hermes-ui.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - scripts/integrate_hermes_execution_ui.py
+      - .github/workflows/integrate-hermes-ui.yml
+      - apps/setup-center/src/api/executionInstances.ts
+      - apps/setup-center/src/components/ExecutionModeSection.tsx
+      - apps/setup-center/src/views/ExecutionInstancesView.tsx
   workflow_dispatch:
 
 permissions:
   contents: write
+  pull-requests: read
 
 jobs:
   integrate:
