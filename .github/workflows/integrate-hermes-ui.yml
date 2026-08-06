@@ -6,12 +6,14 @@ on:
     paths:
       - scripts/integrate_hermes_execution_ui.py
       - scripts/integrate_hermes_agent_cleanup.py
+      - scripts/integrate_hermes_auth.py
       - .github/workflows/integrate-hermes-ui.yml
   pull_request:
     branches: [main]
     paths:
       - scripts/integrate_hermes_execution_ui.py
       - scripts/integrate_hermes_agent_cleanup.py
+      - scripts/integrate_hermes_auth.py
       - .github/workflows/integrate-hermes-ui.yml
       - apps/setup-center/src/api/executionInstances.ts
       - apps/setup-center/src/components/ExecutionModeSection.tsx
@@ -34,8 +36,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Restore auth baseline and inspect App layout
+        run: |
+          git checkout origin/main -- src/openakita/api/auth.py
+          grep -n -C 4 -E 'AgentManagerView|agent_manager' apps/setup-center/src/App.tsx || true
       - name: Apply integrations
         run: |
+          python scripts/integrate_hermes_auth.py
           python scripts/integrate_hermes_execution_ui.py
           python scripts/integrate_hermes_agent_cleanup.py
       - name: Commit generated integration
@@ -51,6 +58,7 @@ jobs:
             apps/setup-center/src/types.ts \
             apps/setup-center/src/components/Sidebar.tsx \
             apps/setup-center/src/views/AgentManagerView.tsx \
+            src/openakita/api/auth.py \
             src/openakita/api/routes/agents.py
           git commit -m "feat: integrate Hermes execution mode into existing Agent lifecycle"
           git push origin HEAD:feature/hermes-multi-agent
