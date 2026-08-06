@@ -1,0 +1,148 @@
+"""Runtime hooks that integrate Hermes with the existing Agent chat surface.
+
+The legacy Agent remains authoritative for local execution.  These wrappers
+only intercept profiles explicitly configured for ``hermes`` or ``auto`` and
+fall back byte-for-byte to the original methods otherwise.
+"""
+from __future__ import annotations
+
+import inspect
+import logging
+from typing import Any
+
+from .bindings import get_binding_store
+from .runtime import execute_with_hermes_fallback
+
+logger = logging.getLogger(__name__)
+_INSTALLED = False
+
+
+def _session_value(session: Any, key: str, default: Any = None) -> Any:
+    if session is None:
+        return default
+    getter = getattr(session, "get_metadata", None)
+    if callable(getter):
+        try:
+            value = getter(key)
+            if value is not None:
+                return value
+        except Exception:
+            pass
+    metadata = getattr(session, "metadata", None)
+    if isinstance(metadata, dict) and key in metadata:
+        return metadata[key]
+    if isinstance(session, dict):
+        metadata = session.get("metadata")
+        if isinstance(metadata, dict) and key in metadata:
+            return metadata[key]
+        return session.get(key, default)
+    return getattr(session, key, default)
+
+
+def _extract_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[str, str, Any]:
+    message = kwargs.get("message")
+    session = kwargs.get("session")
+    if message is None and args:
+        message = args[0]
+    if session is None:
+        for value in args[1:]:
+            if hasattr(value, "metadata") or hasattr(value, "get_metadata"):
+                session = value
+                break
+    profile_id = (
+        kwargs.get("profile_id")
+        or kwargs.get("agent_profile_id")
+        or _session_value(session, "agent_profile_id")
+        or _session_value(session, "_bot_default_agent")
+        or getattr(kwargs.get("agent"), "profile_id", None)
+        or "default"
+    )
+    return str(profile_id), str(message or ""), session
+
+
+def _payload(profile_id: str, message: str, session: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "profile_id": profile_id,
+        "message": message,
+        "session_id": kwargs.get("session_id") or _session_value(session, "id", ""),
+        "messages": kwargs.get("session_messages") or [],
+        "mode": kwargs.get("mode") or "chat",
+        "trace": {
+            "channel": _session_value(session, "channel", ""),
+            "user_id": _session_value(session, "user_id", ""),
+        },
+    }
+
+
+def install_agent_hooks() -> None:
+    """Install idempotent Hermes routing wrappers on the canonical Agent class."""
+    global _INSTALLED
+    if _INSTALLED:
+        return
+
+    from openakita.agent.core import Agent
+
+    original_chat = getattr(Agent, "chat_with_session", None)
+    original_stream = getattr(Agent, "chat_with_session_stream", None)
+
+    if callable(original_chat) and not getattr(original_chat, "_hermes_wrapped", False):
+        async def chat_with_session(self: Any, *args: Any, **kwargs: Any) -> Any:
+            profile_id, message, session = _extract_call(args, kwargs)
+            binding = get_binding_store().get(profile_id)
+            if binding.runtime_provider == "local":
+                return await original_chat(self, *args, **kwargs)
+
+            async def local_fallback() -> Any:
+                return await original_chat(self, *args, **kwargs)
+
+            result = await execute_with_hermes_fallback(
+                profile_id=profile_id,
+                payload=_payload(profile_id, message, session, kwargs),
+                local_fallback=local_fallback,
+            )
+            if isinstance(result, dict):
+                return result.get("content") or result.get("text") or result.get("message") or ""
+            return result
+
+        chat_with_session._hermes_wrapped = True  # type: ignore[attr-defined]
+        chat_with_session._hermes_original = original_chat  # type: ignore[attr-defined]
+        setattr(Agent, "chat_with_session", chat_with_session)
+
+    if callable(original_stream) and not getattr(original_stream, "_hermes_wrapped", False):
+        async def chat_with_session_stream(self: Any, *args: Any, **kwargs: Any):
+            profile_id, message, session = _extract_call(args, kwargs)
+            binding = get_binding_store().get(profile_id)
+            if binding.runtime_provider == "local":
+                async for event in original_stream(self, *args, **kwargs):
+                    yield event
+                return
+
+            async def local_fallback() -> Any:
+                text = ""
+                async for event in original_stream(self, *args, **kwargs):
+                    if isinstance(event, dict):
+                        if event.get("type") == "text_delta":
+                            text += str(event.get("content") or "")
+                        elif event.get("type") == "done" and event.get("content"):
+                            text = str(event["content"])
+                return text
+
+            result = await execute_with_hermes_fallback(
+                profile_id=profile_id,
+                payload=_payload(profile_id, message, session, kwargs),
+                local_fallback=local_fallback,
+            )
+            if isinstance(result, dict):
+                text = str(result.get("content") or result.get("text") or result.get("message") or "")
+            else:
+                text = str(result or "")
+            if text:
+                yield {"type": "text_delta", "content": text, "source": "hermes"}
+            yield {"type": "done", "content": text, "source": "hermes"}
+
+        chat_with_session_stream._hermes_wrapped = True  # type: ignore[attr-defined]
+        chat_with_session_stream._hermes_original = original_stream  # type: ignore[attr-defined]
+        setattr(Agent, "chat_with_session_stream", chat_with_session_stream)
+
+    _INSTALLED = True
+    logger.info("Hermes Agent runtime hooks installed")
