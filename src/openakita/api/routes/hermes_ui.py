@@ -13,8 +13,8 @@ h1{margin:0 0 18px}.card{background:white;border:1px solid #e3e7ef;border-radius
 input,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #cfd5df;border-radius:8px;background:white}button{border:0;border-radius:8px;padding:10px 14px;cursor:pointer;background:#2563eb;color:white;margin-right:8px}.danger{background:#dc2626}.secondary{background:#64748b}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.node{border-top:1px solid #edf0f5;padding:12px 0}.ok{color:#15803d}.bad{color:#b91c1c}.muted{color:#667085;font-size:13px}@media(max-width:720px){.grid{grid-template-columns:1fr}}
 </style></head><body><div class="wrap"><h1>Hermes 节点与 Agent 路由</h1>
 <div class="card"><h2>添加 / 更新节点</h2><div class="grid">
-<div><label>节点 ID</label><input id="id" placeholder="hermes-1"></div><div><label>名称</label><input id="name" placeholder="客服 Hermes"></div>
-<div><label>Base URL</label><input id="base_url" placeholder="http://hermes-1:8000"></div><div><label>API Key 环境变量</label><input id="api_key_env" placeholder="HERMES_1_API_KEY"></div>
+<div><label>节点 ID</label><input id="id" placeholder="hermes-customer"></div><div><label>名称</label><input id="name" placeholder="客服 Hermes"></div>
+<div><label>Base URL</label><input id="base_url" placeholder="http://hermes-customer:8642"></div><div><label>API Key 环境变量</label><input id="api_key_env" placeholder="HERMES_CUSTOMER_API_KEY"></div>
 <div><label>优先级</label><input id="priority" type="number" value="10"></div><div><label>权重</label><input id="weight" type="number" value="1"></div>
 <div><label>最大并发</label><input id="max_concurrency" type="number" value="4"></div><div><label>超时（秒）</label><input id="timeout_seconds" type="number" value="180"></div>
 <div><label>能力（逗号分隔）</label><input id="capabilities" value="text,tools"></div><div><label>标签（逗号分隔）</label><input id="tags"></div></div><p><button onclick="saveNode()">保存节点</button></p></div>
