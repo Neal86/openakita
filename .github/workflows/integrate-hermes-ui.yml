@@ -61,4 +61,6 @@ jobs:
             src/openakita/api/auth.py \
             src/openakita/api/routes/agents.py
           git commit -m "feat: integrate Hermes execution mode into existing Agent lifecycle"
+          git fetch origin feature/hermes-multi-agent
+          git rebase origin/feature/hermes-multi-agent
           git push origin HEAD:feature/hermes-multi-agent
