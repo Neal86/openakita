@@ -39,7 +39,11 @@ from .routes import (
     chat_models,
     config,
     diagnostics,
+    execution_instances,
     feishu_onboard,
+    hermes,
+    hermes_ui,
+    llm_gateway,
     files,
     health,
     hub,
@@ -95,6 +99,20 @@ logger = logging.getLogger(__name__)
 # at import time, which is too early (``.env`` may not be loaded yet) and
 # made the resolution logic invisible to tests.
 API_PORT = int(os.environ.get("API_PORT", "18900"))
+
+
+def mount_hermes_execution_routes(app: FastAPI) -> None:
+    """Mount Hermes APIs at their canonical public paths exactly once."""
+    mounted = {getattr(route, "path", "") for route in app.routes}
+    if "/api/hermes/nodes" not in mounted:
+        hermes_paths = {getattr(route, "path", "") for route in hermes.router.routes}
+        if "/ui" not in hermes_paths:
+            hermes.router.include_router(hermes_ui.router)
+        app.include_router(hermes.router, prefix="/api", tags=["Hermes"])
+    if "/api/execution/instances" not in mounted:
+        app.include_router(execution_instances.router)
+    if "/v1/chat/completions" not in mounted:
+        app.include_router(llm_gateway.router)
 
 
 def get_api_host_for_health_display(app_state: Any | None = None) -> str:
@@ -1093,6 +1111,7 @@ def create_app(
     # Mount routes
     app.include_router(auth_routes.router, tags=["认证"])
     app.include_router(agents.router, tags=["智能体"])
+    mount_hermes_execution_routes(app)
     app.include_router(bug_report.router, tags=["反馈"])
     app.include_router(chat.router, tags=["对话"])
     app.include_router(chat_models.router, tags=["模型"])
