@@ -11,6 +11,7 @@ on:
       - "src/openakita/api/routes/hermes*.py"
       - "src/openakita/api/routes/llm_gateway.py"
       - "src/openakita/api/routes/execution_instances.py"
+      - "src/openakita/api/server.py"
       - "src/openakita/api/auth.py"
       - "deploy/hermes/**"
       - "apps/setup-center/src/**"
@@ -38,18 +39,22 @@ jobs:
             src/openakita/api/routes/hermes_ui.py \
             src/openakita/api/routes/llm_gateway.py \
             src/openakita/api/routes/execution_instances.py \
+            src/openakita/api/server.py \
             src/openakita/api/auth.py \
             deploy/hermes/shared_gateway.py
       - name: Import smoke test
         run: |
           python - <<'PY'
-          from openakita.api.routes import agents
+          from fastapi import FastAPI
+          from openakita.api.server import mount_hermes_execution_routes
           from openakita.hermes.router import HermesRouter
-          paths = {getattr(route, "path", "") for route in agents.router.routes}
-          print("mounted routes:", sorted(path for path in paths if "hermes" in path or "execution" in path or path.startswith("/v1")))
-          assert "/api/hermes/nodes" in paths, sorted(paths)
-          assert "/api/execution/instances" in paths, sorted(paths)
-          assert "/v1/chat/completions" in paths, sorted(paths)
+          app = FastAPI()
+          mount_hermes_execution_routes(app)
+          mount_hermes_execution_routes(app)
+          paths = [getattr(route, "path", "") for route in app.routes]
+          assert paths.count("/api/hermes/nodes") == 1, paths
+          assert paths.count("/api/execution/instances") == 1, paths
+          assert paths.count("/v1/chat/completions") == 1, paths
           print(len(paths), HermesRouter.__name__)
           PY
       - name: Run Hermes tests
