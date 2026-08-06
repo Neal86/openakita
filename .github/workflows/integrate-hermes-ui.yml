@@ -8,6 +8,7 @@ on:
       - scripts/integrate_hermes_agent_cleanup.py
       - scripts/integrate_hermes_auth.py
       - scripts/integrate_hermes_server_routes.py
+      - scripts/fix_hermes_ci_failures.py
       - .github/workflows/integrate-hermes-ui.yml
   pull_request:
     branches: [main]
@@ -16,6 +17,7 @@ on:
       - scripts/integrate_hermes_agent_cleanup.py
       - scripts/integrate_hermes_auth.py
       - scripts/integrate_hermes_server_routes.py
+      - scripts/fix_hermes_ci_failures.py
       - .github/workflows/integrate-hermes-ui.yml
       - apps/setup-center/src/api/executionInstances.ts
       - apps/setup-center/src/components/ExecutionModeSection.tsx
@@ -49,6 +51,7 @@ jobs:
           python scripts/integrate_hermes_execution_ui.py
           python scripts/integrate_hermes_agent_cleanup.py
           python scripts/integrate_hermes_server_routes.py
+          python scripts/fix_hermes_ci_failures.py
           git diff --binary -- \
             apps/setup-center/src/App.tsx \
             apps/setup-center/src/types.ts \
@@ -56,7 +59,17 @@ jobs:
             apps/setup-center/src/views/AgentManagerView.tsx \
             src/openakita/api/auth.py \
             src/openakita/api/routes/agents.py \
-            src/openakita/api/server.py > /tmp/hermes-integration.patch
+            src/openakita/api/routes/hermes_ui.py \
+            src/openakita/api/routes/llm_gateway.py \
+            src/openakita/api/server.py \
+            src/openakita/channels/adapters/wechat_desktop.py \
+            src/openakita/hermes/bindings.py \
+            src/openakita/hermes/client.py \
+            src/openakita/hermes/execution.py \
+            src/openakita/hermes/hooks.py \
+            src/openakita/hermes/models.py \
+            src/openakita/wechat_desktop/connector_bundle/pair.py \
+            src/openakita/wechat_desktop/manager.py > /tmp/hermes-integration.patch
       - name: Commit integration against latest branch
         run: |
           git config user.name "openakita-bot"
@@ -68,10 +81,12 @@ jobs:
               git apply --3way /tmp/hermes-integration.patch || {
                 echo "Patch already represented or conflicted on attempt ${attempt}"
                 git reset --hard origin/feature/hermes-multi-agent
+                git checkout origin/main -- src/openakita/api/auth.py
                 python scripts/integrate_hermes_auth.py
                 python scripts/integrate_hermes_execution_ui.py
                 python scripts/integrate_hermes_agent_cleanup.py
                 python scripts/integrate_hermes_server_routes.py
+                python scripts/fix_hermes_ci_failures.py
               }
             fi
             git add \
@@ -81,12 +96,22 @@ jobs:
               apps/setup-center/src/views/AgentManagerView.tsx \
               src/openakita/api/auth.py \
               src/openakita/api/routes/agents.py \
-              src/openakita/api/server.py
+              src/openakita/api/routes/hermes_ui.py \
+              src/openakita/api/routes/llm_gateway.py \
+              src/openakita/api/server.py \
+              src/openakita/channels/adapters/wechat_desktop.py \
+              src/openakita/hermes/bindings.py \
+              src/openakita/hermes/client.py \
+              src/openakita/hermes/execution.py \
+              src/openakita/hermes/hooks.py \
+              src/openakita/hermes/models.py \
+              src/openakita/wechat_desktop/connector_bundle/pair.py \
+              src/openakita/wechat_desktop/manager.py
             if git diff --cached --quiet; then
               echo "Integration is already up to date"
               exit 0
             fi
-            git commit -m "feat: integrate Hermes execution mode into existing Agent lifecycle"
+            git commit -m "fix: resolve Hermes regression and CI failures"
             if git push origin HEAD:feature/hermes-multi-agent; then
               exit 0
             fi
