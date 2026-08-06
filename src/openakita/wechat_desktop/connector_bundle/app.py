@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
+from typing import Any
 
 import requests
 
@@ -36,8 +37,8 @@ class ConnectorApp(tk.Tk):
 
         form = ttk.LabelFrame(root, text="配对设置", padding=14)
         form.pack(fill="x")
-        for i in range(2):
-            form.columnconfigure(i, weight=1)
+        for column in range(2):
+            form.columnconfigure(column, weight=1)
         ttk.Label(form, text="OpenAkita 地址").grid(row=0, column=0, sticky="w")
         ttk.Label(form, text="8 位配对码").grid(row=0, column=1, sticky="w", padx=(12, 0))
         ttk.Entry(form, textvariable=self.oa_url).grid(row=1, column=0, sticky="ew", pady=(4, 10))
@@ -49,9 +50,9 @@ class ConnectorApp(tk.Tk):
         status = ttk.LabelFrame(root, text="运行状态", padding=14)
         status.pack(fill="x", pady=14)
         rows = [("状态", self.status), ("节点 ID", self.node_id), ("节点令牌", self.token_display)]
-        for idx, (label, value) in enumerate(rows):
-            ttk.Label(status, text=label, width=12).grid(row=idx, column=0, sticky="w", pady=3)
-            ttk.Label(status, textvariable=value).grid(row=idx, column=1, sticky="w", pady=3)
+        for index, (label, value) in enumerate(rows):
+            ttk.Label(status, text=label, width=12).grid(row=index, column=0, sticky="w", pady=3)
+            ttk.Label(status, textvariable=value).grid(row=index, column=1, sticky="w", pady=3)
 
         actions = ttk.Frame(root)
         actions.pack(fill="x")
@@ -63,13 +64,13 @@ class ConnectorApp(tk.Tk):
         ttk.Checkbutton(root, text="启动应用后自动连接", variable=self.auto_start, command=self._save_preferences).pack(anchor="w", pady=(18, 0))
 
     def _load(self) -> None:
-        cfg = load_config()
-        self.oa_url.set(str(cfg.get("oa_url") or ""))
-        self.node_name.set(str(cfg.get("node_name") or "Windows 微信节点"))
-        self.auto_start.set(bool(cfg.get("auto_start")))
-        if cfg.get("node_id"):
-            self.node_id.set(str(cfg["node_id"]))
-            self.token_display.set(masked_token(str(cfg.get("node_token") or "")))
+        config = load_config()
+        self.oa_url.set(str(config.get("oa_url") or ""))
+        self.node_name.set(str(config.get("node_name") or "Windows 微信节点"))
+        self.auto_start.set(bool(config.get("auto_start")))
+        if config.get("node_id"):
+            self.node_id.set(str(config["node_id"]))
+            self.token_display.set(masked_token(str(config.get("node_token") or "")))
             self.status.set("已配对")
             if self.auto_start.get():
                 self.after(400, self._start)
@@ -77,6 +78,8 @@ class ConnectorApp(tk.Tk):
     def _pair(self) -> None:
         url = self.oa_url.get().strip().rstrip("/")
         code = self.pair_code.get().strip()
+        node_name = self.node_name.get().strip() or "Windows 微信节点"
+        auto_start = self.auto_start.get()
         if not url.startswith(("http://", "https://")):
             messagebox.showerror("地址错误", "请输入完整的 http:// 或 https:// 地址")
             return
@@ -84,46 +87,58 @@ class ConnectorApp(tk.Tk):
             messagebox.showerror("配对码错误", "请输入 8 位数字配对码")
             return
         self.status.set("正在配对")
-        threading.Thread(target=self._pair_worker, args=(url, code), daemon=True).start()
+        threading.Thread(
+            target=self._pair_worker,
+            args=(url, code, node_name, auto_start),
+            daemon=True,
+        ).start()
 
-    def _pair_worker(self, url: str, code: str) -> None:
+    def _pair_worker(self, url: str, code: str, node_name: str, auto_start: bool) -> None:
         try:
             response = requests.post(f"{url}/api/wechat-desktop/pair", json={"code": code}, timeout=30)
             response.raise_for_status()
             data = response.json()
-            cfg = {
+            config = {
                 "oa_url": url,
                 "node_id": data["node_id"],
                 "node_token": data["node_token"],
-                "node_name": self.node_name.get().strip() or data.get("node_name", "Windows 微信节点"),
-                "auto_start": self.auto_start.get(),
+                "node_name": node_name or data.get("node_name", "Windows 微信节点"),
+                "auto_start": auto_start,
             }
-            save_config(cfg)
-            self.after(0, self._paired, cfg)
+            save_config(config)
+            self.after(0, self._paired, config)
         except Exception as exc:
-            self.after(0, lambda: (self.status.set("配对失败"), messagebox.showerror("配对失败", str(exc))))
+            message = str(exc)
+            self.after(0, self._pair_failed, message)
 
-    def _paired(self, cfg: dict) -> None:
-        self.node_id.set(str(cfg["node_id"]))
-        self.token_display.set(masked_token(str(cfg["node_token"])))
+    def _pair_failed(self, message: str) -> None:
+        self.status.set("配对失败")
+        messagebox.showerror("配对失败", message)
+
+    def _paired(self, config: dict[str, Any]) -> None:
+        self.node_id.set(str(config["node_id"]))
+        self.token_display.set(masked_token(str(config["node_token"])))
         self.status.set("已配对")
         self.pair_code.set("")
         messagebox.showinfo("配对成功", "配置已保存，可以启动 Connector。")
 
     def _start(self) -> None:
-        cfg = load_config()
-        if not cfg.get("node_id"):
+        config = load_config()
+        if not config.get("node_id"):
             messagebox.showwarning("尚未配对", "请先输入 OpenAkita 地址和配对码。")
             return
-        self.service.start()
+        try:
+            self.service.start()
+        except FileNotFoundError:
+            messagebox.showerror("启动失败", "Connector Worker 文件不存在，请重新下载完整发布包。")
 
     def _set_status(self, value: str) -> None:
         self.status.set(value)
 
     def _save_preferences(self) -> None:
-        cfg = load_config()
-        cfg["auto_start"] = self.auto_start.get()
-        save_config(cfg)
+        config = load_config()
+        config["auto_start"] = self.auto_start.get()
+        save_config(config)
 
     def _clear(self) -> None:
         if not messagebox.askyesno("清除配对", "确定清除本机配对信息吗？"):
