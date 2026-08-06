@@ -1,15 +1,14 @@
-"""API route modules and Hermes execution integration."""
+"""API route package.
 
-from . import agents, execution_instances, hermes, hermes_ui, llm_gateway
+Route modules are mounted explicitly by :mod:`openakita.api.server`; importing
+this package must not mutate unrelated routers.
+"""
+
 from openakita.hermes.hooks import install_agent_hooks
 
-# agents.router is mounted at the application root. Apply the public prefixes
-# directly here so route inspection, OpenAPI and tests all see one canonical path.
-hermes.router.include_router(hermes_ui.router)
-agents.router.include_router(hermes.router, prefix="/api")
-agents.router.include_router(execution_instances.router)
-agents.router.include_router(llm_gateway.router)
-
+# Runtime chat hooks are process-wide and idempotent. Route mounting belongs to
+# the FastAPI composition root, but installing the hooks here preserves the
+# historical Agent import behavior used by desktop and tests.
 install_agent_hooks()
 
-__all__ = ["agents", "execution_instances", "hermes", "hermes_ui", "llm_gateway"]
+__all__: list[str] = []
