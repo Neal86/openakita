@@ -1,7 +1,13 @@
 FROM nousresearch/hermes-agent:latest
 
 USER root
-RUN python -m pip install --no-cache-dir "fastapi>=0.110,<1" "uvicorn[standard]>=0.27" "httpx>=0.27"
+# The official Hermes image ships Python and uv, but intentionally does not
+# include the legacy `python -m pip` module. Install the lightweight shared
+# gateway dependencies into the image Python environment through uv.
+RUN uv pip install --system --no-cache \
+    "fastapi>=0.110,<1" \
+    "uvicorn[standard]>=0.27" \
+    "httpx>=0.27"
 
 COPY shared_gateway.py /opt/openakita/shared_gateway.py
 RUN chmod 0755 /opt/openakita/shared_gateway.py && mkdir -p /opt/openakita/agents
