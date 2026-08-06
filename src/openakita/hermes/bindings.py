@@ -1,8 +1,4 @@
-"""Per-Agent Hermes runtime bindings kept separate from AgentProfile JSON.
-
-This preserves backward compatibility while exposing the same fields planned for
-AgentProfile. The API can later migrate them inline without changing routing.
-"""
+"""Per-Agent Hermes runtime bindings kept separate from AgentProfile JSON."""
 
 from __future__ import annotations
 
@@ -48,7 +44,6 @@ class AgentHermesBindingStore:
         if path is None:
             try:
                 from openakita.config import settings
-
                 path = Path(settings.project_root) / "data" / "agent_hermes_bindings.json"
             except Exception:
                 path = Path.cwd() / "data" / "agent_hermes_bindings.json"
@@ -66,10 +61,11 @@ class AgentHermesBindingStore:
             return [AgentHermesBinding.from_dict(x) for x in raw.get("bindings", [])]
 
     def get(self, profile_id: str) -> AgentHermesBinding:
-        return next(
-            (item for item in self.list() if item.profile_id == profile_id),
-            AgentHermesBinding(profile_id=profile_id),
-        )
+        return next((item for item in self.list() if item.profile_id == profile_id), AgentHermesBinding(profile_id=profile_id))
+
+    def _save(self, rows: list[AgentHermesBinding]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_json_write(self.path, {"version": 1, "bindings": [x.to_dict() for x in rows]})
 
     def upsert(self, binding: AgentHermesBinding) -> AgentHermesBinding:
         with self._lock:
@@ -80,6 +76,14 @@ class AgentHermesBindingStore:
                     break
             else:
                 rows.append(binding)
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_json_write(self.path, {"version": 1, "bindings": [x.to_dict() for x in rows]})
+            self._save(rows)
             return binding
+
+    def delete(self, profile_id: str) -> bool:
+        with self._lock:
+            rows = self.list()
+            kept = [item for item in rows if item.profile_id != profile_id]
+            if len(kept) == len(rows):
+                return False
+            self._save(kept)
+            return True
