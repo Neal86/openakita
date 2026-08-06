@@ -2,28 +2,28 @@
   "version": 1,
   "nodes": [
     {
-      "id": "hermes-primary",
-      "name": "Hermes Primary",
-      "base_url": "http://hermes-primary:8000",
-      "api_key_env": "HERMES_PRIMARY_API_KEY",
+      "id": "hermes-customer",
+      "name": "Hermes Customer Service",
+      "base_url": "http://hermes-customer:8642",
+      "api_key_env": "HERMES_CUSTOMER_API_KEY",
       "enabled": true,
       "priority": 10,
       "weight": 3,
       "capabilities": ["text", "tools"],
-      "tags": ["default"],
+      "tags": ["customer-service"],
       "max_concurrency": 8,
       "timeout_seconds": 180
     },
     {
-      "id": "hermes-backup",
-      "name": "Hermes Backup",
-      "base_url": "http://hermes-backup:8000",
-      "api_key_env": "HERMES_BACKUP_API_KEY",
+      "id": "hermes-content",
+      "name": "Hermes Content",
+      "base_url": "http://hermes-content:8642",
+      "api_key_env": "HERMES_CONTENT_API_KEY",
       "enabled": true,
       "priority": 20,
       "weight": 1,
       "capabilities": ["text", "tools"],
-      "tags": ["backup"],
+      "tags": ["content"],
       "max_concurrency": 4,
       "timeout_seconds": 180
     }
