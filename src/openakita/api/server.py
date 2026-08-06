@@ -103,16 +103,18 @@ API_PORT = int(os.environ.get("API_PORT", "18900"))
 
 def mount_hermes_execution_routes(app: FastAPI) -> None:
     """Mount Hermes APIs at their canonical public paths exactly once."""
-    mounted = {getattr(route, "path", "") for route in app.routes}
-    if "/api/hermes/nodes" not in mounted:
-        hermes_paths = {getattr(route, "path", "") for route in hermes.router.routes}
-        if "/ui" not in hermes_paths:
-            hermes.router.include_router(hermes_ui.router)
-        app.include_router(hermes.router, prefix="/api", tags=["Hermes"])
-    if "/api/execution/instances" not in mounted:
-        app.include_router(execution_instances.router)
-    if "/v1/chat/completions" not in mounted:
-        app.include_router(llm_gateway.router)
+    if getattr(app.state, "_hermes_execution_routes_mounted", False):
+        return
+    hermes_paths = {
+        getattr(route, "path", "") or getattr(route, "path_format", "")
+        for route in hermes.router.routes
+    }
+    if "/ui" not in hermes_paths:
+        hermes.router.include_router(hermes_ui.router)
+    app.include_router(hermes.router, prefix="/api", tags=["Hermes"])
+    app.include_router(execution_instances.router)
+    app.include_router(llm_gateway.router)
+    app.state._hermes_execution_routes_mounted = True
 
 
 def get_api_host_for_health_display(app_state: Any | None = None) -> str:
