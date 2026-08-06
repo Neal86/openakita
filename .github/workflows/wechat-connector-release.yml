@@ -6,17 +6,31 @@ on:
     paths:
       - "src/openakita/wechat_desktop/**"
       - "src/openakita/api/routes/wechat_desktop.py"
-      - "apps/setup-center/src/components/WechatDesktopNodes.tsx"
-      - "apps/setup-center/src/views/IMView.tsx"
+      - "apps/setup-center/src/components/WechatDesktopPanel.tsx"
       - "scripts/build_wechat_connector.py"
-      - "scripts/integrate_wechat_connector_ui.py"
       - "build/wechat_connector_*"
       - "tests/wechat_desktop/**"
+      - "tests/hermes/**"
+      - "deploy/hermes/**"
+      - "ci-trigger/**"
+      - ".github/workflows/wechat-connector-release.yml"
+  pull_request:
+    branches: [feature/hermes-multi-agent]
+    paths:
+      - "src/openakita/wechat_desktop/**"
+      - "src/openakita/api/routes/wechat_desktop.py"
+      - "apps/setup-center/src/components/WechatDesktopPanel.tsx"
+      - "scripts/build_wechat_connector.py"
+      - "build/wechat_connector_*"
+      - "tests/wechat_desktop/**"
+      - "tests/hermes/**"
+      - "deploy/hermes/**"
+      - "ci-trigger/**"
       - ".github/workflows/wechat-connector-release.yml"
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: wechat-connector-${{ github.ref }}
@@ -37,14 +51,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
           pip install -e ./openakita-plugin-sdk
-      - name: Verify generated WeChat integration is current
-        run: |
-          python scripts/integrate_wechat_connector_ui.py
-          git diff --exit-code -- apps/setup-center/src/views/IMView.tsx src/openakita/api/routes/wechat_desktop.py
       - name: WeChat Connector tests
         run: pytest -q tests/wechat_desktop
       - name: Ruff
-        run: ruff check src/ tests/wechat_desktop scripts/build_wechat_connector.py
+        run: ruff check src/openakita/wechat_desktop src/openakita/api/routes/wechat_desktop.py tests/wechat_desktop scripts/build_wechat_connector.py build/wechat_connector_entry.py build/wechat_connector_worker_entry.py
       - name: mypy
         run: mypy src/openakita/wechat_desktop src/openakita/api/routes/wechat_desktop.py
       - uses: actions/setup-node@v4
@@ -121,3 +131,25 @@ jobs:
         run: pytest -q tests/hermes
       - name: Hermes Compose validation
         run: docker compose -f deploy/hermes/docker-compose.example.yml config >/dev/null
+
+  publish-stable-release:
+    name: Publish stable Connector download
+    if: github.event_name != 'pull_request'
+    needs: hermes-final
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: wechat-connector-latest
+      ZIP_PATH: dist/OpenAkita-WeChat-Connector-Windows-x64.zip
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: OpenAkita-WeChat-Connector-Windows-x64
+          path: dist
+      - name: Replace stable GitHub release
+        run: |
+          gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag -y || true
+          gh release create "$RELEASE_TAG" "$ZIP_PATH" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "OpenAkita WeChat Connector Windows x64" \
+            --notes "Validated Windows x64 Connector package built from commit $GITHUB_SHA."
