@@ -1,0 +1,12 @@
+{
+  "workflow": "WeChat Connector Windows release",
+  "run_id": "31126846829",
+  "run_attempt": "1",
+  "head_sha": "ebd105f75d81c88e959b97f2f44844ef8ae6a25f",
+  "event": "push",
+  "connector_checks": "cancelled",
+  "windows_release": "cancelled",
+  "hermes_final": "cancelled",
+  "publish_stable_release": "cancelled",
+  "success": false
+}
