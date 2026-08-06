@@ -49,8 +49,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# docker.io supplies the Docker CLI used by the restricted Hermes container
+# manager. The daemon remains on the host; only /var/run/docker.sock is mounted.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg curl \
+    ffmpeg curl docker.io \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
