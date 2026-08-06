@@ -144,10 +144,15 @@ class WeChatDesktopManager:
             )
         return code
 
+    async def cancel_pairing_code(self, code: str) -> bool:
+        digest = self._hash(code.strip())
+        async with self._lock:
+            return self._pairings.pop(digest, None) is not None
+
     async def consume_pairing_code(self, code: str) -> tuple[str, str, str]:
         digest = self._hash(code.strip())
         async with self._lock:
-            ticket = self._pairings.get(digest)
+            ticket = self._pairings.pop(digest, None)
             if ticket is None or ticket.used or ticket.expires_at < datetime.now(UTC):
                 raise ValueError("invalid or expired pairing code")
             ticket.used = True
