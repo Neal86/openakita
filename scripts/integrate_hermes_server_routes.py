@@ -5,6 +5,36 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PATH = ROOT / "src/openakita/api/server.py"
 
+OLD_HELPER = '''def mount_hermes_execution_routes(app: FastAPI) -> None:
+    """Mount Hermes APIs at their canonical public paths exactly once."""
+    mounted = {getattr(route, "path", "") for route in app.routes}
+    if "/api/hermes/nodes" not in mounted:
+        hermes_paths = {getattr(route, "path", "") for route in hermes.router.routes}
+        if "/ui" not in hermes_paths:
+            hermes.router.include_router(hermes_ui.router)
+        app.include_router(hermes.router, prefix="/api", tags=["Hermes"])
+    if "/api/execution/instances" not in mounted:
+        app.include_router(execution_instances.router)
+    if "/v1/chat/completions" not in mounted:
+        app.include_router(llm_gateway.router)
+'''
+
+NEW_HELPER = '''def mount_hermes_execution_routes(app: FastAPI) -> None:
+    """Mount Hermes APIs at their canonical public paths exactly once."""
+    if getattr(app.state, "_hermes_execution_routes_mounted", False):
+        return
+    hermes_paths = {
+        getattr(route, "path", "") or getattr(route, "path_format", "")
+        for route in hermes.router.routes
+    }
+    if "/ui" not in hermes_paths:
+        hermes.router.include_router(hermes_ui.router)
+    app.include_router(hermes.router, prefix="/api", tags=["Hermes"])
+    app.include_router(execution_instances.router)
+    app.include_router(llm_gateway.router)
+    app.state._hermes_execution_routes_mounted = True
+'''
+
 
 def main() -> None:
     text = PATH.read_text("utf-8")
@@ -24,11 +54,14 @@ def main() -> None:
         text = text.replace(import_marker, import_replacement, 1)
 
     helper_marker = "\ndef get_api_host_for_health_display(app_state: Any | None = None) -> str:\n"
-    helper = '''\ndef mount_hermes_execution_routes(app: FastAPI) -> None:\n    \"\"\"Mount Hermes APIs at their canonical public paths exactly once.\"\"\"\n    mounted = {getattr(route, \"path\", \"\") for route in app.routes}\n    if \"/api/hermes/nodes\" not in mounted:\n        hermes_paths = {getattr(route, \"path\", \"\") for route in hermes.router.routes}\n        if \"/ui\" not in hermes_paths:\n            hermes.router.include_router(hermes_ui.router)\n        app.include_router(hermes.router, prefix=\"/api\", tags=[\"Hermes\"])\n    if \"/api/execution/instances\" not in mounted:\n        app.include_router(execution_instances.router)\n    if \"/v1/chat/completions\" not in mounted:\n        app.include_router(llm_gateway.router)\n\n'''
-    if "def mount_hermes_execution_routes" not in text:
+    if OLD_HELPER in text:
+        text = text.replace(OLD_HELPER, NEW_HELPER, 1)
+    elif "def mount_hermes_execution_routes" not in text:
         if helper_marker not in text:
             raise RuntimeError("server helper marker missing")
-        text = text.replace(helper_marker, helper + helper_marker, 1)
+        text = text.replace(helper_marker, "\n" + NEW_HELPER + helper_marker, 1)
+    elif NEW_HELPER not in text:
+        raise RuntimeError("unknown Hermes server helper layout")
 
     mount_marker = '    app.include_router(agents.router, tags=["智能体"])\n'
     mount_replacement = mount_marker + "    mount_hermes_execution_routes(app)\n"
