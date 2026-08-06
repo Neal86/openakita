@@ -102,7 +102,7 @@ def _download_release_bytes() -> bytes:
         return response.read()
 
 
-@router.get("/connector/download")
+@router.get("/connector/download", response_model=None)
 async def download_connector() -> FileResponse | StreamingResponse:
     local_path = _local_release_path()
     if local_path is not None:
