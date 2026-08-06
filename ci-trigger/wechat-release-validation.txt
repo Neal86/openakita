@@ -1,1 +1,2 @@
 Run the finalized Windows Connector and Hermes validation workflow.
+Persist the final result for automated verification.
