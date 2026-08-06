@@ -1,0 +1,123 @@
+name: WeChat Connector Windows release
+
+on:
+  push:
+    branches: [feature/hermes-multi-agent]
+    paths:
+      - "src/openakita/wechat_desktop/**"
+      - "src/openakita/api/routes/wechat_desktop.py"
+      - "apps/setup-center/src/components/WechatDesktopNodes.tsx"
+      - "apps/setup-center/src/views/IMView.tsx"
+      - "scripts/build_wechat_connector.py"
+      - "scripts/integrate_wechat_connector_ui.py"
+      - "build/wechat_connector_*"
+      - "tests/wechat_desktop/**"
+      - ".github/workflows/wechat-connector-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wechat-connector-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  connector-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install -e ./openakita-plugin-sdk
+      - name: Verify generated WeChat integration is current
+        run: |
+          python scripts/integrate_wechat_connector_ui.py
+          git diff --exit-code -- apps/setup-center/src/views/IMView.tsx src/openakita/api/routes/wechat_desktop.py
+      - name: WeChat Connector tests
+        run: pytest -q tests/wechat_desktop
+      - name: Ruff
+        run: ruff check src/ tests/wechat_desktop scripts/build_wechat_connector.py
+      - name: mypy
+        run: mypy src/openakita/wechat_desktop src/openakita/api/routes/wechat_desktop.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/setup-center/package-lock.json
+      - name: Setup Center build
+        working-directory: apps/setup-center
+        run: npm ci && npm run build
+
+  windows-release:
+    needs: connector-checks
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install connector build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r src/openakita/wechat_desktop/connector_bundle/requirements.txt
+          pip install -e .
+      - name: Build Windows EXE package
+        run: python scripts/build_wechat_connector.py
+      - name: Validate release archive
+        shell: pwsh
+        run: |
+          $zip = "dist/OpenAkita-WeChat-Connector-Windows-x64.zip"
+          if (!(Test-Path $zip)) { throw "release ZIP missing" }
+          Expand-Archive $zip -DestinationPath dist/package-check -Force
+          $root = "dist/package-check/OpenAkita-WeChat-Connector-Windows-x64"
+          @(
+            "$root/OpenAkita-WeChat-Connector.exe",
+            "$root/OpenAkita-WeChat-Connector-Worker.exe",
+            "$root/README.txt"
+          ) | ForEach-Object { if (!(Test-Path $_)) { throw "missing package file: $_" } }
+      - name: EXE startup smoke test
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path "dist/OpenAkita-WeChat-Connector-Windows-x64/OpenAkita-WeChat-Connector.exe"
+          $proc = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 5
+          if ($proc.HasExited) { throw "UI executable exited during startup: $($proc.ExitCode)" }
+          Stop-Process -Id $proc.Id -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenAkita-WeChat-Connector-Windows-x64
+          path: dist/OpenAkita-WeChat-Connector-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  hermes-final:
+    name: Hermes final checks
+    needs: windows-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Hermes tests
+        run: pytest -q tests/hermes
+      - name: Hermes Compose validation
+        run: docker compose -f deploy/hermes/docker-compose.example.yml config >/dev/null
