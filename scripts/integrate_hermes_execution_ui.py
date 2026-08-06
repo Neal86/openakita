@@ -8,51 +8,47 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def replace_once(path: Path, old: str, new: str) -> None:
-    text = path.read_text("utf-8")
-    if new in text:
-        return
-    if old not in text:
-        raise RuntimeError(f"integration marker missing in {path}: {old[:80]!r}")
-    path.write_text(text.replace(old, new, 1), "utf-8")
-
-
 def patch_types() -> None:
     path = ROOT / "apps/setup-center/src/types.ts"
     text = path.read_text("utf-8")
-    if '"execution_instances"' in text:
-        return
-    marker = '| "dashboard" | "agent_manager"'
-    if marker not in text:
-        raise RuntimeError("ViewId marker missing")
-    path.write_text(text.replace(marker, '| "dashboard" | "agent_manager" | "execution_instances"', 1), "utf-8")
+    if '"execution_instances"' not in text:
+        marker = '| "dashboard" | "agent_manager"'
+        if marker not in text:
+            raise RuntimeError("ViewId marker missing")
+        text = text.replace(marker, '| "dashboard" | "agent_manager" | "execution_instances"', 1)
+        path.write_text(text, "utf-8")
 
 
 def patch_app() -> None:
     path = ROOT / "apps/setup-center/src/App.tsx"
     text = path.read_text("utf-8")
-    if "ExecutionInstancesView" not in text:
+    if "const ExecutionInstancesView" not in text:
         marker = 'const AgentManagerView = lazy(() => import("./views/AgentManagerView").then(m => ({ default: m.AgentManagerView })));'
-        insert = marker + '\nconst ExecutionInstancesView = lazy(() => import("./views/ExecutionInstancesView").then(m => ({ default: m.ExecutionInstancesView })));'
         if marker not in text:
             raise RuntimeError("AgentManager lazy import marker missing")
-        text = text.replace(marker, insert, 1)
+        text = text.replace(marker, marker + '\nconst ExecutionInstancesView = lazy(() => import("./views/ExecutionInstancesView").then(m => ({ default: m.ExecutionInstancesView })));', 1)
     if '"execution-instances": "execution_instances"' not in text:
         marker = '"agent-manager": "agent_manager", "agent-store": "agent_store",'
-        replacement = '"agent-manager": "agent_manager", "execution-instances": "execution_instances", "agent-store": "agent_store",'
         if marker not in text:
             raise RuntimeError("hash route marker missing")
-        text = text.replace(marker, replacement, 1)
-    if 'view === "execution_instances"' not in text:
-        patterns = [
-            re.compile(r'(\{view === "agent_manager"\s*&&\s*\([\s\S]*?</Suspense>\s*\)\})'),
-            re.compile(r'(\{view === "agent_manager"[\s\S]*?<AgentManagerView[\s\S]*?\}\s*)'),
-        ]
-        match = next((p.search(text) for p in patterns if p.search(text)), None)
-        if not match:
-            raise RuntimeError("AgentManager render marker missing")
-        addition = match.group(1) + '\n          {view === "execution_instances" && (\n            <Suspense fallback={null}><ExecutionInstancesView apiBaseUrl={apiBaseUrl} /></Suspense>\n          )}'
-        text = text[: match.start()] + addition + text[match.end() :]
+        text = text.replace(marker, '"agent-manager": "agent_manager", "execution-instances": "execution_instances", "agent-store": "agent_store",', 1)
+    if 'if (view === "execution_instances")' not in text:
+        marker = '''    if (view === "agent_manager") {
+      return (
+        <AgentManagerView
+          apiBaseUrl={apiBaseUrl}
+          visible={view === "agent_manager"}
+        />
+      );
+    }
+'''
+        if marker not in text:
+            raise RuntimeError("AgentManager return block missing")
+        addition = marker + '''    if (view === "execution_instances") {
+      return <ExecutionInstancesView apiBaseUrl={apiBaseUrl} />;
+    }
+'''
+        text = text.replace(marker, addition, 1)
     path.write_text(text, "utf-8")
 
 
@@ -81,7 +77,6 @@ def patch_agent_manager() -> None:
             raise RuntimeError("AgentManager import marker missing")
         text = text.replace(marker, marker + '\nimport { ExecutionModeSection } from "../components/ExecutionModeSection";', 1)
     if '<ExecutionModeSection' not in text:
-        # Insert in the primary editor sheet, immediately before its first close.
         sheet_start = text.find('<Sheet open={editorOpen}')
         if sheet_start < 0:
             sheet_start = text.find('<Sheet')
