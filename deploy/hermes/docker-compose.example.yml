@@ -20,27 +20,24 @@ services:
       hermes-shared:
         condition: service_healthy
 
-  # Default shared instance. Multiple Hermes Agents use this one container while
-  # OpenAkita keeps their memory/session/workspace directories isolated by profile_id.
+  # Default shared instance. One container can host multiple isolated Hermes
+  # Agent processes; every profile has its own HOME/memory/session/workspace.
   hermes-shared:
     container_name: openakita-hermes-shared
-    image: nousresearch/hermes-agent:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: openakita-hermes-runtime:latest
     restart: unless-stopped
-    command: gateway run
     expose:
       - "8642"
     volumes:
-      - hermes_shared_data:/root/.hermes
-      - ../../data/hermes_agents:/opt/openakita/agents
+      - hermes_shared_data:/opt/openakita/agents
     environment:
-      API_SERVER_ENABLED: "true"
       API_SERVER_HOST: 0.0.0.0
       API_SERVER_PORT: 8642
-      HERMES_DASHBOARD: "0"
-      HERMES_ALLOW_ROOT_GATEWAY: "1"
-      # Hermes uses OpenAkita as its only model provider. The static non-secret
-      # value satisfies OpenAI clients that require a non-empty key; Akita's
-      # private Docker-network gateway does not authenticate it.
+      OPENAKITA_HERMES_AGENT_ROOT: /opt/openakita/agents
+      HERMES_SHARED_MAX_AGENTS: 32
       OPENAI_API_KEY: openakita-internal
       OPENAI_BASE_URL: http://openakita:18900/v1
       OPENAI_MODEL: openakita-auto
@@ -49,7 +46,7 @@ services:
       interval: 20s
       timeout: 5s
       retries: 6
-      start_period: 60s
+      start_period: 30s
     networks:
       agents:
         aliases: [openakita-hermes-shared]
