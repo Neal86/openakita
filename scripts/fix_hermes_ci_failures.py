@@ -3,7 +3,6 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-# This script is intentionally idempotent so validation can safely rerun it.
 
 
 def replace(path: str, old: str, new: str) -> None:
@@ -16,7 +15,32 @@ def replace(path: str, old: str, new: str) -> None:
     target.write_text(text.replace(old, new, 1), "utf-8")
 
 
+def normalize_imports() -> None:
+    execution = ROOT / "src/openakita/hermes/execution.py"
+    text = execution.read_text("utf-8")
+    callable_import = "from collections.abc import Callable\n"
+    text = text.replace(callable_import, "")
+    marker = "import threading\n"
+    if marker not in text:
+        raise RuntimeError("threading import marker missing in execution.py")
+    text = text.replace(marker, marker + callable_import, 1)
+    text = text.replace("from typing import Any, Callable\n", "from typing import Any\n")
+    execution.write_text(text, "utf-8")
+
+    manager = ROOT / "src/openakita/wechat_desktop/manager.py"
+    text = manager.read_text("utf-8")
+    import_line = "from collections.abc import Awaitable, Callable\n"
+    text = text.replace(import_line, "")
+    marker = "import secrets\n"
+    if marker not in text:
+        raise RuntimeError("secrets import marker missing in manager.py")
+    text = text.replace(marker, marker + import_line, 1)
+    text = text.replace("from typing import Any, Awaitable, Callable\n", "from typing import Any\n")
+    manager.write_text(text, "utf-8")
+
+
 def main() -> None:
+    normalize_imports()
     replace(
         "src/openakita/api/routes/hermes_ui.py",
         '@router.get("/ui", response_class=HTMLResponse, include_in_schema=False)',
@@ -68,16 +92,6 @@ def main() -> None:
         "                json=payload,\n            ) as response,\n        ):\n",
     )
     replace(
-        "src/openakita/hermes/execution.py",
-        "import json\nimport re\nimport threading\n",
-        "import json\nimport re\nimport threading\nfrom collections.abc import Callable\n",
-    )
-    replace(
-        "src/openakita/hermes/execution.py",
-        "from pathlib import Path\nfrom typing import Any, Callable\n",
-        "from pathlib import Path\nfrom typing import Any\n",
-    )
-    replace(
         "src/openakita/api/server.py",
         "    execution_instances,\n    feishu_onboard,\n    hermes,\n    hermes_ui,\n    llm_gateway,\n    files,\n    health,\n",
         "    execution_instances,\n    feishu_onboard,\n    files,\n    health,\n    hermes,\n    hermes_ui,\n",
@@ -96,11 +110,6 @@ def main() -> None:
         "src/openakita/wechat_desktop/connector_bundle/pair.py",
         "import json\n",
         "",
-    )
-    replace(
-        "src/openakita/wechat_desktop/manager.py",
-        "from datetime import UTC, datetime, timedelta\nfrom pathlib import Path\nfrom typing import Any, Awaitable, Callable\n",
-        "from collections.abc import Awaitable, Callable\nfrom datetime import UTC, datetime, timedelta\nfrom pathlib import Path\nfrom typing import Any\n",
     )
     print("Hermes CI failures fixed")
 
