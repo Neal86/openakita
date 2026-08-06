@@ -22,6 +22,10 @@ on:
       - apps/setup-center/src/views/ExecutionInstancesView.tsx
   workflow_dispatch:
 
+concurrency:
+  group: hermes-integration-feature-branch
+  cancel-in-progress: false
+
 permissions:
   contents: write
   pull-requests: read
@@ -38,31 +42,55 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Restore auth baseline
-        run: git checkout origin/main -- src/openakita/api/auth.py
-      - name: Apply integrations
+      - name: Generate integration patch
         run: |
+          git checkout origin/main -- src/openakita/api/auth.py
           python scripts/integrate_hermes_auth.py
           python scripts/integrate_hermes_execution_ui.py
           python scripts/integrate_hermes_agent_cleanup.py
           python scripts/integrate_hermes_server_routes.py
-      - name: Commit generated integration
-        run: |
-          git config user.name "openakita-bot"
-          git config user.email "actions@users.noreply.github.com"
-          git add \
+          git diff --binary -- \
             apps/setup-center/src/App.tsx \
             apps/setup-center/src/types.ts \
             apps/setup-center/src/components/Sidebar.tsx \
             apps/setup-center/src/views/AgentManagerView.tsx \
             src/openakita/api/auth.py \
             src/openakita/api/routes/agents.py \
-            src/openakita/api/server.py
-          if git diff --cached --quiet; then
-            echo "Integration is already up to date"
-            exit 0
-          fi
-          git commit -m "feat: integrate Hermes execution mode into existing Agent lifecycle"
-          git fetch origin feature/hermes-multi-agent
-          git rebase origin/feature/hermes-multi-agent
-          git push origin HEAD:feature/hermes-multi-agent
+            src/openakita/api/server.py > /tmp/hermes-integration.patch
+      - name: Commit integration against latest branch
+        run: |
+          git config user.name "openakita-bot"
+          git config user.email "actions@users.noreply.github.com"
+          for attempt in 1 2 3 4 5; do
+            git fetch origin feature/hermes-multi-agent
+            git reset --hard origin/feature/hermes-multi-agent
+            if [ -s /tmp/hermes-integration.patch ]; then
+              git apply --3way /tmp/hermes-integration.patch || {
+                echo "Patch already represented or conflicted on attempt ${attempt}"
+                git reset --hard origin/feature/hermes-multi-agent
+                python scripts/integrate_hermes_auth.py
+                python scripts/integrate_hermes_execution_ui.py
+                python scripts/integrate_hermes_agent_cleanup.py
+                python scripts/integrate_hermes_server_routes.py
+              }
+            fi
+            git add \
+              apps/setup-center/src/App.tsx \
+              apps/setup-center/src/types.ts \
+              apps/setup-center/src/components/Sidebar.tsx \
+              apps/setup-center/src/views/AgentManagerView.tsx \
+              src/openakita/api/auth.py \
+              src/openakita/api/routes/agents.py \
+              src/openakita/api/server.py
+            if git diff --cached --quiet; then
+              echo "Integration is already up to date"
+              exit 0
+            fi
+            git commit -m "feat: integrate Hermes execution mode into existing Agent lifecycle"
+            if git push origin HEAD:feature/hermes-multi-agent; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo "Failed to publish integration after retries" >&2
+          exit 1
