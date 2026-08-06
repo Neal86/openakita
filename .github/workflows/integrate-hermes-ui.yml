@@ -1,4 +1,4 @@
-name: Integrate Hermes execution UI
+name: Integrate Hermes and WeChat UI
 
 on:
   workflow_dispatch:
@@ -30,6 +30,7 @@ jobs:
           python scripts/integrate_hermes_agent_cleanup.py
           python scripts/integrate_hermes_server_routes.py
           python scripts/fix_hermes_ci_failures.py
+          python scripts/integrate_wechat_connector_ui.py
       - name: Commit generated integration
         run: |
           git config user.name "openakita-bot"
@@ -39,10 +40,12 @@ jobs:
             apps/setup-center/src/types.ts \
             apps/setup-center/src/components/Sidebar.tsx \
             apps/setup-center/src/views/AgentManagerView.tsx \
+            apps/setup-center/src/views/IMView.tsx \
             src/openakita/api/auth.py \
             src/openakita/api/routes/agents.py \
             src/openakita/api/routes/hermes_ui.py \
             src/openakita/api/routes/llm_gateway.py \
+            src/openakita/api/routes/wechat_desktop.py \
             src/openakita/api/server.py \
             src/openakita/channels/adapters/wechat_desktop.py \
             src/openakita/hermes/bindings.py \
@@ -56,5 +59,5 @@ jobs:
             echo "Integration is already up to date"
             exit 0
           fi
-          git commit -m "chore: refresh generated Hermes integration"
+          git commit -m "chore: refresh Hermes and WeChat UI integration"
           git push origin HEAD:feature/hermes-multi-agent
