@@ -1,9 +1,4 @@
-"""Agent execution-mode and Hermes instance persistence.
-
-The sidecar store keeps backward compatibility with existing AgentProfile JSON.
-All old profiles default to native execution.  API consumers receive the merged
-configuration and can migrate inline later without changing runtime behavior.
-"""
+"""Agent execution-mode and Hermes instance persistence."""
 from __future__ import annotations
 
 import json
@@ -13,7 +8,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from openakita.utils.atomic_io import atomic_json_write
 
@@ -123,8 +118,8 @@ class HermesInstance:
 
 
 class _JsonStore:
-    def __init__(self, path: Path, key: str, factory):
-        self.path, self.key, self.factory = Path(path), key, factory
+    def __init__(self, path: Path, key: str, factory: Callable[..., Any], identity: Callable[[Any], str]):
+        self.path, self.key, self.factory, self.identity = Path(path), key, factory, identity
         self._lock = threading.RLock()
 
     def list(self):
@@ -145,8 +140,9 @@ class _JsonStore:
     def upsert(self, row):
         with self._lock:
             rows = self.list()
+            wanted = self.identity(row)
             for index, current in enumerate(rows):
-                if current.id == row.id:
+                if self.identity(current) == wanted:
                     rows[index] = row
                     break
             else:
@@ -157,7 +153,7 @@ class _JsonStore:
     def delete(self, row_id: str) -> bool:
         with self._lock:
             rows = self.list()
-            kept = [row for row in rows if row.id != row_id]
+            kept = [row for row in rows if self.identity(row) != row_id]
             if len(rows) == len(kept):
                 return False
             self.save(kept)
@@ -174,29 +170,21 @@ def _data_path(name: str) -> Path:
 
 class AgentExecutionStore:
     def __init__(self, path: Path | None = None):
-        self._store = _JsonStore(path or _data_path("agent_execution.json"), "agents", lambda **d: AgentExecutionConfig(**d))
+        self._store = _JsonStore(path or _data_path("agent_execution.json"), "agents", lambda **d: AgentExecutionConfig(**d), lambda x: x.profile_id)
 
-    def list(self) -> list[AgentExecutionConfig]:
-        return self._store.list()
-
+    def list(self) -> list[AgentExecutionConfig]: return self._store.list()
     def get(self, profile_id: str) -> AgentExecutionConfig:
         profile_id = safe_id(profile_id)
         return next((x for x in self.list() if x.profile_id == profile_id), AgentExecutionConfig(profile_id))
-
-    def upsert(self, config: AgentExecutionConfig) -> AgentExecutionConfig:
-        config.id = config.profile_id  # private adapter key
-        try:
-            return self._store.upsert(config)
-        finally:
-            config.__dict__.pop("id", None)
+    def upsert(self, config: AgentExecutionConfig) -> AgentExecutionConfig: return self._store.upsert(config)
+    def delete(self, profile_id: str) -> bool: return self._store.delete(safe_id(profile_id))
 
 
 class HermesInstanceStore:
     def __init__(self, path: Path | None = None):
-        self._store = _JsonStore(path or _data_path("hermes_instances.json"), "instances", lambda **d: HermesInstance(**d))
+        self._store = _JsonStore(path or _data_path("hermes_instances.json"), "instances", lambda **d: HermesInstance(**d), lambda x: x.id)
 
     def list(self) -> list[HermesInstance]: return self._store.list()
-    def get(self, instance_id: str) -> HermesInstance | None:
-        return next((x for x in self.list() if x.id == instance_id), None)
+    def get(self, instance_id: str) -> HermesInstance | None: return next((x for x in self.list() if x.id == instance_id), None)
     def upsert(self, instance: HermesInstance) -> HermesInstance: return self._store.upsert(instance)
-    def delete(self, instance_id: str) -> bool: return self._store.delete(instance_id)
+    def delete(self, instance_id: str) -> bool: return self._store.delete(safe_id(instance_id))
