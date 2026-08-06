@@ -1,0 +1,51 @@
+name: Hermes final validation
+
+on:
+  push:
+    branches: [feature/hermes-multi-agent]
+    paths:
+      - ".github/workflows/hermes-final-validation.yml"
+      - "src/openakita/hermes/**"
+      - "src/openakita/api/routes/hermes*.py"
+      - "src/openakita/api/routes/llm_gateway.py"
+      - "src/openakita/api/server.py"
+      - "tests/hermes/**"
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install -e ./openakita-plugin-sdk
+      - name: Ruff
+        run: ruff check src/
+      - name: Hermes tests
+        run: pytest -q tests/hermes
+      - name: L0 smoke
+        run: pytest -q tests/smoke
+      - name: L1 unit
+        run: pytest -q tests/unit
+      - name: L2 component
+        run: pytest -q tests/component
+      - name: L3 integration
+        run: pytest -q tests/integration
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/setup-center/package-lock.json
+      - name: Setup Center build
+        working-directory: apps/setup-center
+        run: npm ci && npm run build
+      - name: Compose validation
+        run: docker compose -f deploy/hermes/docker-compose.example.yml config >/dev/null
