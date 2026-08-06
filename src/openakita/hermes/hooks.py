@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 from .bindings import AgentHermesBindingStore
 from .models import HermesRuntimeProvider
-from .runtime import execute_with_hermes_fallback
+from .runtime import execute_with_hermes_fallback, stream_with_hermes_fallback
 
 logger = logging.getLogger(__name__)
 _INSTALLED = False
@@ -71,6 +72,21 @@ def _runtime_args(profile_id: str, message: str, session: Any, kwargs: dict[str,
     }
 
 
+def _normalize_remote_event(event: Any) -> dict[str, Any] | None:
+    if not isinstance(event, dict):
+        return None
+    normalized = dict(event)
+    event_type = str(normalized.get("type") or "")
+    if event_type in {"delta", "token", "content_delta"}:
+        normalized["type"] = "text_delta"
+    elif event_type in {"complete", "completed", "finish"}:
+        normalized["type"] = "done"
+    if "content" not in normalized and "text" in normalized:
+        normalized["content"] = normalized.get("text")
+    normalized.setdefault("source", "hermes")
+    return normalized
+
+
 def install_agent_hooks() -> None:
     """Install idempotent Hermes routing wrappers on the canonical Agent class."""
     global _INSTALLED
@@ -106,30 +122,18 @@ def install_agent_hooks() -> None:
     if callable(original_stream) and not getattr(original_stream, "_hermes_wrapped", False):
         async def chat_with_session_stream(self: Any, *args: Any, **kwargs: Any):
             profile_id, message, session = _extract_call(self, args, kwargs)
-            binding = AgentHermesBindingStore().get(profile_id)
-            if binding.runtime_provider == HermesRuntimeProvider.LOCAL:
+
+            async def local_stream_runner() -> AsyncIterator[dict[str, Any]]:
                 async for event in original_stream(self, *args, **kwargs):
                     yield event
-                return
 
-            async def local_runner() -> Any:
-                text = ""
-                async for event in original_stream(self, *args, **kwargs):
-                    if isinstance(event, dict):
-                        if event.get("type") == "text_delta":
-                            text += str(event.get("content") or "")
-                        elif event.get("type") == "done" and event.get("content"):
-                            text = str(event["content"])
-                return text
-
-            result = await execute_with_hermes_fallback(
+            async for event in stream_with_hermes_fallback(
                 **_runtime_args(profile_id, message, session, kwargs),
-                local_runner=local_runner,
-            )
-            text = str(getattr(result, "content", result) or "")
-            if text:
-                yield {"type": "text_delta", "content": text, "source": "hermes"}
-            yield {"type": "done", "content": text, "source": "hermes"}
+                local_stream_runner=local_stream_runner,
+            ):
+                normalized = _normalize_remote_event(event)
+                if normalized is not None:
+                    yield normalized
 
         chat_with_session_stream._hermes_wrapped = True  # type: ignore[attr-defined]
         chat_with_session_stream._hermes_original = original_stream  # type: ignore[attr-defined]
