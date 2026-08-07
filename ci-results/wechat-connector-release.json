@@ -1,8 +1,8 @@
 {
   "workflow": "WeChat Connector Windows release",
-  "run_id": "31127853631",
+  "run_id": "31139362904",
   "run_attempt": "1",
-  "head_sha": "7189c26e7045b9c91667ff09b60d983585e7a85c",
+  "head_sha": "c283c306c92290bed2903567ffa33a7facc32380",
   "event": "push",
   "connector_checks": "failure",
   "windows_release": "skipped",
