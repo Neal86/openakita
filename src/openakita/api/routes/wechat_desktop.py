@@ -116,6 +116,19 @@ async def download_connector() -> FileResponse | StreamingResponse:
         payload = await asyncio.to_thread(_download_release_bytes)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise HTTPException(status_code=503, detail="Windows Connector 发布包尚未生成或暂时无法下载") from exc
+
+    # Cache the validated remote package under persistent /app/data so future
+    # downloads do not depend on GitHub availability. Cache failure must not
+    # block the current successful download.
+    try:
+        cache_path = Path("data/releases") / RELEASE_FILENAME
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_path.with_suffix(".tmp")
+        tmp_path.write_bytes(payload)
+        tmp_path.replace(cache_path)
+    except OSError:
+        pass
+
     return StreamingResponse(
         iter([payload]),
         media_type="application/zip",

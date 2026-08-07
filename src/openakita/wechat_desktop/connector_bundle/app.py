@@ -96,8 +96,10 @@ class ConnectorApp(tk.Tk):
     def _pair_worker(self, url: str, code: str, node_name: str, auto_start: bool) -> None:
         try:
             response = requests.post(f"{url}/api/wechat-desktop/pair", json={"code": code}, timeout=30)
-            response.raise_for_status()
-            data = response.json()
+            data = response.json() if response.content else {}
+            if not response.ok:
+                detail = data.get("detail") if isinstance(data, dict) else None
+                raise RuntimeError(str(detail or f"OpenAkita 返回 HTTP {response.status_code}"))
             config = {
                 "oa_url": url,
                 "node_id": data["node_id"],

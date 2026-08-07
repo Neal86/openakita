@@ -146,13 +146,14 @@ jobs:
         with:
           name: OpenAkita-WeChat-Connector-Windows-x64
           path: dist
-      - name: Replace stable GitHub release
+      - name: Publish stable GitHub release
         run: |
-          gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag -y || true
-          gh release create "$RELEASE_TAG" "$ZIP_PATH" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "OpenAkita WeChat Connector Windows x64" \
-            --notes "Validated Windows x64 Connector package built from commit $GITHUB_SHA."
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$ZIP_PATH" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"               --title "OpenAkita WeChat Connector Windows x64"               --notes "Validated Windows x64 Connector package built from commit $GITHUB_SHA."
+          else
+            gh release create "$RELEASE_TAG" "$ZIP_PATH"               --repo "$GITHUB_REPOSITORY"               --title "OpenAkita WeChat Connector Windows x64"               --notes "Validated Windows x64 Connector package built from commit $GITHUB_SHA."
+          fi
 
   persist-final-result:
     name: Persist final validation result

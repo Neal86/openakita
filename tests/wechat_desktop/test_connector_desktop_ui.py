@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from openakita.wechat_desktop.connector_bundle import config_service
