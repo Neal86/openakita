@@ -40,6 +40,12 @@ jobs:
   connector-checks:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      install: ${{ steps.install.outcome }}
+      tests: ${{ steps.tests.outcome }}
+      ruff: ${{ steps.ruff.outcome }}
+      mypy: ${{ steps.mypy.outcome }}
+      frontend: ${{ steps.frontend.outcome }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -47,15 +53,26 @@ jobs:
           python-version: "3.11"
           cache: pip
       - name: Install project dependencies
+        id: install
+        continue-on-error: true
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
           pip install -e ./openakita-plugin-sdk
       - name: WeChat Connector tests
+        id: tests
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
         run: pytest -q tests/wechat_desktop
       - name: Ruff
+        id: ruff
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
         run: ruff check src/openakita/wechat_desktop src/openakita/api/routes/wechat_desktop.py tests/wechat_desktop scripts/build_wechat_connector.py build/wechat_connector_entry.py build/wechat_connector_worker_entry.py
       - name: mypy
+        id: mypy
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
         run: mypy src/openakita/wechat_desktop src/openakita/api/routes/wechat_desktop.py
       - uses: actions/setup-node@v4
         with:
@@ -63,8 +80,25 @@ jobs:
           cache: npm
           cache-dependency-path: apps/setup-center/package-lock.json
       - name: Setup Center build
+        id: frontend
+        continue-on-error: true
         working-directory: apps/setup-center
         run: npm ci && npm run build
+      - name: Enforce Connector checks
+        if: always()
+        env:
+          INSTALL: ${{ steps.install.outcome }}
+          TESTS: ${{ steps.tests.outcome }}
+          RUFF: ${{ steps.ruff.outcome }}
+          MYPY: ${{ steps.mypy.outcome }}
+          FRONTEND: ${{ steps.frontend.outcome }}
+        run: |
+          echo "install=$INSTALL tests=$TESTS ruff=$RUFF mypy=$MYPY frontend=$FRONTEND"
+          test "$INSTALL" = success
+          test "$TESTS" = success
+          test "$RUFF" = success
+          test "$MYPY" = success
+          test "$FRONTEND" = success
 
   windows-release:
     needs: connector-checks
@@ -167,6 +201,11 @@ jobs:
       - name: Write result JSON
         env:
           CONNECTOR_RESULT: ${{ needs.connector-checks.result }}
+          CONNECTOR_INSTALL: ${{ needs.connector-checks.outputs.install }}
+          CONNECTOR_TESTS: ${{ needs.connector-checks.outputs.tests }}
+          CONNECTOR_RUFF: ${{ needs.connector-checks.outputs.ruff }}
+          CONNECTOR_MYPY: ${{ needs.connector-checks.outputs.mypy }}
+          CONNECTOR_FRONTEND: ${{ needs.connector-checks.outputs.frontend }}
           WINDOWS_RESULT: ${{ needs.windows-release.result }}
           HERMES_RESULT: ${{ needs.hermes-final.result }}
           PUBLISH_RESULT: ${{ needs.publish-stable-release.result }}
@@ -182,6 +221,11 @@ jobs:
               "head_sha": os.environ["GITHUB_SHA"],
               "event": os.environ["GITHUB_EVENT_NAME"],
               "connector_checks": os.environ["CONNECTOR_RESULT"],
+              "connector_install": os.environ["CONNECTOR_INSTALL"],
+              "connector_tests": os.environ["CONNECTOR_TESTS"],
+              "connector_ruff": os.environ["CONNECTOR_RUFF"],
+              "connector_mypy": os.environ["CONNECTOR_MYPY"],
+              "connector_frontend": os.environ["CONNECTOR_FRONTEND"],
               "windows_release": os.environ["WINDOWS_RESULT"],
               "hermes_final": os.environ["HERMES_RESULT"],
               "publish_stable_release": os.environ["PUBLISH_RESULT"],
