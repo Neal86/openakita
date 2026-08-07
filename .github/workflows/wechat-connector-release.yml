@@ -44,7 +44,6 @@ jobs:
       install: ${{ steps.install.outcome }}
       tests: ${{ steps.tests.outcome }}
       ruff: ${{ steps.ruff.outcome }}
-      ruff_detail: ${{ steps.ruff_detail.outputs.detail }}
       mypy: ${{ steps.mypy.outcome }}
       frontend: ${{ steps.frontend.outcome }}
     steps:
@@ -69,21 +68,17 @@ jobs:
         id: ruff
         if: steps.install.outcome == 'success'
         continue-on-error: true
-        run: ruff check src/openakita/wechat_desktop src/openakita/api/routes/wechat_desktop.py tests/wechat_desktop scripts/build_wechat_connector.py build/wechat_connector_entry.py build/wechat_connector_worker_entry.py 2>&1 | tee /tmp/wechat-ruff.log; exit ${PIPESTATUS[0]}
-      - name: Capture Ruff detail
-        id: ruff_detail
-        if: always()
         run: |
-          python - <<'PY'
-          import base64
-          from pathlib import Path
-          p = Path('/tmp/wechat-ruff.log')
-          text = p.read_text('utf-8', errors='replace')[-12000:] if p.exists() else ''
-          encoded = base64.b64encode(text.encode()).decode()
-          with open(Path(__import__('os').environ['GITHUB_OUTPUT']), 'a', encoding='utf-8') as fh:
-              fh.write(f'detail={encoded}
-')
-          PY
+          TARGETS="src/openakita/wechat_desktop src/openakita/api/routes/wechat_desktop.py tests/wechat_desktop scripts/build_wechat_connector.py build/wechat_connector_entry.py build/wechat_connector_worker_entry.py"
+          ruff check --fix $TARGETS
+          if ! git diff --quiet -- $TARGETS; then
+            git config user.name "openakita-actions"
+            git config user.email "actions@users.noreply.github.com"
+            git add $TARGETS
+            git commit -m "style: apply Ruff fixes to WeChat Connector [skip ci]"
+            git push origin HEAD:feature/hermes-multi-agent
+          fi
+          ruff check $TARGETS
       - name: mypy
         id: mypy
         if: steps.install.outcome == 'success'
@@ -219,7 +214,6 @@ jobs:
           CONNECTOR_INSTALL: ${{ needs.connector-checks.outputs.install }}
           CONNECTOR_TESTS: ${{ needs.connector-checks.outputs.tests }}
           CONNECTOR_RUFF: ${{ needs.connector-checks.outputs.ruff }}
-          CONNECTOR_RUFF_DETAIL: ${{ needs.connector-checks.outputs.ruff_detail }}
           CONNECTOR_MYPY: ${{ needs.connector-checks.outputs.mypy }}
           CONNECTOR_FRONTEND: ${{ needs.connector-checks.outputs.frontend }}
           WINDOWS_RESULT: ${{ needs.windows-release.result }}
@@ -240,7 +234,6 @@ jobs:
               "connector_install": os.environ["CONNECTOR_INSTALL"],
               "connector_tests": os.environ["CONNECTOR_TESTS"],
               "connector_ruff": os.environ["CONNECTOR_RUFF"],
-              "connector_ruff_detail_b64": os.environ["CONNECTOR_RUFF_DETAIL"],
               "connector_mypy": os.environ["CONNECTOR_MYPY"],
               "connector_frontend": os.environ["CONNECTOR_FRONTEND"],
               "windows_release": os.environ["WINDOWS_RESULT"],
