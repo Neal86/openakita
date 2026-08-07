@@ -44,6 +44,7 @@ jobs:
       install: ${{ steps.install.outcome }}
       tests: ${{ steps.tests.outcome }}
       ruff: ${{ steps.ruff.outcome }}
+      ruff_report: ${{ steps.ruff_report.outputs.report }}
       mypy: ${{ steps.mypy.outcome }}
       frontend: ${{ steps.frontend.outcome }}
     steps:
@@ -79,6 +80,16 @@ jobs:
             git push origin HEAD:feature/hermes-multi-agent
           fi
           ruff check $TARGETS
+      - name: Capture Ruff report
+        id: ruff_report
+        if: always()
+        run: |
+          TARGETS="src/openakita/wechat_desktop src/openakita/api/routes/wechat_desktop.py tests/wechat_desktop scripts/build_wechat_connector.py build/wechat_connector_entry.py build/wechat_connector_worker_entry.py"
+          { ruff check $TARGETS --output-format=concise 2>&1 || true; } > /tmp/ruff-report.txt
+          echo "report<<EOF" >> "$GITHUB_OUTPUT"
+          tail -c 12000 /tmp/ruff-report.txt >> "$GITHUB_OUTPUT"
+          echo >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
       - name: mypy
         id: mypy
         if: steps.install.outcome == 'success'
@@ -214,6 +225,7 @@ jobs:
           CONNECTOR_INSTALL: ${{ needs.connector-checks.outputs.install }}
           CONNECTOR_TESTS: ${{ needs.connector-checks.outputs.tests }}
           CONNECTOR_RUFF: ${{ needs.connector-checks.outputs.ruff }}
+          CONNECTOR_RUFF_REPORT: ${{ needs.connector-checks.outputs.ruff_report }}
           CONNECTOR_MYPY: ${{ needs.connector-checks.outputs.mypy }}
           CONNECTOR_FRONTEND: ${{ needs.connector-checks.outputs.frontend }}
           WINDOWS_RESULT: ${{ needs.windows-release.result }}
@@ -234,6 +246,7 @@ jobs:
               "connector_install": os.environ["CONNECTOR_INSTALL"],
               "connector_tests": os.environ["CONNECTOR_TESTS"],
               "connector_ruff": os.environ["CONNECTOR_RUFF"],
+              "connector_ruff_report": os.environ["CONNECTOR_RUFF_REPORT"],
               "connector_mypy": os.environ["CONNECTOR_MYPY"],
               "connector_frontend": os.environ["CONNECTOR_FRONTEND"],
               "windows_release": os.environ["WINDOWS_RESULT"],
