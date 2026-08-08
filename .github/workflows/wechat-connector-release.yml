@@ -45,6 +45,7 @@ jobs:
       tests: ${{ steps.tests.outcome }}
       ruff: ${{ steps.ruff.outcome }}
       ruff_report: ${{ steps.ruff_report.outputs.report }}
+      ruff_diff_b64: ${{ steps.ruff_report.outputs.diff_b64 }}
       mypy: ${{ steps.mypy.outcome }}
       frontend: ${{ steps.frontend.outcome }}
     steps:
@@ -72,13 +73,7 @@ jobs:
         run: |
           TARGETS="src/openakita/wechat_desktop src/openakita/api/routes/wechat_desktop.py tests/wechat_desktop scripts/build_wechat_connector.py build/wechat_connector_entry.py build/wechat_connector_worker_entry.py"
           ruff check --fix $TARGETS
-          if ! git diff --quiet -- $TARGETS; then
-            git config user.name "openakita-actions"
-            git config user.email "actions@users.noreply.github.com"
-            git add $TARGETS
-            git commit -m "style: apply Ruff fixes to WeChat Connector [skip ci]"
-            git push origin HEAD:feature/hermes-multi-agent
-          fi
+          git diff -- $TARGETS > /tmp/ruff-fix.diff
           ruff check $TARGETS
       - name: Capture Ruff report
         id: ruff_report
@@ -90,6 +85,14 @@ jobs:
           tail -c 12000 /tmp/ruff-report.txt >> "$GITHUB_OUTPUT"
           echo >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
+          python - <<'PY'
+          import base64, os
+          from pathlib import Path
+          diff = Path('/tmp/ruff-fix.diff').read_bytes() if Path('/tmp/ruff-fix.diff').exists() else b''
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as fh:
+              fh.write('diff_b64=' + base64.b64encode(diff).decode() + '
+')
+          PY
       - name: mypy
         id: mypy
         if: steps.install.outcome == 'success'
@@ -226,6 +229,7 @@ jobs:
           CONNECTOR_TESTS: ${{ needs.connector-checks.outputs.tests }}
           CONNECTOR_RUFF: ${{ needs.connector-checks.outputs.ruff }}
           CONNECTOR_RUFF_REPORT: ${{ needs.connector-checks.outputs.ruff_report }}
+          CONNECTOR_RUFF_DIFF_B64: ${{ needs.connector-checks.outputs.ruff_diff_b64 }}
           CONNECTOR_MYPY: ${{ needs.connector-checks.outputs.mypy }}
           CONNECTOR_FRONTEND: ${{ needs.connector-checks.outputs.frontend }}
           WINDOWS_RESULT: ${{ needs.windows-release.result }}
@@ -247,6 +251,7 @@ jobs:
               "connector_tests": os.environ["CONNECTOR_TESTS"],
               "connector_ruff": os.environ["CONNECTOR_RUFF"],
               "connector_ruff_report": os.environ["CONNECTOR_RUFF_REPORT"],
+              "connector_ruff_diff_b64": os.environ["CONNECTOR_RUFF_DIFF_B64"],
               "connector_mypy": os.environ["CONNECTOR_MYPY"],
               "connector_frontend": os.environ["CONNECTOR_FRONTEND"],
               "windows_release": os.environ["WINDOWS_RESULT"],
