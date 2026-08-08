@@ -1,61 +1,55 @@
 services:
   openakita:
-    build: .
+    container_name: openakita
+    build: ../..
     restart: unless-stopped
     expose:
       - "18900"
     volumes:
-      - ./data:/app/data
-      - /opt/devops-repos/openakita-secrets/.env:/app/.env:ro
-      # Allows OpenAkita to create, stop, and restore dedicated Hermes instances.
+      - ../../data:/app/data
+      - ../../.env:/app/.env:ro
+      # Required only for automatically creating/stopping dedicated Hermes instances.
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       API_HOST: 0.0.0.0
       API_PORT: 18900
-    labels:
-      - "traefik.http.services.openakita.loadbalancer.server.port=18900"
     networks:
       agents:
-        aliases:
-          - openakita
+        aliases: [openakita]
     depends_on:
       hermes-shared:
         condition: service_healthy
 
-  # Default shared Hermes instance. Multiple Agents share this container while
-  # keeping memory, sessions, identity, skills, and workspaces isolated.
+  # Default shared instance. One container can host multiple isolated Hermes
+  # Agent processes; every profile has its own HOME/memory/session/workspace.
   hermes-shared:
+    container_name: openakita-hermes-shared
     build:
-      context: ./deploy/hermes
+      context: .
       dockerfile: Dockerfile
     image: openakita-hermes-runtime:latest
     restart: unless-stopped
     expose:
       - "8642"
     volumes:
-      - hermes_shared_data:/opt/data
+      - hermes_shared_data:/opt/openakita/agents
     environment:
       API_SERVER_HOST: 0.0.0.0
       API_SERVER_PORT: 8642
-      OPENAKITA_HERMES_AGENT_ROOT: /opt/data/openakita-agents
+      OPENAKITA_HERMES_AGENT_ROOT: /opt/openakita/agents
       HERMES_SHARED_MAX_AGENTS: 32
       OPENAI_API_KEY: openakita-internal
       OPENAI_BASE_URL: http://openakita:18900/v1
       OPENAI_MODEL: openakita-auto
     healthcheck:
-      test:
-        - CMD
-        - curl
-        - -fsS
-        - http://localhost:8642/health
+      test: ["CMD", "curl", "-fsS", "http://localhost:8642/health"]
       interval: 20s
       timeout: 5s
       retries: 6
       start_period: 30s
     networks:
       agents:
-        aliases:
-          - openakita-hermes-shared
+        aliases: [openakita-hermes-shared]
 
 networks:
   agents:

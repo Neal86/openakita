@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "hermes-customer",
+      "name": "Hermes Customer Service",
+      "base_url": "http://hermes-customer:8642",
+      "api_key_env": "HERMES_CUSTOMER_API_KEY",
+      "enabled": true,
+      "priority": 10,
+      "weight": 3,
+      "capabilities": ["text", "tools"],
+      "tags": ["customer-service"],
+      "max_concurrency": 8,
+      "timeout_seconds": 180
+    },
+    {
+      "id": "hermes-content",
+      "name": "Hermes Content",
+      "base_url": "http://hermes-content:8642",
+      "api_key_env": "HERMES_CONTENT_API_KEY",
+      "enabled": true,
+      "priority": 20,
+      "weight": 1,
+      "capabilities": ["text", "tools"],
+      "tags": ["content"],
+      "max_concurrency": 4,
+      "timeout_seconds": 180
+    }
+  ]
+}

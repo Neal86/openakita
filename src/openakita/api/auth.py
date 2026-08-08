@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -436,6 +437,19 @@ def is_trusted_local(request: Request) -> bool:
     return True
 
 
+def is_private_direct_request(request: Request) -> bool:
+    """Allow keyless /v1 only for direct private-network peers."""
+    if not request.client:
+        return False
+    if request.headers.get("x-forwarded-for") or request.headers.get("forwarded"):
+        return False
+    try:
+        address = ipaddress.ip_address(request.client.host.removeprefix("::ffff:"))
+    except ValueError:
+        return False
+    return address.is_private or address.is_loopback or address.is_link_local
+
+
 def _is_auth_exempt(path: str) -> bool:
     """Check if the path is exempt from authentication."""
     if path in AUTH_EXEMPT_PATHS:
@@ -452,6 +466,12 @@ def create_auth_middleware(config: WebAccessConfig):
             return await call_next(request)
 
         path = request.url.path
+
+        # Hermes uses this OpenAI-compatible gateway only over the direct
+        # Docker/private network. Requests carrying proxy forwarding headers
+        # still go through normal web authentication.
+        if path.startswith("/v1/") and is_private_direct_request(request):
+            return await call_next(request)
 
         # Static files and auth endpoints are always accessible
         if _is_auth_exempt(path):

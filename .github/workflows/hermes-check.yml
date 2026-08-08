@@ -1,0 +1,71 @@
+name: Hermes integration check
+
+on:
+  push:
+    branches:
+      - feature/hermes-multi-agent
+  pull_request:
+    paths:
+      - "src/openakita/hermes/**"
+      - "src/openakita/api/openai_compat.py"
+      - "src/openakita/api/routes/hermes*.py"
+      - "src/openakita/api/routes/llm_gateway.py"
+      - "src/openakita/api/routes/execution_instances.py"
+      - "src/openakita/api/server.py"
+      - "src/openakita/api/auth.py"
+      - "deploy/hermes/**"
+      - "apps/setup-center/src/**"
+      - "tests/hermes/**"
+      - ".github/workflows/hermes-check.yml"
+
+jobs:
+  hermes-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install project and test dependencies
+        run: python -m pip install --upgrade pip && pip install -e ".[dev]"
+      - name: Compile changed modules
+        run: |
+          python -m compileall -q \
+            src/openakita/hermes \
+            src/openakita/api/openai_compat.py \
+            src/openakita/api/routes/hermes.py \
+            src/openakita/api/routes/hermes_ui.py \
+            src/openakita/api/routes/llm_gateway.py \
+            src/openakita/api/routes/execution_instances.py \
+            src/openakita/api/server.py \
+            src/openakita/api/auth.py \
+            deploy/hermes/shared_gateway.py
+      - name: Import smoke test
+        run: |
+          python - <<'PY'
+          from fastapi import FastAPI
+          from openakita.api.server import mount_hermes_execution_routes
+          from openakita.hermes.router import HermesRouter
+          app = FastAPI()
+          mount_hermes_execution_routes(app)
+          mount_hermes_execution_routes(app)
+          paths = app.openapi()["paths"]
+          assert "/api/hermes/nodes" in paths, paths
+          assert "/api/execution/instances" in paths, paths
+          assert "/v1/chat/completions" in paths, paths
+          print(len(paths), HermesRouter.__name__)
+          PY
+      - name: Run Hermes tests
+        run: pytest -q tests/hermes
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/setup-center/package-lock.json
+      - name: Build Setup Center
+        working-directory: apps/setup-center
+        run: npm ci && npm run build:web
+      - name: Validate Compose
+        run: docker compose -f deploy/hermes/docker-compose.example.yml config >/dev/null

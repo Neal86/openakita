@@ -15,6 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { AgentIcon, AGENT_SVG_ICONS, isCustomAgentIcon } from "@/components/AgentIcon";
+import { ExecutionModeSection } from "../components/ExecutionModeSection";
 
 type AgentProfile = {
   id: string;
@@ -1778,7 +1779,13 @@ export function AgentManagerView({
               {saving ? t("common.loading") : t("agentManager.save")}
             </Button>
           </div>
-        </SheetContent>
+        
+              {!isCreating && editingProfile.id && (
+                <div className="mt-5">
+                  <ExecutionModeSection apiBaseUrl={apiBaseUrl} profileId={editingProfile.id} disabled={saving} />
+                </div>
+              )}
+</SheetContent>
       </Sheet>
     </div>
   );

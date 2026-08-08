@@ -6,10 +6,11 @@ import asyncio
 import hashlib
 import json
 import secrets
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 SendCallable = Callable[[dict[str, Any]], Awaitable[None]]
 InboundCallback = Callable[[dict[str, Any]], Awaitable[None]]
@@ -143,10 +144,15 @@ class WeChatDesktopManager:
             )
         return code
 
+    async def cancel_pairing_code(self, code: str) -> bool:
+        digest = self._hash(code.strip())
+        async with self._lock:
+            return self._pairings.pop(digest, None) is not None
+
     async def consume_pairing_code(self, code: str) -> tuple[str, str, str]:
         digest = self._hash(code.strip())
         async with self._lock:
-            ticket = self._pairings.get(digest)
+            ticket = self._pairings.pop(digest, None)
             if ticket is None or ticket.used or ticket.expires_at < datetime.now(UTC):
                 raise ValueError("invalid or expired pairing code")
             ticket.used = True
