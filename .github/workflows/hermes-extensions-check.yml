@@ -45,7 +45,7 @@ jobs:
           def yaml_version(text: str) -> str:
               for line in text.splitlines():
                   if line.strip().startswith("version:"):
-                      return line.split(": 1)[1].strip().strip('"').strip("'")
+                      return line.split(":", 1)[1].strip().strip('"').strip("'")
               raise AssertionError("version not found")
 
           root = Path('hermes-extensions')
