@@ -3,6 +3,8 @@ name: Hermes Extensions release
 on:
   workflow_dispatch:
   push:
+    branches:
+      - feature/hermes-extensions
     tags:
       - "hermes-extensions-v*"
 
