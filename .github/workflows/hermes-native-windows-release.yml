@@ -1,16 +1,13 @@
 name: Hermes Native Windows Release
 
 on:
-  push:
+  pull_request_target:
     branches: [main]
-    paths:
-      - .github/workflows/hermes-native-windows-release.yml
-  pull_request:
-    branches: [main]
+    types: [opened, reopened, synchronize]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
   actions: read
 
 env:
@@ -20,6 +17,10 @@ env:
 
 jobs:
   windows-installer:
+    if: >-
+      github.event_name != 'pull_request_target' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'feature/hermes-multi-agent')
     runs-on: windows-latest
     timeout-minutes: 180
     steps:
@@ -27,6 +28,7 @@ jobs:
         with:
           ref: ${{ env.BUILD_REF }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python for Hermes preinstall
         uses: actions/setup-python@v6
@@ -109,13 +111,11 @@ jobs:
           cargo fetch --locked
           cargo check
 
-      - name: Build Windows NSIS installer
+      - name: Build unsigned Windows NSIS installer
         working-directory: apps/setup-center
         shell: bash
         env:
-          TAURI_CONFIG: '{}'
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_CONFIG: '{"bundle":{"createUpdaterArtifacts":false}}'
           NO_STRIP: true
         run: npx tauri build --bundles nsis
 
@@ -137,29 +137,3 @@ jobs:
           path: release-artifacts/*.exe
           if-no-files-found: error
           retention-days: 30
-
-      - name: Record successful run on feature branch
-        if: success() && github.event_name != 'pull_request'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p ci-results
-          cat > ci-results/hermes-native-windows-release.json <<JSON
-          {
-            "workflow": "Hermes Native Windows Release",
-            "run_id": "${GITHUB_RUN_ID}",
-            "run_attempt": "${GITHUB_RUN_ATTEMPT}",
-            "head_sha": "$(git rev-parse HEAD)",
-            "hermes_agent_version": "${HERMES_AGENT_VERSION}",
-            "artifact": "OpenAkita-Hermes-Native-Windows-x64",
-            "native_runtime": true,
-            "docker_required": false,
-            "success": true
-          }
-          JSON
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add ci-results/hermes-native-windows-release.json
-          git diff --cached --quiet && exit 0
-          git commit -m "ci: record Hermes native Windows release [skip ci]"
-          git push origin HEAD:${BUILD_REF}
