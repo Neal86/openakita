@@ -1,14 +1,14 @@
 {
   "name": "hermes-extensions",
   "label": "Management Center",
-  "description": "Hermes management center for Agents, Projects, Tasks, and execution history.",
+  "description": "Hermes Agents, Projects, Tasks, runtime status, and extension management.",
   "icon": "LayoutDashboard",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "tab": {
     "path": "/management-center",
     "position": "after:cron"
   },
-  "entry": "dist/index.js",
+  "entry": "src/index.js",
   "css": "dist/style.css",
   "has_api": true
 }
