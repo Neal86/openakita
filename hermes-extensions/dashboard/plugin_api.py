@@ -10,18 +10,23 @@ from pydantic import BaseModel, Field
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _load_class(relative: str, module_name: str, class_name: str):
+def _load_module(relative: str, module_name: str):
     path = PLUGIN_ROOT / relative
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
-        raise RuntimeError(f"Unable to load {class_name}")
+        raise RuntimeError(f"Unable to load {path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return getattr(module, class_name)
+    return module
 
 
-TaskCenter = _load_class("task_center/service_v2.py", "hermes_extensions_task_center_service", "TaskCenter")
-ManagementCenter = _load_class("management/service.py", "hermes_extensions_management_service", "ManagementCenter")
+TaskCenter = _load_module(
+    "task_center/service_v2.py", "hermes_extensions_task_center_service"
+).TaskCenter
+ManagementCenter = _load_module(
+    "management/service.py", "hermes_extensions_management_service"
+).ManagementCenter
+compat = _load_module("compatibility.py", "hermes_extensions_compatibility")
 router = APIRouter()
 
 
@@ -54,7 +59,15 @@ class AgentBody(BaseModel):
 
 
 class AgentActionBody(BaseModel):
-    action: Literal["use", "gateway_start", "gateway_stop", "gateway_restart", "gateway_status", "set_workspace", "export"]
+    action: Literal[
+        "use",
+        "gateway_start",
+        "gateway_stop",
+        "gateway_restart",
+        "gateway_status",
+        "set_workspace",
+        "export",
+    ]
     value: str | None = Field(default=None, max_length=4096)
 
 
@@ -75,7 +88,16 @@ class ProjectBody(BaseModel):
 
 
 class ProjectActionBody(BaseModel):
-    action: Literal["use", "archive", "restore", "add_folder", "remove_folder", "set_primary", "bind_board", "assign_agent"]
+    action: Literal[
+        "use",
+        "archive",
+        "restore",
+        "add_folder",
+        "remove_folder",
+        "set_primary",
+        "bind_board",
+        "assign_agent",
+    ]
     value: str | None = Field(default=None, max_length=4096)
     profile: str | None = Field(default=None, max_length=64)
 
@@ -88,16 +110,73 @@ def _server_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=500, detail=str(exc))
 
 
+def _caps(*, force: bool = False):
+    return compat.detect_capabilities(force=force)
+
+
+def _unsupported_project() -> dict[str, Any]:
+    payload = compat.project_unavailable_payload()
+    payload["capabilities"] = _caps().to_dict()
+    return payload
+
+
+def _project_required() -> None:
+    if not _caps().project:
+        raise HTTPException(status_code=409, detail=_unsupported_project())
+
+
 def _management_overview() -> dict[str, Any]:
-    data = ManagementCenter().overview()
+    caps = _caps()
+    manager = ManagementCenter()
+    if caps.project:
+        data = manager.overview()
+    else:
+        agents = manager.agent_list(probe_runtime=True)
+        errors = [
+            {"scope": f"agent:{agent['name']}", "message": str(agent["status_error"])}
+            for agent in agents
+            if agent.get("status_error")
+        ]
+        errors.append({
+            "scope": "projects",
+            "message": compat.project_unavailable_payload()["message"],
+        })
+        data = {
+            "counts": {
+                "agents": len(agents),
+                "running_agents": sum(
+                    1
+                    for agent in agents
+                    if str(agent.get("gateway") or "").lower().startswith("running")
+                ),
+                "projects": 0,
+                "archived_projects": 0,
+            },
+            "agents": agents,
+            "projects": [],
+            "active_profile": manager._active_profile(),
+            "partial": True,
+            "errors": errors,
+        }
+
     task_center = TaskCenter()
     tasks = task_center.overview(include_completed=False)
     data["task_counts"] = tasks.get("counts", {})
     data["upcoming"] = task_center.upcoming(hours=24 * 7, limit=25)
     if tasks.get("kanban_error"):
-        data.setdefault("errors", []).append({"scope": "tasks:kanban", "message": str(tasks["kanban_error"])})
+        data.setdefault("errors", []).append(
+            {"scope": "tasks:kanban", "message": str(tasks["kanban_error"])}
+        )
         data["partial"] = True
+    data["capabilities"] = caps.to_dict()
+    data["project_supported"] = caps.project
     return data
+
+
+@router.get("/capabilities")
+def capabilities(refresh: bool = False) -> dict[str, Any]:
+    caps = _caps(force=refresh)
+    return {"capabilities": caps.to_dict(), "project_supported": caps.project}
 
 
 @router.get("/overview")
@@ -109,7 +188,11 @@ def overview(profile: str | None = None, include_completed: bool = False) -> dic
 
 
 @router.get("/upcoming")
-def upcoming(hours: int = Query(168, ge=1, le=2160), profile: str | None = None, limit: int = Query(300, ge=1, le=1000)) -> dict[str, Any]:
+def upcoming(
+    hours: int = Query(168, ge=1, le=2160),
+    profile: str | None = None,
+    limit: int = Query(300, ge=1, le=1000),
+) -> dict[str, Any]:
     try:
         return {"items": TaskCenter().upcoming(hours=hours, profile=profile, limit=limit)}
     except Exception as exc:
@@ -130,7 +213,9 @@ def create_task(body: TaskBody) -> dict[str, Any]:
 
 
 @router.patch("/tasks/{task_type}/{task_id}")
-def update_task(task_type: Literal["cron", "kanban"], task_id: str, body: TaskBody) -> dict[str, Any]:
+def update_task(
+    task_type: Literal["cron", "kanban"], task_id: str, body: TaskBody
+) -> dict[str, Any]:
     payload = body.model_dump(exclude_none=True)
     payload.update({"type": task_type, "id": task_id})
     try:
@@ -142,7 +227,9 @@ def update_task(task_type: Literal["cron", "kanban"], task_id: str, body: TaskBo
 
 
 @router.post("/tasks/{task_type}/{task_id}/action")
-def task_action(task_type: Literal["cron", "kanban"], task_id: str, body: TaskActionBody) -> dict[str, Any]:
+def task_action(
+    task_type: Literal["cron", "kanban"], task_id: str, body: TaskActionBody
+) -> dict[str, Any]:
     payload: dict[str, Any] = {"type": task_type, "id": task_id, "action": body.action}
     if body.value is not None:
         payload["value"] = body.value
@@ -157,7 +244,12 @@ def task_action(task_type: Literal["cron", "kanban"], task_id: str, body: TaskAc
 
 
 @router.get("/tasks/{task_type}/{task_id}/history")
-def history(task_type: Literal["cron", "kanban"], task_id: str, profile: str | None = None, limit: int = Query(20, ge=1, le=200)) -> dict[str, Any]:
+def history(
+    task_type: Literal["cron", "kanban"],
+    task_id: str,
+    profile: str | None = None,
+    limit: int = Query(20, ge=1, le=200),
+) -> dict[str, Any]:
     try:
         return {"items": TaskCenter().history(task_type, task_id, limit=limit, profile=profile)}
     except ValueError as exc:
@@ -236,12 +328,24 @@ def agent_delete(name: str) -> dict[str, Any]:
 
 @router.get("/projects")
 def projects(profile: str | None = None, include_archived: bool = True) -> dict[str, Any]:
+    if not _caps().project:
+        return _unsupported_project()
     try:
         center = ManagementCenter()
         if profile:
-            return {"items": center.project_list(profile, include_archived=include_archived), "partial": False, "errors": []}
+            return {
+                "supported": True,
+                "items": center.project_list(profile, include_archived=include_archived),
+                "partial": False,
+                "errors": [],
+            }
         snapshot = center.snapshot(include_archived=include_archived)
-        return {"items": snapshot["projects"], "partial": snapshot["partial"], "errors": snapshot["errors"]}
+        return {
+            "supported": True,
+            "items": snapshot["projects"],
+            "partial": snapshot["partial"],
+            "errors": snapshot["errors"],
+        }
     except ValueError as exc:
         raise _bad_request(exc) from exc
     except Exception as exc:
@@ -250,6 +354,8 @@ def projects(profile: str | None = None, include_archived: bool = True) -> dict[
 
 @router.get("/projects/{project}")
 def project_get(project: str, profile: str = "default") -> dict[str, Any]:
+    if not _caps().project:
+        return _unsupported_project()
     try:
         return ManagementCenter().project_get(project, profile)
     except ValueError as exc:
@@ -260,6 +366,7 @@ def project_get(project: str, profile: str = "default") -> dict[str, Any]:
 
 @router.post("/projects")
 def project_create(body: ProjectBody) -> dict[str, Any]:
+    _project_required()
     try:
         return ManagementCenter().project_create(body.model_dump(exclude_none=True))
     except ValueError as exc:
@@ -270,6 +377,7 @@ def project_create(body: ProjectBody) -> dict[str, Any]:
 
 @router.patch("/projects/{project}")
 def project_update(project: str, body: ProjectBody) -> dict[str, Any]:
+    _project_required()
     payload = body.model_dump(exclude_none=True)
     profile = str(payload.pop("profile", "default"))
     try:
@@ -282,8 +390,11 @@ def project_update(project: str, body: ProjectBody) -> dict[str, Any]:
 
 @router.post("/projects/{project}/action")
 def project_action(project: str, body: ProjectActionBody) -> dict[str, Any]:
+    _project_required()
     try:
-        return ManagementCenter().project_action(project, body.profile or "default", body.action, body.value)
+        return ManagementCenter().project_action(
+            project, body.profile or "default", body.action, body.value
+        )
     except ValueError as exc:
         raise _bad_request(exc) from exc
     except Exception as exc:
