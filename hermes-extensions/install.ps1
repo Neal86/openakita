@@ -14,6 +14,7 @@ $PlatformSource = Join-Path $Source "platforms\wechat-desktop"
 $PlatformTarget = Join-Path $PluginsRoot "platforms\wechat-desktop"
 $Requirements = Join-Path $Source "requirements-windows.txt"
 $DashboardSource = Join-Path $Source "dashboard\src\index.js"
+$ConfigPath = Join-Path $HermesHome "config.yaml"
 $HermesCommand = Get-Command hermes -ErrorAction SilentlyContinue
 
 function Test-HermesCapability {
@@ -168,8 +169,13 @@ $StagePlugin = Join-Path $TxnRoot "stage\hermes-extensions"
 $StagePlatform = Join-Path $TxnRoot "stage\wechat-desktop"
 $BackupPlugin = Join-Path $TxnRoot "backup\hermes-extensions"
 $BackupPlatform = Join-Path $TxnRoot "backup\wechat-desktop"
+$BackupConfig = Join-Path $TxnRoot "backup\config.yaml"
+$ConfigExisted = Test-Path -LiteralPath $ConfigPath
 New-Item -ItemType Directory -Force -Path (Split-Path $StagePlugin -Parent) | Out-Null
 New-Item -ItemType Directory -Force -Path (Split-Path $BackupPlugin -Parent) | Out-Null
+if ($ConfigExisted) {
+    Copy-Item -LiteralPath $ConfigPath -Destination $BackupConfig -Force
+}
 
 try {
     Write-Host "Staging Hermes Extensions..."
@@ -235,7 +241,7 @@ try {
     & (Join-Path $Target "doctor.ps1") -Installed
     if ($LASTEXITCODE -ne 0) { throw "Installed doctor verification failed with exit code $LASTEXITCODE." }
 
-    Write-Host "Hermes Extensions v0.4.2 install complete."
+    Write-Host "Hermes Extensions v0.4.3 install complete."
     Write-Host "Dashboard hot rescan: $DashboardRescanned"
     if (-not $Capabilities.project) {
         Write-Host "Projects: disabled for this Hermes build; they will auto-enable after a compatible Hermes upgrade."
@@ -243,9 +249,18 @@ try {
     Write-Host "If dashboard backend code changed, restart only 'hermes dashboard'."
     Write-Host "For WeChat platform Python changes, restart the relevant Hermes gateway."
 } catch {
-    Write-Error "Installation failed; rolling back previous plugin files. $($_.Exception.Message)"
+    Write-Error "Installation failed; rolling back previous plugin files and Hermes plugin configuration. $($_.Exception.Message)"
     try { Restore-Backup -Backup $BackupPlugin -Destination $Target } catch { Write-Warning "Plugin rollback failed: $($_.Exception.Message)" }
     try { Restore-Backup -Backup $BackupPlatform -Destination $PlatformTarget } catch { Write-Warning "Platform rollback failed: $($_.Exception.Message)" }
+    try {
+        if ($ConfigExisted -and (Test-Path -LiteralPath $BackupConfig)) {
+            Copy-Item -LiteralPath $BackupConfig -Destination $ConfigPath -Force
+        } elseif (-not $ConfigExisted -and (Test-Path -LiteralPath $ConfigPath)) {
+            Remove-Item -LiteralPath $ConfigPath -Force
+        }
+    } catch {
+        Write-Warning "Hermes config rollback failed: $($_.Exception.Message)"
+    }
     throw
 } finally {
     if (Test-Path -LiteralPath $TxnRoot) { Remove-Item -LiteralPath $TxnRoot -Recurse -Force -ErrorAction SilentlyContinue }
