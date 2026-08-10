@@ -36,7 +36,7 @@ jobs:
           node-version: "20"
       - name: JavaScript source syntax
         run: node --check hermes-extensions/dashboard/src/index.js
-      - name: Validate v0.4.2 release surfaces
+      - name: Validate v0.4.3 release surfaces
         run: |
           python - <<'PY'
           import json
@@ -45,7 +45,7 @@ jobs:
           def yaml_version(text: str) -> str:
               for line in text.splitlines():
                   if line.strip().startswith("version:"):
-                      return line.split(":", 1)[1].strip().strip('"').strip("'")
+                      return line.split(": 1)[1].strip().strip('"').strip("'")
               raise AssertionError("version not found")
 
           root = Path('hermes-extensions')
@@ -59,16 +59,16 @@ jobs:
 
           assert manifest['entry'] == 'dist/index.js'
           assert manifest['api'] == 'plugin_api.py'
-          assert manifest['version'] == yaml_version(plugin) == yaml_version(platform_yaml) == '0.4.2'
+          assert manifest['version'] == yaml_version(plugin) == yaml_version(platform_yaml) == '0.4.3'
           assert not (root / 'dashboard/compat_api.py').exists()
           assert '/capabilities' in api and 'project_supported' in api
           assert 'ttl_seconds' in compat and 'force' in compat
-          assert 'rolling back previous plugin files' in installer
+          assert 'rolling back previous plugin files and Hermes plugin configuration' in installer
+          assert 'BackupConfig' in installer and 'ConfigExisted' in installer
           assert 'APPDATA' in installer and 'uv\\tools\\hermes-agent' in installer
-          assert '-Preflight' not in doctor  # parameter is PowerShell syntax, checked below
-          assert '[switch]$Preflight' in doctor and '[switch]$Json' in doctor
+          assert '[switch]$Preflight' in doctor and '[switch]$Installed' in doctor and '[switch]$Json' in doctor
           assert (root / 'doctor.ps1').is_file()
-          print('v0.4.2 compatibility, transactional install, and release surfaces ok')
+          print('v0.4.3 compatibility, transactional config rollback, and release surfaces ok')
           PY
 
   windows-installer:
@@ -110,10 +110,14 @@ jobs:
             echo hermes: error: argument command: invalid choice: 'project' 1>&2
             exit /b 2
           )
-          if "%1"=="plugins" if "%2"=="enable" if "%FAKE_HERMES_FAIL_ENABLE%"=="1" exit /b 9
+          if "%1"=="plugins" if "%2"=="enable" (
+            echo enabled-%3>>"%HERMES_HOME%\config.yaml"
+            if "%FAKE_HERMES_FAIL_ENABLE%"=="1" exit /b 9
+            exit /b 0
+          )
           if "%1"=="plugins" if "%2"=="list" (
-            echo hermes-extensions enabled 0.4.2 user
-            echo wechat-desktop enabled 0.4.2 user
+            echo hermes-extensions enabled 0.4.3 user
+            echo wechat-desktop enabled 0.4.3 user
             exit /b 0
           )
           if "%1"=="dashboard" if "%2"=="--status" (
@@ -151,15 +155,21 @@ jobs:
           )) { if (-not (Test-Path $path)) { throw "Missing installed file: $path" } }
           & (Join-Path $plugin "doctor.ps1") -Installed -Json | Out-Host
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Rollback on failed upgrade
+      - name: Rollback files and config on failed upgrade
         shell: pwsh
         run: |
           $plugin = Join-Path $env:HERMES_HOME "plugins\hermes-extensions"
+          $config = Join-Path $env:HERMES_HOME "config.yaml"
           Set-Content -LiteralPath (Join-Path $plugin "rollback-marker.txt") -Value "old-version"
+          Set-Content -LiteralPath $config -Value "baseline-config" -NoNewline
           $env:FAKE_HERMES_FAIL_ENABLE = "1"
           try { & .\hermes-extensions\install.ps1; throw "Install unexpectedly succeeded" }
           catch { Write-Host "Expected install failure: $($_.Exception.Message)" }
           finally { Remove-Item Env:FAKE_HERMES_FAIL_ENABLE -ErrorAction SilentlyContinue }
           if (-not (Test-Path (Join-Path $plugin "rollback-marker.txt"))) {
             throw "Transactional rollback did not restore previous plugin."
+          }
+          $restoredConfig = Get-Content -LiteralPath $config -Raw
+          if ($restoredConfig -ne "baseline-config") {
+            throw "Transactional rollback did not restore Hermes config. Got: $restoredConfig"
           }
