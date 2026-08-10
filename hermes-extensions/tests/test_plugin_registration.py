@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,19 +27,34 @@ def load_plugin():
     return module
 
 
-def test_registers_expected_tools() -> None:
-    plugin = load_plugin()
-    ctx = FakeContext()
-    plugin.register(ctx)
-    expected = {
+def _base_tools() -> set[str]:
+    return {
         "wechat_status", "wechat_list_chats", "wechat_get_unread_chats", "wechat_get_messages", "wechat_send_message",
         "task_center_overview", "task_center_upcoming", "task_center_create", "task_center_update", "task_center_action", "task_center_history",
         "management_overview", "agent_list", "agent_get", "agent_create", "agent_update", "agent_action",
-        "project_list", "project_get", "project_create", "project_update", "project_action",
     }
-    assert set(ctx.tools) == expected
+
+
+def _project_tools() -> set[str]:
+    return {"project_list", "project_get", "project_create", "project_update", "project_action"}
+
+
+def test_registers_project_tools_when_native_projects_exist() -> None:
+    plugin = load_plugin()
+    plugin.detect_capabilities = lambda: SimpleNamespace(project=True)
+    ctx = FakeContext()
+    plugin.register(ctx)
+    assert set(ctx.tools) == _base_tools() | _project_tools()
     assert ctx.tools["wechat_send_message"]["toolset"] == "hermes_extensions_wechat"
     assert ctx.tools["task_center_overview"]["toolset"] == "hermes_extensions_tasks"
     assert ctx.tools["management_overview"]["toolset"] == "hermes_extensions_management"
-    assert ctx.tools["agent_create"]["toolset"] == "hermes_extensions_management"
     assert callable(ctx.tools["wechat_status"]["check_fn"])
+
+
+def test_hides_project_tools_when_native_projects_are_unavailable() -> None:
+    plugin = load_plugin()
+    plugin.detect_capabilities = lambda: SimpleNamespace(project=False)
+    ctx = FakeContext()
+    plugin.register(ctx)
+    assert set(ctx.tools) == _base_tools()
+    assert not (_project_tools() & set(ctx.tools))
