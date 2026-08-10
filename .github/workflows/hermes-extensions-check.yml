@@ -34,17 +34,29 @@ jobs:
           node-version: "20"
       - name: JavaScript syntax
         run: node --check hermes-extensions/dashboard/dist/index.js
-      - name: Validate manifests
+      - name: Validate manifests and platform surface
         run: |
           python - <<'PY'
-          import json
+          import ast, json
           from pathlib import Path
-          manifest = json.loads(Path('hermes-extensions/dashboard/manifest.json').read_text('utf-8'))
+
+          root = Path('hermes-extensions')
+          manifest = json.loads((root / 'dashboard/manifest.json').read_text('utf-8'))
           assert manifest['name'] == 'hermes-extensions'
-          assert manifest['api'] == 'plugin_api.py'
-          plugin = Path('hermes-extensions/plugin.yaml').read_text('utf-8')
+          assert manifest['description']
+          assert manifest['has_api'] is True
+          assert manifest['entry'] == 'dist/index.js'
+
+          plugin = (root / 'plugin.yaml').read_text('utf-8')
           assert 'name: hermes-extensions' in plugin
           assert 'wechat_send_message' in plugin
           assert 'task_center_upcoming' in plugin
-          print('manifests ok')
+
+          platform = (root / 'platforms/wechat-desktop/plugin.yaml').read_text('utf-8')
+          assert 'kind: platform' in platform
+          assert 'name: wechat-desktop' in platform
+          tree = ast.parse((root / 'platforms/wechat-desktop/adapter.py').read_text('utf-8'))
+          names = {node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+          assert {'register', 'connect', 'disconnect', 'send'} <= names
+          print('manifests and platform surface ok')
           PY
