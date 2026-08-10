@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - .github/workflows/hermes-native-windows-release.yml
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -137,7 +139,7 @@ jobs:
           retention-days: 30
 
       - name: Record successful run on feature branch
-        if: success()
+        if: success() && github.event_name != 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
