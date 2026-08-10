@@ -77,7 +77,7 @@ def _env_enablement() -> dict[str, Any] | None:
 
 
 class WeChatDesktopPlatformAdapter(BasePlatformAdapter):
-    """Poll unread desktop conversations and route new text into Hermes Gateway."""
+    """Poll unread desktop conversations and route new inbound text into Hermes Gateway."""
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config=config, platform=Platform("wechat_desktop"))
@@ -98,7 +98,8 @@ class WeChatDesktopPlatformAdapter(BasePlatformAdapter):
         if not status.get("available"):
             return False
         self._mark_connected()
-        self._poll_task = asyncio.create_task(self._poll_loop())
+        if self._poll_task is None or self._poll_task.done():
+            self._poll_task = asyncio.create_task(self._poll_loop())
         return True
 
     async def disconnect(self) -> None:
@@ -141,7 +142,10 @@ class WeChatDesktopPlatformAdapter(BasePlatformAdapter):
                     messages = await asyncio.to_thread(self.desktop.get_messages, chat, 8)
                     if not messages:
                         continue
-                    text = str(messages[-1].get("text") or "").strip()
+                    latest = messages[-1]
+                    if str(latest.get("direction") or "").lower() == "outbound":
+                        continue
+                    text = str(latest.get("text") or "").strip()
                     if not text:
                         continue
                     fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -159,15 +163,22 @@ class WeChatDesktopPlatformAdapter(BasePlatformAdapter):
                         chat_id=chat,
                         chat_name=chat,
                         chat_type="dm",
-                        user_id=chat,
-                        user_name=chat,
+                        user_id=str(latest.get("sender") or chat),
+                        user_name=str(latest.get("sender") or chat),
                     )
                     event = MessageEvent(
                         text=text,
                         message_type=MessageType.TEXT,
                         source=source,
                         message_id=f"wechat-desktop-{fingerprint[:20]}-{int(now)}",
-                        raw_message={"chat": chat, "text": text, "transport": "windows-uia"},
+                        raw_message={
+                            "chat": chat,
+                            "text": text,
+                            "sender": latest.get("sender"),
+                            "display_time": latest.get("time"),
+                            "direction": latest.get("direction"),
+                            "transport": "windows-uia",
+                        },
                         timestamp=datetime.now(UTC),
                     )
                     await self.handle_message(event)
