@@ -42,7 +42,7 @@ jobs:
       - name: Install and validate source
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r hermes-extensions/requirements.txt pytest ruff
+          python -m pip install -r hermes-extensions/requirements.txt pytest ruff fastapi pydantic
           python -m compileall -q hermes-extensions
           ruff check hermes-extensions
           pytest -q hermes-extensions/tests
@@ -109,4 +109,4 @@ jobs:
             "release/hermes-extensions-v${VERSION}.zip" \
             "release/hermes-extensions-v${VERSION}.zip.sha256" \
             --title "Hermes Extensions v${VERSION}" \
-            --notes "Standalone Hermes Extensions v${VERSION}. Transactional Windows installer, preflight/installed doctor modes, cached compatibility probing, and graceful native Project fallback. Download the ZIP, extract it, run doctor.ps1 -Preflight, then install.ps1."
+            --notes "Standalone Hermes Extensions v${VERSION}. Transactional Windows installer with config rollback, preflight/installed doctor modes, cached compatibility probing, dataclass-safe Dashboard loading, strict API bodies, and graceful native Project fallback. Download the ZIP, extract it, run doctor.ps1 -Preflight, then install.ps1."
