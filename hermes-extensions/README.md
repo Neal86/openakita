@@ -2,7 +2,7 @@
 
 Standalone extensions for **NousResearch/hermes-agent**. This package does not depend on the OpenAkita runtime, APIs, agents, or databases.
 
-Current package version: **0.4.2**.
+Current package version: **0.4.3**.
 
 ## Included
 
@@ -42,24 +42,24 @@ Registered task tools:
 - `task_center_action`
 - `task_center_history`
 
-## v0.4.2 reliability hardening
+## v0.4.3 reliability hardening
 
-### Transactional Windows install
+### Fully transactional Windows install
 
-`install.ps1` now stages and validates the new plugin before replacing the current installation:
+`install.ps1` stages and validates the new plugin before replacing the current installation:
 
 1. Detect real Hermes capabilities.
-2. Locate the **actual Python interpreter used by Hermes**, including `%APPDATA%\uv\tools\hermes-agent\Scripts\python.exe` used by normal `uv tool` installs.
-3. Install dependencies only into that interpreter; it refuses to silently fall back to unrelated system Python.
+2. Locate the **actual Python interpreter used by Hermes**, including `%APPDATA%\uv\tools\hermes-agent\Scripts\python.exe` used by `uv tool` installs.
+3. Install dependencies only into that interpreter; refuse unrelated system-Python fallback.
 4. Verify `yaml`, `croniter`, `pywinauto`, and `pyperclip` imports.
-5. Build a staging plugin tree and generate the official Dashboard `dist/index.js` bundle.
+5. Build a staging plugin tree and generate the Dashboard `dist/index.js` entry.
 6. Compile the staged Python code.
-7. Back up the existing Hermes Extensions and WeChat platform.
+7. Back up the existing Hermes Extensions plugin, WeChat platform, and Hermes `config.yaml` state used by plugin enablement.
 8. Atomically replace both plugin directories and enable them.
 9. Run installed-package doctor checks.
-10. On any failure after replacement begins, automatically restore the previous plugin/platform files.
+10. On any failure after replacement begins, restore the previous plugin files, WeChat platform files, and Hermes plugin configuration.
 
-Python dependencies may remain installed after a failed upgrade, but the previous executable plugin code is restored.
+Python packages installed into the Hermes environment are intentionally not uninstalled during rollback; executable plugin code and Hermes enablement configuration are restored.
 
 ### Fast compatibility probing
 
@@ -67,7 +67,7 @@ Hermes capability detection is cached in-process for 45 seconds. Dashboard API c
 
 ### One Dashboard backend router
 
-Compatibility handling now lives directly in `dashboard/plugin_api.py`; the duplicate `compat_api.py` router was removed. The manifest uses the Hermes v0.16-compatible standard:
+Compatibility handling lives directly in `dashboard/plugin_api.py`; the old duplicate compatibility router is removed. The manifest uses the Hermes v0.16-compatible standard:
 
 ```json
 {
@@ -76,7 +76,7 @@ Compatibility handling now lives directly in `dashboard/plugin_api.py`; the dupl
 }
 ```
 
-When `hermes project` is absent, Project reads return `supported: false` and Project mutations return a structured 409. Agent, Task, Dashboard and WeChat functionality remain available.
+When `hermes project` is absent, Project reads return `supported: false` and Project mutations return a structured 409. The plugin also omits Project tools from model registration when the local Hermes build has no native Project command. Agent, Task, Dashboard and WeChat functionality remain available.
 
 ### Doctor modes
 
@@ -117,7 +117,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\doctor.ps1 -Installed
 ```
 
-For the user's observed Hermes v0.16.0 build where `profile`, `plugins`, `dashboard`, `cron`, and `kanban` are available but `project` is absent, installation is supported. Projects are disabled and automatically become available after upgrading to a Hermes build that exposes the native Project command.
+For the observed Hermes v0.16.0 build where `profile`, `plugins`, `dashboard`, `cron`, and `kanban` are available but `project` is absent, installation is supported. Projects are disabled and automatically become available after upgrading to a Hermes build that exposes the native Project command.
 
 Useful checks:
 
@@ -133,15 +133,15 @@ A first installation or change to Dashboard backend Python should restart only `
 The release workflow builds an isolated package:
 
 ```text
-hermes-extensions-v0.4.2.zip
-hermes-extensions-v0.4.2.zip.sha256
+hermes-extensions-v0.4.3.zip
+hermes-extensions-v0.4.3.zip.sha256
 ```
 
 The ZIP root contains only the standalone Hermes extension tree. It excludes OpenAkita application code and tests, and includes a pre-built `dashboard/dist/index.js` expected by Hermes Dashboard.
 
 ## Validation
 
-CI now covers:
+CI covers:
 
 - Python compilation, Ruff and pytest.
 - Dashboard JavaScript syntax.
@@ -149,10 +149,11 @@ CI now covers:
 - Agent/Profile and Task Center regression tests.
 - WeChat fail-closed automation unit tests.
 - Hermes capability detection cache and forced refresh.
+- Conditional Project-tool registration on Hermes builds without native Projects.
 - PowerShell parser validation.
 - A **real execution of `install.ps1` on Windows CI** against a fake Hermes v0.16-compatible command surface where native Projects are intentionally unavailable.
 - Post-install file/discovery doctor checks.
-- A deliberately failed upgrade proving the previous plugin is restored by transactional rollback.
+- A deliberately failed upgrade proving both previous plugin files and Hermes `config.yaml` are restored by transactional rollback.
 - Release ZIP isolation and SHA256 generation.
 
 A real WeChat acceptance test still requires native Windows with a logged-in WeChat client. CI cannot truthfully substitute for that device-level UI Automation test.
