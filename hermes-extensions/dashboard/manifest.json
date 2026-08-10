@@ -3,12 +3,12 @@
   "label": "Management Center",
   "description": "Hermes Agents, Projects, Tasks, runtime status, and extension management.",
   "icon": "LayoutDashboard",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "tab": {
     "path": "/management-center",
     "position": "after:cron"
   },
-  "entry": "src/index.js",
+  "entry": "dist/index.js",
   "css": "dist/style.css",
-  "has_api": true
+  "api": "compat_api.py"
 }
