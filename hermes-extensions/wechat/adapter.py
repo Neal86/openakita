@@ -26,15 +26,17 @@ class ChatRow:
 
 
 class WeChatDesktop:
-    """Best-effort UIA adapter that fails closed before any send side effect.
+    """Windows WeChat UI Automation adapter with fail-closed send semantics.
 
-    It deliberately does not use fixed screen coordinates. Controls are located
-    from the Windows UI Automation tree every call. If the target conversation
-    cannot be re-verified immediately before sending, no keystroke is sent.
+    The adapter never relies on fixed screen coordinates. Before every send it
+    resolves the requested chat through the UIA tree, rejects ambiguous search
+    results, opens the exact conversation, and verifies the visible title again
+    immediately before the Enter key side effect.
     """
 
     WINDOW_MARKERS = ("微信", "WeChat")
     UNREAD_MARKERS = ("条新消息", "new message", "unread", "未读")
+    TIME_MARKERS = ("AM", "PM", "上午", "下午", ":")
 
     def __init__(self, data_dir: Path | None = None) -> None:
         hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
@@ -68,24 +70,51 @@ class WeChatDesktop:
             ) from exc
         return Desktop, send_keys, pyperclip
 
+    @staticmethod
+    def _safe_text(control) -> str:
+        try:
+            return (control.window_text() or "").strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _rect_area(control) -> int:
+        try:
+            rect = control.rectangle()
+            return max(0, rect.width()) * max(0, rect.height())
+        except Exception:
+            return 0
+
+    def _restore_window(self, win) -> None:
+        try:
+            if hasattr(win, "is_minimized") and win.is_minimized():
+                win.restore()
+                time.sleep(0.15)
+        except Exception:
+            pass
+        try:
+            win.set_focus()
+        except Exception:
+            pass
+
     def _main_window(self):
         Desktop, _, _ = self._deps()
         candidates = []
         for win in Desktop(backend="uia").windows():
             try:
-                title = (win.window_text() or "").strip()
+                title = self._safe_text(win)
                 if not title or not win.is_visible():
                     continue
                 if any(marker.lower() in title.lower() for marker in self.WINDOW_MARKERS):
-                    rect = win.rectangle()
-                    area = max(0, rect.width()) * max(0, rect.height())
-                    candidates.append((area, win))
+                    candidates.append((self._rect_area(win), win))
             except Exception:
                 continue
         if not candidates:
             raise WeChatUnavailable("No visible Windows WeChat window was found")
         candidates.sort(key=lambda row: row[0], reverse=True)
-        return candidates[0][1]
+        win = candidates[0][1]
+        self._restore_window(win)
+        return win
 
     @staticmethod
     def _text(control) -> str:
@@ -111,17 +140,27 @@ class WeChatDesktop:
                 "available": False,
                 "platform": platform.system(),
                 "reason": "Requires native Windows plus pywinauto and pyperclip",
+                "transport": "windows-uia",
+                "fail_closed_send": True,
             }
         try:
             win = self._main_window()
             return {
                 "available": True,
-                "window_title": win.window_text(),
+                "window_title": self._safe_text(win),
                 "window_handle": int(win.handle),
                 "backend": "uia",
+                "transport": "windows-uia",
+                "fail_closed_send": True,
             }
         except Exception as exc:
-            return {"available": False, "platform": platform.system(), "reason": str(exc)}
+            return {
+                "available": False,
+                "platform": platform.system(),
+                "reason": str(exc),
+                "transport": "windows-uia",
+                "fail_closed_send": True,
+            }
 
     def list_chats(self, limit: int = 50) -> list[ChatRow]:
         win = self._main_window()
@@ -135,8 +174,6 @@ class WeChatDesktop:
             text = self._text(control)
             if not text:
                 continue
-            # The first line/label is normally the chat name. Avoid fabricating an
-            # ID from coordinates; only expose names the UIA tree actually reports.
             try:
                 text_children = [
                     (item.window_text() or "").strip()
@@ -145,7 +182,7 @@ class WeChatDesktop:
                 ]
             except Exception:
                 text_children = []
-            name = text_children[0] if text_children else (control.window_text() or "").strip()
+            name = text_children[0] if text_children else self._safe_text(control)
             if not name or name in seen:
                 continue
             lower = text.lower()
@@ -168,8 +205,6 @@ class WeChatDesktop:
                 er = edit.rectangle()
                 if not edit.is_visible() or not edit.is_enabled():
                     continue
-                # Search is expected in the upper quarter. We intentionally do
-                # not accept a lower message editor as a search field.
                 if er.top <= rect.top + max(180, rect.height() // 4):
                     edits.append((er.top, -er.width(), edit))
             except Exception:
@@ -189,13 +224,46 @@ class WeChatDesktop:
         pyperclip.copy(text)
         send_keys("^v", pause=0.03)
         if previous is not None:
-            # Restore asynchronously would race with the paste. A short wait keeps
-            # the clipboard side effect bounded while allowing WeChat to consume it.
             time.sleep(0.08)
             try:
                 pyperclip.copy(previous)
             except Exception:
                 pass
+
+    def _exact_search_results(self, win, chat: str) -> list[Any]:
+        """Return only exact-name UIA search result rows.
+
+        More than one exact row is treated as ambiguous because selecting the
+        wrong customer/group is worse than refusing to send.
+        """
+        wanted = chat.strip()
+        if not wanted:
+            return []
+        matches: list[Any] = []
+        seen_handles: set[int] = set()
+        try:
+            items = win.descendants(control_type="ListItem")
+        except Exception:
+            return []
+        for item in items:
+            try:
+                labels = [
+                    self._safe_text(child)
+                    for child in item.descendants(control_type="Text")
+                    if self._safe_text(child)
+                ]
+                own = self._safe_text(item)
+                if own:
+                    labels.insert(0, own)
+                if wanted not in labels:
+                    continue
+                handle = int(getattr(item, "handle", 0) or id(item))
+                if handle not in seen_handles:
+                    matches.append(item)
+                    seen_handles.add(handle)
+            except Exception:
+                continue
+        return matches
 
     def open_chat(self, chat: str) -> None:
         chat = chat.strip()
@@ -208,9 +276,23 @@ class WeChatDesktop:
             _, send_keys, _ = self._deps()
             send_keys("^a{BACKSPACE}", pause=0.03)
             self._paste(chat)
+            time.sleep(0.4)
+            matches = self._exact_search_results(win, chat)
+            if len(matches) > 1:
+                send_keys("{ESC}", pause=0.03)
+                raise WeChatUnavailable(
+                    f"Ambiguous WeChat search: more than one exact result named {chat!r}"
+                )
+            if len(matches) == 1:
+                matches[0].click_input()
+            else:
+                # Some WeChat builds expose search results without ListItem
+                # wrappers. Enter is allowed only if the resulting title can be
+                # proved exact immediately afterwards.
+                send_keys("{ENTER}", pause=0.05)
             time.sleep(0.35)
-            send_keys("{ENTER}", pause=0.05)
-            time.sleep(0.35)
+        except WeChatUnavailable:
+            raise
         except Exception as exc:
             raise WeChatUnavailable(f"Failed to open WeChat conversation {chat!r}: {exc}") from exc
         if not self._verify_target(win, chat):
@@ -222,55 +304,85 @@ class WeChatDesktop:
             return False
         try:
             rect = win.rectangle()
-            # Conversation title normally appears in the upper/right content area.
+            matches = 0
             for text in win.descendants(control_type="Text"):
-                value = (text.window_text() or "").strip()
+                value = self._safe_text(text)
                 if value != wanted:
                     continue
                 tr = text.rectangle()
                 if tr.left >= rect.left + rect.width() // 4 and tr.top <= rect.top + max(220, rect.height() // 3):
-                    return True
+                    matches += 1
+            return matches == 1
         except Exception:
             return False
-        return False
+
+    def _message_rows(self, win, chat: str) -> list[dict[str, Any]]:
+        rect = win.rectangle()
+        rows: list[dict[str, Any]] = []
+        seen: set[tuple[int, int, str]] = set()
+        try:
+            controls = win.descendants(control_type="ListItem")
+        except Exception:
+            controls = []
+        if not controls:
+            try:
+                controls = win.descendants(control_type="Text")
+            except Exception:
+                controls = []
+        for control in controls:
+            try:
+                cr = control.rectangle()
+                if cr.left < rect.left + rect.width() // 3:
+                    continue
+                if cr.top < rect.top + 100 or cr.bottom > rect.bottom - 80:
+                    continue
+                labels = [
+                    self._safe_text(child)
+                    for child in control.descendants(control_type="Text")
+                    if self._safe_text(child)
+                ]
+                text = self._text(control)
+                if not text or text == chat:
+                    continue
+                key = (cr.top, cr.left, text)
+                if key in seen:
+                    continue
+                seen.add(key)
+                sender = labels[0] if len(labels) > 1 else None
+                body = labels[-1] if labels else text
+                timestamp = next((value for value in labels if any(marker in value for marker in self.TIME_MARKERS)), None)
+                midpoint = rect.left + (rect.width() * 2 // 3)
+                direction = "outbound" if cr.left >= midpoint else "inbound"
+                rows.append({
+                    "text": body,
+                    "sender": sender if sender != body else None,
+                    "time": timestamp,
+                    "direction": direction,
+                    "top": cr.top,
+                    "left": cr.left,
+                })
+            except Exception:
+                continue
+        rows.sort(key=lambda row: (row["top"], row["left"]))
+        return rows
 
     def get_messages(self, chat: str, limit: int = 20) -> list[dict[str, Any]]:
         self.open_chat(chat)
         win = self._main_window()
-        rect = win.rectangle()
-        rows: list[dict[str, Any]] = []
-        seen: set[tuple[int, int, str]] = set()
-        for control_type in ("ListItem", "Text"):
-            try:
-                controls = win.descendants(control_type=control_type)
-            except Exception:
-                continue
-            for control in controls:
-                try:
-                    cr = control.rectangle()
-                    if cr.left < rect.left + rect.width() // 3:
-                        continue
-                    if cr.top < rect.top + 100 or cr.bottom > rect.bottom - 80:
-                        continue
-                    text = self._text(control)
-                    if not text or text == chat:
-                        continue
-                    key = (cr.top, cr.left, text)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    rows.append({"text": text, "top": cr.top, "left": cr.left})
-                except Exception:
-                    continue
-        rows.sort(key=lambda row: (row["top"], row["left"]))
+        rows = self._message_rows(win, chat)
         compact: list[dict[str, Any]] = []
-        seen_text: set[str] = set()
+        previous_key: tuple[str, str | None, str | None, str] | None = None
         for row in rows:
-            text = row["text"]
-            if text in seen_text:
+            key = (row["text"], row.get("sender"), row.get("time"), row.get("direction") or "")
+            if key == previous_key:
                 continue
-            seen_text.add(text)
-            compact.append({"text": text})
+            previous_key = key
+            compact.append({
+                "text": row["text"],
+                "sender": row.get("sender"),
+                "time": row.get("time"),
+                "direction": row.get("direction"),
+            })
         return compact[-max(1, min(int(limit), 100)) :]
 
     def _message_editor(self, win):
@@ -318,8 +430,6 @@ class WeChatDesktop:
                 return {"ok": True, "sent": False, "duplicate_suppressed": True, "chat": chat}
             self.open_chat(chat)
             win = self._main_window()
-            # Re-verify immediately before locating/focusing the editor. This is
-            # intentionally repeated even though open_chat() already verified it.
             if not self._verify_target(win, chat):
                 raise WeChatUnavailable(f"Refusing to send: current conversation is not verified as {chat!r}")
             editor = self._message_editor(win)
@@ -329,8 +439,6 @@ class WeChatDesktop:
                 _, send_keys, _ = self._deps()
                 send_keys("^a{BACKSPACE}", pause=0.03)
                 return {"ok": True, "sent": False, "dry_run": True, "chat": chat, "characters": len(text)}
-            # One final target verification catches accidental focus/conversation
-            # changes between editor selection and the side effect.
             if not self._verify_target(win, chat):
                 _, send_keys, _ = self._deps()
                 send_keys("^a{BACKSPACE}", pause=0.03)
@@ -338,7 +446,6 @@ class WeChatDesktop:
             _, send_keys, _ = self._deps()
             send_keys("{ENTER}", pause=0.05)
             state[digest] = now
-            # Bound persisted de-duplication state.
             cutoff = now - max(3600, duplicate_ttl * 4)
             state = {key: value for key, value in state.items() if isinstance(value, (int, float)) and value >= cutoff}
             self._save_state(state)
