@@ -1,0 +1,163 @@
+name: Hermes Native Windows Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/hermes-native-windows-release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  HERMES_AGENT_VERSION: "0.18.2"
+  BUILD_REF: "feature/hermes-multi-agent"
+
+jobs:
+  windows-installer:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.BUILD_REF }}
+          fetch-depth: 0
+
+      - name: Set up Python for Hermes preinstall
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install pinned Hermes Agent runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install "hermes-agent==${HERMES_AGENT_VERSION}"
+          python - <<'PY'
+          import importlib.metadata
+          from run_agent import AIAgent
+          version = importlib.metadata.version("hermes-agent")
+          assert version == "0.18.2", version
+          print("Hermes Agent embedded runtime:", version, AIAgent)
+          PY
+
+      - name: Desktop build prepare
+        uses: ./.github/actions/desktop-build-prepare
+        with:
+          target_platform: win-x64
+          rust_cache_prefix: hermes-native-windows
+          disable_bootstrap_cache: "false"
+          python_version: "3.11"
+
+      - name: Run Hermes/OpenAkita tests
+        shell: bash
+        run: python -m pytest tests/hermes tests/wechat_desktop -q
+
+      - name: Copy backend and Hermes license to Tauri resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          RESOURCE_DIR="apps/setup-center/src-tauri/resources"
+          mkdir -p "$RESOURCE_DIR"
+          rm -rf "$RESOURCE_DIR/openakita-server"
+          cp -r dist/openakita-server "$RESOURCE_DIR/openakita-server"
+          mkdir -p "$RESOURCE_DIR/bootstrap/licenses"
+          cp THIRD_PARTY_LICENSES/HERMES_AGENT_LICENSE.txt "$RESOURCE_DIR/bootstrap/licenses/HERMES_AGENT_LICENSE.txt"
+
+      - name: Verify embedded Hermes collection
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          toc = list(Path("build").rglob("*.toc"))
+          text = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in toc if p.is_file())
+          if "run_agent" not in text:
+              raise SystemExit("PyInstaller analysis does not contain Hermes run_agent")
+          print("Verified embedded Hermes run_agent")
+          PY
+
+      - name: Verify bundled Python contract
+        shell: bash
+        run: |
+          python build/verify_bundled_python_contract.py \
+            --backend-dir apps/setup-center/src-tauri/resources/openakita-server \
+            --bootstrap-manifest apps/setup-center/src-tauri/resources/bootstrap/manifest.json \
+            --require-seed-packaged
+
+      - name: Create Rust placeholder
+        shell: bash
+        run: |
+          mkdir -p identity/personas
+          test -f identity/personas/user_custom.md || echo "# User Custom Persona (placeholder)" > identity/personas/user_custom.md
+
+      - name: Install frontend dependencies
+        working-directory: apps/setup-center
+        run: npm ci
+
+      - name: Rust preflight
+        working-directory: apps/setup-center/src-tauri
+        shell: bash
+        env:
+          CARGO_HTTP_MULTIPLEXING: "false"
+        run: |
+          cargo fetch --locked
+          cargo check
+
+      - name: Build Windows NSIS installer
+        working-directory: apps/setup-center
+        shell: bash
+        env:
+          TAURI_CONFIG: '{}'
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          NO_STRIP: true
+        run: npx tauri build --bundles nsis
+
+      - name: Collect installer
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem "apps/setup-center/src-tauri/target/release/bundle/nsis/*.exe"
+          if (-not $files) { throw "NSIS installer not found" }
+          New-Item -ItemType Directory -Force -Path "release-artifacts" | Out-Null
+          foreach ($file in $files) {
+            Copy-Item $file.FullName "release-artifacts/$($file.Name)"
+            Get-FileHash $file.FullName -Algorithm SHA256 | Format-List
+          }
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenAkita-Hermes-Native-Windows-x64
+          path: release-artifacts/*.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Record successful run on feature branch
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-results
+          cat > ci-results/hermes-native-windows-release.json <<JSON
+          {
+            "workflow": "Hermes Native Windows Release",
+            "run_id": "${GITHUB_RUN_ID}",
+            "run_attempt": "${GITHUB_RUN_ATTEMPT}",
+            "head_sha": "$(git rev-parse HEAD)",
+            "hermes_agent_version": "${HERMES_AGENT_VERSION}",
+            "artifact": "OpenAkita-Hermes-Native-Windows-x64",
+            "native_runtime": true,
+            "docker_required": false,
+            "success": true
+          }
+          JSON
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ci-results/hermes-native-windows-release.json
+          git diff --cached --quiet && exit 0
+          git commit -m "ci: record Hermes native Windows release [skip ci]"
+          git push origin HEAD:${BUILD_REF}
