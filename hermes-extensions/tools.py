@@ -71,13 +71,7 @@ def wechat_get_messages(args: dict, **kwargs) -> str:
 
 def wechat_send_message(args: dict, **kwargs) -> str:
     del kwargs
-    return _result(
-        lambda: WeChatDesktop().send_message(
-            str(args.get("chat") or ""),
-            str(args.get("text") or ""),
-            dry_run=bool(args.get("dry_run", False)),
-        )
-    )
+    return _result(lambda: WeChatDesktop().send_message(str(args.get("chat") or ""), str(args.get("text") or ""), dry_run=bool(args.get("dry_run", False))))
 
 
 def task_center_overview(args: dict, **kwargs) -> str:
@@ -89,13 +83,7 @@ def task_center_overview(args: dict, **kwargs) -> str:
 def task_center_upcoming(args: dict, **kwargs) -> str:
     del kwargs
     profile = str(args.get("profile") or "").strip() or None
-    return _result(
-        lambda: TaskCenter().upcoming(
-            hours=int(args.get("hours", 168)),
-            profile=profile,
-            limit=int(args.get("limit", 200)),
-        )
-    )
+    return _result(lambda: TaskCenter().upcoming(hours=int(args.get("hours", 168)), profile=profile, limit=int(args.get("limit", 200))))
 
 
 def task_center_create(args: dict, **kwargs) -> str:
@@ -119,17 +107,8 @@ def task_center_history(args: dict, **kwargs) -> str:
     task_id = str(args.get("id") or "")
     profile = str(args.get("profile") or "").strip() or None
     if task_type == "cron" and profile is None:
-        profile = str(
-            _resolve_cron_profile({"type": "cron", "id": task_id}).get("profile") or ""
-        ).strip() or None
-    return _result(
-        lambda: TaskCenter().history(
-            task_type,
-            task_id,
-            limit=int(args.get("limit", 20)),
-            profile=profile,
-        )
-    )
+        profile = str(_resolve_cron_profile({"type": "cron", "id": task_id}).get("profile") or "").strip() or None
+    return _result(lambda: TaskCenter().history(task_type, task_id, limit=int(args.get("limit", 20)), profile=profile))
 
 
 def management_overview(args: dict, **kwargs) -> str:
@@ -166,34 +145,27 @@ def agent_action(args: dict, **kwargs) -> str:
     allowed = {"use", "gateway_start", "gateway_stop", "gateway_status", "set_workspace", "export"}
     if action not in allowed:
         return _result(lambda: (_ for _ in ()).throw(ValueError("unsupported autonomous agent action")))
-    return _result(
-        lambda: ManagementCenter().agent_action(
-            name,
-            action,
-            str(args.get("value") or "") or None,
-        )
-    )
+    return _result(lambda: ManagementCenter().agent_action(name, action, str(args.get("value") or "") or None))
 
 
 def project_list(args: dict, **kwargs) -> str:
     del kwargs
     profile = str(args.get("profile") or "").strip() or None
-    return _result(
-        lambda: ManagementCenter().project_list(
-            profile,
-            bool(args.get("include_archived", True)),
-        )
-    )
+    include_archived = bool(args.get("include_archived", True))
+
+    def load():
+        center = ManagementCenter()
+        if profile:
+            return {"items": center.project_list(profile, include_archived), "partial": False, "errors": []}
+        snapshot = center.snapshot(include_archived=include_archived)
+        return {"items": snapshot["projects"], "partial": snapshot["partial"], "errors": snapshot["errors"]}
+
+    return _result(load)
 
 
 def project_get(args: dict, **kwargs) -> str:
     del kwargs
-    return _result(
-        lambda: ManagementCenter().project_get(
-            str(args.get("project") or ""),
-            str(args.get("profile") or "default"),
-        )
-    )
+    return _result(lambda: ManagementCenter().project_get(str(args.get("project") or ""), str(args.get("profile") or "default")))
 
 
 def project_create(args: dict, **kwargs) -> str:
@@ -211,11 +183,4 @@ def project_update(args: dict, **kwargs) -> str:
 
 def project_action(args: dict, **kwargs) -> str:
     del kwargs
-    return _result(
-        lambda: ManagementCenter().project_action(
-            str(args.get("project") or ""),
-            str(args.get("profile") or "default"),
-            str(args.get("action") or ""),
-            str(args.get("value") or "") or None,
-        )
-    )
+    return _result(lambda: ManagementCenter().project_action(str(args.get("project") or ""), str(args.get("profile") or "default"), str(args.get("action") or ""), str(args.get("value") or "") or None))
