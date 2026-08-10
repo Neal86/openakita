@@ -39,7 +39,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  HERMES_AGENT_VERSION: "0.18.2"
+  HERMES_AGENT_VERSION: "0.19.0"
 
 jobs:
   connector-checks:
@@ -185,7 +185,7 @@ jobs:
           import importlib.metadata
           from run_agent import AIAgent
           version = importlib.metadata.version("hermes-agent")
-          assert version == "0.18.2", version
+          assert version == "0.19.0", version
           print("Hermes Agent embedded runtime:", version, AIAgent)
           PY
       - name: Prepare production Desktop bundle
@@ -355,7 +355,7 @@ jobs:
               "native_desktop_release": os.environ["NATIVE_DESKTOP_RESULT"],
               "hermes_final": os.environ["HERMES_RESULT"],
               "publish_stable_release": os.environ["PUBLISH_RESULT"],
-              "hermes_agent_version": "0.18.2",
+              "hermes_agent_version": "0.19.0",
               "native_runtime": True,
               "docker_required_for_windows_desktop": False,
           }
