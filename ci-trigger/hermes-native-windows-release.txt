@@ -1,0 +1,5 @@
+Trigger Hermes native Windows installer build.
+Hermes Agent: 0.18.2
+Runtime: embedded native AIAgent
+Docker required: no
+Triggered: 2026-08-10
