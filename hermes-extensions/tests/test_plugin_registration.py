@@ -31,19 +31,14 @@ def test_registers_expected_tools() -> None:
     ctx = FakeContext()
     plugin.register(ctx)
     expected = {
-        "wechat_status",
-        "wechat_list_chats",
-        "wechat_get_unread_chats",
-        "wechat_get_messages",
-        "wechat_send_message",
-        "task_center_overview",
-        "task_center_upcoming",
-        "task_center_create",
-        "task_center_update",
-        "task_center_action",
-        "task_center_history",
+        "wechat_status", "wechat_list_chats", "wechat_get_unread_chats", "wechat_get_messages", "wechat_send_message",
+        "task_center_overview", "task_center_upcoming", "task_center_create", "task_center_update", "task_center_action", "task_center_history",
+        "management_overview", "agent_list", "agent_get", "agent_create", "agent_update", "agent_action",
+        "project_list", "project_get", "project_create", "project_update", "project_action",
     }
     assert set(ctx.tools) == expected
     assert ctx.tools["wechat_send_message"]["toolset"] == "hermes_extensions_wechat"
     assert ctx.tools["task_center_overview"]["toolset"] == "hermes_extensions_tasks"
+    assert ctx.tools["management_overview"]["toolset"] == "hermes_extensions_management"
+    assert ctx.tools["agent_create"]["toolset"] == "hermes_extensions_management"
     assert callable(ctx.tools["wechat_status"]["check_fn"])
