@@ -74,11 +74,12 @@
       } catch (err) { setError(err.message || String(err)); }
     }
 
-    async function action(type, id, verb, value) {
+    async function action(type, id, verb, value, ownerProfile) {
       setError("");
       try {
         await request("/tasks/" + encodeURIComponent(type) + "/" + encodeURIComponent(id) + "/action", {
-          method: "POST", body: JSON.stringify({ action: verb, value: value || null })
+          method: "POST",
+          body: JSON.stringify({ action: verb, value: value || null, profile: ownerProfile || null })
         });
         await load();
       } catch (err) { setError(err.message || String(err)); }
@@ -133,12 +134,12 @@
         return h(Card, { key: agent.name },
           h("div", { className: "hx-agent-head" }, h("div", null, h("h2", null, agent.name), h("div", { className: "hx-muted" }, (agent.cron || []).length + " scheduled · " + (agent.kanban || []).length + " kanban"))),
           (agent.cron || []).length ? h("div", null, h("h3", null, "Fixed / scheduled tasks"), (agent.cron || []).map(function (job) {
-            return h("div", { className: "hx-task", key: "cron:" + job.id },
+            return h("div", { className: "hx-task", key: "cron:" + job.profile + ":" + job.id },
               h("div", { className: "hx-grow" }, h("div", { className: "hx-title" }, job.name), h("div", { className: "hx-muted" }, String(job.schedule || "") + " · next " + fmt(job.next_run_at))),
               h(Pill, { kind: job.enabled ? "ok" : "paused" }, job.enabled ? "active" : "paused"),
               h("div", { className: "hx-mini-actions" },
-                job.enabled ? h("button", { onClick: function () { action("cron", job.id, "pause"); } }, "Pause") : h("button", { onClick: function () { action("cron", job.id, "resume"); } }, "Resume"),
-                h("button", { onClick: function () { action("cron", job.id, "run"); } }, "Run")
+                job.enabled ? h("button", { onClick: function () { action("cron", job.id, "pause", null, job.profile); } }, "Pause") : h("button", { onClick: function () { action("cron", job.id, "resume", null, job.profile); } }, "Resume"),
+                h("button", { onClick: function () { action("cron", job.id, "run", null, job.profile); } }, "Run")
               )
             );
           })) : null,
