@@ -15,6 +15,25 @@ def _result(fn: Callable[[], Any]) -> str:
         return json.dumps({"ok": False, "error": type(exc).__name__, "message": str(exc)}, ensure_ascii=False)
 
 
+def _resolve_cron_profile(payload: dict[str, Any]) -> dict[str, Any]:
+    if str(payload.get("type") or "") != "cron" or str(payload.get("profile") or "").strip():
+        return payload
+    task_id = str(payload.get("id") or "").strip()
+    if not task_id:
+        return payload
+    center = TaskCenter()
+    matches = [
+        job for job in center.cron_jobs()
+        if str(job.get("id") or "") == task_id or str(job.get("name") or "").lower() == task_id.lower()
+    ]
+    profiles = sorted({str(job.get("profile") or "default") for job in matches})
+    if len(profiles) == 1:
+        return {**payload, "profile": profiles[0]}
+    if len(profiles) > 1:
+        raise ValueError(f"Cron task reference is ambiguous across profiles: {', '.join(profiles)}")
+    return payload
+
+
 def wechat_status(args: dict, **kwargs) -> str:
     del args, kwargs
     return _result(lambda: WeChatDesktop().status())
@@ -69,12 +88,12 @@ def task_center_create(args: dict, **kwargs) -> str:
 
 def task_center_update(args: dict, **kwargs) -> str:
     del kwargs
-    return _result(lambda: TaskCenter().update(args))
+    return _result(lambda: TaskCenter().update(_resolve_cron_profile(dict(args))))
 
 
 def task_center_action(args: dict, **kwargs) -> str:
     del kwargs
-    return _result(lambda: TaskCenter().action(args))
+    return _result(lambda: TaskCenter().action(_resolve_cron_profile(dict(args))))
 
 
 def task_center_history(args: dict, **kwargs) -> str:
@@ -83,4 +102,7 @@ def task_center_history(args: dict, **kwargs) -> str:
     task_id = str(args.get("id") or "")
     limit = int(args.get("limit", 20))
     profile = str(args.get("profile") or "").strip() or None
+    if task_type == "cron" and profile is None:
+        resolved = _resolve_cron_profile({"type": "cron", "id": task_id})
+        profile = str(resolved.get("profile") or "").strip() or None
     return _result(lambda: TaskCenter().history(task_type, task_id, limit=limit, profile=profile))
