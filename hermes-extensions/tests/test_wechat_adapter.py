@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ ADAPTER_PATH = ROOT / "wechat" / "adapter.py"
 _spec = importlib.util.spec_from_file_location("hx_wechat_adapter_test", ADAPTER_PATH)
 assert _spec and _spec.loader
 adapter_mod = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = adapter_mod
 _spec.loader.exec_module(adapter_mod)
 WeChatDesktop = adapter_mod.WeChatDesktop
 WeChatUnavailable = adapter_mod.WeChatUnavailable
