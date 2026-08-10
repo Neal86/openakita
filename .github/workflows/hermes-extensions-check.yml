@@ -36,7 +36,7 @@ jobs:
           node-version: "20"
       - name: JavaScript syntax
         run: node --check hermes-extensions/dashboard/dist/index.js
-      - name: Validate manifests and platform surface
+      - name: Validate manifests and management surfaces
         run: |
           python - <<'PY'
           import ast, json
@@ -52,24 +52,29 @@ jobs:
           manifest = json.loads((root / 'dashboard/manifest.json').read_text('utf-8'))
           plugin = (root / 'plugin.yaml').read_text('utf-8')
           platform_yaml = (root / 'platforms/wechat-desktop/plugin.yaml').read_text('utf-8')
+          dashboard = (root / 'dashboard/dist/index.js').read_text('utf-8')
+          api = (root / 'dashboard/plugin_api.py').read_text('utf-8')
 
           assert manifest['name'] == 'hermes-extensions'
-          assert manifest['description']
+          assert manifest['label'] == 'Management Center'
           assert manifest['has_api'] is True
           assert manifest['entry'] == 'dist/index.js'
-          assert 'name: hermes-extensions' in plugin
-          assert 'wechat_send_message' in plugin
-          assert 'task_center_upcoming' in plugin
-          assert 'kind: platform' in platform_yaml
-          assert 'name: wechat-desktop' in platform_yaml
-          assert manifest['version'] == yaml_version(plugin) == yaml_version(platform_yaml)
+          assert manifest['version'] == yaml_version(plugin) == yaml_version(platform_yaml) == '0.3.0'
+          for tool in ('wechat_send_message', 'task_center_upcoming', 'management_overview', 'agent_create', 'project_create'):
+              assert tool in plugin
+          for tab in ('overview', 'agents', 'projects', 'tasks'):
+              assert tab in dashboard
+          for route in ('/management/overview', '/agents', '/projects'):
+              assert route in api
+          assert (root / 'management/service.py').is_file()
           assert (root / 'requirements.txt').is_file()
+          assert 'PyYAML' in (root / 'requirements.txt').read_text('utf-8')
           assert '-r requirements.txt' in (root / 'requirements-windows.txt').read_text('utf-8')
 
           tree = ast.parse((root / 'platforms/wechat-desktop/adapter.py').read_text('utf-8'))
           names = {node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
           assert {'register', 'connect', 'disconnect', 'send'} <= names
-          print('manifests, versions, dependencies, and platform surface ok')
+          print('manifests, management center, dependencies, and platform surface ok')
           PY
 
   windows-installer:
@@ -95,8 +100,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Compile Windows WeChat modules
+      - name: Install shared dependencies
+        shell: pwsh
+        run: python -m pip install -r hermes-extensions/requirements.txt
+      - name: Compile Windows and management modules
         shell: pwsh
         run: |
           python -m py_compile hermes-extensions/wechat/adapter.py
           python -m py_compile hermes-extensions/platforms/wechat-desktop/adapter.py
+          python -m py_compile hermes-extensions/management/service.py
