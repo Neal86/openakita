@@ -26,8 +26,8 @@ def write_jobs(home: Path, jobs: list[dict]) -> None:
 def test_profiles_and_cron_are_aggregated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     support = tmp_path / "profiles" / "support"
     support.mkdir(parents=True)
-    write_jobs(tmp_path, [{"id": "d1", "name": "default-job", "schedule": "every 1h", "next_run_at": "2030-01-01T00:00:00Z"}])
-    write_jobs(support, [{"id": "s1", "name": "support-job", "schedule": "0 9 * * *", "next_run_at": "2030-01-01T09:00:00Z"}])
+    write_jobs(tmp_path, [{"id": "d1", "name": "default-job", "schedule": {"kind": "interval", "minutes": 60}, "next_run_at": "2030-01-01T00:00:00Z"}])
+    write_jobs(support, [{"id": "s1", "name": "support-job", "schedule": {"kind": "cron", "expr": "0 9 * * *"}, "next_run_at": "2030-01-01T09:00:00Z"}])
     monkeypatch.setattr(TaskCenter, "kanban_tasks", lambda self, profile=None, include_completed=False: [])
 
     center = TaskCenter(tmp_path)
@@ -35,14 +35,17 @@ def test_profiles_and_cron_are_aggregated(tmp_path: Path, monkeypatch: pytest.Mo
     assert [p["name"] for p in overview["profiles"]] == ["default", "support"]
     assert overview["counts"]["cron"] == 2
     assert overview["counts"]["recurring"] == 2
+    jobs = center.cron_jobs()
+    assert jobs[0]["schedule"] == "every 1h"
+    assert jobs[1]["schedule"] == "0 9 * * *"
 
 
-def test_recurring_interval_is_expanded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_structured_interval_is_expanded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     start = datetime.now(UTC) + timedelta(minutes=5)
     write_jobs(tmp_path, [{
         "id": "j1",
         "name": "check inbox",
-        "schedule": "every 1h",
+        "schedule": {"kind": "interval", "minutes": 60},
         "next_run_at": start.isoformat(),
     }])
     monkeypatch.setattr(TaskCenter, "kanban_tasks", lambda self, profile=None, include_completed=False: [])
@@ -52,6 +55,22 @@ def test_recurring_interval_is_expanded(tmp_path: Path, monkeypatch: pytest.Monk
     times = [datetime.fromisoformat(row["at"]) for row in rows]
     assert times == sorted(times)
     assert times[1] - times[0] == timedelta(hours=1)
+
+
+def test_structured_once_is_not_recurring(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    start = datetime.now(UTC) + timedelta(hours=2)
+    write_jobs(tmp_path, [{
+        "id": "j2",
+        "name": "one shot",
+        "schedule": {"kind": "once", "run_at": start.isoformat()},
+        "next_run_at": start.isoformat(),
+    }])
+    monkeypatch.setattr(TaskCenter, "kanban_tasks", lambda self, profile=None, include_completed=False: [])
+    center = TaskCenter(tmp_path)
+    job = center.cron_jobs()[0]
+    assert job["recurring"] is False
+    assert center.overview()["counts"]["one_shot"] == 1
+    assert len(center.upcoming(hours=4)) == 1
 
 
 def test_nondefault_cron_create_uses_global_profile_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
