@@ -2,11 +2,55 @@
 
 Standalone extensions for **NousResearch/hermes-agent**. This package does not depend on the OpenAkita runtime, APIs, agents, or databases.
 
-Current package version: **0.2.0**.
+Current package version: **0.3.0**.
 
 ## Included
 
-### 1. Windows WeChat desktop tools
+### 1. Hermes Management Center
+
+`hermes dashboard` gets one **Management Center** entry with four tabs:
+
+- **Overview** — projects, agents, running gateways, scheduled/running/failed task counts, and upcoming work
+- **Agents** — create, inspect, edit, select, start/restart gateways, edit SOUL/workspace/model/provider, and delete native Hermes Profiles
+- **Projects** — create and manage native profile-scoped Hermes Projects, folders, primary repo, Kanban binding, active/archive state, and Agent workspace assignment
+- **Tasks** — the existing fleet-wide Cron/Kanban Task Center
+
+Hermes Profiles are treated as Agents; Hermes Projects remain first-class native Projects. This plugin does **not** create another Agent or Project database.
+
+Native Agent/Profile operations use official Hermes commands such as:
+
+- `hermes profile create/list/show/use/rename/delete/describe/export`
+- profile-scoped `hermes config set terminal.cwd ...`
+- profile-scoped `hermes config set model.provider ...`
+- profile-scoped `hermes config set model.default ...`
+- profile-scoped `hermes gateway start/stop/restart/status`
+
+SOUL.md editing is the only direct profile-file mutation because Hermes does not currently expose a dedicated SOUL mutation command. The write is restricted to a validated profile home and replaced atomically.
+
+Native Project operations use:
+
+- `hermes project create/list/show`
+- `hermes project add-folder/remove-folder`
+- `hermes project rename/set-primary/use`
+- `hermes project archive/restore/bind-board`
+
+Projects are profile-scoped exactly as Hermes defines them. Agent-to-Project assignment is represented by the Agent's native `terminal.cwd`; the UI computes Project membership from that workspace instead of storing a parallel assignment database.
+
+Registered management tools:
+
+- `management_overview`
+- `agent_list`
+- `agent_get`
+- `agent_create`
+- `agent_update`
+- `agent_action`
+- `project_list`
+- `project_get`
+- `project_create`
+- `project_update`
+- `project_action`
+
+### 2. Windows WeChat desktop tools
 
 Registered Hermes tools:
 
@@ -32,7 +76,7 @@ Duplicate identical sends to the same conversation are suppressed for 10 minutes
 
 The gateway platform adapter lives under `platforms/wechat-desktop/` and can continuously route unread chats into Hermes. An optional exact-name allow-list is supported with `WECHAT_DESKTOP_ALLOWED_CHATS`.
 
-### 2. Hermes Task Center
+### 3. Hermes Task Center
 
 The Task Center is a management layer over native Hermes state. It does **not** implement a second scheduler or task database.
 
@@ -55,41 +99,17 @@ Registered tools:
 - `task_center_action`
 - `task_center_history`
 
-The dashboard adds **Task Center** to `hermes dashboard` and supports:
-
-- all Hermes profiles / agents
-- recurring and one-shot Cron jobs
-- fixed responsibilities grouped by profile
-- 24-hour / 7-day / 30-day future windows
-- expanded recurring occurrences
-- Kanban assignments, including archived/completed rows on demand
-- Cron pause / resume / run / remove
-- Kanban archive and reassignment through edit
-- manual Cron and Kanban creation
-- task editing and detail view
-- Cron and Kanban execution history
-- loading, empty, error, busy, and success states
-- persisted profile, date-range, and completed-task filters in browser local storage
+Task management supports all Hermes profiles/agents, recurring and one-shot Cron jobs, 24-hour / 7-day / 30-day future windows, expanded recurring occurrences, Kanban assignments, completed rows, Cron pause/resume/run/remove, Kanban archive, task creation, task detail and execution history.
 
 ## Install into local Hermes
 
-From this directory on the Windows machine that runs Hermes:
+From this directory on the machine that runs Hermes:
 
 ```powershell
 ./install.ps1
 ```
 
-The installer:
-
-- resolves `HERMES_HOME` (default `~/.hermes`)
-- performs a clean code upgrade while leaving plugin runtime data under `~/.hermes/plugin-data/`
-- installs the general plugin into `~/.hermes/plugins/hermes-extensions/`
-- installs the gateway platform into `~/.hermes/plugins/platforms/wechat-desktop/`
-- installs shared Task Center dependencies plus Windows UI Automation dependencies
-- tries Hermes-managed Python first, then system Python, with `uv` as a pip fallback
-- enables the installed plugins when the `hermes` command is available
-
-Then restart Hermes / gateway. Restart `hermes dashboard` or use the dashboard plugin rescan endpoint after changing dashboard plugin code.
+The installer resolves `HERMES_HOME`, performs a clean plugin code upgrade while preserving plugin runtime data, installs the general extension and WeChat gateway platform, installs shared dependencies plus Windows UI Automation dependencies, and enables plugins when `hermes` is available.
 
 Useful checks:
 
@@ -100,54 +120,22 @@ hermes plugins enable wechat-desktop
 hermes dashboard
 ```
 
-For continuous WeChat gateway routing, configure `gateway.platforms.wechat_desktop` or set:
-
-```powershell
-$env:WECHAT_DESKTOP_AUTO_ENABLE = "1"
-```
-
-Optional environment variables:
-
-- `WECHAT_DESKTOP_ALLOWED_CHATS` — comma-separated exact conversation names
-- `WECHAT_DESKTOP_HOME_CHAT` — exact conversation for Cron delivery
-- `WECHAT_DESKTOP_POLL_SECONDS` — unread polling interval
-- `WECHAT_DESKTOP_AUTO_ENABLE` — auto-enable the platform
+For continuous WeChat gateway routing, configure `gateway.platforms.wechat_desktop` or set `WECHAT_DESKTOP_AUTO_ENABLE=1`.
 
 ## Dependencies
 
-Shared Task Center dependency:
-
-```text
-requirements.txt
-```
-
-Windows WeChat dependencies:
-
-```text
-requirements-windows.txt
-```
-
-`requirements-windows.txt` includes the shared requirements.
+`requirements.txt` contains shared Management/Task Center dependencies (`croniter`, `PyYAML`). `requirements-windows.txt` includes shared requirements plus `pywinauto` and `pyperclip`.
 
 ## Security notes
 
-- The WeChat connector is local desktop automation, not an official Tencent API.
-- It refuses outbound messages when it cannot prove the exact selected chat.
-- Multiple exact-name search rows are treated as ambiguous and are not auto-selected.
-- UI Automation trees can change across WeChat releases; run `wechat_status` and a `dry_run` send after a WeChat update.
-- Hermes dashboard plugin routes share the dashboard process security model. Keep the dashboard bound to localhost unless you deliberately configure trusted network access/authentication.
+- Agent/Profile deletion refuses `default` and the currently selected sticky profile.
+- Profile names and SOUL paths are validated to prevent path traversal.
+- API keys are not exposed by the Management Center; provider credentials remain managed by Hermes.
+- The WeChat connector is local desktop automation, not an official Tencent API, and refuses outbound messages when it cannot prove the exact selected chat.
+- Hermes dashboard plugin routes share the dashboard process security model. Keep the dashboard bound to localhost unless trusted authentication/network controls are configured.
 
 ## Validation
 
-GitHub Actions validates:
-
-- Python compilation
-- Ruff
-- unit tests for Task Center aggregation, profile scoping, recurrence, archived Kanban visibility, native Kanban run history, and WeChat send safety
-- plugin manifests and version consistency
-- gateway platform registration surface
-- dashboard JavaScript syntax
-- Windows PowerShell installer syntax
-- Windows compilation of the WeChat automation modules
+GitHub Actions validates Python compilation, Ruff, unit tests for Task Center/WeChat/Management Center, plugin manifests and version consistency, management API/dashboard surfaces, JavaScript syntax, Windows PowerShell installer syntax, and Windows compilation of WeChat + management modules.
 
 A real WeChat acceptance test still requires a native Windows machine with a logged-in WeChat client. CI cannot truthfully substitute for that device-level test.
