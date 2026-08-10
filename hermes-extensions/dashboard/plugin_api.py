@@ -1,22 +1,35 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_module(relative: str, module_name: str):
+    """Load a plugin module under a stable sys.modules name.
+
+    Python 3.11 dataclasses with postponed annotations consult ``sys.modules``
+    while the class decorator runs. Registering before ``exec_module`` keeps
+    dynamic dashboard loading equivalent to a normal import and prevents
+    ``NoneType.__dict__`` failures.
+    """
     path = PLUGIN_ROOT / relative
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Unable to load {path}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
     return module
 
 
@@ -30,7 +43,11 @@ compat = _load_module("compatibility.py", "hermes_extensions_compatibility")
 router = APIRouter()
 
 
-class TaskBody(BaseModel):
+class StrictBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class TaskBody(StrictBody):
     type: Literal["cron", "kanban"] | None = None
     name: str | None = Field(default=None, max_length=256)
     prompt: str | None = Field(default=None, max_length=20000)
@@ -40,13 +57,13 @@ class TaskBody(BaseModel):
     deliver: str | None = Field(default=None, max_length=128)
 
 
-class TaskActionBody(BaseModel):
+class TaskActionBody(StrictBody):
     action: Literal["pause", "resume", "run", "remove", "assign", "archive"]
-    value: str | None = None
+    value: str | None = Field(default=None, max_length=4096)
     profile: str | None = Field(default=None, max_length=64)
 
 
-class AgentBody(BaseModel):
+class AgentBody(StrictBody):
     name: str | None = Field(default=None, max_length=64)
     description: str | None = Field(default=None, max_length=2000)
     clone_mode: Literal["blank", "clone", "clone_all"] | None = None
@@ -58,7 +75,7 @@ class AgentBody(BaseModel):
     soul: str | None = Field(default=None, max_length=200000)
 
 
-class AgentActionBody(BaseModel):
+class AgentActionBody(StrictBody):
     action: Literal[
         "use",
         "gateway_start",
@@ -71,11 +88,11 @@ class AgentActionBody(BaseModel):
     value: str | None = Field(default=None, max_length=4096)
 
 
-class ProjectBody(BaseModel):
+class ProjectBody(StrictBody):
     name: str | None = Field(default=None, max_length=256)
     profile: str | None = Field(default=None, max_length=64)
     slug: str | None = Field(default=None, max_length=128)
-    folders: list[str] | None = None
+    folders: list[str] | None = Field(default=None, max_length=64)
     primary: str | None = Field(default=None, max_length=4096)
     description: str | None = Field(default=None, max_length=2000)
     icon: str | None = Field(default=None, max_length=128)
@@ -83,11 +100,11 @@ class ProjectBody(BaseModel):
     board: str | None = Field(default=None, max_length=128)
     use: bool | None = None
     agent: str | None = Field(default=None, max_length=64)
-    add_folders: list[str] | None = None
-    remove_folders: list[str] | None = None
+    add_folders: list[str] | None = Field(default=None, max_length=64)
+    remove_folders: list[str] | None = Field(default=None, max_length=64)
 
 
-class ProjectActionBody(BaseModel):
+class ProjectActionBody(StrictBody):
     action: Literal[
         "use",
         "archive",
