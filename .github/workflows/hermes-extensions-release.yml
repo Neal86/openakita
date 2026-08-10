@@ -18,18 +18,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.ref }}
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
       - name: Read version
         id: version
-        shell: bash
         run: |
           VERSION=$(python - <<'PY'
           from pathlib import Path
@@ -42,20 +39,16 @@ jobs:
           test -n "$VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Install test dependencies
+      - name: Install and validate source
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r hermes-extensions/requirements.txt pytest ruff
-
-      - name: Validate source
-        run: |
           python -m compileall -q hermes-extensions
           ruff check hermes-extensions
           pytest -q hermes-extensions/tests
           node --check hermes-extensions/dashboard/src/index.js
 
-      - name: Build release tree
-        shell: bash
+      - name: Build isolated release tree
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           OUT="release/hermes-extensions-v${VERSION}"
@@ -66,27 +59,36 @@ jobs:
             --exclude .pytest_cache
           mkdir -p "$OUT/dashboard/dist"
           cp "$OUT/dashboard/src/index.js" "$OUT/dashboard/dist/index.js"
-          test -f "$OUT/plugin.yaml"
-          test -f "$OUT/__init__.py"
-          test -f "$OUT/install.ps1"
-          test -f "$OUT/doctor.ps1"
-          test -f "$OUT/dashboard/manifest.json"
-          test -f "$OUT/dashboard/dist/index.js"
-          test -f "$OUT/dashboard/compat_api.py"
-          test -f "$OUT/platforms/wechat-desktop/plugin.yaml"
+          python - <<PY
+          import json
+          from pathlib import Path
+          root = Path('$OUT')
+          manifest = json.loads((root/'dashboard/manifest.json').read_text('utf-8'))
+          assert manifest['entry'] == 'dist/index.js'
+          assert manifest['api'] == 'plugin_api.py'
+          for rel in [
+              'plugin.yaml', '__init__.py', 'install.ps1', 'doctor.ps1',
+              'compatibility.py', 'dashboard/manifest.json',
+              'dashboard/dist/index.js', 'dashboard/plugin_api.py',
+              'platforms/wechat-desktop/plugin.yaml'
+          ]:
+              assert (root/rel).is_file(), rel
+          assert not (root/'dashboard/compat_api.py').exists()
+          PY
           (cd release && zip -qr "hermes-extensions-v${VERSION}.zip" "hermes-extensions-v${VERSION}")
           cd release
           sha256sum "hermes-extensions-v${VERSION}.zip" > "hermes-extensions-v${VERSION}.zip.sha256"
 
       - name: Validate release archive isolation
-        shell: bash
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           unzip -l "release/hermes-extensions-v${VERSION}.zip" > /tmp/archive.txt
           ! grep -q "src/openakita" /tmp/archive.txt
           ! grep -q "apps/setup-center" /tmp/archive.txt
+          ! grep -q "/tests/" /tmp/archive.txt
           grep -q "hermes-extensions-v${VERSION}/plugin.yaml" /tmp/archive.txt
           grep -q "hermes-extensions-v${VERSION}/dashboard/dist/index.js" /tmp/archive.txt
+          grep -q "hermes-extensions-v${VERSION}/dashboard/plugin_api.py" /tmp/archive.txt
 
       - uses: actions/upload-artifact@v4
         with:
@@ -99,7 +101,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/hermes-extensions-v')
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: bash
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           TAG="hermes-extensions-v${VERSION}"
@@ -108,4 +109,4 @@ jobs:
             "release/hermes-extensions-v${VERSION}.zip" \
             "release/hermes-extensions-v${VERSION}.zip.sha256" \
             --title "Hermes Extensions v${VERSION}" \
-            --notes "Standalone Hermes Extensions v${VERSION}. Download the ZIP, extract it, and run install.ps1 from PowerShell. Native Projects degrade gracefully on Hermes builds without the 'hermes project' command."
+            --notes "Standalone Hermes Extensions v${VERSION}. Transactional Windows installer, preflight/installed doctor modes, cached compatibility probing, and graceful native Project fallback. Download the ZIP, extract it, run doctor.ps1 -Preflight, then install.ps1."
