@@ -37,26 +37,59 @@ jobs:
       - name: Validate manifests and platform surface
         run: |
           python - <<'PY'
-          import ast, json
+          import ast, json, re
           from pathlib import Path
 
           root = Path('hermes-extensions')
           manifest = json.loads((root / 'dashboard/manifest.json').read_text('utf-8'))
+          plugin = (root / 'plugin.yaml').read_text('utf-8')
+          platform_yaml = (root / 'platforms/wechat-desktop/plugin.yaml').read_text('utf-8')
+
           assert manifest['name'] == 'hermes-extensions'
           assert manifest['description']
           assert manifest['has_api'] is True
           assert manifest['entry'] == 'dist/index.js'
-
-          plugin = (root / 'plugin.yaml').read_text('utf-8')
           assert 'name: hermes-extensions' in plugin
           assert 'wechat_send_message' in plugin
           assert 'task_center_upcoming' in plugin
+          assert 'kind: platform' in platform_yaml
+          assert 'name: wechat-desktop' in platform_yaml
 
-          platform = (root / 'platforms/wechat-desktop/plugin.yaml').read_text('utf-8')
-          assert 'kind: platform' in platform
-          assert 'name: wechat-desktop' in platform
+          plugin_version = re.search(r'^version:\s*["\']?([^"\'\s]+)', plugin, re.M).group(1)
+          platform_version = re.search(r'^version:\s*["\']?([^"\'\s]+)', platform_yaml, re.M).group(1)
+          assert manifest['version'] == plugin_version == platform_version
+
           tree = ast.parse((root / 'platforms/wechat-desktop/adapter.py').read_text('utf-8'))
           names = {node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
           assert {'register', 'connect', 'disconnect', 'send'} <= names
-          print('manifests and platform surface ok')
+          print('manifests, versions, and platform surface ok')
           PY
+
+  windows-installer:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse PowerShell installer
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "hermes-extensions/install.ps1"),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | Format-List | Out-String | Write-Error
+            exit 1
+          }
+          Write-Host "install.ps1 syntax ok"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile Windows WeChat modules
+        shell: pwsh
+        run: |
+          python -m py_compile hermes-extensions/wechat/adapter.py
+          python -m py_compile hermes-extensions/platforms/wechat-desktop/adapter.py
