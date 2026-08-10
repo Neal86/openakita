@@ -241,10 +241,10 @@ try {
     & (Join-Path $Target "doctor.ps1") -Installed
     if ($LASTEXITCODE -ne 0) { throw "Installed doctor verification failed with exit code $LASTEXITCODE." }
 
-    Write-Host "Hermes Extensions v0.4.3 install complete."
+    Write-Host "Hermes Extensions v0.4.4 install complete."
     Write-Host "Dashboard hot rescan: $DashboardRescanned"
     if (-not $Capabilities.project) {
-        Write-Host "Projects: disabled for this Hermes build; they will auto-enable after a compatible Hermes upgrade."
+        Write-Host "Projects: disabled for this Hermes build; Dashboard support can refresh after upgrade, while model Project tools require Hermes/plugin reload."
     }
     Write-Host "If dashboard backend code changed, restart only 'hermes dashboard'."
     Write-Host "For WeChat platform Python changes, restart the relevant Hermes gateway."
