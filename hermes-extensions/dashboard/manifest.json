@@ -1,11 +1,11 @@
 {
   "name": "hermes-extensions",
-  "label": "Task Center",
-  "description": "Fleet-wide Hermes task center for Cron, Kanban, upcoming work, and task history.",
-  "icon": "Clock",
-  "version": "0.2.0",
+  "label": "Management Center",
+  "description": "Hermes management center for Agents, Projects, Tasks, and execution history.",
+  "icon": "LayoutDashboard",
+  "version": "0.3.0",
   "tab": {
-    "path": "/task-center",
+    "path": "/management-center",
     "position": "after:cron"
   },
   "entry": "dist/index.js",
