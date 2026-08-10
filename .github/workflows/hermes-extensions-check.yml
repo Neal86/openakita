@@ -36,7 +36,7 @@ jobs:
           node-version: "20"
       - name: JavaScript source syntax
         run: node --check hermes-extensions/dashboard/src/index.js
-      - name: Validate v0.4.3 release surfaces
+      - name: Validate v0.4.4 release surfaces
         run: |
           python - <<'PY'
           import json
@@ -59,16 +59,17 @@ jobs:
 
           assert manifest['entry'] == 'dist/index.js'
           assert manifest['api'] == 'plugin_api.py'
-          assert manifest['version'] == yaml_version(plugin) == yaml_version(platform_yaml) == '0.4.3'
+          assert manifest['version'] == yaml_version(plugin) == yaml_version(platform_yaml) == '0.4.4'
           assert not (root / 'dashboard/compat_api.py').exists()
           assert '/capabilities' in api and 'project_supported' in api
-          assert 'ttl_seconds' in compat and 'force' in compat
+          assert 'sys.modules[module_name] = module' in api
+          assert 'ConfigDict(extra="forbid")' in api
+          assert 'ttl_seconds' in compat and 'force' in compat and '_resolve_binary' in compat
           assert 'rolling back previous plugin files and Hermes plugin configuration' in installer
           assert 'BackupConfig' in installer and 'ConfigExisted' in installer
           assert 'APPDATA' in installer and 'uv\\tools\\hermes-agent' in installer
           assert '[switch]$Preflight' in doctor and '[switch]$Installed' in doctor and '[switch]$Json' in doctor
-          assert (root / 'doctor.ps1').is_file()
-          print('v0.4.3 compatibility, transactional config rollback, and release surfaces ok')
+          print('v0.4.4 loader, compatibility, strict API, and transactional surfaces ok')
           PY
 
   windows-installer:
@@ -116,8 +117,8 @@ jobs:
             exit /b 0
           )
           if "%1"=="plugins" if "%2"=="list" (
-            echo hermes-extensions enabled 0.4.3 user
-            echo wechat-desktop enabled 0.4.3 user
+            echo hermes-extensions enabled 0.4.4 user
+            echo wechat-desktop enabled 0.4.4 user
             exit /b 0
           )
           if "%1"=="dashboard" if "%2"=="--status" (
@@ -127,7 +128,6 @@ jobs:
           exit /b 0
           '@
           Set-Content -LiteralPath (Join-Path $bin "hermes.cmd") -Value $fake -Encoding ASCII
-          "HX_CI_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
           "APPDATA=$appdata" | Out-File -FilePath $env:GITHUB_ENV -Append
           "HERMES_HOME=$hermesHome" | Out-File -FilePath $env:GITHUB_ENV -Append
           "PATH=$bin;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Append
