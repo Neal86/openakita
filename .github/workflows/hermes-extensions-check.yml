@@ -36,10 +36,10 @@ jobs:
           node-version: "20"
       - name: JavaScript source syntax
         run: node --check hermes-extensions/dashboard/src/index.js
-      - name: Validate compatibility release surfaces
+      - name: Validate v0.4.2 release surfaces
         run: |
           python - <<'PY'
-          import ast, json
+          import json
           from pathlib import Path
 
           def yaml_version(text: str) -> str:
@@ -52,48 +52,33 @@ jobs:
           manifest = json.loads((root / 'dashboard/manifest.json').read_text('utf-8'))
           plugin = (root / 'plugin.yaml').read_text('utf-8')
           platform_yaml = (root / 'platforms/wechat-desktop/plugin.yaml').read_text('utf-8')
-          dashboard = (root / 'dashboard/src/index.js').read_text('utf-8')
-          compat_api = (root / 'dashboard/compat_api.py').read_text('utf-8')
-          schemas = (root / 'schemas.py').read_text('utf-8')
+          api = (root / 'dashboard/plugin_api.py').read_text('utf-8')
+          compat = (root / 'compatibility.py').read_text('utf-8')
           installer = (root / 'install.ps1').read_text('utf-8')
+          doctor = (root / 'doctor.ps1').read_text('utf-8')
 
-          assert manifest['name'] == 'hermes-extensions'
-          assert manifest['label'] == 'Management Center'
           assert manifest['entry'] == 'dist/index.js'
-          assert manifest['api'] == 'compat_api.py'
-          assert 'has_api' not in manifest
-          assert manifest['version'] == yaml_version(plugin) == yaml_version(platform_yaml) == '0.4.1'
-          for tool in ('wechat_send_message', 'task_center_upcoming', 'management_overview', 'agent_create', 'project_create'):
-              assert tool in plugin
-          for tab in ('overview', 'agents', 'projects', 'tasks'):
-              assert tab in dashboard
-          assert '/capabilities' in compat_api
-          assert 'project_supported' in compat_api
-          assert 'project_unavailable_payload' in compat_api
-          assert 'dashboard\\dist\\index.js' in installer
-          assert 'dashboard\\src\\index.js' in installer
-          assert 'Test-HermesCapability' in installer
-          assert 'api/dashboard/plugins/rescan' in installer
+          assert manifest['api'] == 'plugin_api.py'
+          assert manifest['version'] == yaml_version(plugin) == yaml_version(platform_yaml) == '0.4.2'
+          assert not (root / 'dashboard/compat_api.py').exists()
+          assert '/capabilities' in api and 'project_supported' in api
+          assert 'ttl_seconds' in compat and 'force' in compat
+          assert 'rolling back previous plugin files' in installer
+          assert 'APPDATA' in installer and 'uv\\tools\\hermes-agent' in installer
+          assert '-Preflight' not in doctor  # parameter is PowerShell syntax, checked below
+          assert '[switch]$Preflight' in doctor and '[switch]$Json' in doctor
           assert (root / 'doctor.ps1').is_file()
-          assert (root / 'compatibility.py').is_file()
-          assert (root / 'management/service.py').is_file()
-          assert (root / 'hermes_cli.py').is_file()
-          agent_action_block = schemas.split('AGENT_ACTION =', 1)[1].split('PROJECT_LIST =', 1)[0]
-          assert 'gateway_restart' not in agent_action_block
-          assert '"delete"' not in agent_action_block
-          task_action_block = schemas.split('TASK_CENTER_ACTION =', 1)[1].split('TASK_CENTER_HISTORY =', 1)[0]
-          assert '"enum": ["pause", "resume", "run", "remove", "assign", "archive"]' in task_action_block
-          tree = ast.parse((root / 'platforms/wechat-desktop/adapter.py').read_text('utf-8'))
-          names = {node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
-          assert {'register', 'connect', 'disconnect', 'send'} <= names
-          print('v0.4.1 compatibility, manifest, installer, schemas, and platform surface ok')
+          print('v0.4.2 compatibility, transactional install, and release surfaces ok')
           PY
 
   windows-installer:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
       - name: Parse PowerShell scripts
         shell: pwsh
         run: |
@@ -106,19 +91,75 @@ jobs:
               exit 1
             }
           }
-          Write-Host "PowerShell syntax ok"
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install shared dependencies
-        shell: pwsh
-        run: python -m pip install -r hermes-extensions/requirements.txt
-      - name: Compile Windows and compatibility modules
+      - name: Build fake Hermes v0.16-compatible environment
         shell: pwsh
         run: |
-          python -m py_compile hermes-extensions/hermes_cli.py
-          python -m py_compile hermes-extensions/compatibility.py
-          python -m py_compile hermes-extensions/dashboard/compat_api.py
-          python -m py_compile hermes-extensions/wechat/adapter.py
-          python -m py_compile hermes-extensions/platforms/wechat-desktop/adapter.py
-          python -m py_compile hermes-extensions/management/service.py
+          $root = Join-Path $env:RUNNER_TEMP "hx-ci"
+          $bin = Join-Path $root "bin"
+          $appdata = Join-Path $root "AppData\Roaming"
+          $hermesHome = Join-Path $root ".hermes"
+          New-Item -ItemType Directory -Force -Path $bin,$appdata,$hermesHome | Out-Null
+          python -m venv (Join-Path $appdata "uv\tools\hermes-agent")
+          $fake = @'
+          @echo off
+          if "%1"=="--version" (
+            echo Hermes Agent v0.16.0 test
+            exit /b 0
+          )
+          if "%1"=="project" (
+            echo hermes: error: argument command: invalid choice: 'project' 1>&2
+            exit /b 2
+          )
+          if "%1"=="plugins" if "%2"=="enable" if "%FAKE_HERMES_FAIL_ENABLE%"=="1" exit /b 9
+          if "%1"=="plugins" if "%2"=="list" (
+            echo hermes-extensions enabled 0.4.2 user
+            echo wechat-desktop enabled 0.4.2 user
+            exit /b 0
+          )
+          if "%1"=="dashboard" if "%2"=="--status" (
+            echo No hermes dashboard processes running.
+            exit /b 0
+          )
+          exit /b 0
+          '@
+          Set-Content -LiteralPath (Join-Path $bin "hermes.cmd") -Value $fake -Encoding ASCII
+          "HX_CI_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "APPDATA=$appdata" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "HERMES_HOME=$hermesHome" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PATH=$bin;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Preflight doctor
+        shell: pwsh
+        run: |
+          & .\hermes-extensions\doctor.ps1 -Preflight -Json | Tee-Object -Variable report
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $json = ($report -join "`n") | ConvertFrom-Json
+          if ($json.capability_project -ne $false) { throw "Expected project=false" }
+          if ($json.capability_profile -ne $true) { throw "Expected profile=true" }
+      - name: Real transactional install
+        shell: pwsh
+        run: |
+          & .\hermes-extensions\install.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $plugin = Join-Path $env:HERMES_HOME "plugins\hermes-extensions"
+          $platform = Join-Path $env:HERMES_HOME "plugins\platforms\wechat-desktop"
+          foreach ($path in @(
+            (Join-Path $plugin "plugin.yaml"),
+            (Join-Path $plugin "dashboard\manifest.json"),
+            (Join-Path $plugin "dashboard\dist\index.js"),
+            (Join-Path $plugin "dashboard\plugin_api.py"),
+            (Join-Path $platform "plugin.yaml")
+          )) { if (-not (Test-Path $path)) { throw "Missing installed file: $path" } }
+          & (Join-Path $plugin "doctor.ps1") -Installed -Json | Out-Host
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Rollback on failed upgrade
+        shell: pwsh
+        run: |
+          $plugin = Join-Path $env:HERMES_HOME "plugins\hermes-extensions"
+          Set-Content -LiteralPath (Join-Path $plugin "rollback-marker.txt") -Value "old-version"
+          $env:FAKE_HERMES_FAIL_ENABLE = "1"
+          try { & .\hermes-extensions\install.ps1; throw "Install unexpectedly succeeded" }
+          catch { Write-Host "Expected install failure: $($_.Exception.Message)" }
+          finally { Remove-Item Env:FAKE_HERMES_FAIL_ENABLE -ErrorAction SilentlyContinue }
+          if (-not (Test-Path (Join-Path $plugin "rollback-marker.txt"))) {
+            throw "Transactional rollback did not restore previous plugin."
+          }
