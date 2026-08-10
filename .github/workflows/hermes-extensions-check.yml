@@ -35,7 +35,7 @@ jobs:
         with:
           node-version: "20"
       - name: JavaScript syntax
-        run: node --check hermes-extensions/dashboard/dist/index.js
+        run: node --check hermes-extensions/dashboard/src/index.js
       - name: Validate manifests and management surfaces
         run: |
           python - <<'PY'
@@ -52,21 +52,30 @@ jobs:
           manifest = json.loads((root / 'dashboard/manifest.json').read_text('utf-8'))
           plugin = (root / 'plugin.yaml').read_text('utf-8')
           platform_yaml = (root / 'platforms/wechat-desktop/plugin.yaml').read_text('utf-8')
-          dashboard = (root / 'dashboard/dist/index.js').read_text('utf-8')
+          dashboard = (root / 'dashboard/src/index.js').read_text('utf-8')
           api = (root / 'dashboard/plugin_api.py').read_text('utf-8')
+          schemas = (root / 'schemas.py').read_text('utf-8')
 
           assert manifest['name'] == 'hermes-extensions'
           assert manifest['label'] == 'Management Center'
           assert manifest['has_api'] is True
-          assert manifest['entry'] == 'dist/index.js'
-          assert manifest['version'] == yaml_version(plugin) == yaml_version(platform_yaml) == '0.3.0'
+          assert manifest['entry'] == 'src/index.js'
+          assert manifest['version'] == yaml_version(plugin) == yaml_version(platform_yaml) == '0.4.0'
           for tool in ('wechat_send_message', 'task_center_upcoming', 'management_overview', 'agent_create', 'project_create'):
               assert tool in plugin
           for tab in ('overview', 'agents', 'projects', 'tasks'):
               assert tab in dashboard
           for route in ('/management/overview', '/agents', '/projects'):
               assert route in api
+          assert 'if (!outcome.ok) return;' in dashboard
+          assert 'gateway_restart' in dashboard  # human-confirmed Dashboard surface
+          agent_action_block = schemas.split('AGENT_ACTION =', 1)[1].split('PROJECT_LIST =', 1)[0]
+          assert 'gateway_restart' not in agent_action_block
+          assert '"delete"' not in agent_action_block
+          task_action_block = schemas.split('TASK_CENTER_ACTION =', 1)[1].split('TASK_CENTER_HISTORY =', 1)[0]
+          assert '"enum": ["pause", "resume", "run", "remove", "assign", "archive"]' in task_action_block
           assert (root / 'management/service.py').is_file()
+          assert (root / 'hermes_cli.py').is_file()
           assert (root / 'requirements.txt').is_file()
           assert 'PyYAML' in (root / 'requirements.txt').read_text('utf-8')
           assert '-r requirements.txt' in (root / 'requirements-windows.txt').read_text('utf-8')
@@ -74,7 +83,7 @@ jobs:
           tree = ast.parse((root / 'platforms/wechat-desktop/adapter.py').read_text('utf-8'))
           names = {node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
           assert {'register', 'connect', 'disconnect', 'send'} <= names
-          print('manifests, management center, dependencies, and platform surface ok')
+          print('v0.4 manifests, safety contracts, management center, dependencies, and platform surface ok')
           PY
 
   windows-installer:
@@ -106,6 +115,7 @@ jobs:
       - name: Compile Windows and management modules
         shell: pwsh
         run: |
+          python -m py_compile hermes-extensions/hermes_cli.py
           python -m py_compile hermes-extensions/wechat/adapter.py
           python -m py_compile hermes-extensions/platforms/wechat-desktop/adapter.py
           python -m py_compile hermes-extensions/management/service.py
