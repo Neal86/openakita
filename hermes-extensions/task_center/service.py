@@ -26,7 +26,10 @@ def _iso(value: Any) -> str | None:
     if not text:
         return None
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(UTC).isoformat()
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC).isoformat()
     except Exception:
         return text
 
@@ -49,14 +52,7 @@ def _as_dt(value: Any) -> datetime | None:
 
 
 def _json_output(command: list[str], env: dict[str, str] | None = None) -> Any:
-    proc = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env=env,
-        check=False,
-    )
+    proc = subprocess.run(command, capture_output=True, text=True, timeout=60, env=env, check=False)
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout or "Hermes command failed").strip())
     text = proc.stdout.strip()
@@ -76,7 +72,11 @@ def _plain_output(command: list[str], env: dict[str, str] | None = None) -> str:
 
 
 class TaskCenter:
-    """Read fleet state directly; mutate schedules only through Hermes native CLI."""
+    """Fleet view over Hermes profiles, Cron and Kanban.
+
+    Reads use Hermes' durable stores. All mutations are delegated back to the
+    official CLI so this plugin never becomes a second scheduler or board.
+    """
 
     def __init__(self, root: Path | None = None) -> None:
         self.root = (root or Path.home() / ".hermes").expanduser().resolve()
@@ -105,9 +105,14 @@ class TaskCenter:
         env["HERMES_HOME"] = str(self._profile_home(profile))
         return env
 
+    def _profile_cli(self, profile: str | None) -> list[str]:
+        if not profile or profile == "default":
+            return [self.hermes]
+        self._profile_home(profile)
+        return [self.hermes, "-p", profile]
+
     def _cron_jobs(self, profile: str) -> list[dict[str, Any]]:
-        home = self._profile_home(profile)
-        path = home / "cron" / "jobs.json"
+        path = self._profile_home(profile) / "cron" / "jobs.json"
         if not path.exists():
             return []
         try:
@@ -173,9 +178,6 @@ class TaskCenter:
         args = ["list"]
         if profile:
             args += ["--assignee", profile]
-        if not include_completed:
-            # Hermes treats omitted status as all active board rows; filter terminal rows below for forward compatibility.
-            pass
         payload = self._kanban(args)
         rows = payload.get("tasks", payload) if isinstance(payload, dict) else payload
         result: list[dict[str, Any]] = []
@@ -240,7 +242,7 @@ class TaskCenter:
         rows: list[dict[str, Any]] = []
         for job in self.cron_jobs(profile):
             next_dt = _as_dt(job.get("next_run_at"))
-            if next_dt and next_dt <= horizon and job.get("enabled", True):
+            if next_dt and _now() <= next_dt <= horizon and job.get("enabled", True):
                 rows.append({
                     "type": "cron",
                     "id": job["id"],
@@ -280,18 +282,22 @@ class TaskCenter:
             croniter = None
         if schedule.lower().startswith("every "):
             interval = schedule[6:].strip().lower()
-            multiplier = 1
-            if interval.endswith("m"):
-                step = timedelta(minutes=float(interval[:-1]))
-            elif interval.endswith("h"):
-                step = timedelta(hours=float(interval[:-1]))
-            elif interval.endswith("d"):
-                step = timedelta(days=float(interval[:-1]))
-            else:
+            try:
+                if interval.endswith("m"):
+                    step = timedelta(minutes=float(interval[:-1]))
+                elif interval.endswith("h"):
+                    step = timedelta(hours=float(interval[:-1]))
+                elif interval.endswith("d"):
+                    step = timedelta(days=float(interval[:-1]))
+                else:
+                    return []
+            except (TypeError, ValueError):
+                return []
+            if step.total_seconds() <= 0:
                 return []
             cursor = first
             while len(result) < remaining:
-                cursor += step * multiplier
+                cursor += step
                 if cursor > horizon:
                     break
                 result.append(self._upcoming_copy(job, cursor))
@@ -334,15 +340,13 @@ class TaskCenter:
             prompt = str(args.get("prompt") or "").strip()
             if not schedule or not prompt:
                 raise ValueError("cron tasks require schedule and prompt")
-            command = [self.hermes, "cron", "create", schedule, prompt, "--name", name]
-            profile = str(args.get("profile") or "").strip()
-            if profile and profile != "default":
-                command += ["--profile", profile]
+            profile = str(args.get("profile") or "").strip() or "default"
+            command = [*self._profile_cli(profile), "cron", "create", schedule, prompt, "--name", name]
             deliver = str(args.get("deliver") or "").strip()
             if deliver:
                 command += ["--deliver", deliver]
-            output = _plain_output(command, self._env_for(profile or None))
-            return {"ok": True, "type": "cron", "output": output}
+            output = _plain_output(command, self._env_for(profile))
+            return {"ok": True, "type": "cron", "profile": profile, "output": output}
         if task_type == "kanban":
             command = [self.hermes, "kanban", "create", name]
             body = str(args.get("prompt") or "").strip()
@@ -363,33 +367,43 @@ class TaskCenter:
         if not task_id:
             raise ValueError("id is required")
         if task_type == "cron":
-            command = [self.hermes, "cron", "edit", task_id]
+            profile = str(args.get("profile") or "").strip() or "default"
+            command = [*self._profile_cli(profile), "cron", "edit", task_id]
+            supplied = 0
             if args.get("schedule") is not None:
                 command += ["--schedule", str(args["schedule"])]
+                supplied += 1
             if args.get("prompt") is not None:
                 command += ["--prompt", str(args["prompt"])]
+                supplied += 1
             if args.get("name") is not None:
                 command += ["--name", str(args["name"])]
-            profile = str(args.get("profile") or "").strip()
-            if profile:
-                command += ["--profile", profile]
-            if len(command) == 4:
+                supplied += 1
+            if supplied == 0:
                 raise ValueError("no cron fields supplied")
-            return {"ok": True, "type": "cron", "output": _plain_output(command, self._env_for(profile or None))}
+            return {"ok": True, "type": "cron", "profile": profile, "output": _plain_output(command, self._env_for(profile))}
         if task_type == "kanban":
             command = [self.hermes, "kanban", "edit", task_id]
+            supplied = 0
             if args.get("name") is not None:
                 command += ["--title", str(args["name"])]
+                supplied += 1
             if args.get("prompt") is not None:
                 command += ["--body", str(args["prompt"])]
+                supplied += 1
             if args.get("priority") is not None:
                 command += ["--priority", str(int(args["priority"]))]
-            if len(command) == 4:
-                raise ValueError("no Kanban fields supplied")
-            output = _plain_output(command)
+                supplied += 1
             profile = str(args.get("profile") or "").strip()
+            if supplied:
+                output = _plain_output(command)
+            else:
+                output = ""
             if profile:
                 _plain_output([self.hermes, "kanban", "assign", task_id, profile])
+                supplied += 1
+            if supplied == 0:
+                raise ValueError("no Kanban fields supplied")
             return {"ok": True, "type": "kanban", "output": output}
         raise ValueError("type must be cron or kanban")
 
@@ -403,7 +417,9 @@ class TaskCenter:
         if task_type == "cron":
             if action not in {"pause", "resume", "run", "remove"}:
                 raise ValueError("unsupported cron action")
-            return {"ok": True, "type": "cron", "output": _plain_output([self.hermes, "cron", action, task_id])}
+            profile = str(args.get("profile") or "").strip() or "default"
+            command = [*self._profile_cli(profile), "cron", action, task_id]
+            return {"ok": True, "type": "cron", "profile": profile, "output": _plain_output(command, self._env_for(profile))}
         if task_type == "kanban":
             if action == "assign":
                 if not value:
