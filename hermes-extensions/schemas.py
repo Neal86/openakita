@@ -95,7 +95,7 @@ TASK_CENTER_CREATE = {
             "schedule": {"type": "string", "description": "Cron schedule such as 'every 10m', '0 9 * * *', or ISO8601. Required for cron."},
             "profile": {"type": "string", "description": "Hermes profile that owns/runs the cron job or assignee for Kanban."},
             "priority": {"type": "integer", "minimum": 0, "maximum": 100},
-            "deliver": {"type": "string", "description": "Cron delivery target, e.g. local, origin, telegram."},
+            "deliver": {"type": "string", "description": "Cron delivery target, e.g. local, origin, telegram, or wechat_desktop."},
         },
         "required": ["type", "name"],
     },
@@ -111,9 +111,9 @@ TASK_CENTER_UPDATE = {
             "id": {"type": "string"},
             "name": {"type": "string"},
             "prompt": {"type": "string"},
-            "schedule": {"type": "string"},
-            "profile": {"type": "string"},
-            "priority": {"type": "integer", "minimum": 0, "maximum": 100},
+            "schedule": {"type": "string", "description": "Cron-only schedule."},
+            "profile": {"type": "string", "description": "Owning Cron profile or Kanban assignee."},
+            "priority": {"type": "integer", "minimum": 0, "maximum": 100, "description": "Kanban-only priority."},
         },
         "required": ["type", "id"],
     },
@@ -121,14 +121,15 @@ TASK_CENTER_UPDATE = {
 
 TASK_CENTER_ACTION = {
     "name": "task_center_action",
-    "description": "Pause, resume, run, remove a cron job, or assign/archive/schedule a Kanban task through Hermes native commands.",
+    "description": "Pause, resume, run, or remove a Hermes Cron job; assign or archive a native Hermes Kanban task.",
     "parameters": {
         "type": "object",
         "properties": {
             "type": {"type": "string", "enum": ["cron", "kanban"]},
             "id": {"type": "string"},
-            "action": {"type": "string", "enum": ["pause", "resume", "run", "remove", "assign", "archive", "schedule"]},
-            "value": {"type": "string", "description": "Assignee for assign or ISO8601 timestamp for schedule."},
+            "action": {"type": "string", "enum": ["pause", "resume", "run", "remove", "assign", "archive"]},
+            "value": {"type": "string", "description": "Assignee value; required only for the Kanban assign action."},
+            "profile": {"type": "string", "description": "Owning Hermes profile for Cron actions. Omit to auto-resolve an unambiguous task ID/name."},
         },
         "required": ["type", "id", "action"],
     },
@@ -136,12 +137,13 @@ TASK_CENTER_ACTION = {
 
 TASK_CENTER_HISTORY = {
     "name": "task_center_history",
-    "description": "Read recent immutable execution history for a Hermes cron job or run history for a Kanban task.",
+    "description": "Read durable execution history for a Hermes Cron job or the lifecycle record for a native Hermes Kanban task.",
     "parameters": {
         "type": "object",
         "properties": {
             "type": {"type": "string", "enum": ["cron", "kanban"]},
             "id": {"type": "string"},
+            "profile": {"type": "string", "description": "Optional owning Cron profile; omitted values are auto-resolved when unique."},
             "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 20},
         },
         "required": ["type", "id"],
