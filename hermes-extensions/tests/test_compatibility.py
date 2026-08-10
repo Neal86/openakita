@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,9 +10,11 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PATH = ROOT / "compatibility.py"
-spec = importlib.util.spec_from_file_location("hx_compat_test", PATH)
+MODULE_NAME = "hx_compat_test"
+spec = importlib.util.spec_from_file_location(MODULE_NAME, PATH)
 assert spec and spec.loader
 compat = importlib.util.module_from_spec(spec)
+sys.modules[MODULE_NAME] = compat
 spec.loader.exec_module(compat)
 
 
@@ -54,9 +57,20 @@ def test_capability_probe_is_cached_and_force_refreshes(monkeypatch: pytest.Monk
     assert len(calls) == 12
 
 
+def test_invalid_explicit_binary_is_not_reported_as_hermes(monkeypatch: pytest.MonkeyPatch) -> None:
+    compat.clear_capability_cache()
+    monkeypatch.setattr(compat.shutil, "which", lambda value: None)
+    monkeypatch.setattr(compat.Path, "is_file", lambda self: False)
+    caps = compat.detect_capabilities("Z:/missing/hermes.exe", force=True)
+    assert caps.hermes is False
+    assert caps.plugins is False
+    assert caps.project is False
+
+
 def test_project_unavailable_payload_is_explicit() -> None:
     payload = compat.project_unavailable_payload()
     assert payload["supported"] is False
     assert payload["items"] == []
     assert "hermes project" in payload["message"]
     assert "Agents" in payload["message"]
+    assert "restarted or reloaded" in payload["message"]
