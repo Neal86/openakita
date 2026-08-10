@@ -33,6 +33,7 @@ class TaskBody(BaseModel):
 class ActionBody(BaseModel):
     action: str
     value: str | None = None
+    profile: str | None = None
 
 
 @router.get("/overview")
@@ -80,9 +81,11 @@ def update_task(task_type: str, task_id: str, body: TaskBody) -> dict[str, Any]:
 
 @router.post("/tasks/{task_type}/{task_id}/action")
 def task_action(task_type: str, task_id: str, body: ActionBody) -> dict[str, Any]:
-    payload = {"type": task_type, "id": task_id, "action": body.action}
+    payload: dict[str, Any] = {"type": task_type, "id": task_id, "action": body.action}
     if body.value is not None:
         payload["value"] = body.value
+    if body.profile is not None:
+        payload["profile"] = body.profile
     try:
         return TaskCenter().action(payload)
     except ValueError as exc:
