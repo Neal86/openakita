@@ -6,6 +6,7 @@ on:
     paths:
       - "src/openakita/wechat_desktop/**"
       - "src/openakita/api/routes/wechat_desktop.py"
+      - "src/openakita/hermes/**"
       - "apps/setup-center/src/components/WechatDesktopPanel.tsx"
       - "scripts/build_wechat_connector.py"
       - "build/wechat_connector_*"
@@ -19,6 +20,7 @@ on:
     paths:
       - "src/openakita/wechat_desktop/**"
       - "src/openakita/api/routes/wechat_desktop.py"
+      - "src/openakita/hermes/**"
       - "apps/setup-center/src/components/WechatDesktopPanel.tsx"
       - "scripts/build_wechat_connector.py"
       - "build/wechat_connector_*"
@@ -35,6 +37,9 @@ permissions:
 concurrency:
   group: wechat-connector-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  HERMES_AGENT_VERSION: "0.18.2"
 
 jobs:
   connector-checks:
@@ -160,9 +165,112 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  native-desktop-release:
+    name: OpenAkita + embedded Hermes Windows installer
+    needs: connector-checks
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install pinned Hermes Agent runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install "hermes-agent==${HERMES_AGENT_VERSION}"
+          python - <<'PY'
+          import importlib.metadata
+          from run_agent import AIAgent
+          version = importlib.metadata.version("hermes-agent")
+          assert version == "0.18.2", version
+          print("Hermes Agent embedded runtime:", version, AIAgent)
+          PY
+      - name: Prepare production Desktop bundle
+        uses: ./.github/actions/desktop-build-prepare
+        with:
+          target_platform: win-x64
+          rust_cache_prefix: hermes-native-windows
+          disable_bootstrap_cache: "false"
+          python_version: "3.11"
+      - name: Run Hermes and WeChat tests on Windows
+        shell: bash
+        run: python -m pytest tests/hermes tests/wechat_desktop -q
+      - name: Copy backend and Hermes license to Tauri resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          RESOURCE_DIR="apps/setup-center/src-tauri/resources"
+          mkdir -p "$RESOURCE_DIR"
+          rm -rf "$RESOURCE_DIR/openakita-server"
+          cp -r dist/openakita-server "$RESOURCE_DIR/openakita-server"
+          mkdir -p "$RESOURCE_DIR/bootstrap/licenses"
+          cp THIRD_PARTY_LICENSES/HERMES_AGENT_LICENSE.txt "$RESOURCE_DIR/bootstrap/licenses/HERMES_AGENT_LICENSE.txt"
+      - name: Verify embedded Hermes collection
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          toc = list(Path("build").rglob("*.toc"))
+          text = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in toc if p.is_file())
+          if "run_agent" not in text:
+              raise SystemExit("PyInstaller analysis does not contain Hermes run_agent")
+          print("Verified embedded Hermes run_agent")
+          PY
+      - name: Verify bundled Python contract
+        shell: bash
+        run: |
+          python build/verify_bundled_python_contract.py \
+            --backend-dir apps/setup-center/src-tauri/resources/openakita-server \
+            --bootstrap-manifest apps/setup-center/src-tauri/resources/bootstrap/manifest.json \
+            --require-seed-packaged
+      - name: Create gitignored placeholder for Rust build
+        shell: bash
+        run: |
+          mkdir -p identity/personas
+          test -f identity/personas/user_custom.md || echo "# User Custom Persona (placeholder)" > identity/personas/user_custom.md
+      - name: Install frontend dependencies
+        working-directory: apps/setup-center
+        run: npm ci
+      - name: Rust preflight
+        working-directory: apps/setup-center/src-tauri
+        shell: bash
+        env:
+          CARGO_HTTP_MULTIPLEXING: "false"
+        run: |
+          cargo fetch --locked
+          cargo check
+      - name: Build unsigned Windows NSIS installer
+        working-directory: apps/setup-center
+        shell: bash
+        env:
+          TAURI_CONFIG: '{"bundle":{"createUpdaterArtifacts":false}}'
+          NO_STRIP: true
+        run: npx tauri build --bundles nsis
+      - name: Collect and hash installer
+        id: installer
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem "apps/setup-center/src-tauri/target/release/bundle/nsis/*.exe"
+          if (-not $files) { throw "NSIS installer not found" }
+          New-Item -ItemType Directory -Force -Path "release-artifacts" | Out-Null
+          foreach ($file in $files) {
+            Copy-Item $file.FullName "release-artifacts/$($file.Name)"
+            $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash
+            Write-Host "$($file.Name) SHA256=$hash"
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenAkita-Hermes-Native-Windows-x64
+          path: release-artifacts/*.exe
+          if-no-files-found: error
+          retention-days: 30
+
   hermes-final:
     name: Hermes final checks
-    needs: windows-release
+    needs: [windows-release, native-desktop-release]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -198,15 +306,15 @@ jobs:
         run: |
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" "$ZIP_PATH" --repo "$GITHUB_REPOSITORY" --clobber
-            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"               --title "OpenAkita WeChat Connector Windows x64"               --notes "Validated Windows x64 Connector package built from commit $GITHUB_SHA."
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --title "OpenAkita WeChat Connector Windows x64" --notes "Validated Windows x64 Connector package built from commit $GITHUB_SHA."
           else
-            gh release create "$RELEASE_TAG" "$ZIP_PATH"               --repo "$GITHUB_REPOSITORY"               --title "OpenAkita WeChat Connector Windows x64"               --notes "Validated Windows x64 Connector package built from commit $GITHUB_SHA."
+            gh release create "$RELEASE_TAG" "$ZIP_PATH" --repo "$GITHUB_REPOSITORY" --title "OpenAkita WeChat Connector Windows x64" --notes "Validated Windows x64 Connector package built from commit $GITHUB_SHA."
           fi
 
   persist-final-result:
     name: Persist final validation result
     if: always() && github.event_name != 'pull_request'
-    needs: [connector-checks, windows-release, hermes-final, publish-stable-release]
+    needs: [connector-checks, windows-release, native-desktop-release, hermes-final, publish-stable-release]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -222,6 +330,7 @@ jobs:
           CONNECTOR_MYPY: ${{ needs.connector-checks.outputs.mypy }}
           CONNECTOR_FRONTEND: ${{ needs.connector-checks.outputs.frontend }}
           WINDOWS_RESULT: ${{ needs.windows-release.result }}
+          NATIVE_DESKTOP_RESULT: ${{ needs.native-desktop-release.result }}
           HERMES_RESULT: ${{ needs.hermes-final.result }}
           PUBLISH_RESULT: ${{ needs.publish-stable-release.result }}
         run: |
@@ -243,11 +352,15 @@ jobs:
               "connector_mypy": os.environ["CONNECTOR_MYPY"],
               "connector_frontend": os.environ["CONNECTOR_FRONTEND"],
               "windows_release": os.environ["WINDOWS_RESULT"],
+              "native_desktop_release": os.environ["NATIVE_DESKTOP_RESULT"],
               "hermes_final": os.environ["HERMES_RESULT"],
               "publish_stable_release": os.environ["PUBLISH_RESULT"],
+              "hermes_agent_version": "0.18.2",
+              "native_runtime": True,
+              "docker_required_for_windows_desktop": False,
           }
           results["success"] = all(results[key] == "success" for key in (
-              "connector_checks", "windows_release", "hermes_final", "publish_stable_release"
+              "connector_checks", "windows_release", "native_desktop_release", "hermes_final", "publish_stable_release"
           ))
           Path("ci-results/wechat-connector-release.json").write_text(
               json.dumps(results, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
