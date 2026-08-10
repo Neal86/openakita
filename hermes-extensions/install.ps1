@@ -1,3 +1,8 @@
+param(
+    [switch]$NoEnable,
+    [switch]$SkipDependencies
+)
+
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
@@ -9,12 +14,90 @@ $PlatformSource = Join-Path $Source "platforms\wechat-desktop"
 $PlatformTarget = Join-Path $PluginsRoot "platforms\wechat-desktop"
 $Requirements = Join-Path $Source "requirements-windows.txt"
 $DashboardSource = Join-Path $Source "dashboard\src\index.js"
+$HermesCommand = Get-Command hermes -ErrorAction SilentlyContinue
+
+function Test-HermesCapability {
+    param([string]$HermesExe, [string]$Command)
+    try {
+        $output = & $HermesExe $Command --help 2>&1 | Out-String
+        if ($output -match "invalid choice|no such command|unknown command") { return $false }
+        return $LASTEXITCODE -eq 0
+    } catch { return $false }
+}
+
+function Test-PythonCandidate {
+    param([string]$PythonExe)
+    if (-not $PythonExe -or -not (Test-Path -LiteralPath $PythonExe)) { return $false }
+    try {
+        & $PythonExe -c "import sys; print(sys.executable)" | Out-Null
+        return $LASTEXITCODE -eq 0
+    } catch { return $false }
+}
+
+function Find-HermesPython {
+    $candidates = New-Object System.Collections.Generic.List[string]
+
+    foreach ($base in @($env:APPDATA, $env:LOCALAPPDATA)) {
+        if ($base) {
+            $candidates.Add((Join-Path $base "uv\tools\hermes-agent\Scripts\python.exe"))
+            $candidates.Add((Join-Path $base "hermes\.venv\Scripts\python.exe"))
+        }
+    }
+    $candidates.Add((Join-Path $HermesHome "hermes-agent\.venv\Scripts\python.exe"))
+    $candidates.Add((Join-Path $HermesHome ".venv\Scripts\python.exe"))
+
+    if ($HermesCommand) {
+        try {
+            $versionText = & $HermesCommand.Source --version 2>&1 | Out-String
+            if ($versionText -match "(?m)^Project:\s*(.+?)\s*$") {
+                $projectPath = $Matches[1].Trim()
+                $site = [System.IO.DirectoryInfo]::new($projectPath)
+                if ($site.Name -ieq "site-packages" -and $site.Parent -and $site.Parent.Parent) {
+                    $candidates.Insert(0, (Join-Path $site.Parent.Parent.FullName "Scripts\python.exe"))
+                }
+            }
+        } catch {}
+    }
+
+    $uv = Get-Command uv -ErrorAction SilentlyContinue
+    if ($uv) {
+        try {
+            $toolDir = (& $uv.Source tool dir 2>$null | Select-Object -First 1).Trim()
+            if ($toolDir) { $candidates.Insert(0, (Join-Path $toolDir "hermes-agent\Scripts\python.exe")) }
+        } catch {}
+    }
+
+    foreach ($candidate in $candidates | Select-Object -Unique) {
+        if (Test-PythonCandidate $candidate) { return $candidate }
+    }
+    return $null
+}
+
+function Copy-PluginTree {
+    param([string]$From, [string]$To)
+    New-Item -ItemType Directory -Force -Path $To | Out-Null
+    Get-ChildItem -LiteralPath $From -Force | Where-Object {
+        $_.Name -notin @(".git", "__pycache__", ".pytest_cache", "platforms", "tests")
+    } | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $To -Recurse -Force
+    }
+}
+
+function Restore-Backup {
+    param([string]$Backup, [string]$Destination)
+    if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Recurse -Force }
+    if ($Backup -and (Test-Path -LiteralPath $Backup)) {
+        Move-Item -LiteralPath $Backup -Destination $Destination -Force
+    }
+}
 
 foreach ($RequiredPath in @(
     (Join-Path $Source "plugin.yaml"),
     (Join-Path $Source "dashboard\manifest.json"),
-    (Join-Path $Source "dashboard\compat_api.py"),
+    (Join-Path $Source "dashboard\plugin_api.py"),
     $DashboardSource,
+    (Join-Path $Source "doctor.ps1"),
+    (Join-Path $Source "compatibility.py"),
     (Join-Path $Source "wechat\adapter.py"),
     (Join-Path $PlatformSource "plugin.yaml"),
     $Requirements
@@ -24,18 +107,6 @@ foreach ($RequiredPath in @(
     }
 }
 
-function Test-HermesCapability {
-    param([string]$HermesExe, [string]$Command)
-    try {
-        $output = & $HermesExe $Command --help 2>&1 | Out-String
-        if ($output -match "invalid choice|no such command|unknown command") { return $false }
-        return $LASTEXITCODE -eq 0
-    } catch {
-        return $false
-    }
-}
-
-$HermesCommand = Get-Command hermes -ErrorAction SilentlyContinue
 $Capabilities = [ordered]@{
     hermes = [bool]$HermesCommand
     plugins = $false
@@ -55,122 +126,127 @@ Write-Host "Hermes home: $HermesHome"
 Write-Host "Detected Hermes capabilities:"
 $Capabilities.GetEnumerator() | ForEach-Object { Write-Host ("  {0,-10} {1}" -f $_.Key, $_.Value) }
 if (-not $Capabilities.project) {
-    Write-Warning "Native 'hermes project' is not available. Projects will be disabled; Agents, Tasks and WeChat remain available."
+    Write-Warning "Native 'hermes project' is unavailable. Projects will be disabled; Agents, Tasks and WeChat remain available."
 }
+if (-not $Capabilities.profile) { throw "This Hermes build does not expose profile management; installation aborted." }
+if (-not $Capabilities.plugins) { throw "This Hermes build does not expose plugin management; installation aborted." }
 
-Write-Host "Installing Hermes Extensions to $Target"
-New-Item -ItemType Directory -Force -Path $PluginsRoot | Out-Null
-if (Test-Path -LiteralPath $Target) {
-    Remove-Item -LiteralPath $Target -Recurse -Force
+$HermesPython = Find-HermesPython
+if (-not $HermesPython) {
+    throw "Could not locate the Python interpreter used by Hermes. Refusing to install dependencies into an unrelated system Python."
 }
-New-Item -ItemType Directory -Force -Path $Target | Out-Null
+Write-Host "Hermes Python: $HermesPython"
 
-Get-ChildItem -LiteralPath $Source -Force | Where-Object {
-    $_.Name -notin @(".git", "__pycache__", ".pytest_cache", "platforms", "tests")
-} | ForEach-Object {
-    Copy-Item -LiteralPath $_.FullName -Destination $Target -Recurse -Force
-}
-
-# Hermes v0.16 dashboard plugins expect a pre-built single JS entry under dist/.
-$TargetDashboardDist = Join-Path $Target "dashboard\dist"
-New-Item -ItemType Directory -Force -Path $TargetDashboardDist | Out-Null
-Copy-Item -LiteralPath $DashboardSource -Destination (Join-Path $TargetDashboardDist "index.js") -Force
-
-Write-Host "Installing WeChat Desktop gateway platform to $PlatformTarget"
-if (Test-Path -LiteralPath $PlatformTarget) {
-    Remove-Item -LiteralPath $PlatformTarget -Recurse -Force
-}
-New-Item -ItemType Directory -Force -Path $PlatformTarget | Out-Null
-Get-ChildItem -LiteralPath $PlatformSource -Force | ForEach-Object {
-    Copy-Item -LiteralPath $_.FullName -Destination $PlatformTarget -Recurse -Force
-}
-
-$PythonCandidates = @(
-    (Join-Path $env:LOCALAPPDATA "uv\tools\hermes-agent\Scripts\python.exe"),
-    (Join-Path $env:LOCALAPPDATA "hermes\.venv\Scripts\python.exe"),
-    (Join-Path $HermesHome "hermes-agent\.venv\Scripts\python.exe"),
-    (Join-Path $HermesHome ".venv\Scripts\python.exe")
-) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
-
-$HermesPython = $null
-if ($PythonCandidates.Count -gt 0) {
-    $HermesPython = $PythonCandidates[0]
-} else {
-    $PythonCommand = Get-Command python -ErrorAction SilentlyContinue
-    if ($PythonCommand) { $HermesPython = $PythonCommand.Source }
-}
-
-$InstalledDependencies = $false
-if ($HermesPython) {
-    Write-Host "Installing plugin dependencies with $HermesPython"
+if (-not $SkipDependencies) {
+    Write-Host "Installing plugin dependencies into the Hermes Python environment..."
+    $uv = Get-Command uv -ErrorAction SilentlyContinue
+    $installed = $false
     try {
-        & $HermesPython -m pip install -r (Join-Path $Target "requirements-windows.txt")
-        if ($LASTEXITCODE -ne 0) { throw "pip exited with code $LASTEXITCODE" }
-        $InstalledDependencies = $true
-    } catch {
-        $UvCommand = Get-Command uv -ErrorAction SilentlyContinue
-        if ($UvCommand) {
-            Write-Warning "pip install failed; retrying with uv. $($_.Exception.Message)"
-            & $UvCommand.Source pip install --python $HermesPython -r (Join-Path $Target "requirements-windows.txt")
-            if ($LASTEXITCODE -ne 0) { throw "uv pip install exited with code $LASTEXITCODE" }
-            $InstalledDependencies = $true
-        } else { throw }
+        & $HermesPython -m pip --version 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            & $HermesPython -m pip install -r $Requirements
+            if ($LASTEXITCODE -ne 0) { throw "pip exited with code $LASTEXITCODE" }
+            $installed = $true
+        }
+    } catch {}
+    if (-not $installed -and $uv) {
+        & $uv.Source pip install --python $HermesPython -r $Requirements
+        if ($LASTEXITCODE -ne 0) { throw "uv pip install exited with code $LASTEXITCODE" }
+        $installed = $true
     }
-} else {
-    Write-Warning "Python was not found automatically. Install requirements-windows.txt into the Python environment that runs Hermes."
+    if (-not $installed) { throw "Unable to install dependencies into Hermes Python." }
 }
 
-if ($HermesCommand -and $Capabilities.plugins) {
-    foreach ($PluginName in @("hermes-extensions", "wechat-desktop")) {
-        try {
+& $HermesPython -c "import yaml, croniter; print('shared dependencies ok')"
+if ($LASTEXITCODE -ne 0) { throw "Shared dependency import validation failed." }
+& $HermesPython -c "import pywinauto, pyperclip; print('Windows WeChat dependencies ok')"
+if ($LASTEXITCODE -ne 0) { throw "Windows WeChat dependency import validation failed." }
+
+New-Item -ItemType Directory -Force -Path $PluginsRoot | Out-Null
+$TxnRoot = Join-Path $PluginsRoot (".hermes-extensions-txn-" + [Guid]::NewGuid().ToString("N"))
+$StagePlugin = Join-Path $TxnRoot "stage\hermes-extensions"
+$StagePlatform = Join-Path $TxnRoot "stage\wechat-desktop"
+$BackupPlugin = Join-Path $TxnRoot "backup\hermes-extensions"
+$BackupPlatform = Join-Path $TxnRoot "backup\wechat-desktop"
+New-Item -ItemType Directory -Force -Path (Split-Path $StagePlugin -Parent) | Out-Null
+New-Item -ItemType Directory -Force -Path (Split-Path $BackupPlugin -Parent) | Out-Null
+
+try {
+    Write-Host "Staging Hermes Extensions..."
+    Copy-PluginTree -From $Source -To $StagePlugin
+    New-Item -ItemType Directory -Force -Path (Join-Path $StagePlugin "dashboard\dist") | Out-Null
+    Copy-Item -LiteralPath $DashboardSource -Destination (Join-Path $StagePlugin "dashboard\dist\index.js") -Force
+
+    New-Item -ItemType Directory -Force -Path $StagePlatform | Out-Null
+    Get-ChildItem -LiteralPath $PlatformSource -Force | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $StagePlatform -Recurse -Force
+    }
+
+    foreach ($required in @(
+        (Join-Path $StagePlugin "plugin.yaml"),
+        (Join-Path $StagePlugin "dashboard\manifest.json"),
+        (Join-Path $StagePlugin "dashboard\dist\index.js"),
+        (Join-Path $StagePlugin "dashboard\plugin_api.py"),
+        (Join-Path $StagePlatform "plugin.yaml")
+    )) {
+        if (-not (Test-Path -LiteralPath $required)) { throw "Staging validation failed: missing $required" }
+    }
+
+    & $HermesPython -m compileall -q $StagePlugin
+    if ($LASTEXITCODE -ne 0) { throw "Python compile validation failed in staging." }
+
+    if (Test-Path -LiteralPath $Target) {
+        Write-Host "Backing up current Hermes Extensions..."
+        Move-Item -LiteralPath $Target -Destination $BackupPlugin -Force
+    }
+    if (Test-Path -LiteralPath $PlatformTarget) {
+        Move-Item -LiteralPath $PlatformTarget -Destination $BackupPlatform -Force
+    }
+
+    New-Item -ItemType Directory -Force -Path (Split-Path $PlatformTarget -Parent) | Out-Null
+    Move-Item -LiteralPath $StagePlugin -Destination $Target -Force
+    Move-Item -LiteralPath $StagePlatform -Destination $PlatformTarget -Force
+
+    if (-not $NoEnable) {
+        foreach ($PluginName in @("hermes-extensions", "wechat-desktop")) {
             & $HermesCommand.Source plugins enable $PluginName
-            if ($LASTEXITCODE -ne 0) {
-                Write-Warning "Plugin '$PluginName' was copied but Hermes returned exit code $LASTEXITCODE while enabling it."
-            }
-        } catch {
-            Write-Warning "Plugin '$PluginName' was copied, but automatic enable failed: $($_.Exception.Message)"
+            if ($LASTEXITCODE -ne 0) { throw "Hermes could not enable plugin '$PluginName'." }
         }
     }
-    Write-Host "Installed Hermes plugins:"
-    try { & $HermesCommand.Source plugins list --plain --no-bundled } catch { & $HermesCommand.Source plugins list }
-}
 
-$DashboardRescanned = $false
-if ($Capabilities.dashboard) {
-    try {
-        $status = & $HermesCommand.Source dashboard --status 2>&1 | Out-String
-        if ($status -notmatch "No hermes dashboard processes running") {
-            try {
+    $installedList = & $HermesCommand.Source plugins list --plain --no-bundled 2>&1 | Out-String
+    if ($installedList -notmatch "hermes-extensions") { throw "Hermes did not discover hermes-extensions after installation." }
+    if ($installedList -notmatch "wechat-desktop") { throw "Hermes did not discover wechat-desktop after installation." }
+
+    $DashboardRescanned = $false
+    if ($Capabilities.dashboard) {
+        try {
+            $status = & $HermesCommand.Source dashboard --status 2>&1 | Out-String
+            if ($status -notmatch "No hermes dashboard processes running") {
                 Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:9119/api/dashboard/plugins/rescan" -TimeoutSec 5 | Out-Null
                 $DashboardRescanned = $true
                 Write-Host "Dashboard plugin rescan completed."
-            } catch {
-                Write-Warning "Dashboard is running but plugin rescan failed: $($_.Exception.Message)"
             }
+        } catch {
+            Write-Warning "Dashboard hot rescan was unavailable: $($_.Exception.Message)"
         }
-    } catch {}
-}
+    }
 
-$InstalledChecks = [ordered]@{
-    plugin_manifest = Test-Path -LiteralPath (Join-Path $Target "plugin.yaml")
-    dashboard_manifest = Test-Path -LiteralPath (Join-Path $Target "dashboard\manifest.json")
-    dashboard_bundle = Test-Path -LiteralPath (Join-Path $Target "dashboard\dist\index.js")
-    dashboard_api = Test-Path -LiteralPath (Join-Path $Target "dashboard\compat_api.py")
-    wechat_platform = Test-Path -LiteralPath (Join-Path $PlatformTarget "plugin.yaml")
-}
+    & (Join-Path $Target "doctor.ps1") -Installed
+    if ($LASTEXITCODE -ne 0) { throw "Installed doctor verification failed with exit code $LASTEXITCODE." }
 
-Write-Host "Install verification:"
-$InstalledChecks.GetEnumerator() | ForEach-Object { Write-Host ("  {0,-20} {1}" -f $_.Key, $_.Value) }
-if ($InstalledChecks.Values -contains $false) {
-    throw "Hermes Extensions installation verification failed."
+    Write-Host "Hermes Extensions v0.4.2 install complete."
+    Write-Host "Dashboard hot rescan: $DashboardRescanned"
+    if (-not $Capabilities.project) {
+        Write-Host "Projects: disabled for this Hermes build; they will auto-enable after a compatible Hermes upgrade."
+    }
+    Write-Host "If dashboard backend code changed, restart only 'hermes dashboard'."
+    Write-Host "For WeChat platform Python changes, restart the relevant Hermes gateway."
+} catch {
+    Write-Error "Installation failed; rolling back previous plugin files. $($_.Exception.Message)"
+    try { Restore-Backup -Backup $BackupPlugin -Destination $Target } catch { Write-Warning "Plugin rollback failed: $($_.Exception.Message)" }
+    try { Restore-Backup -Backup $BackupPlatform -Destination $PlatformTarget } catch { Write-Warning "Platform rollback failed: $($_.Exception.Message)" }
+    throw
+} finally {
+    if (Test-Path -LiteralPath $TxnRoot) { Remove-Item -LiteralPath $TxnRoot -Recurse -Force -ErrorAction SilentlyContinue }
 }
-
-Write-Host "Hermes Extensions v0.4.1 install complete."
-Write-Host "Dependencies installed: $InstalledDependencies"
-Write-Host "Dashboard hot rescan: $DashboardRescanned"
-if (-not $Capabilities.project) {
-    Write-Host "Projects: disabled for this Hermes build (no native 'hermes project'); they will auto-enable after a compatible Hermes upgrade."
-}
-Write-Host "Run '.\doctor.ps1' from the package, or '$Target\doctor.ps1', for a compatibility report."
-Write-Host "If this is the first install or dashboard backend API changed, restart only 'hermes dashboard'."
-Write-Host "For WeChat platform Python changes, restart the relevant Hermes gateway; the whole Hermes installation does not need reinstalling."
