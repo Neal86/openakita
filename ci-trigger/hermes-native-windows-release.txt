@@ -2,5 +2,6 @@ Trigger Hermes native Windows installer build.
 Hermes Agent: 0.19.0
 Runtime: embedded native AIAgent
 Docker required: no
-Triggered: 2026-08-10 15:40 PDT
+Triggered: 2026-08-10 16:08 PDT
 Workflow: WeChat Connector Windows release / native-desktop-release
+Reason: retry after adding pytest + pytest-asyncio to shared desktop build preparation
