@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-from dataclasses import dataclass, asdict
+import threading
+import time
+from dataclasses import asdict, dataclass
 from typing import Any
 
 
@@ -18,6 +20,13 @@ class HermesCapabilities:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+_CACHE_TTL_SECONDS = 45.0
+_cache_lock = threading.RLock()
+_cache_value: HermesCapabilities | None = None
+_cache_at = 0.0
+_cache_binary = ""
 
 
 def _supports(hermes: str, command: str) -> bool:
@@ -37,7 +46,7 @@ def _supports(hermes: str, command: str) -> bool:
     return proc.returncode == 0
 
 
-def detect_capabilities(hermes: str | None = None) -> HermesCapabilities:
+def _detect_uncached(hermes: str | None = None) -> HermesCapabilities:
     binary = hermes or shutil.which("hermes") or "hermes"
     available = shutil.which(binary) is not None if binary == "hermes" else True
     if not available:
@@ -51,6 +60,45 @@ def detect_capabilities(hermes: str | None = None) -> HermesCapabilities:
         cron=_supports(binary, "cron"),
         kanban=_supports(binary, "kanban"),
     )
+
+
+def detect_capabilities(
+    hermes: str | None = None,
+    *,
+    force: bool = False,
+    ttl_seconds: float = _CACHE_TTL_SECONDS,
+) -> HermesCapabilities:
+    """Return Hermes capability flags with a short process-local cache.
+
+    Dashboard requests used to spawn six ``hermes <command> --help`` subprocesses
+    per API call. Capabilities change only when Hermes itself changes, so a
+    short-lived cache preserves correctness while making the dashboard cheap.
+    ``force=True`` is used by the explicit refresh/doctor surfaces.
+    """
+    global _cache_at, _cache_binary, _cache_value
+    binary = hermes or shutil.which("hermes") or "hermes"
+    now = time.monotonic()
+    with _cache_lock:
+        if (
+            not force
+            and _cache_value is not None
+            and _cache_binary == binary
+            and now - _cache_at < max(0.0, float(ttl_seconds))
+        ):
+            return _cache_value
+        value = _detect_uncached(binary)
+        _cache_value = value
+        _cache_at = now
+        _cache_binary = binary
+        return value
+
+
+def clear_capability_cache() -> None:
+    global _cache_at, _cache_binary, _cache_value
+    with _cache_lock:
+        _cache_value = None
+        _cache_at = 0.0
+        _cache_binary = ""
 
 
 def project_unavailable_payload() -> dict[str, Any]:
