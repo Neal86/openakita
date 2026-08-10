@@ -5,12 +5,16 @@ import hashlib
 import importlib.util
 import os
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
+
+INBOUND_DEDUP_SECONDS = 120.0
+OUTBOUND_ECHO_SECONDS = 60.0
 
 
 def _load_desktop_class():
@@ -85,8 +89,8 @@ class WeChatDesktopPlatformAdapter(BasePlatformAdapter):
         )
         self.allowed_chats = _allowed_chats(config)
         self._poll_task: asyncio.Task | None = None
-        self._seen: dict[str, str] = {}
-        self._recent_outbound: dict[str, str] = {}
+        self._seen: dict[str, tuple[str, float]] = {}
+        self._recent_outbound: dict[str, tuple[str, float]] = {}
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         del is_reconnect
@@ -112,6 +116,20 @@ class WeChatDesktopPlatformAdapter(BasePlatformAdapter):
     def _allowed(self, chat: str) -> bool:
         return not self.allowed_chats or chat in self.allowed_chats
 
+    @staticmethod
+    def _is_recent(entry: tuple[str, float] | None, fingerprint: str, now: float, ttl: float) -> bool:
+        return bool(entry and entry[0] == fingerprint and now - entry[1] < ttl)
+
+    def _prune_dedup(self, now: float) -> None:
+        self._seen = {
+            chat: entry for chat, entry in self._seen.items()
+            if now - entry[1] < INBOUND_DEDUP_SECONDS * 2
+        }
+        self._recent_outbound = {
+            chat: entry for chat, entry in self._recent_outbound.items()
+            if now - entry[1] < OUTBOUND_ECHO_SECONDS * 2
+        }
+
     async def _poll_loop(self) -> None:
         while self._running:
             try:
@@ -127,12 +145,16 @@ class WeChatDesktopPlatformAdapter(BasePlatformAdapter):
                     if not text:
                         continue
                     fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
-                    if self._seen.get(chat) == fingerprint:
+                    now = time.monotonic()
+                    if self._is_recent(self._seen.get(chat), fingerprint, now, INBOUND_DEDUP_SECONDS):
                         continue
-                    if self._recent_outbound.get(chat) == fingerprint:
-                        self._seen[chat] = fingerprint
+                    if self._is_recent(
+                        self._recent_outbound.get(chat), fingerprint, now, OUTBOUND_ECHO_SECONDS
+                    ):
+                        self._seen[chat] = (fingerprint, now)
                         continue
-                    self._seen[chat] = fingerprint
+                    self._seen[chat] = (fingerprint, now)
+                    self._prune_dedup(now)
                     source = self.build_source(
                         chat_id=chat,
                         chat_name=chat,
@@ -144,7 +166,7 @@ class WeChatDesktopPlatformAdapter(BasePlatformAdapter):
                         text=text,
                         message_type=MessageType.TEXT,
                         source=source,
-                        message_id=f"wechat-desktop-{fingerprint[:20]}",
+                        message_id=f"wechat-desktop-{fingerprint[:20]}-{int(now)}",
                         raw_message={"chat": chat, "text": text, "transport": "windows-uia"},
                         timestamp=datetime.now(UTC),
                     )
@@ -175,8 +197,10 @@ class WeChatDesktopPlatformAdapter(BasePlatformAdapter):
         if not result.get("sent") and not result.get("duplicate_suppressed"):
             return SendResult(success=False, error="WeChat desktop send did not complete")
         fingerprint = hashlib.sha256(str(content).strip().encode("utf-8")).hexdigest()
-        self._recent_outbound[chat] = fingerprint
-        return SendResult(success=True, message_id=f"wechat-desktop-{fingerprint[:20]}")
+        now = time.monotonic()
+        self._recent_outbound[chat] = (fingerprint, now)
+        self._prune_dedup(now)
+        return SendResult(success=True, message_id=f"wechat-desktop-{fingerprint[:20]}-{int(now)}")
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         chat = str(chat_id or "").strip()
