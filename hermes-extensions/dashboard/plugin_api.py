@@ -21,7 +21,7 @@ router = APIRouter()
 
 
 class TaskBody(BaseModel):
-    type: str
+    type: str | None = None
     name: str | None = None
     prompt: str | None = None
     schedule: str | None = None
@@ -59,6 +59,8 @@ def upcoming(
 @router.post("/tasks")
 def create_task(body: TaskBody) -> dict[str, Any]:
     payload = body.model_dump(exclude_none=True)
+    if not payload.get("type"):
+        raise HTTPException(status_code=400, detail="type is required")
     try:
         return TaskCenter().create(payload)
     except ValueError as exc:
