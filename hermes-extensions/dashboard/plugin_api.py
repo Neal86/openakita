@@ -20,7 +20,7 @@ def _load_class(relative: str, module_name: str, class_name: str):
     return getattr(module, class_name)
 
 
-TaskCenter = _load_class("task_center/service.py", "hermes_extensions_task_center_service", "TaskCenter")
+TaskCenter = _load_class("task_center/service_v2.py", "hermes_extensions_task_center_service", "TaskCenter")
 ManagementCenter = _load_class("management/service.py", "hermes_extensions_management_service", "ManagementCenter")
 router = APIRouter()
 
@@ -54,15 +54,7 @@ class AgentBody(BaseModel):
 
 
 class AgentActionBody(BaseModel):
-    action: Literal[
-        "use",
-        "gateway_start",
-        "gateway_stop",
-        "gateway_restart",
-        "gateway_status",
-        "set_workspace",
-        "export",
-    ]
+    action: Literal["use", "gateway_start", "gateway_stop", "gateway_restart", "gateway_status", "set_workspace", "export"]
     value: str | None = Field(default=None, max_length=4096)
 
 
@@ -117,11 +109,7 @@ def overview(profile: str | None = None, include_completed: bool = False) -> dic
 
 
 @router.get("/upcoming")
-def upcoming(
-    hours: int = Query(168, ge=1, le=2160),
-    profile: str | None = None,
-    limit: int = Query(300, ge=1, le=1000),
-) -> dict[str, Any]:
+def upcoming(hours: int = Query(168, ge=1, le=2160), profile: str | None = None, limit: int = Query(300, ge=1, le=1000)) -> dict[str, Any]:
     try:
         return {"items": TaskCenter().upcoming(hours=hours, profile=profile, limit=limit)}
     except Exception as exc:
@@ -169,12 +157,7 @@ def task_action(task_type: Literal["cron", "kanban"], task_id: str, body: TaskAc
 
 
 @router.get("/tasks/{task_type}/{task_id}/history")
-def history(
-    task_type: Literal["cron", "kanban"],
-    task_id: str,
-    profile: str | None = None,
-    limit: int = Query(20, ge=1, le=200),
-) -> dict[str, Any]:
+def history(task_type: Literal["cron", "kanban"], task_id: str, profile: str | None = None, limit: int = Query(20, ge=1, le=200)) -> dict[str, Any]:
     try:
         return {"items": TaskCenter().history(task_type, task_id, limit=limit, profile=profile)}
     except ValueError as exc:
@@ -254,7 +237,11 @@ def agent_delete(name: str) -> dict[str, Any]:
 @router.get("/projects")
 def projects(profile: str | None = None, include_archived: bool = True) -> dict[str, Any]:
     try:
-        return {"items": ManagementCenter().project_list(profile, include_archived=include_archived)}
+        center = ManagementCenter()
+        if profile:
+            return {"items": center.project_list(profile, include_archived=include_archived), "partial": False, "errors": []}
+        snapshot = center.snapshot(include_archived=include_archived)
+        return {"items": snapshot["projects"], "partial": snapshot["partial"], "errors": snapshot["errors"]}
     except ValueError as exc:
         raise _bad_request(exc) from exc
     except Exception as exc:
