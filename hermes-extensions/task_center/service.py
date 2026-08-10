@@ -204,6 +204,8 @@ class TaskCenter:
         args = ["list"]
         if profile:
             args += ["--assignee", profile]
+        if include_completed:
+            args.append("--archived")
         payload = self._kanban(args)
         rows = payload.get("tasks", payload) if isinstance(payload, dict) else payload
         result: list[dict[str, Any]] = []
@@ -248,6 +250,14 @@ class TaskCenter:
             history = self._cron_history(job["profile"], job["id"], 1)
             if history and history[0].get("status") in {"claimed", "running"}:
                 running_cron += 1
+        failed_cron = sum(
+            1 for job in cron
+            if str(job.get("last_status") or "").lower() in {"failed", "error", "timed_out", "crashed"}
+        )
+        failed_kanban = sum(
+            1 for task in kanban
+            if str(task.get("status") or "").lower() in {"blocked", "gave_up", "crashed", "timed_out"}
+        )
         return {
             "profiles": list(grouped.values()),
             "counts": {
@@ -257,6 +267,7 @@ class TaskCenter:
                 "one_shot": sum(1 for job in cron if not job.get("recurring")),
                 "kanban": len(kanban),
                 "running": running_cron + sum(1 for task in kanban if task.get("status") == "running"),
+                "failed": failed_cron + failed_kanban,
             },
             "kanban_error": kanban_error,
             "generated_at": _now().isoformat(),
@@ -498,10 +509,24 @@ class TaskCenter:
             rows.sort(key=lambda row: str(row.get("claimed_at") or ""), reverse=True)
             return rows[:limit]
         if task_type == "kanban":
-            # Current Hermes Kanban task rows already contain durable result,
-            # started_at/completed_at/session_id. The native CLI does not expose
-            # a stable `kanban runs` subcommand across all current builds, so
-            # return the task's durable lifecycle record instead of inventing one.
+            # Modern Hermes exposes attempt history through `kanban runs`.
+            # Prefer that durable native surface and keep the lifecycle-row
+            # fallback for older Hermes builds that do not yet have the verb.
+            try:
+                payload = _json_output([self.hermes, "kanban", "runs", task_id, "--json"])
+                runs = payload.get("runs", payload) if isinstance(payload, dict) else payload
+                if isinstance(runs, list):
+                    normalized: list[dict[str, Any]] = []
+                    for run in runs[:limit]:
+                        if isinstance(run, dict):
+                            item = dict(run)
+                            item["type"] = "kanban_run"
+                            item["task_id"] = task_id
+                            normalized.append(item)
+                    if normalized:
+                        return normalized
+            except Exception:
+                pass
             matches = [task for task in self.kanban_tasks(include_completed=True) if task["id"] == task_id]
             return matches[:1]
         raise ValueError("type must be cron or kanban")
