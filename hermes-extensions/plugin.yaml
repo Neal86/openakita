@@ -1,6 +1,6 @@
 name: hermes-extensions
-version: "0.1.0"
-description: Local Hermes extensions for Windows WeChat automation and fleet-wide task management
+version: "0.2.0"
+description: Standalone Hermes extensions for hardened Windows WeChat automation and fleet-wide task management
 provides_tools:
   - wechat_status
   - wechat_list_chats
