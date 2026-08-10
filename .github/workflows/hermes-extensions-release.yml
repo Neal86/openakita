@@ -1,0 +1,109 @@
+name: Hermes Extensions release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "hermes-extensions-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(python - <<'PY'
+          from pathlib import Path
+          for line in Path('hermes-extensions/plugin.yaml').read_text('utf-8').splitlines():
+              if line.startswith('version:'):
+                  print(line.split(':',1)[1].strip().strip('"').strip("'"))
+                  break
+          PY
+          )
+          test -n "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r hermes-extensions/requirements.txt pytest ruff
+
+      - name: Validate source
+        run: |
+          python -m compileall -q hermes-extensions
+          ruff check hermes-extensions
+          pytest -q hermes-extensions/tests
+          node --check hermes-extensions/dashboard/src/index.js
+
+      - name: Build release tree
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          OUT="release/hermes-extensions-v${VERSION}"
+          mkdir -p "$OUT"
+          rsync -a hermes-extensions/ "$OUT/" \
+            --exclude tests \
+            --exclude __pycache__ \
+            --exclude .pytest_cache
+          mkdir -p "$OUT/dashboard/dist"
+          cp "$OUT/dashboard/src/index.js" "$OUT/dashboard/dist/index.js"
+          test -f "$OUT/plugin.yaml"
+          test -f "$OUT/__init__.py"
+          test -f "$OUT/install.ps1"
+          test -f "$OUT/doctor.ps1"
+          test -f "$OUT/dashboard/manifest.json"
+          test -f "$OUT/dashboard/dist/index.js"
+          test -f "$OUT/dashboard/compat_api.py"
+          test -f "$OUT/platforms/wechat-desktop/plugin.yaml"
+          (cd release && zip -qr "hermes-extensions-v${VERSION}.zip" "hermes-extensions-v${VERSION}")
+          cd release
+          sha256sum "hermes-extensions-v${VERSION}.zip" > "hermes-extensions-v${VERSION}.zip.sha256"
+
+      - name: Validate release archive isolation
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          unzip -l "release/hermes-extensions-v${VERSION}.zip" > /tmp/archive.txt
+          ! grep -q "src/openakita" /tmp/archive.txt
+          ! grep -q "apps/setup-center" /tmp/archive.txt
+          grep -q "hermes-extensions-v${VERSION}/plugin.yaml" /tmp/archive.txt
+          grep -q "hermes-extensions-v${VERSION}/dashboard/dist/index.js" /tmp/archive.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hermes-extensions-v${{ steps.version.outputs.version }}
+          path: |
+            release/hermes-extensions-v${{ steps.version.outputs.version }}.zip
+            release/hermes-extensions-v${{ steps.version.outputs.version }}.zip.sha256
+
+      - name: Publish GitHub Release for tag builds
+        if: startsWith(github.ref, 'refs/tags/hermes-extensions-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="hermes-extensions-v${VERSION}"
+          test "$GITHUB_REF_NAME" = "$TAG"
+          gh release create "$TAG" \
+            "release/hermes-extensions-v${VERSION}.zip" \
+            "release/hermes-extensions-v${VERSION}.zip.sha256" \
+            --title "Hermes Extensions v${VERSION}" \
+            --notes "Standalone Hermes Extensions v${VERSION}. Download the ZIP, extract it, and run install.ps1 from PowerShell. Native Projects degrade gracefully on Hermes builds without the 'hermes project' command."
