@@ -3,7 +3,7 @@
   "label": "Task Center",
   "description": "Fleet-wide Hermes task center for Cron, Kanban, upcoming work, and task history.",
   "icon": "Clock",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "tab": {
     "path": "/task-center",
     "position": "after:cron"
