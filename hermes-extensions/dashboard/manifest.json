@@ -1,6 +1,7 @@
 {
   "name": "hermes-extensions",
   "label": "Task Center",
+  "description": "Fleet-wide Hermes task center for Cron, Kanban, upcoming work, and task history.",
   "icon": "Clock",
   "version": "0.1.0",
   "tab": {
@@ -9,5 +10,5 @@
   },
   "entry": "dist/index.js",
   "css": "dist/style.css",
-  "api": "plugin_api.py"
+  "has_api": true
 }
