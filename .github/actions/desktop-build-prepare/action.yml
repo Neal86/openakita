@@ -115,7 +115,10 @@ runs:
         # 资源（与 ci.yml 同等位置保持一致）。
         pip install ./openakita-plugin-sdk
         pip install -e ".[all]"
-        pip install build "pyinstaller>=6.18.0"
+        # Desktop release workflows run packaged-runtime regression tests after
+        # this shared preparation step. Keep test tooling host-only: PyInstaller
+        # does not collect it because OpenAkita runtime code does not import it.
+        pip install build "pyinstaller>=6.18.0" "pytest>=8,<9" "pytest-asyncio>=0.23,<1"
 
     - name: Clean previous PyInstaller output
       shell: bash
