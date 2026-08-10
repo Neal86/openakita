@@ -34,9 +34,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: JavaScript syntax
+      - name: JavaScript source syntax
         run: node --check hermes-extensions/dashboard/src/index.js
-      - name: Validate manifests and management surfaces
+      - name: Validate compatibility release surfaces
         run: |
           python - <<'PY'
           import ast, json
@@ -53,37 +53,40 @@ jobs:
           plugin = (root / 'plugin.yaml').read_text('utf-8')
           platform_yaml = (root / 'platforms/wechat-desktop/plugin.yaml').read_text('utf-8')
           dashboard = (root / 'dashboard/src/index.js').read_text('utf-8')
-          api = (root / 'dashboard/plugin_api.py').read_text('utf-8')
+          compat_api = (root / 'dashboard/compat_api.py').read_text('utf-8')
           schemas = (root / 'schemas.py').read_text('utf-8')
+          installer = (root / 'install.ps1').read_text('utf-8')
 
           assert manifest['name'] == 'hermes-extensions'
           assert manifest['label'] == 'Management Center'
-          assert manifest['has_api'] is True
-          assert manifest['entry'] == 'src/index.js'
-          assert manifest['version'] == yaml_version(plugin) == yaml_version(platform_yaml) == '0.4.0'
+          assert manifest['entry'] == 'dist/index.js'
+          assert manifest['api'] == 'compat_api.py'
+          assert 'has_api' not in manifest
+          assert manifest['version'] == yaml_version(plugin) == yaml_version(platform_yaml) == '0.4.1'
           for tool in ('wechat_send_message', 'task_center_upcoming', 'management_overview', 'agent_create', 'project_create'):
               assert tool in plugin
           for tab in ('overview', 'agents', 'projects', 'tasks'):
               assert tab in dashboard
-          for route in ('/management/overview', '/agents', '/projects'):
-              assert route in api
-          assert 'if (!outcome.ok) return;' in dashboard
-          assert 'gateway_restart' in dashboard  # human-confirmed Dashboard surface
+          assert '/capabilities' in compat_api
+          assert 'project_supported' in compat_api
+          assert 'project_unavailable_payload' in compat_api
+          assert 'dashboard\\dist\\index.js' in installer
+          assert 'dashboard\\src\\index.js' in installer
+          assert 'Test-HermesCapability' in installer
+          assert 'api/dashboard/plugins/rescan' in installer
+          assert (root / 'doctor.ps1').is_file()
+          assert (root / 'compatibility.py').is_file()
+          assert (root / 'management/service.py').is_file()
+          assert (root / 'hermes_cli.py').is_file()
           agent_action_block = schemas.split('AGENT_ACTION =', 1)[1].split('PROJECT_LIST =', 1)[0]
           assert 'gateway_restart' not in agent_action_block
           assert '"delete"' not in agent_action_block
           task_action_block = schemas.split('TASK_CENTER_ACTION =', 1)[1].split('TASK_CENTER_HISTORY =', 1)[0]
           assert '"enum": ["pause", "resume", "run", "remove", "assign", "archive"]' in task_action_block
-          assert (root / 'management/service.py').is_file()
-          assert (root / 'hermes_cli.py').is_file()
-          assert (root / 'requirements.txt').is_file()
-          assert 'PyYAML' in (root / 'requirements.txt').read_text('utf-8')
-          assert '-r requirements.txt' in (root / 'requirements-windows.txt').read_text('utf-8')
-
           tree = ast.parse((root / 'platforms/wechat-desktop/adapter.py').read_text('utf-8'))
           names = {node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
           assert {'register', 'connect', 'disconnect', 'send'} <= names
-          print('v0.4 manifests, safety contracts, management center, dependencies, and platform surface ok')
+          print('v0.4.1 compatibility, manifest, installer, schemas, and platform surface ok')
           PY
 
   windows-installer:
@@ -91,31 +94,31 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Parse PowerShell installer
+      - name: Parse PowerShell scripts
         shell: pwsh
         run: |
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path "hermes-extensions/install.ps1"),
-            [ref]$tokens,
-            [ref]$errors
-          ) | Out-Null
-          if ($errors.Count -gt 0) {
-            $errors | Format-List | Out-String | Write-Error
-            exit 1
+          foreach ($file in @("hermes-extensions/install.ps1", "hermes-extensions/doctor.ps1")) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | Format-List | Out-String | Write-Error
+              exit 1
+            }
           }
-          Write-Host "install.ps1 syntax ok"
+          Write-Host "PowerShell syntax ok"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - name: Install shared dependencies
         shell: pwsh
         run: python -m pip install -r hermes-extensions/requirements.txt
-      - name: Compile Windows and management modules
+      - name: Compile Windows and compatibility modules
         shell: pwsh
         run: |
           python -m py_compile hermes-extensions/hermes_cli.py
+          python -m py_compile hermes-extensions/compatibility.py
+          python -m py_compile hermes-extensions/dashboard/compat_api.py
           python -m py_compile hermes-extensions/wechat/adapter.py
           python -m py_compile hermes-extensions/platforms/wechat-desktop/adapter.py
           python -m py_compile hermes-extensions/management/service.py
