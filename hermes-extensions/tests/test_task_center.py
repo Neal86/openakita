@@ -111,3 +111,27 @@ def test_profile_path_escape_is_rejected(tmp_path: Path) -> None:
     center = TaskCenter(tmp_path)
     with pytest.raises(ValueError):
         center._profile_home("../../outside")
+
+
+def test_include_completed_requests_archived_kanban(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    center = TaskCenter(tmp_path)
+    monkeypatch.setattr(center, "_kanban", lambda args: calls.append(args) or [])
+    center.kanban_tasks(include_completed=True)
+    assert calls == [["list", "--archived"]]
+
+
+def test_kanban_history_prefers_native_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    center = TaskCenter(tmp_path)
+    center.hermes = "hermes"
+    calls: list[list[str]] = []
+
+    def fake_json(command, env=None):
+        calls.append(command)
+        return {"runs": [{"id": "r1", "outcome": "completed", "started_at": "2030-01-01T00:00:00Z"}]}
+
+    monkeypatch.setattr(service, "_json_output", fake_json)
+    rows = center.history("kanban", "t1")
+    assert calls == [["hermes", "kanban", "runs", "t1", "--json"]]
+    assert rows[0]["type"] == "kanban_run"
+    assert rows[0]["task_id"] == "t1"
