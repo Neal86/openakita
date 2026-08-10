@@ -1,5 +1,5 @@
 name: hermes-extensions
-version: "0.4.1"
+version: "0.4.2"
 description: Standalone Hermes extensions for hardened Windows WeChat automation, task management, and native Agent/Project administration
 provides_tools:
   - wechat_status
