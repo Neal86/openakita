@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
+from .compatibility import detect_capabilities, project_unavailable_payload
 from .management import ManagementCenter
 from .task_center import TaskCenter
 from .wechat import WeChatDesktop
@@ -38,7 +39,36 @@ def _resolve_cron_profile(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _management_overview() -> dict[str, Any]:
-    data = ManagementCenter().overview()
+    caps = detect_capabilities()
+    manager = ManagementCenter()
+    if caps.project:
+        data = manager.overview()
+    else:
+        agents = manager.agent_list(probe_runtime=True)
+        errors = [
+            {"scope": f"agent:{agent['name']}", "message": str(agent["status_error"])}
+            for agent in agents
+            if agent.get("status_error")
+        ]
+        errors.append({"scope": "projects", "message": project_unavailable_payload()["message"]})
+        data = {
+            "counts": {
+                "agents": len(agents),
+                "running_agents": sum(
+                    1
+                    for agent in agents
+                    if str(agent.get("gateway") or "").lower().startswith("running")
+                ),
+                "projects": 0,
+                "archived_projects": 0,
+            },
+            "agents": agents,
+            "projects": [],
+            "active_profile": manager._active_profile(),
+            "partial": True,
+            "errors": errors,
+        }
+
     task_center = TaskCenter()
     tasks = task_center.overview(include_completed=False)
     data["task_counts"] = tasks.get("counts", {})
@@ -46,7 +76,19 @@ def _management_overview() -> dict[str, Any]:
     if tasks.get("kanban_error"):
         data.setdefault("errors", []).append({"scope": "tasks:kanban", "message": str(tasks["kanban_error"])})
         data["partial"] = True
+    data["capabilities"] = caps.to_dict()
+    data["project_supported"] = caps.project
     return data
+
+
+def _project_available() -> bool:
+    return detect_capabilities().project
+
+
+def _unsupported_project_result() -> dict[str, Any]:
+    payload = project_unavailable_payload()
+    payload["capabilities"] = detect_capabilities().to_dict()
+    return payload
 
 
 def wechat_status(args: dict, **kwargs) -> str:
@@ -150,31 +192,39 @@ def agent_action(args: dict, **kwargs) -> str:
 
 def project_list(args: dict, **kwargs) -> str:
     del kwargs
+    if not _project_available():
+        return _result(_unsupported_project_result)
     profile = str(args.get("profile") or "").strip() or None
     include_archived = bool(args.get("include_archived", True))
 
     def load():
         center = ManagementCenter()
         if profile:
-            return {"items": center.project_list(profile, include_archived), "partial": False, "errors": []}
+            return {"supported": True, "items": center.project_list(profile, include_archived), "partial": False, "errors": []}
         snapshot = center.snapshot(include_archived=include_archived)
-        return {"items": snapshot["projects"], "partial": snapshot["partial"], "errors": snapshot["errors"]}
+        return {"supported": True, "items": snapshot["projects"], "partial": snapshot["partial"], "errors": snapshot["errors"]}
 
     return _result(load)
 
 
 def project_get(args: dict, **kwargs) -> str:
     del kwargs
+    if not _project_available():
+        return _result(_unsupported_project_result)
     return _result(lambda: ManagementCenter().project_get(str(args.get("project") or ""), str(args.get("profile") or "default")))
 
 
 def project_create(args: dict, **kwargs) -> str:
     del kwargs
+    if not _project_available():
+        return _result(lambda: (_ for _ in ()).throw(RuntimeError(project_unavailable_payload()["message"])))
     return _result(lambda: ManagementCenter().project_create(dict(args)))
 
 
 def project_update(args: dict, **kwargs) -> str:
     del kwargs
+    if not _project_available():
+        return _result(lambda: (_ for _ in ()).throw(RuntimeError(project_unavailable_payload()["message"])))
     payload = dict(args)
     project = str(payload.pop("project", ""))
     profile = str(payload.pop("profile", "default"))
@@ -183,4 +233,6 @@ def project_update(args: dict, **kwargs) -> str:
 
 def project_action(args: dict, **kwargs) -> str:
     del kwargs
+    if not _project_available():
+        return _result(lambda: (_ for _ in ()).throw(RuntimeError(project_unavailable_payload()["message"])))
     return _result(lambda: ManagementCenter().project_action(str(args.get("project") or ""), str(args.get("profile") or "default"), str(args.get("action") or ""), str(args.get("value") or "") or None))
