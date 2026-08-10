@@ -1,4 +1,4 @@
-"""Official Hermes Agent OpenAI-compatible HTTP/SSE client."""
+"""Official Hermes Agent HTTP/SSE client plus embedded Desktop transport."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from .models import HermesNode
+from .native_runtime import NativeHermesRuntime
 
 
 @dataclass
@@ -22,21 +23,17 @@ class HermesResponse:
 
 
 class HermesClient:
-    """Client for Nous Research Hermes Agent's official API server.
-
-    Shared OpenAkita Hermes instances use ``X-OpenAkita-Agent-Id`` to select
-    the isolated child process for one Agent profile. Dedicated instances
-    accept the same header, so callers do not need separate code paths.
-    """
+    """Client facade for remote Hermes nodes and OpenAkita's embedded runtime."""
 
     def __init__(self, node: HermesNode) -> None:
         self.node = node
 
+    @property
+    def is_native(self) -> bool:
+        return self.node.base_url.startswith("native://")
+
     def _headers(self, *, session_id: str = "", agent_id: str = "") -> dict[str, str]:
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
         if self.node.api_key_env:
             key = os.environ.get(self.node.api_key_env, "").strip()
             if key:
@@ -56,6 +53,14 @@ class HermesClient:
         return messages
 
     async def health(self) -> dict[str, Any]:
+        if self.is_native:
+            if not NativeHermesRuntime.available():
+                raise RuntimeError("Embedded Hermes runtime unavailable")
+            return {
+                "status": "ok",
+                "platform": "openakita-native",
+                "hermes_version": NativeHermesRuntime.version(),
+            }
         async with httpx.AsyncClient(timeout=min(self.node.timeout_seconds, 15)) as client:
             response = await client.get(f"{self.node.base_url}/health", headers=self._headers())
             response.raise_for_status()
@@ -74,6 +79,21 @@ class HermesClient:
         tools: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> HermesResponse:
+        if self.is_native:
+            data = await NativeHermesRuntime.run(
+                message=message,
+                agent_id=agent_id,
+                session_id=session_id,
+                system=system,
+                metadata=metadata,
+            )
+            return HermesResponse(
+                content=str(data.get("content") or ""),
+                node_id=self.node.id,
+                usage=data.get("usage") or {},
+                metadata=data.get("metadata") or {},
+            )
+
         payload: dict[str, Any] = {
             "model": f"agent:{agent_id}" if agent_id else "openakita-auto",
             "messages": self._messages(message, system),
@@ -118,6 +138,17 @@ class HermesClient:
         tools: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
+        if self.is_native:
+            async for event in NativeHermesRuntime.run_stream(
+                message=message,
+                agent_id=agent_id,
+                session_id=session_id,
+                system=system,
+                metadata=metadata,
+            ):
+                yield event
+            return
+
         payload: dict[str, Any] = {
             "model": f"agent:{agent_id}" if agent_id else "openakita-auto",
             "messages": self._messages(message, system),
@@ -138,40 +169,38 @@ class HermesClient:
                 json=payload,
             ) as response,
         ):
-                response.raise_for_status()
-                event_name = ""
-                async for line in response.aiter_lines():
-                    if not line:
-                        event_name = ""
-                        continue
-                    if line.startswith(":"):
-                        continue
-                    if line.startswith("event:"):
-                        event_name = line[6:].strip()
-                        continue
-                    raw = line[5:].strip() if line.startswith("data:") else line.strip()
-                    if raw == "[DONE]":
-                        yield {"type": "done"}
-                        return
-                    try:
-                        data = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-
-                    if event_name == "hermes.tool.progress":
-                        yield {"type": "tool_progress", "event": data}
-                        continue
-
-                    choices = data.get("choices") or []
-                    if not choices:
-                        continue
-                    delta = choices[0].get("delta") or {}
-                    content = delta.get("content")
-                    if content:
-                        yield {"type": "text_delta", "content": str(content)}
-                    if delta.get("tool_calls"):
-                        yield {"type": "tool_call_delta", "tool_calls": delta["tool_calls"]}
-                    finish_reason = choices[0].get("finish_reason")
-                    if finish_reason:
-                        yield {"type": "done", "finish_reason": finish_reason}
-                        return
+            response.raise_for_status()
+            event_name = ""
+            async for line in response.aiter_lines():
+                if not line:
+                    event_name = ""
+                    continue
+                if line.startswith(":"):
+                    continue
+                if line.startswith("event:"):
+                    event_name = line[6:].strip()
+                    continue
+                raw = line[5:].strip() if line.startswith("data:") else line.strip()
+                if raw == "[DONE]":
+                    yield {"type": "done"}
+                    return
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if event_name == "hermes.tool.progress":
+                    yield {"type": "tool_progress", "event": data}
+                    continue
+                choices = data.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                content = delta.get("content")
+                if content:
+                    yield {"type": "text_delta", "content": str(content)}
+                if delta.get("tool_calls"):
+                    yield {"type": "tool_call_delta", "tool_calls": delta["tool_calls"]}
+                finish_reason = choices[0].get("finish_reason")
+                if finish_reason:
+                    yield {"type": "done", "finish_reason": finish_reason}
+                    return
