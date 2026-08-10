@@ -1,151 +1,26 @@
 """Schemas exposed to Hermes for the extensions plugin."""
 
-WECHAT_STATUS = {
-    "name": "wechat_status",
-    "description": "Check whether Windows WeChat is running and whether the desktop connector can inspect it.",
-    "parameters": {"type": "object", "properties": {}},
-}
+WECHAT_STATUS = {"name":"wechat_status","description":"Check whether Windows WeChat is running and inspectable.","parameters":{"type":"object","properties":{}}}
+WECHAT_LIST_CHATS = {"name":"wechat_list_chats","description":"List visible WeChat conversations with best-effort unread state.","parameters":{"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":200,"default":50}}}}
+WECHAT_GET_UNREAD_CHATS = {"name":"wechat_get_unread_chats","description":"List conversations that appear unread.","parameters":{"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":200,"default":50}}}}
+WECHAT_GET_MESSAGES = {"name":"wechat_get_messages","description":"Open an exact conversation and read newest visible messages.","parameters":{"type":"object","properties":{"chat":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100,"default":20}},"required":["chat"]}}
+WECHAT_SEND_MESSAGE = {"name":"wechat_send_message","description":"Send text to an exact WeChat conversation with fail-closed target verification.","parameters":{"type":"object","properties":{"chat":{"type":"string"},"text":{"type":"string","minLength":1,"maxLength":4000},"dry_run":{"type":"boolean","default":False}},"required":["chat","text"]}}
 
-WECHAT_LIST_CHATS = {
-    "name": "wechat_list_chats",
-    "description": "List visible WeChat conversations with best-effort unread state. Use before opening or replying to a chat.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
-        },
-    },
-}
+TASK_CENTER_OVERVIEW = {"name":"task_center_overview","description":"Return fleet-wide Hermes profile, Cron, Kanban, and execution summaries.","parameters":{"type":"object","properties":{"profile":{"type":"string"},"include_completed":{"type":"boolean","default":False}}}}
+TASK_CENTER_UPCOMING = {"name":"task_center_upcoming","description":"List upcoming Hermes tasks with recurring Cron occurrences expanded.","parameters":{"type":"object","properties":{"hours":{"type":"integer","minimum":1,"maximum":2160,"default":168},"profile":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":1000,"default":200}}}}
+TASK_CENTER_CREATE = {"name":"task_center_create","description":"Create a native Hermes Cron or Kanban task.","parameters":{"type":"object","properties":{"type":{"type":"string","enum":["cron","kanban"]},"name":{"type":"string"},"prompt":{"type":"string"},"schedule":{"type":"string"},"profile":{"type":"string"},"priority":{"type":"integer","minimum":0,"maximum":100},"deliver":{"type":"string"}},"required":["type","name"]}}
+TASK_CENTER_UPDATE = {"name":"task_center_update","description":"Update a native Hermes Cron or Kanban task.","parameters":{"type":"object","properties":{"type":{"type":"string","enum":["cron","kanban"]},"id":{"type":"string"},"name":{"type":"string"},"prompt":{"type":"string"},"schedule":{"type":"string"},"profile":{"type":"string"},"priority":{"type":"integer","minimum":0,"maximum":100}},"required":["type","id"]}}
+TASK_CENTER_ACTION = {"name":"task_center_action","description":"Pause, resume, run or remove Cron; assign/archive Kanban.","parameters":{"type":"object","properties":{"type":{"type":"string","enum":["cron","kanban"]},"id":{"type":"string"},"action":{"type":"string"},"value":{"type":"string"},"profile":{"type":"string"}},"required":["type","id","action"]}}
+TASK_CENTER_HISTORY = {"name":"task_center_history","description":"Read native execution history for Cron or Kanban.","parameters":{"type":"object","properties":{"type":{"type":"string","enum":["cron","kanban"]},"id":{"type":"string"},"profile":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":200,"default":20}},"required":["type","id"]}}
 
-WECHAT_GET_UNREAD_CHATS = {
-    "name": "wechat_get_unread_chats",
-    "description": "List WeChat conversations that appear unread. Results include the exact conversation names for safe follow-up calls.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
-        },
-    },
-}
-
-WECHAT_GET_MESSAGES = {
-    "name": "wechat_get_messages",
-    "description": "Open an exact WeChat conversation and read the newest visible message rows. Does not send anything.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "chat": {"type": "string", "description": "Exact conversation name returned by wechat_list_chats."},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
-        },
-        "required": ["chat"],
-    },
-}
-
-WECHAT_SEND_MESSAGE = {
-    "name": "wechat_send_message",
-    "description": (
-        "Send text to an exact WeChat conversation. The connector re-opens and re-verifies the target immediately before sending "
-        "and fails closed if it cannot verify the target. Use only after identifying the exact chat."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "chat": {"type": "string", "description": "Exact conversation name."},
-            "text": {"type": "string", "minLength": 1, "maxLength": 4000},
-            "dry_run": {"type": "boolean", "default": False, "description": "When true, verify target and payload but do not press Send."},
-        },
-        "required": ["chat", "text"],
-    },
-}
-
-TASK_CENTER_OVERVIEW = {
-    "name": "task_center_overview",
-    "description": "Return a fleet-wide view of Hermes profiles, recurring/one-shot cron jobs, Kanban tasks, and current execution summaries.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "profile": {"type": "string", "description": "Optional profile filter."},
-            "include_completed": {"type": "boolean", "default": False},
-        },
-    },
-}
-
-TASK_CENTER_UPCOMING = {
-    "name": "task_center_upcoming",
-    "description": "List the next scheduled Hermes tasks across profiles, including expanded future occurrences for recurring cron jobs.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "hours": {"type": "integer", "minimum": 1, "maximum": 24 * 90, "default": 24 * 7},
-            "profile": {"type": "string"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 200},
-        },
-    },
-}
-
-TASK_CENTER_CREATE = {
-    "name": "task_center_create",
-    "description": "Create a Hermes cron task (one-shot or recurring) or a Hermes Kanban task without creating a second scheduler.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "type": {"type": "string", "enum": ["cron", "kanban"]},
-            "name": {"type": "string", "minLength": 1},
-            "prompt": {"type": "string", "description": "Cron prompt or Kanban body."},
-            "schedule": {"type": "string", "description": "Cron schedule such as 'every 10m', '0 9 * * *', or ISO8601. Required for cron."},
-            "profile": {"type": "string", "description": "Hermes profile that owns/runs the cron job or assignee for Kanban."},
-            "priority": {"type": "integer", "minimum": 0, "maximum": 100},
-            "deliver": {"type": "string", "description": "Cron delivery target, e.g. local, origin, telegram, or wechat_desktop."},
-        },
-        "required": ["type", "name"],
-    },
-}
-
-TASK_CENTER_UPDATE = {
-    "name": "task_center_update",
-    "description": "Update an existing Hermes cron or Kanban task using Hermes' native mutation interfaces.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "type": {"type": "string", "enum": ["cron", "kanban"]},
-            "id": {"type": "string"},
-            "name": {"type": "string"},
-            "prompt": {"type": "string"},
-            "schedule": {"type": "string", "description": "Cron-only schedule."},
-            "profile": {"type": "string", "description": "Owning Cron profile or Kanban assignee."},
-            "priority": {"type": "integer", "minimum": 0, "maximum": 100, "description": "Kanban-only priority."},
-        },
-        "required": ["type", "id"],
-    },
-}
-
-TASK_CENTER_ACTION = {
-    "name": "task_center_action",
-    "description": "Pause, resume, run, or remove a Hermes Cron job; assign or archive a native Hermes Kanban task.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "type": {"type": "string", "enum": ["cron", "kanban"]},
-            "id": {"type": "string"},
-            "action": {"type": "string", "enum": ["pause", "resume", "run", "remove", "assign", "archive"]},
-            "value": {"type": "string", "description": "Assignee value; required only for the Kanban assign action."},
-            "profile": {"type": "string", "description": "Owning Hermes profile for Cron actions. Omit to auto-resolve an unambiguous task ID/name."},
-        },
-        "required": ["type", "id", "action"],
-    },
-}
-
-TASK_CENTER_HISTORY = {
-    "name": "task_center_history",
-    "description": "Read durable execution history for a Hermes Cron job or the lifecycle record for a native Hermes Kanban task.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "type": {"type": "string", "enum": ["cron", "kanban"]},
-            "id": {"type": "string"},
-            "profile": {"type": "string", "description": "Optional owning Cron profile; omitted values are auto-resolved when unique."},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 20},
-        },
-        "required": ["type", "id"],
-    },
-}
+MANAGEMENT_OVERVIEW = {"name":"management_overview","description":"Return Hermes agents/profiles, projects, gateway state, workspaces and task counts.","parameters":{"type":"object","properties":{}}}
+AGENT_LIST = {"name":"agent_list","description":"List Hermes agents (native profiles) with model, workspace, gateway and task metadata.","parameters":{"type":"object","properties":{}}}
+AGENT_GET = {"name":"agent_get","description":"Get one Hermes agent/profile including description, model, workspace and SOUL content.","parameters":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}}
+AGENT_CREATE = {"name":"agent_create","description":"Create a native Hermes profile/agent. Supports blank, config clone, or clone-all modes.","parameters":{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"clone_mode":{"type":"string","enum":["blank","clone","clone_all"]},"clone_from":{"type":"string"},"no_skills":{"type":"boolean"},"workspace":{"type":"string"},"model":{"type":"string"},"provider":{"type":"string"},"soul":{"type":"string"}},"required":["name"]}}
+AGENT_UPDATE = {"name":"agent_update","description":"Edit a Hermes agent/profile name, role, workspace, model/provider or SOUL.","parameters":{"type":"object","properties":{"agent":{"type":"string"},"name":{"type":"string"},"description":{"type":"string"},"workspace":{"type":"string"},"model":{"type":"string"},"provider":{"type":"string"},"soul":{"type":"string"}},"required":["agent"]}}
+AGENT_ACTION = {"name":"agent_action","description":"Operate on an agent: use, gateway_start/stop/restart/status, set_workspace, export, or delete.","parameters":{"type":"object","properties":{"name":{"type":"string"},"action":{"type":"string","enum":["use","gateway_start","gateway_stop","gateway_restart","gateway_status","set_workspace","export","delete"]},"value":{"type":"string"}},"required":["name","action"]}}
+PROJECT_LIST = {"name":"project_list","description":"List native Hermes projects across profiles or within one profile.","parameters":{"type":"object","properties":{"profile":{"type":"string"},"include_archived":{"type":"boolean","default":True}}}}
+PROJECT_GET = {"name":"project_get","description":"Get a native Hermes project and computed agents whose terminal.cwd is one of its folders.","parameters":{"type":"object","properties":{"project":{"type":"string"},"profile":{"type":"string","default":"default"}},"required":["project"]}}
+PROJECT_CREATE = {"name":"project_create","description":"Create a native Hermes project with folders, primary repo, board and optional agent assignment.","parameters":{"type":"object","properties":{"name":{"type":"string"},"profile":{"type":"string"},"slug":{"type":"string"},"folders":{"type":"array","items":{"type":"string"}},"primary":{"type":"string"},"description":{"type":"string"},"icon":{"type":"string"},"color":{"type":"string"},"board":{"type":"string"},"use":{"type":"boolean"},"agent":{"type":"string"}},"required":["name"]}}
+PROJECT_UPDATE = {"name":"project_update","description":"Update a native Hermes project's name, folders, primary repo, board, or assigned agent.","parameters":{"type":"object","properties":{"project":{"type":"string"},"profile":{"type":"string"},"name":{"type":"string"},"primary":{"type":"string"},"board":{"type":"string"},"add_folders":{"type":"array","items":{"type":"string"}},"remove_folders":{"type":"array","items":{"type":"string"}},"agent":{"type":"string"}},"required":["project"]}}
+PROJECT_ACTION = {"name":"project_action","description":"Operate on a native Hermes project: use/archive/restore/add_folder/remove_folder/set_primary/bind_board/assign_agent.","parameters":{"type":"object","properties":{"project":{"type":"string"},"profile":{"type":"string"},"action":{"type":"string","enum":["use","archive","restore","add_folder","remove_folder","set_primary","bind_board","assign_agent"]},"value":{"type":"string"}},"required":["project","action"]}}
