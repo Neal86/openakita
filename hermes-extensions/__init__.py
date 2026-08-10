@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from . import schemas, tools
+from .compatibility import detect_capabilities
 from .wechat import WeChatDesktop
 
 ToolSpec = tuple[str, dict[str, Any], Any]
@@ -48,20 +49,26 @@ def register(ctx):
             ("task_center_history", schemas.TASK_CENTER_HISTORY, tools.task_center_history),
         ],
     )
-    _register_group(
-        ctx,
-        "hermes_extensions_management",
-        [
-            ("management_overview", schemas.MANAGEMENT_OVERVIEW, tools.management_overview),
-            ("agent_list", schemas.AGENT_LIST, tools.agent_list),
-            ("agent_get", schemas.AGENT_GET, tools.agent_get),
-            ("agent_create", schemas.AGENT_CREATE, tools.agent_create),
-            ("agent_update", schemas.AGENT_UPDATE, tools.agent_update),
-            ("agent_action", schemas.AGENT_ACTION, tools.agent_action),
-            ("project_list", schemas.PROJECT_LIST, tools.project_list),
-            ("project_get", schemas.PROJECT_GET, tools.project_get),
-            ("project_create", schemas.PROJECT_CREATE, tools.project_create),
-            ("project_update", schemas.PROJECT_UPDATE, tools.project_update),
-            ("project_action", schemas.PROJECT_ACTION, tools.project_action),
-        ],
-    )
+
+    management_specs: list[ToolSpec] = [
+        ("management_overview", schemas.MANAGEMENT_OVERVIEW, tools.management_overview),
+        ("agent_list", schemas.AGENT_LIST, tools.agent_list),
+        ("agent_get", schemas.AGENT_GET, tools.agent_get),
+        ("agent_create", schemas.AGENT_CREATE, tools.agent_create),
+        ("agent_update", schemas.AGENT_UPDATE, tools.agent_update),
+        ("agent_action", schemas.AGENT_ACTION, tools.agent_action),
+    ]
+    # Native Projects did not exist in older Hermes builds (including the
+    # user's v0.16 installation). Do not expose dead Project tools to the LLM.
+    # Dashboard Project UI still shows the structured compatibility state.
+    if detect_capabilities().project:
+        management_specs.extend(
+            [
+                ("project_list", schemas.PROJECT_LIST, tools.project_list),
+                ("project_get", schemas.PROJECT_GET, tools.project_get),
+                ("project_create", schemas.PROJECT_CREATE, tools.project_create),
+                ("project_update", schemas.PROJECT_UPDATE, tools.project_update),
+                ("project_action", schemas.PROJECT_ACTION, tools.project_action),
+            ]
+        )
+    _register_group(ctx, "hermes_extensions_management", management_specs)
