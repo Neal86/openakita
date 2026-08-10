@@ -2,7 +2,7 @@
 
 Standalone extensions for **NousResearch/hermes-agent**. This package does not depend on the OpenAkita runtime, APIs, agents, or databases.
 
-Current package version: **0.4.0**.
+Current package version: **0.4.1**.
 
 ## Included
 
@@ -10,65 +10,52 @@ Current package version: **0.4.0**.
 
 `hermes dashboard` gets one **Management Center** entry with four tabs:
 
-- **Overview** — projects, agents, running gateways, scheduled/running/failed task counts, upcoming work, and partial-load errors
+- **Overview** — agents, projects when supported, gateway state, task counts, upcoming work, and partial-load errors
 - **Agents** — create, inspect, rename, edit, select, start/restart gateways, edit SOUL/workspace/model/provider, and delete native Hermes Profiles
-- **Projects** — create and manage native profile-scoped Hermes Projects, folders, primary repo, Kanban binding, active/archive state, and Workspace Agent selection
+- **Projects** — native Hermes Projects when the installed Hermes build exposes `hermes project`
 - **Tasks** — fleet-wide native Cron/Kanban Task Center
 
-Hermes Profiles are treated as Agents; Hermes Projects remain first-class native Projects. The plugin does **not** create another Agent, Project, scheduler, or task database.
+Hermes Profiles are treated as Agents. The plugin does **not** create another Agent, Project, scheduler, or task database.
 
-#### v0.4 management hardening
+### Hermes v0.16 compatibility
 
-- Management reads use a single Agent snapshot that is reused while expanding Projects. A Project no longer recursively re-runs a full Agent scan.
-- Workspace-to-Project matching uses normalized paths instead of raw string equality, including Windows case normalization.
-- Partial profile/project failures are returned as `partial=true` plus scoped `errors[]` instead of silently appearing as empty data.
-- Gateway start/stop/restart is followed by status polling. A command that exits successfully but does not reach the expected runtime state returns `ok=false` with an explicit verification warning.
-- `gateway_restart` remains available from the human Dashboard with confirmation, but autonomous Hermes `agent_action` tools intentionally do not expose restart or delete.
-- Dashboard forms stay open and preserve user input after failed create/update operations.
-- Agent rename is wired end-to-end and the UI reopens the returned new profile name.
-- Project edit UI only exposes fields the current Hermes Project CLI can actually mutate. Description/icon/color remain creation-time fields until Hermes exposes a stable edit command for them.
-- Agent-to-Project UI wording is **Workspace Agent** because the relationship is computed from the Agent's native `terminal.cwd`, not stored as a multi-project membership database.
-- Shared Hermes subprocess execution lives in `hermes_cli.py` and is used by Management and Task Center.
-- Dashboard loads the maintainable `dashboard/src/index.js` directly; the stale generated JavaScript bundle was removed.
+v0.4.1 is designed to install safely on Hermes builds that have Profiles/Dashboard/plugins but do **not** yet expose the native `hermes project` command.
 
-Native Agent/Profile operations use official Hermes commands such as:
+On such builds:
 
-- `hermes profile create/list/show/use/rename/delete/describe/export`
-- profile-scoped `hermes config set terminal.cwd ...`
-- profile-scoped `hermes config set model.provider ...`
-- profile-scoped `hermes config set model.default ...`
-- profile-scoped `hermes gateway start/stop/restart/status`
+- Agents remain available.
+- Tasks remain available.
+- Dashboard remains available.
+- Windows WeChat remains available.
+- Projects return `supported: false` and are shown as unavailable instead of causing the Management Center to fail.
+- Projects automatically become available after Hermes is upgraded to a build that exposes native `hermes project`.
 
-SOUL.md editing is the only direct profile-file mutation because Hermes does not currently expose a dedicated SOUL mutation command. The write is restricted to a validated profile home and replaced atomically.
+The Dashboard manifest follows the Hermes v0.16 extension format and uses:
 
-Native Project operations use:
+```json
+{
+  "entry": "dist/index.js",
+  "api": "compat_api.py"
+}
+```
 
-- `hermes project create/list/show`
-- `hermes project add-folder/remove-folder`
-- `hermes project rename/set-primary/use`
-- `hermes project archive/restore/bind-board`
+The source Dashboard remains under `dashboard/src/index.js`; installation/release packaging creates the pre-built `dashboard/dist/index.js` expected by Hermes.
 
-Projects are profile-scoped exactly as Hermes defines them. Workspace Agent selection sets the Agent's native `terminal.cwd` to the Project primary folder; the UI computes matching Agents from normalized workspace/folder paths.
+### Management hardening
 
-Registered management tools:
-
-- `management_overview`
-- `agent_list`
-- `agent_get`
-- `agent_create`
-- `agent_update`
-- `agent_action`
-- `project_list`
-- `project_get`
-- `project_create`
-- `project_update`
-- `project_action`
-
-`management_overview` returns the same high-level management/task summary used by the Dashboard, including task counts and the next seven days of work.
+- Management uses a single Agent snapshot while expanding Projects, avoiding Project-to-Agent N×M runtime probing.
+- Workspace/Project path matching is normalized, including Windows case normalization.
+- Partial load failures return scoped errors instead of silently becoming empty data.
+- Gateway start/stop/restart is followed by runtime-state verification.
+- Autonomous Hermes Agent tools do not expose profile deletion or Gateway restart; the human Dashboard keeps restart behind confirmation.
+- Failed Dashboard writes preserve forms and user input.
+- Agent rename is wired end-to-end.
+- Project edit UI only exposes fields Hermes can actually mutate.
+- Shared Hermes subprocess handling lives in `hermes_cli.py`.
 
 ### 2. Windows WeChat desktop tools
 
-Registered Hermes tools:
+Registered tools:
 
 - `wechat_status`
 - `wechat_list_chats`
@@ -76,23 +63,9 @@ Registered Hermes tools:
 - `wechat_get_messages`
 - `wechat_send_message`
 
-The connector uses native Windows UI Automation through `pywinauto`; it does not use fixed screen coordinates.
-
-Send safety is fail-closed:
-
-1. Search for the requested exact conversation name.
-2. Reject the operation when multiple exact UIA search rows exist.
-3. Open the single exact result when available.
-4. Verify the visible conversation title in the content header.
-5. Focus the message editor and paste the payload.
-6. Verify the exact title again immediately before Enter.
-7. Refuse the send if any verification step fails.
-
-Duplicate identical sends to the same conversation are suppressed for 10 minutes by default. Message reads expose best-effort `text`, `sender`, `time`, and `direction` fields when the current WeChat UIA tree provides them. The gateway ignores a newest message positively identified as outbound so Hermes does not re-ingest its own reply.
+The connector uses native Windows UI Automation through `pywinauto`, never fixed screen coordinates. Sending is fail-closed: exact chat selection and the visible title are verified before the send side effect, duplicate identical sends are suppressed, and `dry_run=true` verifies without pressing Enter.
 
 ### 3. Hermes Task Center
-
-The Task Center reads native profile Cron state, native Cron execution SQLite history, native Kanban JSON surfaces, and `hermes kanban runs <id> --json` when available. All mutations use Hermes CLI operations.
 
 Registered tools:
 
@@ -103,60 +76,76 @@ Registered tools:
 - `task_center_action`
 - `task_center_history`
 
-Task management supports all Hermes profiles/agents, recurring and one-shot Cron jobs, 24-hour / 7-day / 30-day future windows, expanded recurring occurrences, Kanban assignments, completed rows, Cron pause/resume/run/remove, Kanban archive, task creation, task detail and execution history.
+The Task Center reads native Hermes Cron/Kanban state and uses official Hermes CLI mutations. It supports recurring/one-shot jobs, upcoming windows, execution history, pause/resume/run/remove, Kanban archive/assignment, and multi-profile aggregation.
 
-Tool schemas are strict in v0.4: task actions are enum-constrained, unknown properties are rejected, field lengths are bounded, and autonomous Agent lifecycle actions exclude high-risk restart/delete.
+## Install for testing
 
-## Install into local Hermes
-
-From this directory on the machine that runs Hermes:
+From the extracted `hermes-extensions-v0.4.1` directory in Windows PowerShell:
 
 ```powershell
-./install.ps1
+Set-ExecutionPolicy -Scope Process Bypass
+.\install.ps1
 ```
 
-The installer resolves `HERMES_HOME`, performs a clean plugin code upgrade while preserving plugin runtime data, installs the general extension and WeChat gateway platform, installs shared dependencies plus Windows UI Automation dependencies, and enables plugins when `hermes` is available.
+The installer:
 
-Useful checks:
+1. Detects `plugins`, `dashboard`, `profile`, `project`, `cron`, and `kanban` capabilities from the **actual installed Hermes**.
+2. Installs the plugin into `~/.hermes/plugins/hermes-extensions/`.
+3. Builds `dashboard/dist/index.js` from the maintained Dashboard source.
+4. Installs the WeChat platform into `~/.hermes/plugins/platforms/wechat-desktop/`.
+5. Installs Python dependencies using the Hermes/uv Python environment when available.
+6. Enables the plugins when supported.
+7. Attempts a hot Dashboard rescan if the Dashboard is already running.
+8. Verifies the installed package structure.
+
+If `plugin_api.py`/`compat_api.py` changed or this is the first install, restart **only** `hermes dashboard`. If WeChat platform Python changed, restart the relevant Hermes Gateway. You do not need to reinstall the whole Hermes application.
+
+Run the compatibility doctor any time:
 
 ```powershell
-hermes plugins list
-hermes plugins enable hermes-extensions
-hermes plugins enable wechat-desktop
-hermes dashboard
+.\doctor.ps1
 ```
 
-For continuous WeChat gateway routing, configure `gateway.platforms.wechat_desktop` or set `WECHAT_DESKTOP_AUTO_ENABLE=1`.
+or after installation:
 
-## Dependencies
+```powershell
+~\.hermes\plugins\hermes-extensions\doctor.ps1
+```
 
-`requirements.txt` contains shared Management/Task Center dependencies (`croniter`, `PyYAML`). `requirements-windows.txt` includes shared requirements plus `pywinauto` and `pyperclip`.
+## Release package
+
+`.github/workflows/hermes-extensions-release.yml` validates and packages only the standalone plugin directory as:
+
+```text
+hermes-extensions-v0.4.1.zip
+hermes-extensions-v0.4.1.zip.sha256
+```
+
+The release archive contains the plugin itself and does not include OpenAkita runtime/application code. Branch builds upload the ZIP as a GitHub Actions artifact; tag builds named `hermes-extensions-v0.4.1` also publish a GitHub Release.
+
+## Useful checks
+
+```powershell
+hermes plugins list --plain --no-bundled
+hermes dashboard --status
+hermes profile create --help
+hermes project --help
+```
+
+A missing `hermes project` command is an expected supported compatibility mode in v0.4.1.
 
 ## Security notes
 
 - Agent/Profile deletion refuses `default` and the currently selected sticky profile.
-- Profile names and SOUL paths are validated to prevent path traversal.
-- API keys are not exposed by the Management Center; provider credentials remain managed by Hermes.
+- Profile names and SOUL paths are validated against traversal.
+- Provider credentials/API keys are not exposed by Management Center.
 - Autonomous Agent tools do not expose profile deletion or Gateway restart.
 - Human Dashboard Gateway restart requires confirmation and runtime-state verification.
-- The WeChat connector is local desktop automation, not an official Tencent API, and refuses outbound messages when it cannot prove the exact selected chat.
-- Hermes dashboard plugin routes share the dashboard process security model. Keep the dashboard bound to localhost unless trusted authentication/network controls are configured.
+- WeChat outbound sends fail closed if the exact conversation cannot be verified.
+- Keep Hermes Dashboard bound to localhost unless trusted authentication/network controls are configured.
 
 ## Validation
 
-GitHub Actions validates:
+CI checks Python compilation, Ruff, unit tests, capability detection, graceful Project fallback, strict tool schemas, Management call-budget regression, Dashboard JavaScript syntax, v0.16-compatible manifest fields, Windows PowerShell syntax, package isolation, release ZIP layout, and Windows module compilation.
 
-- Python compilation and Ruff
-- Management, Task Center, WeChat, and plugin-registration tests
-- Agent rename and create-failure behavior
-- Gateway command-success/state-failure behavior
-- path normalization and traversal protection
-- partial error reporting
-- a Management snapshot call-budget regression that prevents Project-to-Agent N×M runtime probing
-- strict tool schema safety contracts
-- plugin/Platform/Dashboard version consistency
-- Dashboard source JavaScript syntax
-- Windows PowerShell installer syntax
-- Windows compilation of shared CLI, WeChat, and Management modules
-
-A real WeChat acceptance test still requires a native Windows machine with a logged-in WeChat client. CI cannot truthfully substitute for that device-level test.
+A real WeChat acceptance test still requires native Windows with a logged-in WeChat client. CI cannot truthfully substitute for that device-level test.
