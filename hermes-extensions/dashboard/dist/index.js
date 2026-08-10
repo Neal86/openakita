@@ -7,244 +7,142 @@
   const { useCallback, useEffect, useMemo, useState } = React;
   const fetchJSON = SDK.fetchJSON;
   const API = "/api/plugins/hermes-extensions";
-  const PREFS_KEY = "hermes-extensions.task-center.prefs";
+  const PREFS = "hermes-extensions.management.prefs";
 
   function request(path, init) {
     const options = Object.assign({}, init || {});
     if (options.body && !options.headers) options.headers = { "Content-Type": "application/json" };
     return fetchJSON(API + path, options);
   }
+  function fmt(value) { if (!value) return "—"; const d = new Date(value); return Number.isNaN(d.getTime()) ? String(value) : d.toLocaleString(); }
+  function loadPrefs() { try { return JSON.parse(localStorage.getItem(PREFS) || "{}"); } catch (_) { return {}; } }
+  function savePrefs(v) { try { localStorage.setItem(PREFS, JSON.stringify(v)); } catch (_) {} }
+  function Card(p) { return h("div", { className: "hx-card " + (p.className || "") }, p.children); }
+  function Pill(p) { return h("span", { className: "hx-pill " + (p.kind || "") }, p.children); }
+  function Stat(p) { return h(Card, { className: "hx-stat" }, h("div", { className: "hx-stat-value" }, String(p.value || 0)), h("div", { className: "hx-muted" }, p.label)); }
+  function Field(label, child) { return h("label", null, label, child); }
+  function Empty(p) { return h("div", { className: "hx-empty" }, p.children); }
+  function Tabs(p) { return h("div", { className: "hx-tabs" }, ["overview","agents","projects","tasks"].map(function (x) { return h("button", { key:x, className:"hx-tab "+(p.value===x?"active":""), onClick:function(){p.onChange(x);} }, x.charAt(0).toUpperCase()+x.slice(1)); })); }
 
-  function fmt(value) {
-    if (!value) return "—";
-    const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
-  }
-
-  function loadPrefs() {
-    try { return JSON.parse(window.localStorage.getItem(PREFS_KEY) || "{}"); }
-    catch (_) { return {}; }
-  }
-
-  function savePrefs(value) {
-    try { window.localStorage.setItem(PREFS_KEY, JSON.stringify(value)); }
-    catch (_) { /* localStorage is optional */ }
-  }
-
-  function Card(props) { return h("div", { className: "hx-card " + (props.className || "") }, props.children); }
-  function Pill(props) { return h("span", { className: "hx-pill " + (props.kind || "") }, props.children); }
-  function Stat(props) { return h(Card, { className: "hx-stat" }, h("div", { className: "hx-stat-value" }, String(props.value || 0)), h("div", { className: "hx-muted" }, props.label)); }
-  function field(label, child) { return h("label", null, label, child); }
-
-  function TaskCenterPage() {
+  function ManagementApp() {
     const prefs = useMemo(loadPrefs, []);
-    const [overview, setOverview] = useState(null);
+    const [tab, setTab] = useState(prefs.tab || "overview");
+    const [management, setManagement] = useState(null);
+    const [tasks, setTasks] = useState(null);
     const [upcoming, setUpcoming] = useState([]);
-    const [profile, setProfile] = useState(prefs.profile || "");
-    const [range, setRange] = useState(Number(prefs.range) || 168);
-    const [includeCompleted, setIncludeCompleted] = useState(Boolean(prefs.includeCompleted));
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
     const [notice, setNotice] = useState("");
-    const [formOpen, setFormOpen] = useState(false);
-    const [form, setForm] = useState({ type: "cron", name: "", prompt: "", schedule: "", profile: "", priority: 50, deliver: "local" });
-    const [selected, setSelected] = useState(null);
+    const [busy, setBusy] = useState("");
+    const [agentModal, setAgentModal] = useState(false);
+    const [projectModal, setProjectModal] = useState(false);
+    const [taskModal, setTaskModal] = useState(false);
+    const [agentDetail, setAgentDetail] = useState(null);
+    const [projectDetail, setProjectDetail] = useState(null);
+    const [taskDetail, setTaskDetail] = useState(null);
     const [history, setHistory] = useState([]);
-    const [detailLoading, setDetailLoading] = useState(false);
-    const [edit, setEdit] = useState(null);
-    const [busyKey, setBusyKey] = useState("");
+    const [agentForm, setAgentForm] = useState({name:"",description:"",clone_mode:"blank",clone_from:"",workspace:"",model:"",provider:"",soul:"",no_skills:false});
+    const [projectForm, setProjectForm] = useState({name:"",profile:"default",slug:"",folders:"",primary:"",description:"",board:"",agent:"",use:true});
+    const [taskForm, setTaskForm] = useState({type:"cron",name:"",prompt:"",schedule:"",profile:"default",priority:50,deliver:"local"});
+    const [taskProfile, setTaskProfile] = useState(prefs.taskProfile || "");
+    const [taskRange, setTaskRange] = useState(Number(prefs.taskRange)||168);
+    const [includeCompleted, setIncludeCompleted] = useState(Boolean(prefs.includeCompleted));
 
-    useEffect(function () {
-      savePrefs({ profile: profile, range: range, includeCompleted: includeCompleted });
-    }, [profile, range, includeCompleted]);
+    useEffect(function(){ savePrefs({tab:tab,taskProfile:taskProfile,taskRange:taskRange,includeCompleted:includeCompleted}); },[tab,taskProfile,taskRange,includeCompleted]);
 
-    const load = useCallback(async function () {
+    const load = useCallback(async function(){
       setLoading(true); setError("");
       try {
-        const params = new URLSearchParams();
-        if (profile) params.set("profile", profile);
-        if (includeCompleted) params.set("include_completed", "true");
-        const data = await request("/overview" + (params.toString() ? "?" + params.toString() : ""));
-        const upcomingParams = new URLSearchParams({ hours: String(range) });
-        if (profile) upcomingParams.set("profile", profile);
-        const future = await request("/upcoming?" + upcomingParams.toString());
-        setOverview(data); setUpcoming(future.items || []);
-      } catch (err) { setError(err.message || String(err)); }
-      finally { setLoading(false); }
-    }, [profile, range, includeCompleted]);
+        const m = await request("/management/overview");
+        setManagement(m);
+        const q = new URLSearchParams(); if(taskProfile)q.set("profile",taskProfile); if(includeCompleted)q.set("include_completed","true");
+        const t = await request("/overview"+(q.toString()?"?"+q.toString():"")); setTasks(t);
+        const uq = new URLSearchParams({hours:String(taskRange)}); if(taskProfile)uq.set("profile",taskProfile);
+        const u = await request("/upcoming?"+uq.toString()); setUpcoming(u.items||[]);
+      } catch(e){ setError(e.message||String(e)); }
+      finally{ setLoading(false); }
+    },[taskProfile,taskRange,includeCompleted]);
+    useEffect(function(){load();},[load]);
 
-    useEffect(function () { load(); }, [load]);
+    const agents = (management&&management.agents)||[];
+    const projects = (management&&management.projects)||[];
+    const taskProfiles = (tasks&&tasks.profiles)||[];
+    const agentNames = agents.map(function(a){return a.name;});
 
-    const profileNames = useMemo(function () {
-      const rows = (overview && overview.profiles) || [];
-      return rows.map(function (row) { return row.name; }).filter(Boolean);
-    }, [overview]);
+    async function doAction(key, fn, success){ setBusy(key); setError(""); setNotice(""); try{ await fn(); setNotice(success); await load(); }catch(e){setError(e.message||String(e));}finally{setBusy("");} }
 
-    async function createTask(event) {
-      event.preventDefault(); setError(""); setNotice(""); setBusyKey("create");
-      try {
-        const payload = Object.assign({}, form);
-        if (payload.type === "kanban") { delete payload.schedule; delete payload.deliver; }
-        if (!payload.profile) delete payload.profile;
-        await request("/tasks", { method: "POST", body: JSON.stringify(payload) });
-        setFormOpen(false);
-        setForm({ type: "cron", name: "", prompt: "", schedule: "", profile: "", priority: 50, deliver: "local" });
-        setNotice("Task saved in Hermes.");
-        await load();
-      } catch (err) { setError(err.message || String(err)); }
-      finally { setBusyKey(""); }
+    async function createAgent(e){
+      e.preventDefault();
+      const payload=Object.assign({},agentForm); if(!payload.clone_from)delete payload.clone_from; if(!payload.workspace)delete payload.workspace; if(!payload.model)delete payload.model; if(!payload.provider)delete payload.provider; if(!payload.soul)delete payload.soul;
+      await doAction("agent-create",function(){return request("/agents",{method:"POST",body:JSON.stringify(payload)});},"Agent created in Hermes.");
+      if(!error){setAgentModal(false);setAgentForm({name:"",description:"",clone_mode:"blank",clone_from:"",workspace:"",model:"",provider:"",soul:"",no_skills:false});}
     }
-
-    async function action(type, id, verb, ownerProfile) {
-      const key = type + ":" + id + ":" + verb;
-      setError(""); setNotice(""); setBusyKey(key);
-      try {
-        await request("/tasks/" + encodeURIComponent(type) + "/" + encodeURIComponent(id) + "/action", {
-          method: "POST", body: JSON.stringify({ action: verb, profile: ownerProfile || null })
-        });
-        if (selected && selected.type === type && selected.id === id && (verb === "remove" || verb === "archive")) {
-          setSelected(null); setHistory([]); setEdit(null);
-        }
-        setNotice(verb.charAt(0).toUpperCase() + verb.slice(1) + " completed.");
-        await load();
-      } catch (err) { setError(err.message || String(err)); }
-      finally { setBusyKey(""); }
+    async function openAgent(name){ setBusy("agent-open"); try{setAgentDetail(await request("/agents/"+encodeURIComponent(name)));setTab("agents");}catch(e){setError(e.message||String(e));}finally{setBusy("");} }
+    async function saveAgent(e){
+      e.preventDefault(); if(!agentDetail)return;
+      const payload={description:agentDetail.description||"",workspace:agentDetail.workspace||".",model:agentDetail.model||"",provider:agentDetail.provider||"",soul:agentDetail.soul||""};
+      await doAction("agent-save",function(){return request("/agents/"+encodeURIComponent(agentDetail.name),{method:"PATCH",body:JSON.stringify(payload)});},"Agent changes saved.");
+      try{setAgentDetail(await request("/agents/"+encodeURIComponent(agentDetail.name)));}catch(_){}
     }
+    function agentAction(a,action,value){ return doAction("agent:"+a.name+":"+action,function(){return request("/agents/"+encodeURIComponent(a.name)+"/action",{method:"POST",body:JSON.stringify({action:action,value:value||null})});},"Agent action completed."); }
+    async function deleteAgent(a){ if(!confirm("Delete Hermes agent '"+a.name+"'? This permanently removes its profile state."))return; await doAction("agent-delete",function(){return request("/agents/"+encodeURIComponent(a.name),{method:"DELETE"});},"Agent deleted."); setAgentDetail(null); }
 
-    async function openDetails(task) {
-      setSelected(task);
-      setEdit({
-        name: task.name || "",
-        prompt: task.prompt || task.body || "",
-        schedule: task.schedule || "",
-        profile: task.profile || "",
-        priority: task.priority == null ? 50 : Number(task.priority)
-      });
-      setHistory([]); setDetailLoading(true); setError(""); setNotice("");
-      try {
-        const q = task.profile ? "?profile=" + encodeURIComponent(task.profile) + "&limit=30" : "?limit=30";
-        const data = await request("/tasks/" + encodeURIComponent(task.type) + "/" + encodeURIComponent(task.id) + "/history" + q);
-        setHistory(data.items || []);
-      } catch (err) { setError(err.message || String(err)); }
-      finally { setDetailLoading(false); }
+    async function createProject(e){
+      e.preventDefault(); const payload=Object.assign({},projectForm); payload.folders=String(payload.folders||"").split(/[,\n]/).map(function(x){return x.trim();}).filter(Boolean); ["slug","primary","description","board","agent"].forEach(function(k){if(!payload[k])delete payload[k];});
+      await doAction("project-create",function(){return request("/projects",{method:"POST",body:JSON.stringify(payload)});},"Project created in Hermes."); setProjectModal(false); setProjectForm({name:"",profile:"default",slug:"",folders:"",primary:"",description:"",board:"",agent:"",use:true});
     }
+    async function openProject(p){ setBusy("project-open"); try{setProjectDetail(await request("/projects/"+encodeURIComponent(p.slug)+"?profile="+encodeURIComponent(p.profile||"default")));setTab("projects");}catch(e){setError(e.message||String(e));}finally{setBusy("");} }
+    async function saveProject(e){ e.preventDefault(); if(!projectDetail)return; const payload={profile:projectDetail.profile||"default",name:projectDetail.name||"",primary:projectDetail.primary_path||"",board:projectDetail.board||""}; await doAction("project-save",function(){return request("/projects/"+encodeURIComponent(projectDetail.slug),{method:"PATCH",body:JSON.stringify(payload)});},"Project changes saved."); try{setProjectDetail(await request("/projects/"+encodeURIComponent(projectDetail.slug)+"?profile="+encodeURIComponent(projectDetail.profile||"default")));}catch(_){} }
+    function projectAction(p,action,value){ return doAction("project:"+p.slug+":"+action,function(){return request("/projects/"+encodeURIComponent(p.slug)+"/action",{method:"POST",body:JSON.stringify({action:action,value:value||null,profile:p.profile||"default"})});},"Project action completed."); }
 
-    async function saveDetails(event) {
-      event.preventDefault();
-      if (!selected || !edit) return;
-      setError(""); setNotice(""); setBusyKey("save:" + selected.type + ":" + selected.id);
-      try {
-        const payload = selected.type === "cron"
-          ? { name: edit.name, prompt: edit.prompt, schedule: edit.schedule, profile: selected.profile || edit.profile }
-          : { name: edit.name, prompt: edit.prompt, priority: Number(edit.priority), profile: edit.profile };
-        await request("/tasks/" + encodeURIComponent(selected.type) + "/" + encodeURIComponent(selected.id), {
-          method: "PATCH", body: JSON.stringify(payload)
-        });
-        await load();
-        setSelected(Object.assign({}, selected, payload));
-        setNotice("Task changes saved.");
-      } catch (err) { setError(err.message || String(err)); }
-      finally { setBusyKey(""); }
-    }
+    async function createTask(e){ e.preventDefault(); const payload=Object.assign({},taskForm); if(payload.type==="kanban"){delete payload.schedule;delete payload.deliver;} await doAction("task-create",function(){return request("/tasks",{method:"POST",body:JSON.stringify(payload)});},"Task created in Hermes."); setTaskModal(false); }
+    async function openTask(task){ setTaskDetail(task); setHistory([]); try{const q=task.profile?"?profile="+encodeURIComponent(task.profile)+"&limit=30":"?limit=30";const d=await request("/tasks/"+encodeURIComponent(task.type)+"/"+encodeURIComponent(task.id)+"/history"+q);setHistory(d.items||[]);}catch(e){setError(e.message||String(e));} }
+    function taskAction(t,action){return doAction("task:"+t.id+":"+action,function(){return request("/tasks/"+encodeURIComponent(t.type)+"/"+encodeURIComponent(t.id)+"/action",{method:"POST",body:JSON.stringify({action:action,profile:t.profile||null})});},"Task action completed.");}
 
-    const counts = (overview && overview.counts) || {};
-    const profiles = (overview && overview.profiles) || [];
+    function Header(){return h(React.Fragment,null,
+      h("div",{className:"hx-header"},h("div",null,h("h1",null,"Hermes Management Center"),h("div",{className:"hx-muted"},"Native Agents · Projects · Tasks · Windows WeChat extensions")),h("div",{className:"hx-actions"},h("button",{className:"hx-button secondary",disabled:loading||Boolean(busy),onClick:load},loading?"Refreshing…":"Refresh"))),
+      h(Tabs,{value:tab,onChange:setTab}), error?h("div",{className:"hx-error"},error):null, notice?h("div",{className:"hx-notice"},notice):null
+    );}
 
-    return h("div", { className: "hx-page" },
-      h("div", { className: "hx-header" },
-        h("div", null, h("h1", null, "Hermes Task Center"), h("div", { className: "hx-muted" }, "All agents · fixed tasks · upcoming work · Cron · Kanban")),
-        h("div", { className: "hx-actions" },
-          h("button", { className: "hx-button secondary", onClick: load, disabled: loading || Boolean(busyKey) }, loading ? "Refreshing…" : "Refresh"),
-          h("button", { className: "hx-button", onClick: function () { setFormOpen(!formOpen); }, disabled: Boolean(busyKey) }, formOpen ? "Close" : "+ Add task")
-        )
+    function Overview(){const c=(management&&management.counts)||{};const tc=(management&&management.task_counts)||{};return h("div",null,
+      h("div",{className:"hx-stats"},h(Stat,{label:"Projects",value:c.projects}),h(Stat,{label:"Agents",value:c.agents}),h(Stat,{label:"Running agents",value:c.running_agents}),h(Stat,{label:"Scheduled",value:tc.cron}),h(Stat,{label:"Running tasks",value:tc.running}),h(Stat,{label:"Failed",value:tc.failed})),
+      h("div",{className:"hx-two-col"},
+        h(Card,null,h("div",{className:"hx-section-head"},h("h2",null,"Agents"),h("button",{className:"hx-button",onClick:function(){setAgentModal(true);setTab("agents");}},"+ Agent")),agents.length?agents.slice(0,8).map(function(a){return h("button",{className:"hx-list-row hx-row-button",key:a.name,onClick:function(){openAgent(a.name);}},h("div",{className:"hx-grow hx-left"},h("div",{className:"hx-title"},a.display_name||a.name),h("div",{className:"hx-muted"},(a.description||"No role description")+" · "+(a.workspace||"no workspace"))),h(Pill,{kind:String(a.gateway).toLowerCase().startsWith("running")?"ok":"paused"},a.gateway||"unknown"));}):h(Empty,null,"No agents.")),
+        h(Card,null,h("div",{className:"hx-section-head"},h("h2",null,"Projects"),h("button",{className:"hx-button",onClick:function(){setProjectModal(true);setTab("projects");}},"+ Project")),projects.filter(function(p){return !p.archived;}).slice(0,8).map(function(p){return h("button",{className:"hx-list-row hx-row-button",key:p.profile+":"+p.slug,onClick:function(){openProject(p);}},h("div",{className:"hx-grow hx-left"},h("div",{className:"hx-title"},p.name||p.slug),h("div",{className:"hx-muted"},(p.profile||"default")+" · "+(p.primary_path||"no primary folder"))),p.active?h(Pill,{kind:"ok"},"active"):null);}))
       ),
-      error ? h("div", { className: "hx-error" }, error) : null,
-      notice ? h("div", { className: "hx-notice" }, notice) : null,
-      overview && overview.kanban_error ? h("div", { className: "hx-error" }, "Kanban unavailable: " + overview.kanban_error) : null,
-      h("div", { className: "hx-stats" },
-        h(Stat, { label: "Agents", value: counts.profiles }),
-        h(Stat, { label: "Running", value: counts.running }),
-        h(Stat, { label: "Scheduled", value: counts.cron }),
-        h(Stat, { label: "Recurring", value: counts.recurring }),
-        h(Stat, { label: "One-shot", value: counts.one_shot }),
-        h(Stat, { label: "Kanban", value: counts.kanban })
-      ),
-      formOpen ? h(Card, { className: "hx-form-card" },
-        h("form", { onSubmit: createTask, className: "hx-form" },
-          h("h2", null, "Add task directly to Hermes"),
-          field("Type", h("select", { value: form.type, onChange: function (e) { setForm(Object.assign({}, form, { type: e.target.value })); } },
-            h("option", { value: "cron" }, "Scheduled / recurring"), h("option", { value: "kanban" }, "Kanban task"))),
-          field("Name", h("input", { required: true, value: form.name, onChange: function (e) { setForm(Object.assign({}, form, { name: e.target.value })); } })),
-          field(form.type === "cron" ? "Prompt" : "Task details", h("textarea", { required: form.type === "cron", rows: 4, value: form.prompt, onChange: function (e) { setForm(Object.assign({}, form, { prompt: e.target.value })); } })),
-          form.type === "cron" ? field("Schedule", h("input", { required: true, placeholder: "every 10m | 0 9 * * * | 2026-08-11T09:00:00", value: form.schedule, onChange: function (e) { setForm(Object.assign({}, form, { schedule: e.target.value })); } })) : null,
-          field(form.type === "cron" ? "Profile" : "Assignee", h("input", { list: "hx-profile-list", placeholder: "default / support / warehouse", value: form.profile, onChange: function (e) { setForm(Object.assign({}, form, { profile: e.target.value })); } })),
-          h("datalist", { id: "hx-profile-list" }, profileNames.map(function (p) { return h("option", { key: p, value: p }); })),
-          form.type === "cron" ? field("Delivery", h("input", { value: form.deliver, onChange: function (e) { setForm(Object.assign({}, form, { deliver: e.target.value })); } })) : field("Priority", h("input", { type: "number", min: 0, max: 100, value: form.priority, onChange: function (e) { setForm(Object.assign({}, form, { priority: Number(e.target.value) })); } })),
-          h("div", { className: "hx-actions" }, h("button", { className: "hx-button", type: "submit", disabled: busyKey === "create" }, busyKey === "create" ? "Saving…" : "Save in Hermes"))
-        )) : null,
-      h(Card, null,
-        h("div", { className: "hx-toolbar" },
-          h("div", null, h("strong", null, "Upcoming"), h("span", { className: "hx-muted" }, " · recurring jobs expanded into actual future occurrences")),
-          h("div", { className: "hx-actions" },
-            h("label", { className: "hx-inline-check" }, h("input", { type: "checkbox", checked: includeCompleted, onChange: function (e) { setIncludeCompleted(e.target.checked); } }), " Show completed"),
-            h("select", { value: profile, onChange: function (e) { setProfile(e.target.value); } }, h("option", { value: "" }, "All agents"), profileNames.map(function (p) { return h("option", { key: p, value: p }, p); })),
-            h("select", { value: range, onChange: function (e) { setRange(Number(e.target.value)); } }, h("option", { value: 24 }, "24 hours"), h("option", { value: 168 }, "7 days"), h("option", { value: 720 }, "30 days"))
-          )
-        ),
-        h("div", { className: "hx-upcoming" }, upcoming.length ? upcoming.map(function (item, index) {
-          return h("button", { type: "button", className: "hx-upcoming-row hx-row-button", key: item.type + ":" + item.id + ":" + item.at + ":" + index, onClick: function () {
-            const found = profiles.flatMap(function (p) { return (p.cron || []).concat(p.kanban || []); }).find(function (t) { return t.type === item.type && t.id === item.id && (!item.profile || t.profile === item.profile); });
-            if (found) openDetails(found);
-          } },
-            h("div", { className: "hx-time" }, fmt(item.at)),
-            h("div", { className: "hx-grow hx-left" }, h("div", { className: "hx-title" }, item.name), h("div", { className: "hx-muted" }, (item.profile || "unassigned") + (item.schedule ? " · " + item.schedule : ""))),
-            h(Pill, { kind: item.type }, item.type), item.recurring ? h(Pill, { kind: "recurring" }, "recurring") : null
-          );
-        }) : h("div", { className: "hx-empty" }, loading ? "Loading upcoming tasks…" : "No upcoming tasks in this range."))
-      ),
-      h("div", { className: "hx-agent-grid" }, profiles.map(function (agent) {
-        return h(Card, { key: agent.name },
-          h("div", { className: "hx-agent-head" }, h("div", null, h("h2", null, agent.name), h("div", { className: "hx-muted" }, (agent.cron || []).length + " fixed/scheduled · " + (agent.kanban || []).length + " kanban"))),
-          (agent.cron || []).length ? h("div", null, h("h3", null, "Fixed / scheduled tasks"), (agent.cron || []).map(function (job) {
-            return h("div", { className: "hx-task", key: "cron:" + job.profile + ":" + job.id },
-              h("button", { type: "button", className: "hx-grow hx-task-open", onClick: function () { openDetails(job); } }, h("div", { className: "hx-title" }, job.name), h("div", { className: "hx-muted" }, String(job.schedule || "") + " · next " + fmt(job.next_run_at))),
-              h(Pill, { kind: job.enabled ? "ok" : "paused" }, job.enabled ? "active" : "paused"),
-              h("div", { className: "hx-mini-actions" },
-                job.enabled ? h("button", { disabled: Boolean(busyKey), onClick: function () { action("cron", job.id, "pause", job.profile); } }, busyKey === "cron:" + job.id + ":pause" ? "Pausing…" : "Pause") : h("button", { disabled: Boolean(busyKey), onClick: function () { action("cron", job.id, "resume", job.profile); } }, busyKey === "cron:" + job.id + ":resume" ? "Resuming…" : "Resume"),
-                h("button", { disabled: Boolean(busyKey), onClick: function () { action("cron", job.id, "run", job.profile); } }, busyKey === "cron:" + job.id + ":run" ? "Running…" : "Run")
-              )
-            );
-          })) : null,
-          (agent.kanban || []).length ? h("div", null, h("h3", null, "Kanban work"), (agent.kanban || []).map(function (task) {
-            return h("button", { type: "button", className: "hx-task hx-row-button", key: "kanban:" + task.id, onClick: function () { openDetails(task); } },
-              h("div", { className: "hx-grow hx-left" }, h("div", { className: "hx-title" }, task.name), h("div", { className: "hx-muted" }, task.status || "task")),
-              task.next_run_at ? h("div", { className: "hx-muted" }, fmt(task.next_run_at)) : null
-            );
-          })) : null,
-          !(agent.cron || []).length && !(agent.kanban || []).length ? h("div", { className: "hx-empty" }, "No assigned tasks.") : null
-        );
-      })),
-      selected && edit ? h(Card, { className: "hx-detail" },
-        h("div", { className: "hx-header" }, h("div", null, h("h2", null, "Task details"), h("div", { className: "hx-muted" }, selected.type + " · " + selected.id + " · " + (selected.profile || "unassigned"))), h("button", { className: "hx-button secondary", onClick: function () { setSelected(null); setHistory([]); setEdit(null); } }, "Close")),
-        h("form", { className: "hx-form hx-detail-form", onSubmit: saveDetails },
-          field("Name", h("input", { value: edit.name, onChange: function (e) { setEdit(Object.assign({}, edit, { name: e.target.value })); } })),
-          field(selected.type === "cron" ? "Profile" : "Assignee", h("input", { value: edit.profile, disabled: selected.type === "cron", onChange: function (e) { setEdit(Object.assign({}, edit, { profile: e.target.value })); } })),
-          field(selected.type === "cron" ? "Prompt" : "Details", h("textarea", { rows: 5, value: edit.prompt, onChange: function (e) { setEdit(Object.assign({}, edit, { prompt: e.target.value })); } })),
-          selected.type === "cron" ? field("Schedule", h("input", { value: edit.schedule, onChange: function (e) { setEdit(Object.assign({}, edit, { schedule: e.target.value })); } })) : field("Priority", h("input", { type: "number", min: 0, max: 100, value: edit.priority, onChange: function (e) { setEdit(Object.assign({}, edit, { priority: Number(e.target.value) })); } })),
-          h("div", { className: "hx-actions" }, h("button", { className: "hx-button", type: "submit", disabled: Boolean(busyKey) }, busyKey.indexOf("save:") === 0 ? "Saving…" : "Save changes"), selected.type === "cron" ? h("button", { className: "hx-button danger", type: "button", disabled: Boolean(busyKey), onClick: function () { if (window.confirm("Remove this Hermes Cron task?")) action("cron", selected.id, "remove", selected.profile); } }, "Remove") : h("button", { className: "hx-button danger", type: "button", disabled: Boolean(busyKey), onClick: function () { if (window.confirm("Archive this Hermes Kanban task?")) action("kanban", selected.id, "archive", selected.profile); } }, "Archive"))
-        ),
-        h("h3", null, "Execution history"),
-        detailLoading ? h("div", { className: "hx-empty" }, "Loading history…") : history.length ? h("div", { className: "hx-history" }, history.map(function (row, index) {
-          const status = row.status || row.state || (row.completed_at ? "completed" : "record");
-          const when = row.claimed_at || row.started_at || row.completed_at || row.updated_at || row.created_at;
-          return h("div", { className: "hx-history-row", key: String(row.id || index) },
-            h(Pill, { kind: status === "failed" ? "failed" : status }, status),
-            h("div", { className: "hx-grow" }, h("div", { className: "hx-title" }, fmt(when)), row.error ? h("div", { className: "hx-error-text" }, String(row.error)) : row.result ? h("div", { className: "hx-muted hx-pre" }, typeof row.result === "string" ? row.result : JSON.stringify(row.result)) : null)
-          );
-        })) : h("div", { className: "hx-empty" }, "No execution history yet.")
-      ) : null
-    );
+      h(Card,null,h("h2",null,"Next 7 days"),(management&&management.upcoming||[]).length?(management.upcoming||[]).map(function(t,i){return h("button",{className:"hx-list-row hx-row-button",key:t.type+":"+t.id+":"+i,onClick:function(){setTab("tasks");openTask(t);}},h("div",{className:"hx-time"},fmt(t.at)),h("div",{className:"hx-grow hx-left"},h("div",{className:"hx-title"},t.name),h("div",{className:"hx-muted"},t.profile||"unassigned")),h(Pill,{kind:t.type},t.type));}):h(Empty,null,"No upcoming tasks."))
+    );}
+
+    function Agents(){return h("div",null,
+      h("div",{className:"hx-section-head"},h("div",null,h("h2",null,"Agents"),h("div",{className:"hx-muted"},"Hermes Profiles are isolated Agents.")),h("button",{className:"hx-button",onClick:function(){setAgentModal(true);}},"+ Create Agent")),
+      h("div",{className:"hx-agent-grid"},agents.map(function(a){return h(Card,{key:a.name},h("div",{className:"hx-agent-head"},h("div",null,h("h2",null,a.display_name||a.name),h("div",{className:"hx-muted"},a.name)),a.is_default?h(Pill,{kind:"ok"},"default"):null),h("p",{className:"hx-description"},a.description||"No role description"),h("div",{className:"hx-kv"},h("span",null,"Model"),h("strong",null,a.model||"not configured"),h("span",null,"Provider"),h("strong",null,a.provider||"—"),h("span",null,"Workspace"),h("strong",null,a.workspace||"—"),h("span",null,"Gateway"),h("strong",null,a.gateway||"unknown"),h("span",null,"Tasks"),h("strong",null,String(a.cron_count||0))),h("div",{className:"hx-actions"},h("button",{className:"hx-button secondary",onClick:function(){openAgent(a.name);}},"Manage"),!a.is_default?h("button",{className:"hx-button secondary",onClick:function(){agentAction(a,"use");}},"Set default"):null,String(a.gateway).toLowerCase().startsWith("running")?h("button",{className:"hx-button secondary",onClick:function(){agentAction(a,"gateway_restart");}},"Restart"):h("button",{className:"hx-button secondary",onClick:function(){agentAction(a,"gateway_start");}},"Start")));}))
+    );}
+
+    function Projects(){return h("div",null,
+      h("div",{className:"hx-section-head"},h("div",null,h("h2",null,"Projects"),h("div",{className:"hx-muted"},"Native Hermes multi-folder workspaces, scoped per profile.")),h("button",{className:"hx-button",onClick:function(){setProjectModal(true);}},"+ Create Project")),
+      h("div",{className:"hx-agent-grid"},projects.map(function(p){return h(Card,{key:p.profile+":"+p.slug,className:p.archived?"hx-dim":""},h("div",{className:"hx-agent-head"},h("div",null,h("h2",null,p.name||p.slug),h("div",{className:"hx-muted"},p.slug+" · "+p.profile)),h("div",{className:"hx-actions"},p.active?h(Pill,{kind:"ok"},"active"):null,p.archived?h(Pill,{kind:"paused"},"archived"):null)),h("div",{className:"hx-kv"},h("span",null,"Primary"),h("strong",null,p.primary_path||"—"),h("span",null,"Board"),h("strong",null,p.board||"—"),h("span",null,"Folders"),h("strong",null,String((p.folders||[]).length||p.folder_count||0)),h("span",null,"Agents"),h("strong",null,(p.agents||[]).join(", ")||"—")),h("div",{className:"hx-actions"},h("button",{className:"hx-button secondary",onClick:function(){openProject(p);}},"Manage"),!p.archived?h("button",{className:"hx-button secondary",onClick:function(){projectAction(p,"use");}},"Use"):null,p.archived?h("button",{className:"hx-button secondary",onClick:function(){projectAction(p,"restore");}},"Restore"):h("button",{className:"hx-button secondary",onClick:function(){if(confirm("Archive project "+p.slug+"?"))projectAction(p,"archive");}},"Archive")));}))
+    );}
+
+    function Tasks(){const counts=(tasks&&tasks.counts)||{};return h("div",null,
+      h("div",{className:"hx-section-head"},h("div",null,h("h2",null,"Tasks"),h("div",{className:"hx-muted"},"Native Cron + Kanban across Hermes Agents.")),h("button",{className:"hx-button",onClick:function(){setTaskModal(true);}},"+ Create Task")),
+      h("div",{className:"hx-stats"},h(Stat,{label:"Cron",value:counts.cron}),h(Stat,{label:"Recurring",value:counts.recurring}),h(Stat,{label:"One-shot",value:counts.one_shot}),h(Stat,{label:"Kanban",value:counts.kanban}),h(Stat,{label:"Running",value:counts.running}),h(Stat,{label:"Failed",value:counts.failed})),
+      h(Card,null,h("div",{className:"hx-toolbar"},h("strong",null,"Upcoming"),h("div",{className:"hx-actions"},h("label",{className:"hx-inline-check"},h("input",{type:"checkbox",checked:includeCompleted,onChange:function(e){setIncludeCompleted(e.target.checked);}})," Show completed"),h("select",{value:taskProfile,onChange:function(e){setTaskProfile(e.target.value);}},h("option",{value:""},"All agents"),agentNames.map(function(x){return h("option",{key:x,value:x},x);})),h("select",{value:taskRange,onChange:function(e){setTaskRange(Number(e.target.value));}},h("option",{value:24},"24 hours"),h("option",{value:168},"7 days"),h("option",{value:720},"30 days")))),upcoming.length?upcoming.map(function(t,i){return h("button",{className:"hx-list-row hx-row-button",key:t.type+":"+t.id+":"+i,onClick:function(){openTask(t);}},h("div",{className:"hx-time"},fmt(t.at)),h("div",{className:"hx-grow hx-left"},h("div",{className:"hx-title"},t.name),h("div",{className:"hx-muted"},(t.profile||"unassigned")+(t.schedule?" · "+t.schedule:""))),h(Pill,{kind:t.type},t.type));}):h(Empty,null,"No upcoming tasks.")),
+      h("div",{className:"hx-agent-grid"},taskProfiles.map(function(p){return h(Card,{key:p.name},h("h2",null,p.name),(p.cron||[]).concat(p.kanban||[]).map(function(t){return h("div",{className:"hx-task",key:t.type+":"+t.id},h("button",{className:"hx-grow hx-task-open",onClick:function(){openTask(t);}},h("div",{className:"hx-title"},t.name),h("div",{className:"hx-muted"},t.type==="cron"?(String(t.schedule||"")+" · "+fmt(t.next_run_at)):(t.status||"kanban"))),h(Pill,{kind:t.enabled===false?"paused":t.type},t.enabled===false?"paused":t.type),t.type==="cron"?h("div",{className:"hx-mini-actions"},h("button",{onClick:function(){taskAction(t,t.enabled===false?"resume":"pause");}},t.enabled===false?"Resume":"Pause"),h("button",{onClick:function(){taskAction(t,"run");}},"Run")):null);}),!(p.cron||[]).length&&!(p.kanban||[]).length?h(Empty,null,"No tasks."):null);}))
+    );}
+
+    function AgentModal(){if(!agentModal)return null;return h("div",{className:"hx-modal-bg"},h(Card,{className:"hx-modal"},h("div",{className:"hx-section-head"},h("h2",null,"Create Agent"),h("button",{className:"hx-button secondary",onClick:function(){setAgentModal(false);}},"Close")),h("form",{className:"hx-form",onSubmit:createAgent},Field("Agent ID",h("input",{required:true,placeholder:"customer-support",value:agentForm.name,onChange:function(e){setAgentForm(Object.assign({},agentForm,{name:e.target.value}));}})),Field("Role / description",h("input",{value:agentForm.description,onChange:function(e){setAgentForm(Object.assign({},agentForm,{description:e.target.value}));}})),Field("Create mode",h("select",{value:agentForm.clone_mode,onChange:function(e){setAgentForm(Object.assign({},agentForm,{clone_mode:e.target.value}));}},h("option",{value:"blank"},"Blank"),h("option",{value:"clone"},"Clone config"),h("option",{value:"clone_all"},"Clone all"))),Field("Clone from",h("select",{value:agentForm.clone_from,onChange:function(e){setAgentForm(Object.assign({},agentForm,{clone_from:e.target.value}));}},h("option",{value:""},"Current/default source"),agentNames.map(function(x){return h("option",{key:x,value:x},x);}))),Field("Workspace",h("input",{placeholder:"/absolute/project/path",value:agentForm.workspace,onChange:function(e){setAgentForm(Object.assign({},agentForm,{workspace:e.target.value}));}})),Field("Provider",h("input",{placeholder:"openrouter",value:agentForm.provider,onChange:function(e){setAgentForm(Object.assign({},agentForm,{provider:e.target.value}));}})),Field("Model",h("input",{placeholder:"provider/model",value:agentForm.model,onChange:function(e){setAgentForm(Object.assign({},agentForm,{model:e.target.value}));}})),Field("SOUL / instructions",h("textarea",{rows:6,value:agentForm.soul,onChange:function(e){setAgentForm(Object.assign({},agentForm,{soul:e.target.value}));}})),h("label",{className:"hx-inline-check"},h("input",{type:"checkbox",checked:agentForm.no_skills,onChange:function(e){setAgentForm(Object.assign({},agentForm,{no_skills:e.target.checked}));}})," No bundled skills"),h("div",{className:"hx-actions"},h("button",{className:"hx-button",disabled:busy==="agent-create"},busy==="agent-create"?"Creating…":"Create Agent")))));}
+
+    function ProjectModal(){if(!projectModal)return null;return h("div",{className:"hx-modal-bg"},h(Card,{className:"hx-modal"},h("div",{className:"hx-section-head"},h("h2",null,"Create Project"),h("button",{className:"hx-button secondary",onClick:function(){setProjectModal(false);}},"Close")),h("form",{className:"hx-form",onSubmit:createProject},Field("Name",h("input",{required:true,value:projectForm.name,onChange:function(e){setProjectForm(Object.assign({},projectForm,{name:e.target.value}));}})),Field("Profile owner",h("select",{value:projectForm.profile,onChange:function(e){setProjectForm(Object.assign({},projectForm,{profile:e.target.value}));}},agentNames.map(function(x){return h("option",{key:x,value:x},x);}))),Field("Slug (optional)",h("input",{value:projectForm.slug,onChange:function(e){setProjectForm(Object.assign({},projectForm,{slug:e.target.value}));}})),Field("Primary folder",h("input",{value:projectForm.primary,onChange:function(e){setProjectForm(Object.assign({},projectForm,{primary:e.target.value}));}})),Field("Folders (comma/newline)",h("textarea",{rows:4,value:projectForm.folders,onChange:function(e){setProjectForm(Object.assign({},projectForm,{folders:e.target.value}));}})),Field("Description",h("input",{value:projectForm.description,onChange:function(e){setProjectForm(Object.assign({},projectForm,{description:e.target.value}));}})),Field("Kanban board",h("input",{value:projectForm.board,onChange:function(e){setProjectForm(Object.assign({},projectForm,{board:e.target.value}));}})),Field("Assign Agent",h("select",{value:projectForm.agent,onChange:function(e){setProjectForm(Object.assign({},projectForm,{agent:e.target.value}));}},h("option",{value:""},"None"),agentNames.map(function(x){return h("option",{key:x,value:x},x);}))),h("label",{className:"hx-inline-check"},h("input",{type:"checkbox",checked:projectForm.use,onChange:function(e){setProjectForm(Object.assign({},projectForm,{use:e.target.checked}));}})," Set active project"),h("div",{className:"hx-actions"},h("button",{className:"hx-button",disabled:busy==="project-create"},busy==="project-create"?"Creating…":"Create Project")))));}
+
+    function TaskModal(){if(!taskModal)return null;return h("div",{className:"hx-modal-bg"},h(Card,{className:"hx-modal"},h("div",{className:"hx-section-head"},h("h2",null,"Create Task"),h("button",{className:"hx-button secondary",onClick:function(){setTaskModal(false);}},"Close")),h("form",{className:"hx-form",onSubmit:createTask},Field("Type",h("select",{value:taskForm.type,onChange:function(e){setTaskForm(Object.assign({},taskForm,{type:e.target.value}));}},h("option",{value:"cron"},"Cron"),h("option",{value:"kanban"},"Kanban"))),Field("Agent",h("select",{value:taskForm.profile,onChange:function(e){setTaskForm(Object.assign({},taskForm,{profile:e.target.value}));}},agentNames.map(function(x){return h("option",{key:x,value:x},x);}))),Field("Name",h("input",{required:true,value:taskForm.name,onChange:function(e){setTaskForm(Object.assign({},taskForm,{name:e.target.value}));}})),Field("Prompt / details",h("textarea",{required:taskForm.type==="cron",rows:5,value:taskForm.prompt,onChange:function(e){setTaskForm(Object.assign({},taskForm,{prompt:e.target.value}));}})),taskForm.type==="cron"?Field("Schedule",h("input",{required:true,placeholder:"every 10m | 0 7 * * *",value:taskForm.schedule,onChange:function(e){setTaskForm(Object.assign({},taskForm,{schedule:e.target.value}));}})):Field("Priority",h("input",{type:"number",min:0,max:100,value:taskForm.priority,onChange:function(e){setTaskForm(Object.assign({},taskForm,{priority:Number(e.target.value)}));}})),taskForm.type==="cron"?Field("Delivery",h("input",{value:taskForm.deliver,onChange:function(e){setTaskForm(Object.assign({},taskForm,{deliver:e.target.value}));}})):null,h("div",{className:"hx-actions"},h("button",{className:"hx-button"},"Create Task")))));}
+
+    function AgentDetail(){if(!agentDetail)return null;return h("div",{className:"hx-modal-bg"},h(Card,{className:"hx-modal hx-modal-wide"},h("div",{className:"hx-section-head"},h("div",null,h("h2",null,agentDetail.display_name||agentDetail.name),h("div",{className:"hx-muted"},agentDetail.name+" · "+agentDetail.home)),h("button",{className:"hx-button secondary",onClick:function(){setAgentDetail(null);}},"Close")),h("form",{className:"hx-form",onSubmit:saveAgent},Field("Role / description",h("textarea",{rows:3,value:agentDetail.description||"",onChange:function(e){setAgentDetail(Object.assign({},agentDetail,{description:e.target.value}));}})),Field("Workspace",h("input",{value:agentDetail.workspace||"",onChange:function(e){setAgentDetail(Object.assign({},agentDetail,{workspace:e.target.value}));}})),Field("Provider",h("input",{value:agentDetail.provider||"",onChange:function(e){setAgentDetail(Object.assign({},agentDetail,{provider:e.target.value}));}})),Field("Model",h("input",{value:agentDetail.model||"",onChange:function(e){setAgentDetail(Object.assign({},agentDetail,{model:e.target.value}));}})),Field("SOUL / instructions",h("textarea",{rows:12,value:agentDetail.soul||"",onChange:function(e){setAgentDetail(Object.assign({},agentDetail,{soul:e.target.value}));}})),h("div",{className:"hx-actions"},h("button",{className:"hx-button",disabled:busy==="agent-save"},"Save"),h("button",{type:"button",className:"hx-button secondary",onClick:function(){agentAction(agentDetail,"gateway_restart");}},"Restart gateway"),!agentDetail.is_default?h("button",{type:"button",className:"hx-button secondary",onClick:function(){agentAction(agentDetail,"use");}},"Set default"):null,agentDetail.name!=="default"&&!agentDetail.is_default?h("button",{type:"button",className:"hx-button danger",onClick:function(){deleteAgent(agentDetail);}},"Delete Agent"):null))));}
+
+    function ProjectDetail(){if(!projectDetail)return null;const folders=projectDetail.folders||[];return h("div",{className:"hx-modal-bg"},h(Card,{className:"hx-modal hx-modal-wide"},h("div",{className:"hx-section-head"},h("div",null,h("h2",null,projectDetail.name||projectDetail.slug),h("div",{className:"hx-muted"},projectDetail.slug+" · "+projectDetail.profile)),h("button",{className:"hx-button secondary",onClick:function(){setProjectDetail(null);}},"Close")),h("form",{className:"hx-form",onSubmit:saveProject},Field("Name",h("input",{value:projectDetail.name||"",onChange:function(e){setProjectDetail(Object.assign({},projectDetail,{name:e.target.value}));}})),Field("Primary folder",h("select",{value:projectDetail.primary_path||"",onChange:function(e){setProjectDetail(Object.assign({},projectDetail,{primary_path:e.target.value}));}},h("option",{value:""},"None"),folders.map(function(f){return h("option",{key:f.path,value:f.path},f.path);}))),Field("Kanban board",h("input",{value:projectDetail.board||"",onChange:function(e){setProjectDetail(Object.assign({},projectDetail,{board:e.target.value}));}})),Field("Assigned agents",h("div",{className:"hx-tag-row"},(projectDetail.agents||[]).length?(projectDetail.agents||[]).map(function(a){return h(Pill,{key:a,kind:"ok"},a);}):h("span",{className:"hx-muted"},"None"))),h("div",{className:"hx-span-2"},h("h3",null,"Folders"),folders.map(function(f){return h("div",{className:"hx-list-row",key:f.path},h("div",{className:"hx-grow"},h("div",{className:"hx-title"},f.path),h("div",{className:"hx-muted"},f.label||"")),f.is_primary?h(Pill,{kind:"ok"},"primary"):null,h("button",{type:"button",className:"hx-button secondary",onClick:function(){if(confirm("Remove folder?"))projectAction(projectDetail,"remove_folder",f.path);}},"Remove"));}),h("div",{className:"hx-actions"},h("button",{type:"button",className:"hx-button secondary",onClick:function(){const v=prompt("Folder path");if(v)projectAction(projectDetail,"add_folder",v);}},"+ Folder"),h("button",{type:"button",className:"hx-button secondary",onClick:function(){const v=prompt("Agent name",agentNames[0]||"");if(v)projectAction(projectDetail,"assign_agent",v);}},"Assign Agent"))),h("div",{className:"hx-actions hx-span-2"},h("button",{className:"hx-button"},"Save"),h("button",{type:"button",className:"hx-button secondary",onClick:function(){projectAction(projectDetail,"use");}},"Use project"),projectDetail.archived?h("button",{type:"button",className:"hx-button secondary",onClick:function(){projectAction(projectDetail,"restore");}},"Restore"):h("button",{type:"button",className:"hx-button danger",onClick:function(){if(confirm("Archive project?"))projectAction(projectDetail,"archive");}},"Archive")))));}
+
+    function TaskDetail(){if(!taskDetail)return null;return h("div",{className:"hx-modal-bg"},h(Card,{className:"hx-modal hx-modal-wide"},h("div",{className:"hx-section-head"},h("div",null,h("h2",null,taskDetail.name),h("div",{className:"hx-muted"},taskDetail.type+" · "+taskDetail.id+" · "+(taskDetail.profile||"unassigned"))),h("button",{className:"hx-button secondary",onClick:function(){setTaskDetail(null);setHistory([]);}},"Close")),h("div",{className:"hx-actions"},taskDetail.type==="cron"?h(React.Fragment,null,h("button",{className:"hx-button secondary",onClick:function(){taskAction(taskDetail,taskDetail.enabled===false?"resume":"pause");}},taskDetail.enabled===false?"Resume":"Pause"),h("button",{className:"hx-button secondary",onClick:function(){taskAction(taskDetail,"run");}},"Run")):null),h("h3",null,"Execution history"),history.length?history.map(function(r,i){return h("div",{className:"hx-history-row",key:r.id||i},h(Pill,{kind:(r.status||r.state)==="failed"?"failed":"ok"},r.status||r.state||"record"),h("div",{className:"hx-grow"},h("div",{className:"hx-title"},fmt(r.claimed_at||r.started_at||r.completed_at||r.updated_at)),r.error?h("div",{className:"hx-error-text"},String(r.error)):null));}):h(Empty,null,"No history yet.")));}
+
+    return h("div",{className:"hx-page"},h(Header),tab==="overview"?h(Overview):tab==="agents"?h(Agents):tab==="projects"?h(Projects):h(Tasks),h(AgentModal),h(ProjectModal),h(TaskModal),h(AgentDetail),h(ProjectDetail),h(TaskDetail));
   }
-
-  window.__HERMES_PLUGINS__.register("hermes-extensions", TaskCenterPage);
+  window.__HERMES_PLUGINS__.register("hermes-extensions", ManagementApp);
 })();
