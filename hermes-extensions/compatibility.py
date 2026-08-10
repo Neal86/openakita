@@ -5,6 +5,7 @@ import subprocess
 import threading
 import time
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -38,7 +39,7 @@ def _supports(hermes: str, command: str) -> bool:
             timeout=15,
             check=False,
         )
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return False
     text = f"{proc.stdout}\n{proc.stderr}".lower()
     if "invalid choice" in text or "no such command" in text or "unknown command" in text:
@@ -46,10 +47,20 @@ def _supports(hermes: str, command: str) -> bool:
     return proc.returncode == 0
 
 
+def _resolve_binary(hermes: str | None = None) -> str | None:
+    requested = str(hermes or "hermes")
+    resolved = shutil.which(requested)
+    if resolved:
+        return resolved
+    candidate = Path(requested).expanduser()
+    if candidate.is_file():
+        return str(candidate.resolve())
+    return None
+
+
 def _detect_uncached(hermes: str | None = None) -> HermesCapabilities:
-    binary = hermes or shutil.which("hermes") or "hermes"
-    available = shutil.which(binary) is not None if binary == "hermes" else True
-    if not available:
+    binary = _resolve_binary(hermes)
+    if not binary:
         return HermesCapabilities(False, False, False, False, False, False, False)
     return HermesCapabilities(
         hermes=True,
@@ -73,10 +84,10 @@ def detect_capabilities(
     Dashboard requests used to spawn six ``hermes <command> --help`` subprocesses
     per API call. Capabilities change only when Hermes itself changes, so a
     short-lived cache preserves correctness while making the dashboard cheap.
-    ``force=True`` is used by the explicit refresh/doctor surfaces.
+    ``force=True`` is used by explicit refresh surfaces.
     """
     global _cache_at, _cache_binary, _cache_value
-    binary = hermes or shutil.which("hermes") or "hermes"
+    binary = _resolve_binary(hermes) or ""
     now = time.monotonic()
     with _cache_lock:
         if (
@@ -86,7 +97,7 @@ def detect_capabilities(
             and now - _cache_at < max(0.0, float(ttl_seconds))
         ):
             return _cache_value
-        value = _detect_uncached(binary)
+        value = _detect_uncached(binary or None)
         _cache_value = value
         _cache_at = now
         _cache_binary = binary
@@ -107,7 +118,8 @@ def project_unavailable_payload() -> dict[str, Any]:
         "items": [],
         "message": (
             "This Hermes installation does not expose the native 'hermes project' command. "
-            "Agents, Tasks, Dashboard and WeChat remain available. Projects will enable automatically "
-            "after Hermes is upgraded to a build that provides native Projects."
+            "Agents, Tasks, Dashboard and WeChat remain available. Dashboard Project support will "
+            "appear after Hermes is upgraded and capabilities are refreshed; model-facing Project "
+            "tools require the Hermes/plugin process to be restarted or reloaded after that upgrade."
         ),
     }
