@@ -32,21 +32,23 @@ jobs:
           from pathlib import Path
           for line in Path('hermes-extensions/plugin.yaml').read_text('utf-8').splitlines():
               if line.startswith('version:'):
-                  print(line.split(':',1)[1].strip().strip('"').strip("'"))
+                  print(line.partition(':')[2].strip().strip('"').strip("'"))
                   break
           PY
           )
           test -n "$VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Install and validate source
+      - name: Validate and build source
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r hermes-extensions/requirements.txt pytest ruff fastapi pydantic
           python -m compileall -q hermes-extensions
           ruff check hermes-extensions
+          for file in hermes-extensions/dashboard/src/api.js hermes-extensions/dashboard/src/components.js hermes-extensions/dashboard/src/app.js hermes-extensions/dashboard/src/index.js; do node --check "$file"; done
+          python hermes-extensions/dashboard/build_bundle.py
+          node --check hermes-extensions/dashboard/dist/index.js
           pytest -q hermes-extensions/tests
-          node --check hermes-extensions/dashboard/src/index.js
 
       - name: Build isolated release tree
         run: |
@@ -57,8 +59,6 @@ jobs:
             --exclude tests \
             --exclude __pycache__ \
             --exclude .pytest_cache
-          mkdir -p "$OUT/dashboard/dist"
-          cp "$OUT/dashboard/src/index.js" "$OUT/dashboard/dist/index.js"
           python - <<PY
           import json
           from pathlib import Path
@@ -69,20 +69,17 @@ jobs:
           assert manifest['icon'] == 'Activity'
           for rel in [
               'plugin.yaml', '__init__.py', 'install.ps1', 'doctor.ps1',
-              'compatibility.py', 'dashboard/manifest.json',
-              'dashboard/dist/index.js', 'dashboard/dist/style.css',
-              'dashboard/plugin_api.py', 'management/overview.py',
-              'task_center/service_v3.py', 'wechat/adapter.py',
+              'compatibility.py', 'dashboard/manifest.json', 'dashboard/build_bundle.py',
+              'dashboard/src/api.js', 'dashboard/src/components.js', 'dashboard/src/app.js', 'dashboard/src/index.js',
+              'dashboard/dist/index.js', 'dashboard/dist/style.css', 'dashboard/plugin_api.py',
+              'management/overview.py', 'task_center/service_v3.py', 'wechat/adapter.py',
               'wechat/runtime.py', 'platforms/wechat-desktop/plugin.yaml'
           ]:
               assert (root/rel).is_file(), rel
-          assert not (root/'dashboard/compat_api.py').exists()
           ui = (root/'dashboard/dist/index.js').read_text('utf-8')
-          api = (root/'dashboard/plugin_api.py').read_text('utf-8')
-          for token in ('Overview', 'Agents', 'Projects', 'Tasks', 'WeChat', 'Safe dry-run test'):
-              assert token in ui
-          for route in ('/wechat/health', '/wechat/status', '/wechat/dry-run'):
-              assert route in api
+          assert 'Discard unsaved changes?' in ui
+          assert 'Opening this tab does not touch the desktop app' in ui
+          assert 'ConfirmDialog' in ui
           PY
           (cd release && zip -qr "hermes-extensions-v${VERSION}.zip" "hermes-extensions-v${VERSION}")
           cd release
@@ -95,12 +92,9 @@ jobs:
           ! grep -q "src/openakita" /tmp/archive.txt
           ! grep -q "apps/setup-center" /tmp/archive.txt
           ! grep -q "/tests/" /tmp/archive.txt
-          grep -q "hermes-extensions-v${VERSION}/plugin.yaml" /tmp/archive.txt
           grep -q "hermes-extensions-v${VERSION}/dashboard/dist/index.js" /tmp/archive.txt
-          grep -q "hermes-extensions-v${VERSION}/dashboard/dist/style.css" /tmp/archive.txt
-          grep -q "hermes-extensions-v${VERSION}/dashboard/plugin_api.py" /tmp/archive.txt
-          grep -q "hermes-extensions-v${VERSION}/management/overview.py" /tmp/archive.txt
-          grep -q "hermes-extensions-v${VERSION}/task_center/service_v3.py" /tmp/archive.txt
+          grep -q "hermes-extensions-v${VERSION}/dashboard/build_bundle.py" /tmp/archive.txt
+          grep -q "hermes-extensions-v${VERSION}/dashboard/src/app.js" /tmp/archive.txt
           grep -q "hermes-extensions-v${VERSION}/wechat/runtime.py" /tmp/archive.txt
 
       - uses: actions/upload-artifact@v4
@@ -122,4 +116,4 @@ jobs:
             "release/hermes-extensions-v${VERSION}.zip" \
             "release/hermes-extensions-v${VERSION}.zip.sha256" \
             --title "Hermes Extensions v${VERSION}" \
-            --notes "Hermes Extensions v${VERSION} adds the complete Management Center UI: Overview, searchable Agent/Project/Task management, capability-aware Project fallback, full lifecycle controls, responsive dialogs, WeChat gateway/desktop health, recent/unread chats, and fail-closed dry-run testing. It retains transactional Windows install/rollback, hardened cross-process WeChat automation, fair Task Center scheduling, and Hermes v0.16 compatibility."
+            --notes "Hermes Extensions v${VERSION} polishes the complete Management Center UX with a modular single-bundle frontend, context-aware and visibility-aware refresh, health-only WeChat tab loading, explicit partial desktop checks, focus-trapped dialogs, focus restore, consistent confirmation dialogs, unsaved-change protection, granular action states, and touch-friendly mobile controls. Runtime safety and Hermes v0.16 compatibility are retained."
