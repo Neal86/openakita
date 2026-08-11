@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import secrets
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -10,7 +11,10 @@ from typing import Any
 
 from openakita.wechat_desktop import wechat_desktop_manager
 
+from .executor import WindowsCommandExecutor
+
 STATE_PATH = Path("data/windows_connector/state.json")
+LOCAL_NODE_ID = "local"
 
 
 @dataclass(slots=True)
@@ -72,10 +76,11 @@ class AgentResourceGrant:
 
 
 class WindowsConnectorManager:
-    """Server-side registry for resources exposed by paired Windows nodes.
+    """Unified registry for local and remote Windows application resources.
 
-    Durable grants are stored in OpenAkita. The connector receives a mirrored
-    permission snapshot and independently rejects commands outside the grant.
+    The local Windows node is embedded into OpenAkita and executes in-process.
+    Remote nodes continue to use the paired connector transport. Both transports
+    share the same resource/grant model so Agent permissions behave identically.
     """
 
     ACTION_PERMISSION = {
@@ -103,7 +108,12 @@ class WindowsConnectorManager:
         self._grants: dict[str, AgentResourceGrant] = {}
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._lock = asyncio.Lock()
+        self._local_executor = WindowsCommandExecutor()
         self._load()
+
+    @property
+    def local_available(self) -> bool:
+        return os.name == "nt"
 
     def _load(self) -> None:
         if not self.path.exists():
@@ -124,7 +134,7 @@ class WindowsConnectorManager:
     def _save_locked(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "version": 1,
+            "version": 2,
             "grants": [asdict(grant) for grant in self._grants.values()],
             "resources": {
                 node_id: [asdict(resource) for resource in rows.values()]
@@ -149,6 +159,29 @@ class WindowsConnectorManager:
         async with self._lock:
             self._resources[node_id] = synced
             self._save_locked()
+
+    async def refresh_local_resources(self) -> list[dict[str, Any]]:
+        """Discover local apps without requiring a separately installed connector."""
+        if not self.local_available:
+            await self.sync_resources(LOCAL_NODE_ID, [])
+            return []
+        rows = await asyncio.to_thread(self._local_executor.resources)
+        await self.sync_resources(LOCAL_NODE_ID, rows)
+        return await self.list_resources(LOCAL_NODE_ID)
+
+    async def local_node(self, *, refresh: bool = False) -> dict[str, Any]:
+        if refresh:
+            await self.refresh_local_resources()
+        return {
+            "id": LOCAL_NODE_ID,
+            "name": "本机",
+            "status": "online" if self.local_available else "unsupported",
+            "connector_version": "embedded",
+            "transport": "local",
+            "embedded": True,
+            "resources": await self.list_resources(LOCAL_NODE_ID),
+            "grants": await self.list_grants(LOCAL_NODE_ID),
+        }
 
     async def list_resources(self, node_id: str) -> list[dict[str, Any]]:
         async with self._lock:
@@ -240,6 +273,9 @@ class WindowsConnectorManager:
 
     async def push_permissions(self, node_id: str) -> None:
         snapshot = await self.permission_snapshot(node_id)
+        if node_id == LOCAL_NODE_ID:
+            self._local_executor.sync_grants(snapshot)
+            return
         try:
             await wechat_desktop_manager.send_command(
                 node_id,
@@ -249,6 +285,8 @@ class WindowsConnectorManager:
             pass
 
     async def commands_for_attach(self, node_id: str) -> list[dict[str, Any]]:
+        if node_id == LOCAL_NODE_ID:
+            return []
         return [
             {
                 "version": 1,
@@ -298,6 +336,18 @@ class WindowsConnectorManager:
         timeout: float = 60.0,
     ) -> dict[str, Any]:
         grant, resource = await self._resolve_grant(node_id, agent_profile_id, resource_id, action)
+        payload = {
+            "agent_profile_id": agent_profile_id,
+            "resource_id": resource.id,
+            "resource_fingerprint": resource.fingerprint,
+            "grant_id": grant.id,
+            "action": action,
+            "arguments": arguments or {},
+        }
+        if node_id == LOCAL_NODE_ID:
+            self._local_executor.sync_grants(await self.permission_snapshot(LOCAL_NODE_ID))
+            return await asyncio.wait_for(self._local_executor.execute(payload), timeout=timeout)
+
         request_id = f"wc-{secrets.token_hex(8)}"
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
@@ -307,14 +357,7 @@ class WindowsConnectorManager:
             "version": 1,
             "event": "windows.command",
             "request_id": request_id,
-            "payload": {
-                "agent_profile_id": agent_profile_id,
-                "resource_id": resource.id,
-                "resource_fingerprint": resource.fingerprint,
-                "grant_id": grant.id,
-                "action": action,
-                "arguments": arguments or {},
-            },
+            "payload": payload,
         }
         try:
             await wechat_desktop_manager.send_command(node_id, command)
