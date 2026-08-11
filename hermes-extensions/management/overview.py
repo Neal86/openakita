@@ -1,20 +1,58 @@
 from __future__ import annotations
 
+import sys
 from typing import Any
+
+
+def _resolved_defaults() -> tuple[Any, Any, Any, str]:
+    """Reuse Dashboard's stable dynamic modules when present.
+
+    The dashboard loader gives compatibility/management/task modules stable
+    unique names. Reusing those objects preserves one capability cache and one
+    service implementation instead of importing duplicate top-level modules.
+    """
+    compat = sys.modules.get("hermes_extensions_compatibility")
+    management = sys.modules.get("hermes_extensions_management_service")
+    task_module = sys.modules.get("hermes_extensions_task_center_service")
+
+    if compat is None:
+        import compatibility as compat  # type: ignore[no-redef]
+    if management is None:
+        import management.service as management  # type: ignore[no-redef]
+    if task_module is None:
+        import task_center as task_module  # type: ignore[no-redef]
+
+    caps = compat.detect_capabilities()
+    manager = management.ManagementCenter()
+    task_center = task_module.TaskCenter()
+    message = compat.project_unavailable_payload()["message"]
+    return caps, manager, task_center, message
 
 
 def build_management_overview(
     *,
-    caps: Any,
-    manager: Any,
-    task_center: Any,
-    project_unavailable_message: str,
+    caps: Any | None = None,
+    manager: Any | None = None,
+    task_center: Any | None = None,
+    project_unavailable_message: str | None = None,
 ) -> dict[str, Any]:
-    """Build the canonical management/task summary from already-resolved services.
+    """Build the canonical management/task summary used by UI and tools."""
+    if (
+        caps is None
+        or manager is None
+        or task_center is None
+        or project_unavailable_message is None
+    ):
+        default_caps, default_manager, default_tasks, default_message = _resolved_defaults()
+        caps = caps if caps is not None else default_caps
+        manager = manager if manager is not None else default_manager
+        task_center = task_center if task_center is not None else default_tasks
+        project_unavailable_message = (
+            project_unavailable_message
+            if project_unavailable_message is not None
+            else default_message
+        )
 
-    Callers resolve capabilities and service instances once, preventing duplicate
-    Hermes capability probes or duplicate module caches in Dashboard/tool paths.
-    """
     if caps.project:
         data = manager.overview()
     else:
