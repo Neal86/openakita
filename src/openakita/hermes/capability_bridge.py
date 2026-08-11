@@ -25,7 +25,6 @@ class HermesCapabilitySnapshot:
     profile_id: str
     toolset_name: str
     tool_schemas: list[dict[str, Any]] = field(default_factory=list)
-    # bridged Hermes function name -> original OpenAkita tool name
     tool_name_map: dict[str, str] = field(default_factory=dict)
     skill_ids: list[str] = field(default_factory=list)
     tool_names: list[str] = field(default_factory=list)
@@ -49,7 +48,6 @@ def _safe_name(value: str, limit: int = 40) -> str:
 
 
 def _profile_key(profile_id: str) -> str:
-    """Short stable key used in Hermes proxy names (keeps function names <64 chars)."""
     readable = _safe_name(profile_id, 18)
     digest = hashlib.blake2s((profile_id or "default").encode("utf-8"), digest_size=4).hexdigest()
     return f"{readable}_{digest}"
@@ -96,7 +94,6 @@ def _mcp_server_allowed(profile: Any, server: str) -> bool:
 
 
 def _to_hermes_schema(schema: dict[str, Any]) -> dict[str, Any] | None:
-    """Normalize OpenAkita/Anthropic/OpenAI style tool schemas for Hermes."""
     if not isinstance(schema, dict):
         return None
     if schema.get("type") == "function" and isinstance(schema.get("function"), dict):
@@ -126,7 +123,6 @@ def _selected_skill_entries(profile: Any) -> list[Any]:
         from openakita.skills.registry import default_registry
     except Exception:
         return []
-
     mode_obj = getattr(profile, "skills_mode", "all")
     mode = str(getattr(mode_obj, "value", mode_obj) or "all")
     selected = list(getattr(profile, "skills", []) or [])
@@ -135,9 +131,8 @@ def _selected_skill_entries(profile: Any) -> list[Any]:
         if getattr(entry, "disabled", False):
             continue
         skill_id = str(getattr(entry, "skill_id", "") or "")
-        if not _mode_allows(skill_id, selected, mode):
-            continue
-        result.append(entry)
+        if _mode_allows(skill_id, selected, mode):
+            result.append(entry)
     return result
 
 
@@ -147,12 +142,85 @@ def _profile(profile_id: str) -> Any | None:
     return get_profile_store().get(profile_id)
 
 
+def _known_skill_ids() -> set[str]:
+    try:
+        from openakita.skills.registry import default_registry
+
+        return {
+            str(getattr(entry, "skill_id", "") or "")
+            for entry in list(default_registry)
+            if str(getattr(entry, "skill_id", "") or "")
+        }
+    except Exception:
+        return set()
+
+
+def _persist_profile_enablement(
+    profile_id: str,
+    *,
+    skill_ids: set[str] | None = None,
+    mcp_server: str = "",
+) -> None:
+    """Make newly-created durable assets immediately usable by their creator.
+
+    `all` needs no relation update. In `inclusive` mode we append the new asset;
+    in `exclusive` mode we remove it from exclusions. This preserves the user's
+    chosen selection semantics instead of silently converting the profile mode.
+    """
+    try:
+        from openakita.agents.profile import get_profile_store
+
+        store = get_profile_store()
+        profile = store.get(profile_id)
+        if profile is None:
+            return
+        changed = False
+
+        if skill_ids:
+            mode_obj = getattr(profile, "skills_mode", "all")
+            mode = str(getattr(mode_obj, "value", mode_obj) or "all")
+            current = list(getattr(profile, "skills", []) or [])
+            if mode == "inclusive":
+                for skill_id in sorted(skill_ids):
+                    if skill_id not in current:
+                        current.append(skill_id)
+                        changed = True
+            elif mode == "exclusive":
+                reduced = [sid for sid in current if sid not in skill_ids]
+                if reduced != current:
+                    current = reduced
+                    changed = True
+            if changed:
+                profile.skills = current
+
+        if mcp_server:
+            mode = str(getattr(profile, "mcp_mode", "all") or "all")
+            current_mcp = list(getattr(profile, "mcp_servers", []) or [])
+            if mode == "inclusive" and mcp_server not in current_mcp:
+                current_mcp.append(mcp_server)
+                profile.mcp_servers = current_mcp
+                changed = True
+            elif mode == "exclusive" and mcp_server in current_mcp:
+                profile.mcp_servers = [sid for sid in current_mcp if sid != mcp_server]
+                changed = True
+
+        if changed:
+            store.save(profile)
+            logger.info(
+                "Hermes capability bridge updated Agent enablement: profile=%s skills=%s mcp=%s",
+                profile_id,
+                sorted(skill_ids or set()),
+                mcp_server or "-",
+            )
+    except Exception:
+        logger.warning("Failed to persist Hermes-created capability enablement", exc_info=True)
+
+
 def resolve_capabilities(
     profile_id: str,
     *,
     explicit_tools: list[dict[str, Any]] | None = None,
 ) -> HermesCapabilitySnapshot:
-    """Resolve the durable OpenAkita capability view for one Agent profile."""
     profile = _profile(profile_id)
     toolset_name = f"openakita-{_profile_key(profile_id)}"
     if profile is None:
@@ -162,8 +230,6 @@ def resolve_capabilities(
     selected_skill_ids: list[str] = []
     instruction_blocks: list[str] = []
 
-    # Explicit schemas from the Agent call site have highest fidelity and can
-    # include dynamically discovered MCP/plugin tools.
     for raw in explicit_tools or []:
         normalized = _to_hermes_schema(raw)
         if not normalized:
@@ -172,7 +238,6 @@ def resolve_capabilities(
         if _tool_allowed(profile, tool_name=original):
             original_schemas[original] = normalized
 
-    # Shared SkillRegistry = global pool; profile = enable relationship only.
     for entry in _selected_skill_entries(profile):
         skill_id = str(getattr(entry, "skill_id", "") or "")
         if skill_id:
@@ -189,8 +254,6 @@ def resolve_capabilities(
             ):
                 original_schemas.setdefault(original, normalized)
         else:
-            # External Agent Skills are durable instruction assets. Their body
-            # is supplied to Hermes, not copied to another persistent skill pool.
             try:
                 body = str(entry.get_body() or "").strip()
             except Exception:
@@ -212,27 +275,20 @@ def resolve_capabilities(
         tool_schemas.append(proxy)
         tool_name_map[bridged] = original
 
-    selected_mcp = [
-        str(item)
-        for item in (getattr(profile, "mcp_servers", []) or [])
-        if str(item).strip()
-    ]
+    selected_mcp = [str(item) for item in (getattr(profile, "mcp_servers", []) or []) if str(item).strip()]
     mcp_mode = str(getattr(profile, "mcp_mode", "all") or "all")
-
     context_parts = [
         "[OpenAkita Capability Bridge]",
         f"Agent profile: {profile_id}",
         "OpenAkita is the source of truth for durable Skills, Tools, MCP, Memory, Identity and Tasks.",
-        "Use the oa_* bridged functions for OpenAkita capabilities. Their descriptions contain the original tool names.",
-        "Do not create a separate persistent copy of OpenAkita durable assets inside Hermes.",
+        "Use oa_* bridged functions for durable OpenAkita capabilities; descriptions contain original tool names.",
+        "When creating a reusable Skill, write it into OpenAkita's skills directory and use the bridged load_skill/reload_skill tools. When adding MCP, use the bridged add_mcp_server tool. Do not create a second persistent copy inside Hermes.",
     ]
     custom_prompt = str(getattr(profile, "custom_prompt", "") or "").strip()
     if custom_prompt:
         context_parts.append(f"Agent instructions:\n{custom_prompt}")
     if selected_mcp or mcp_mode != "all":
-        context_parts.append(
-            f"MCP policy: mode={mcp_mode}; selected servers={selected_mcp or 'all'}"
-        )
+        context_parts.append(f"MCP policy: mode={mcp_mode}; selected servers={selected_mcp or 'all'}")
     if instruction_blocks:
         context_parts.append("\n\n".join(instruction_blocks))
 
@@ -255,27 +311,17 @@ async def _execute_openakita_tool(
     *,
     session_id: str = "",
 ) -> str:
-    """Execute via OpenAkita's existing ToolExecutor whenever possible."""
     profile = _profile(profile_id)
     if profile is None:
         return json.dumps({"error": f"Unknown Agent profile: {profile_id}"}, ensure_ascii=False)
-
-    # Defense in depth: a stale proxy registration cannot bypass a profile
-    # change performed after the Hermes session started.
     if not _tool_allowed(profile, tool_name=tool_name):
-        return json.dumps(
-            {"error": f"Tool '{tool_name}' is not enabled for Agent '{profile_id}'"},
-            ensure_ascii=False,
-        )
-
+        return json.dumps({"error": f"Tool '{tool_name}' is not enabled for Agent '{profile_id}'"}, ensure_ascii=False)
     if tool_name == "call_mcp_tool":
         server = str(args.get("server") or args.get("server_name") or "")
         if server and not _mcp_server_allowed(profile, server):
-            return json.dumps(
-                {"error": f"MCP server '{server}' is not enabled for Agent '{profile_id}'"},
-                ensure_ascii=False,
-            )
+            return json.dumps({"error": f"MCP server '{server}' is not enabled for Agent '{profile_id}'"}, ensure_ascii=False)
 
+    before_skills = _known_skill_ids() if tool_name in {"install_skill", "load_skill", "reload_skill"} else set()
     try:
         from openakita.agent.core import get_primary_agent
 
@@ -284,38 +330,34 @@ async def _execute_openakita_tool(
         agent = None
 
     if agent is not None and getattr(agent, "tool_executor", None) is not None:
-        result, _hint = await agent.tool_executor.execute_tool(
-            tool_name,
-            args,
-            session_id=session_id or None,
-        )
+        result, _hint = await agent.tool_executor.execute_tool(tool_name, args, session_id=session_id or None)
     else:
-        # Startup/test fallback. Production Desktop normally has a primary
-        # Agent and therefore uses the full ToolExecutor safety chain above.
         from openakita.tools.handlers import default_handler_registry
 
         result = await default_handler_registry.execute_by_tool(tool_name, args)
 
-    if isinstance(result, str):
-        return result
-    try:
-        return json.dumps(result, ensure_ascii=False, default=str)
-    except Exception:
-        return str(result)
+    result_text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
+    # Only persist relationships after a successful-looking control-plane operation.
+    if not result_text.lstrip().startswith("❌"):
+        if tool_name in {"install_skill", "load_skill", "reload_skill"}:
+            new_skills = _known_skill_ids() - before_skills
+            explicit_skill = str(args.get("skill_name") or args.get("name") or "").strip()
+            if explicit_skill and explicit_skill in _known_skill_ids():
+                new_skills.add(explicit_skill)
+            _persist_profile_enablement(profile_id, skill_ids=new_skills)
+        elif tool_name == "add_mcp_server":
+            server = str(args.get("name") or "").strip()
+            if server:
+                _persist_profile_enablement(profile_id, mcp_server=server)
+    return result_text
 
 
-def register_snapshot_with_hermes(
-    snapshot: HermesCapabilitySnapshot,
-    *,
-    session_id: str = "",
-) -> str:
-    """Register this profile's unique proxies in Hermes' global registry."""
+def register_snapshot_with_hermes(snapshot: HermesCapabilitySnapshot, *, session_id: str = "") -> str:
     if not snapshot.tool_schemas:
         return snapshot.toolset_name
-
     try:
         from tools.registry import registry as hermes_registry
-    except Exception as exc:  # pragma: no cover - depends on embedded package
+    except Exception as exc:  # pragma: no cover
         logger.warning("Hermes tool registry unavailable for capability bridge: %s", exc)
         return snapshot.toolset_name
 
@@ -325,17 +367,8 @@ def register_snapshot_with_hermes(
         if not bridged_name or not original_name:
             continue
 
-        async def _handler(
-            args: dict[str, Any],
-            _original_name: str = original_name,
-            **_kwargs: Any,
-        ) -> str:
-            return await _execute_openakita_tool(
-                snapshot.profile_id,
-                _original_name,
-                args or {},
-                session_id=session_id,
-            )
+        async def _handler(args: dict[str, Any], _original_name: str = original_name, **_kwargs: Any) -> str:
+            return await _execute_openakita_tool(snapshot.profile_id, _original_name, args or {}, session_id=session_id)
 
         try:
             hermes_registry.register(
@@ -362,7 +395,6 @@ def register_snapshot_with_hermes(
                 logger.warning("Failed to register bridged Hermes tool %s: %s", bridged_name, exc)
         except Exception as exc:
             logger.warning("Failed to register bridged Hermes tool %s: %s", bridged_name, exc)
-
     return snapshot.toolset_name
 
 
