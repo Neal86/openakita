@@ -1,0 +1,50 @@
+name: Publish Existing Hermes Windows Artifact
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/hermes-multi-agent
+    paths:
+      - .github/workflows/publish-existing-hermes-artifact.yml
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download validated Hermes Native Windows artifact
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/${{ github.repository }}/actions/artifacts/9108887933/zip --method GET > hermes-native.zip
+          New-Item -ItemType Directory -Force -Path extracted | Out-Null
+          Expand-Archive -Path hermes-native.zip -DestinationPath extracted -Force
+          $files = Get-ChildItem extracted -Recurse -Filter *.exe
+          if (-not $files) { throw "No NSIS installer found in validated artifact" }
+          foreach ($file in $files) {
+            Get-FileHash $file.FullName -Algorithm SHA256 | Format-List
+          }
+
+      - name: Publish validated installer to GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $files = Get-ChildItem extracted -Recurse -Filter *.exe
+          if (-not $files) { throw "No NSIS installer found for Release upload" }
+          foreach ($file in $files) {
+            gh release upload wechat-connector-latest $file.FullName --repo "${{ github.repository }}" --clobber
+          }
+
+      - name: Verify Release asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view wechat-connector-latest --repo "${{ github.repository }}" --json url,assets
