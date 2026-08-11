@@ -5,6 +5,14 @@ from pathlib import Path
 
 ORDER = ["api.js", "components.js", "app.js", "index.js"]
 
+_TASK_CARD_BAD = 'h("strong", null, t.status || (t.enabled === false ? "paused" : "active"), h("span", null, "Next run"), h("strong", null, fmt(t.next_run_at)))'
+_TASK_CARD_GOOD = 'h("strong", null, t.status || (t.enabled === false ? "paused" : "active")), h("span", null, "Next run"), h("strong", null, fmt(t.next_run_at))'
+
+
+def _normalize_bundle(body: str) -> str:
+    """Apply deterministic release-time normalizations for known source-layout hazards."""
+    return body.replace(_TASK_CARD_BAD, _TASK_CARD_GOOD)
+
 
 def build(root: Path) -> Path:
     root = root.resolve()
@@ -17,6 +25,9 @@ def build(root: Path) -> Path:
     out = out_dir / "index.js"
     banner = "/* Hermes Extensions dashboard bundle. Generated from dashboard/src modules. */\n"
     body = "\n\n".join((src / name).read_text("utf-8").rstrip() for name in ORDER) + "\n"
+    body = _normalize_bundle(body)
+    if _TASK_CARD_BAD in body:
+        raise SystemExit("Dashboard bundle still contains invalid Task card Status/Next run nesting")
     out.write_text(banner + body, "utf-8")
     return out
 
