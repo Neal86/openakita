@@ -16,6 +16,8 @@ def test_dashboard_source_is_modular_but_release_is_single_bundle() -> None:
         assert (SRC / name).is_file()
     assert 'ORDER = ["api.js", "components.js", "app.js", "index.js"]' in BUILD
     assert 'dist" / "index.js"' in BUILD
+    assert "_normalize_bundle" in BUILD
+    assert "_TASK_CARD_BAD" in BUILD and "_TASK_CARD_GOOD" in BUILD
 
 
 def test_management_center_has_complete_tabs_and_states() -> None:
@@ -36,12 +38,13 @@ def test_agent_project_task_management_surfaces_remain_complete() -> None:
 
 
 def test_wechat_tab_never_auto_scans_desktop() -> None:
-    assert 'if (tab === "wechat") loadHealth()' in JS
+    assert 'if (tab === "wechat") loadHealth(false)' in JS
     assert 'if (tab === "wechat") loadWeChat(true)' not in JS
     assert "checkWeChatDesktop" in JS
-    assert "Promise.allSettled" in JS
-    assert "Partial desktop results" in JS
-    assert "Opening this tab does not touch the desktop app" in JS
+    assert "Opening this tab never touches the desktop app" in JS
+    assert "/wechat/status" in JS
+    assert "/wechat/chats?limit=200" in JS
+    assert "/wechat/unread" not in JS
 
 
 def test_refresh_is_context_aware_and_auto_refresh_is_visibility_guarded() -> None:
@@ -50,6 +53,7 @@ def test_refresh_is_context_aware_and_auto_refresh_is_visibility_guarded() -> No
     assert 'if (tab === "wechat")' in JS
     assert 'document.visibilityState !== "visible"' in JS
     assert "15000" in JS and "30000" in JS
+    assert "loadHealth(true)" in JS
 
 
 def test_dialogs_are_accessible_and_protect_unsaved_changes() -> None:
@@ -59,7 +63,16 @@ def test_dialogs_are_accessible_and_protect_unsaved_changes() -> None:
     assert "Discard unsaved changes?" in JS
     assert "ConfirmDialog" in JS
     assert "guardedClose" in JS
+    assert "modalStack" in JS
+    assert "closeRef" in JS
     assert "confirm(" not in JS
+
+
+def test_dirty_edits_block_refreshing_lifecycle_actions() -> None:
+    assert "Save or discard edits before running lifecycle actions" in JS
+    assert "const blockAction = Boolean(busy) || projectDirty" in JS
+    assert "const blockAction = Boolean(busy) || taskDirty" in JS
+    assert "Boolean(busy) || agentDirty" in JS
 
 
 def test_mobile_and_focus_styles_are_touch_friendly() -> None:
