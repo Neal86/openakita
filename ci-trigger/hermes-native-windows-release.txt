@@ -2,6 +2,6 @@ Trigger Hermes native Windows installer build.
 Hermes Agent: 0.19.0
 Runtime: embedded native AIAgent
 Docker required: no
-Triggered: 2026-08-11 07:56 PDT
-Workflow: Hermes Native Windows Release
-Reason: force final unsigned NSIS build after disabling updater artifacts/signing in development workflow
+Triggered: 2026-08-11 08:21 PDT
+Workflow: WeChat Connector Windows release / native-desktop-release
+Reason: force full OpenAkita + embedded Hermes unsigned NSIS build after applying createUpdaterArtifacts=false and --no-sign to the active workflow
