@@ -30,25 +30,86 @@ def _process_info(pid: int) -> tuple[str, str]:
 
 
 def _wechat_account_hint(hwnd: int, title: str) -> str:
-    """Best-effort nickname discovery for multiple WeChat windows.
-
-    wxauto/UIA layouts vary by WeChat version. Prefer a meaningful UIA text
-    label and fall back to the top-level title. A user-defined remark remains
-    the stable human label when WeChat hides the nickname from accessibility.
-    """
+    """Best-effort nickname discovery for separately running WeChat instances."""
     try:
         from pywinauto import Desktop
 
         window = Desktop(backend="uia").window(handle=hwnd)
-        ignored = {"微信", "wechat", "聊天", "通讯录", "收藏", "朋友圈"}
-        for child in window.descendants(control_type="Text")[:60]:
+        ignored = {"微信", "wechat", "聊天", "通讯录", "收藏", "朋友圈", "小程序"}
+        for child in window.descendants(control_type="Text")[:80]:
             name = str(child.window_text() or "").strip()
             if 1 < len(name) <= 40 and name.lower() not in ignored and not name.isdigit():
                 return name
     except Exception:
         pass
-    clean = title.replace("- 微信", "").replace("微信", "").strip(" -")
-    return clean
+    return title.replace("- 微信", "").replace("微信", "").strip(" -")
+
+
+def _browser_name(process_name: str, fallback: str) -> str:
+    return {
+        "chrome.exe": "Google Chrome",
+        "msedge.exe": "Microsoft Edge",
+        "firefox.exe": "Mozilla Firefox",
+        "brave.exe": "Brave",
+    }.get(process_name.lower(), fallback)
+
+
+def _uia_browser_tabs(window_row: dict[str, Any]) -> list[dict[str, Any]]:
+    """Enumerate visible browser TabItem controls when CDP is unavailable.
+
+    This fallback lets the user separately name/authorize two Chrome tabs even
+    when the browser wasn't launched with remote debugging. The resulting tab
+    is marked limited because DOM/URL access cannot be guaranteed; clicking,
+    focusing and screenshot operations still work through UI Automation.
+    """
+    if os.name != "nt" or window_row.get("kind") != "browser_window":
+        return []
+    hwnd = int(window_row.get("hwnd") or 0)
+    if not hwnd:
+        return []
+    try:
+        from pywinauto import Desktop
+
+        window = Desktop(backend="uia").window(handle=hwnd)
+        controls = window.descendants(control_type="TabItem")
+    except Exception:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, control in enumerate(controls[:100]):
+        try:
+            title = str(control.window_text() or "").strip()
+        except Exception:
+            title = ""
+        if not title or title in seen:
+            continue
+        seen.add(title)
+        app_name = str(window_row.get("app_name") or "Browser")
+        process_name = str(window_row.get("process_name") or "")
+        exe_path = str(window_row.get("exe_path") or "")
+        fingerprint = _fingerprint("browser_tab", exe_path or process_name, title)
+        rows.append(
+            {
+                "id": _resource_id("browser_tab", hwnd, index, title),
+                "fingerprint": fingerprint,
+                "kind": "browser_tab",
+                "app_name": app_name,
+                "process_name": process_name,
+                "pid": int(window_row.get("pid") or 0),
+                "hwnd": hwnd,
+                "title": title,
+                "exe_path": exe_path,
+                "account_name": "",
+                "browser_profile": "uia",
+                "tab_id": f"uia:{index}:{title}",
+                "url": "",
+                "automation": "uia_tab",
+                "controllable": True,
+                "limited": True,
+            }
+        )
+    return rows
 
 
 def _enum_windows() -> list[dict[str, Any]]:
@@ -85,13 +146,7 @@ def _enum_windows() -> list[dict[str, Any]]:
             account_name = _wechat_account_hint(int(hwnd), title)
         elif lowered in {"chrome.exe", "msedge.exe", "firefox.exe", "brave.exe"}:
             kind = "browser_window"
-            app_name = {
-                "chrome.exe": "Google Chrome",
-                "msedge.exe": "Microsoft Edge",
-                "firefox.exe": "Mozilla Firefox",
-                "brave.exe": "Brave",
-            }.get(lowered, app_name)
-            automation = "uia"
+            app_name = _browser_name(process_name, app_name)
             limited = True
         fingerprint = _fingerprint(kind, exe_path or lowered, account_name or title)
         rows.append(
@@ -137,7 +192,8 @@ def _cdp_tabs(port: int, browser_name: str) -> list[dict[str, Any]]:
         tab_id = str(target.get("id") or "").strip()
         title = str(target.get("title") or target.get("url") or tab_id).strip()
         url = str(target.get("url") or "").strip()
-        if not tab_id:
+        ws_url = str(target.get("webSocketDebuggerUrl") or "").strip()
+        if not tab_id or not ws_url:
             continue
         fingerprint = _fingerprint("browser_tab", browser_name, url or title)
         rows.append(
@@ -164,16 +220,23 @@ def _cdp_tabs(port: int, browser_name: str) -> list[dict[str, Any]]:
 
 
 def discover_resources() -> list[dict[str, Any]]:
-    """Return visible Windows app instances plus separately addressable browser tabs."""
-    rows = _enum_windows()
-    cdp_rows: list[dict[str, Any]] = []
+    """Return app instances plus separately addressable WeChat/browser resources."""
+    windows = _enum_windows()
+    uia_tabs: list[dict[str, Any]] = []
+    for window in windows:
+        uia_tabs.extend(_uia_browser_tabs(window))
+
+    cdp_tabs: list[dict[str, Any]] = []
     for port in (9222, 9223, 9225, 9333):
-        cdp_rows.extend(_cdp_tabs(port, "Chromium Browser"))
-    # If CDP identifies tabs, keep browser windows too: windows are useful for
-    # focus/screenshot while tab resources provide precise DOM-level identity.
+        cdp_tabs.extend(_cdp_tabs(port, "Chromium Browser"))
+
+    # Prefer CDP rows for a title when both CDP and UIA expose the same tab.
+    cdp_titles = {str(row.get("title") or "").casefold() for row in cdp_tabs if row.get("title")}
+    uia_tabs = [row for row in uia_tabs if str(row.get("title") or "").casefold() not in cdp_titles]
+
     seen: set[str] = set()
     result: list[dict[str, Any]] = []
-    for row in [*rows, *cdp_rows]:
+    for row in [*windows, *cdp_tabs, *uia_tabs]:
         key = str(row.get("id") or "")
         if key and key not in seen:
             seen.add(key)
