@@ -149,6 +149,17 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Publish Windows installer to GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $files = Get-ChildItem "release-artifacts/*.exe"
+          if (-not $files) { throw "NSIS installer not found for Release upload" }
+          foreach ($file in $files) {
+            gh release upload wechat-connector-latest $file.FullName --repo "${{ github.repository }}" --clobber
+          }
+
       - name: Record successful build run
         if: success()
         shell: bash
@@ -166,6 +177,8 @@ jobs:
             "native_runtime": true,
             "docker_required": false,
             "unsigned_installer": true,
+            "release_tag": "wechat-connector-latest",
+            "release_published": true,
             "success": true
           }
           JSON
