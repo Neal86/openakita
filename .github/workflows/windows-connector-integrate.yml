@@ -93,6 +93,10 @@ jobs:
 
       - name: Commit integrated code
         run: |
+          # The integration generator validates the release-workflow transform, but
+          # GITHUB_TOKEN cannot push workflow-file changes without workflows scope.
+          # Keep that validation while excluding the workflow file from this bot commit.
+          git restore -- .github/workflows/wechat-connector-release.yml
           if git diff --quiet; then
             echo "No generated integration changes"
             exit 0
@@ -110,8 +114,7 @@ jobs:
             apps/setup-center/src/views/IMView.tsx \
             apps/setup-center/src/components/WindowsConnectorPanel.tsx \
             scripts/build_wechat_connector.py \
-            tests/wechat_desktop/test_connector_desktop_ui.py \
-            .github/workflows/wechat-connector-release.yml
+            tests/wechat_desktop/test_connector_desktop_ui.py
           git commit -m "feat: integrate generic Windows Connector runtime [skip ci]"
           git pull --rebase origin feature/hermes-multi-agent
           git push origin HEAD:feature/hermes-multi-agent
