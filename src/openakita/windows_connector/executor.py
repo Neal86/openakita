@@ -5,6 +5,7 @@ import ctypes
 import io
 import json
 import os
+import subprocess
 import urllib.request
 from typing import Any
 
@@ -77,9 +78,22 @@ class WindowsCommandExecutor:
         title = str(resource.get("title") or "")
         return Desktop(backend="uia").window(title_re=f".*{title}.*")
 
+    def _select_uia_tab(self, resource: dict[str, Any]) -> None:
+        if resource.get("automation") != "uia_tab":
+            return
+        title = str(resource.get("title") or "").strip()
+        if not title:
+            return
+        window = self._uia_window(resource)
+        try:
+            window.child_window(title=title, control_type="TabItem").select()
+        except Exception:
+            window.child_window(title=title, control_type="TabItem").click_input()
+
     def _inspect(self, resource: dict[str, Any]) -> dict[str, Any]:
         result = dict(resource)
         try:
+            self._select_uia_tab(resource)
             window = self._uia_window(resource)
             result["controls"] = [
                 {
@@ -94,7 +108,13 @@ class WindowsCommandExecutor:
         return result
 
     def _screenshot(self, resource: dict[str, Any]) -> dict[str, Any]:
+        if resource.get("automation") == "cdp":
+            data = self._cdp_command(resource, "Page.captureScreenshot", {"format": "png", "fromSurface": True})
+            encoded = str(data.get("data") or "")
+            if encoded:
+                return {"mime_type": "image/png", "base64": encoded}
         try:
+            self._select_uia_tab(resource)
             window = self._uia_window(resource)
             image = window.capture_as_image()
         except Exception:
@@ -106,6 +126,7 @@ class WindowsCommandExecutor:
         return {"mime_type": "image/png", "base64": base64.b64encode(buffer.getvalue()).decode("ascii")}
 
     def _uia_click(self, resource: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+        self._select_uia_tab(resource)
         window = self._uia_window(resource)
         target = str(args.get("target") or "").strip()
         if target:
@@ -127,6 +148,7 @@ class WindowsCommandExecutor:
         return {"clicked": [x, y]}
 
     def _type(self, resource: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+        self._select_uia_tab(resource)
         self._focus(int(resource.get("hwnd") or 0))
         text = str(args.get("text") or "")
         if args.get("clear_first"):
@@ -144,31 +166,123 @@ class WindowsCommandExecutor:
         return {"typed": len(text)}
 
     @staticmethod
-    def _cdp_call(resource: dict[str, Any], method: str, params: dict[str, Any] | None = None) -> Any:
+    def _cdp_target(resource: dict[str, Any]) -> dict[str, Any]:
         profile = str(resource.get("browser_profile") or "")
         if not profile.startswith("cdp:"):
-            raise RuntimeError("browser tab does not expose CDP; enable Chrome remote debugging or use UIA")
+            raise RuntimeError("browser tab does not expose CDP; use its UIA tab resource instead")
         port = int(profile.split(":", 1)[1])
         tab_id = str(resource.get("tab_id") or "")
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=2) as response:  # noqa: S310
+        request = urllib.request.Request(f"http://127.0.0.1:{port}/json", headers={"User-Agent": "OpenAkita-Windows-Connector/1.0"})
+        with urllib.request.urlopen(request, timeout=2) as response:  # noqa: S310 - localhost only
             tabs = json.loads(response.read().decode("utf-8"))
         target = next((item for item in tabs if str(item.get("id") or "") == tab_id), None)
-        if target is None:
+        if target is None or not target.get("webSocketDebuggerUrl"):
             raise RuntimeError("browser tab is no longer available")
-        # Browser DOM commands are delegated to the existing local Playwright/CDP
-        # layer when available. The metadata here remains useful even when a
-        # browser build exposes only the target list.
-        return {"target": target, "method": method, "params": params or {}}
+        return target
+
+    @classmethod
+    def _cdp_command(cls, resource: dict[str, Any], method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        from websockets.sync.client import connect
+
+        target = cls._cdp_target(resource)
+        ws_url = str(target["webSocketDebuggerUrl"])
+        with connect(ws_url, open_timeout=3, close_timeout=1, max_size=16 * 1024 * 1024) as socket:
+            request_id = 1
+            socket.send(json.dumps({"id": request_id, "method": method, "params": params or {}}))
+            while True:
+                message = json.loads(socket.recv(timeout=8))
+                if message.get("id") != request_id:
+                    continue
+                if message.get("error"):
+                    raise RuntimeError(str(message["error"]))
+                return dict(message.get("result") or {})
+
+    @classmethod
+    def _cdp_eval(cls, resource: dict[str, Any], expression: str) -> Any:
+        result = cls._cdp_command(
+            resource,
+            "Runtime.evaluate",
+            {"expression": expression, "returnByValue": True, "awaitPromise": True, "userGesture": True},
+        )
+        remote = result.get("result") or {}
+        if remote.get("subtype") == "error":
+            raise RuntimeError(str(remote.get("description") or "browser evaluation failed"))
+        return remote.get("value")
+
+    @staticmethod
+    def _js(value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False)
+
+    @classmethod
+    def _browser_action(cls, resource: dict[str, Any], action: str, args: dict[str, Any]) -> Any:
+        if resource.get("automation") != "cdp":
+            # UIA fallback still keeps tabs separately authorized, but cannot
+            # safely promise DOM semantics or URL reads.
+            if action == "browser_read":
+                return {"limited": True, "message": "该 Tab 仅有 UIA 权限；请用 windows_inspect_app 读取可访问控件。"}
+            raise RuntimeError("该 Tab 未启用 CDP；可使用 windows_focus/click/type 的 UIA 操作，或开启 Chrome/Edge remote debugging 获得 DOM 控制")
+        if action == "browser_read":
+            return cls._cdp_eval(resource, "({title:document.title,url:location.href,text:(document.body&&document.body.innerText||'').slice(0,100000)})")
+        if action == "browser_navigate":
+            url = str(args.get("url") or "").strip()
+            if not url:
+                raise ValueError("url is required")
+            return cls._cdp_command(resource, "Page.navigate", {"url": url})
+        if action == "browser_click":
+            selector = str(args.get("selector") or "").strip()
+            text = str(args.get("text") or "").strip()
+            expression = f"""(() => {{
+              let el = {('document.querySelector(' + cls._js(selector) + ')') if selector else 'null'};
+              if (!el && {cls._js(text)}) {{
+                const wanted={cls._js(text)};
+                el=[...document.querySelectorAll('button,a,input,[role=button],[role=link],*')].find(x => (x.innerText||x.value||x.getAttribute('aria-label')||'').trim()===wanted);
+              }}
+              if (!el) return {{ok:false,error:'element not found'}};
+              el.scrollIntoView({{block:'center',inline:'center'}}); el.click(); return {{ok:true,tag:el.tagName,text:(el.innerText||el.value||'').slice(0,500)}};
+            }})()"""
+            result = cls._cdp_eval(resource, expression)
+            if isinstance(result, dict) and result.get("ok") is False:
+                raise RuntimeError(str(result.get("error")))
+            return result
+        if action == "browser_type":
+            selector = str(args.get("selector") or "").strip()
+            text = str(args.get("text") or "")
+            if not selector:
+                raise ValueError("selector is required")
+            expression = f"""(() => {{
+              const el=document.querySelector({cls._js(selector)}); if(!el) return {{ok:false,error:'element not found'}};
+              el.focus();
+              const value={cls._js(text)};
+              const proto=el instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
+              const setter=Object.getOwnPropertyDescriptor(proto,'value')?.set;
+              if(setter) setter.call(el,value); else el.value=value;
+              el.dispatchEvent(new Event('input',{{bubbles:true}})); el.dispatchEvent(new Event('change',{{bubbles:true}}));
+              return {{ok:true,value:el.value}};
+            }})()"""
+            result = cls._cdp_eval(resource, expression)
+            if isinstance(result, dict) and result.get("ok") is False:
+                raise RuntimeError(str(result.get("error")))
+            return result
+        raise ValueError(f"unsupported browser action: {action}")
+
+    @staticmethod
+    def _launch(resource: dict[str, Any]) -> dict[str, Any]:
+        exe_path = str(resource.get("exe_path") or "").strip()
+        if not exe_path or not os.path.isfile(exe_path):
+            raise RuntimeError("该授权资源没有可重新启动的可执行文件路径")
+        process = subprocess.Popen([exe_path], close_fds=True)  # noqa: S603 - exact discovered executable only
+        return {"launched": exe_path, "pid": process.pid}
 
     async def execute(self, payload: dict[str, Any]) -> dict[str, Any]:
         _grant, resource = self._authorize(payload)
         action = str(payload.get("action") or "")
         args = payload.get("arguments") or {}
-        if action == "inspect" or action == "read_ui":
+        if action in {"inspect", "read_ui"}:
             return {"ok": True, "result": self._inspect(resource)}
         if action == "screenshot":
             return {"ok": True, "result": self._screenshot(resource)}
         if action == "focus":
+            self._select_uia_tab(resource)
             self._focus(int(resource.get("hwnd") or 0))
             return {"ok": True, "result": {"focused": resource.get("id")}}
         if action in {"click", "double_click"}:
@@ -178,17 +292,22 @@ class WindowsCommandExecutor:
         if action == "type":
             return {"ok": True, "result": self._type(resource, args)}
         if action == "hotkey":
+            self._select_uia_tab(resource)
             self._focus(int(resource.get("hwnd") or 0))
             from pywinauto.keyboard import send_keys
             send_keys(str(args.get("keys") or ""))
             return {"ok": True, "result": {"sent": args.get("keys")}}
         if action == "scroll":
+            self._select_uia_tab(resource)
             from pywinauto import mouse
             mouse.scroll(coords=(int(args.get("x") or 0), int(args.get("y") or 0)), wheel_dist=int(args.get("amount") or -3))
             return {"ok": True, "result": {"scrolled": True}}
         if action.startswith("browser_"):
-            return {"ok": True, "result": self._cdp_call(resource, action, args)}
+            return {"ok": True, "result": self._browser_action(resource, action, args)}
+        if action == "launch":
+            return {"ok": True, "result": self._launch(resource)}
         if action == "close":
+            self._select_uia_tab(resource)
             window = self._uia_window(resource)
             window.close()
             return {"ok": True, "result": {"closed": resource.get("id")}}
