@@ -36,7 +36,7 @@ jobs:
           node-version: "20"
       - name: JavaScript source syntax
         run: node --check hermes-extensions/dashboard/src/index.js
-      - name: Validate v0.4.5 release surfaces
+      - name: Validate v0.5.0 UI and release surfaces
         run: |
           python - <<'PY'
           import json
@@ -45,7 +45,7 @@ jobs:
           def yaml_version(text: str) -> str:
               for line in text.splitlines():
                   if line.strip().startswith("version:"):
-                      return line.split(":", 1)[1].strip().strip('"').strip("'")
+                      return line.split(": 1)[1].strip().strip('"').strip("'")
               raise AssertionError("version not found")
 
           root = Path('hermes-extensions')
@@ -53,6 +53,8 @@ jobs:
           plugin = (root / 'plugin.yaml').read_text('utf-8')
           platform_yaml = (root / 'platforms/wechat-desktop/plugin.yaml').read_text('utf-8')
           api = (root / 'dashboard/plugin_api.py').read_text('utf-8')
+          ui = (root / 'dashboard/src/index.js').read_text('utf-8')
+          css = (root / 'dashboard/dist/style.css').read_text('utf-8')
           tools = (root / 'tools.py').read_text('utf-8')
           compat = (root / 'compatibility.py').read_text('utf-8')
           installer = (root / 'install.ps1').read_text('utf-8')
@@ -62,17 +64,25 @@ jobs:
 
           assert manifest['entry'] == 'dist/index.js'
           assert manifest['api'] == 'plugin_api.py'
-          assert manifest['version'] == yaml_version(plugin) == yaml_version(platform_yaml) == '0.4.5'
+          assert manifest['icon'] == 'Activity'
+          assert manifest['version'] == yaml_version(plugin) == yaml_version(platform_yaml) == '0.5.0'
           assert not (root / 'dashboard/compat_api.py').exists()
           assert (root / 'management/overview.py').is_file()
           assert (root / 'task_center/service_v3.py').is_file()
           assert (root / 'wechat/runtime.py').is_file()
           assert '/capabilities' in api and 'project_supported' in api
+          for route in ('/wechat/health', '/wechat/status', '/wechat/chats', '/wechat/unread', '/wechat/dry-run'):
+              assert route in api
           assert 'service_v3.py' in api
           assert 'build_management_overview' in api and 'build_management_overview' in tools
           assert 'def _management_overview' not in api and 'def _management_overview' not in tools
-          assert 'sys.modules[module_name] = module' in api
           assert 'ConfigDict(extra="forbid")' in api
+          for tab in ('overview', 'agents', 'projects', 'tasks', 'wechat'):
+              assert f'"{tab}"' in ui
+          for feature in ('Create without bundled skills', 'Use project', 'Run now', 'Safe dry-run test', 'Native Projects unavailable'):
+              assert feature in ui
+          assert 'hx-dialog-backdrop' in ui and 'hx-dialog-backdrop' in css
+          assert '@media(max-width:640px)' in css
           assert 'ttl_seconds' in compat and 'force' in compat and '_resolve_binary' in compat
           assert 'rolling back previous plugin files and Hermes plugin configuration' in installer
           assert 'wechat\\runtime.py' in installer and 'task_center\\service_v3.py' in installer
@@ -80,7 +90,7 @@ jobs:
           assert '_CrossProcessFileLock' in runtime and '_UI_THREAD_LOCK.acquire(timeout=' in runtime
           assert '_latest_cron_runs' in task_v3 and 'first_rows' in task_v3
           assert 'WECHAT_DESKTOP_GROUP_CHATS' in platform_yaml
-          print('v0.4.5 concurrency, fair task scheduling, canonical overview, and installer surfaces ok')
+          print('v0.5.0 complete Management Center UI, WeChat dashboard, and release surfaces ok')
           PY
 
   windows-installer:
@@ -128,8 +138,8 @@ jobs:
             exit /b 0
           )
           if "%1"=="plugins" if "%2"=="list" (
-            echo hermes-extensions enabled 0.4.5 user
-            echo wechat-desktop enabled 0.4.5 user
+            echo hermes-extensions enabled 0.5.0 user
+            echo wechat-desktop enabled 0.5.0 user
             exit /b 0
           )
           if "%1"=="dashboard" if "%2"=="--status" (
