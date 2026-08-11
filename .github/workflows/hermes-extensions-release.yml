@@ -70,6 +70,8 @@ jobs:
               'plugin.yaml', '__init__.py', 'install.ps1', 'doctor.ps1',
               'compatibility.py', 'dashboard/manifest.json',
               'dashboard/dist/index.js', 'dashboard/plugin_api.py',
+              'management/overview.py', 'task_center/service_v3.py',
+              'wechat/adapter.py', 'wechat/runtime.py',
               'platforms/wechat-desktop/plugin.yaml'
           ]:
               assert (root/rel).is_file(), rel
@@ -89,6 +91,9 @@ jobs:
           grep -q "hermes-extensions-v${VERSION}/plugin.yaml" /tmp/archive.txt
           grep -q "hermes-extensions-v${VERSION}/dashboard/dist/index.js" /tmp/archive.txt
           grep -q "hermes-extensions-v${VERSION}/dashboard/plugin_api.py" /tmp/archive.txt
+          grep -q "hermes-extensions-v${VERSION}/management/overview.py" /tmp/archive.txt
+          grep -q "hermes-extensions-v${VERSION}/task_center/service_v3.py" /tmp/archive.txt
+          grep -q "hermes-extensions-v${VERSION}/wechat/runtime.py" /tmp/archive.txt
 
       - uses: actions/upload-artifact@v4
         with:
@@ -109,4 +114,4 @@ jobs:
             "release/hermes-extensions-v${VERSION}.zip" \
             "release/hermes-extensions-v${VERSION}.zip.sha256" \
             --title "Hermes Extensions v${VERSION}" \
-            --notes "Standalone Hermes Extensions v${VERSION}. Transactional Windows installer with config rollback, preflight/installed doctor modes, cached compatibility probing, dataclass-safe Dashboard loading, strict API bodies, and graceful native Project fallback. Download the ZIP, extract it, run doctor.ps1 -Preflight, then install.ps1."
+            --notes "Standalone Hermes Extensions v${VERSION}. Includes transactional Windows install/rollback, cross-process WeChat UI serialization, improved inbound identity and polling health, configured group-chat routing, fair upcoming-task visibility, batched Cron history reads, canonical Management overview, cached compatibility probing, strict Dashboard API bodies, and graceful native Project fallback."
