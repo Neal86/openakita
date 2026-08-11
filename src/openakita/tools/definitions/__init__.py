@@ -5,29 +5,8 @@
 每个文件定义一类工具，最后统一导出。
 
 遵循 tool-definition-spec.md 规范。
-
-结构：
-- base.py         # 基础类型、验证器、构建器
-- browser.py      # Browser 工具（11 个）
-- filesystem.py   # File System 工具（8 个）
-- skills.py       # Skills 工具（7 个）
-- memory.py       # Memory 工具（3 个）
-- scheduled.py    # Scheduled Tasks 工具（5 个）
-- im_channel.py   # IM Channel 工具（4 个）
-- profile.py      # User Profile 工具（3 个）
-- system.py       # System 工具（7 个）
-- mcp.py          # MCP 工具（8 个）
-- plan.py         # Todo & Plan 工具（6 个）
-- web_search.py   # Web Search 工具（2 个）
-- web_fetch.py    # Web Fetch 工具（1 个）
-- code_quality.py # Code Quality 工具（1 个）
-- search.py       # Search 工具（1 个）
-- mode.py         # Mode 工具（1 个）
-- notebook.py     # Notebook 工具（1 个）
-- config.py       # Config 工具（1 个，统一配置管理）
 """
 
-# 基础模块
 from .agent import AGENT_TOOLS
 from .agent_hub import AGENT_HUB_TOOLS
 from .agent_package import AGENT_PACKAGE_TOOLS
@@ -49,8 +28,6 @@ from .base import (
 from .browser import BROWSER_TOOLS
 from .cli_anything import CLI_ANYTHING_TOOLS
 from .code_quality import CODE_QUALITY_TOOLS
-
-# 工具定义
 from .config import CONFIG_TOOLS
 from .filesystem import FILESYSTEM_TOOLS
 from .im_channel import IM_CHANNEL_TOOLS
@@ -77,6 +54,7 @@ from .system import SYSTEM_TOOLS
 from .tool_search import TOOL_SEARCH_TOOLS
 from .web_fetch import WEB_FETCH_TOOLS
 from .web_search import WEB_SEARCH_TOOLS
+from .windows_connector import WINDOWS_CONNECTOR_TOOLS
 from .worktree import WORKTREE_TOOLS
 
 # 合并所有工具定义（不含平台连接类工具，后者由 agent 根据 hub_enabled 动态加载）
@@ -85,6 +63,7 @@ BASE_TOOLS = (
     + SKILLS_TOOLS
     + MEMORY_TOOLS
     + BROWSER_TOOLS
+    + WINDOWS_CONNECTOR_TOOLS
     + SCHEDULED_TOOLS
     + IM_CHANNEL_TOOLS
     + SYSTEM_TOOLS
@@ -110,7 +89,6 @@ BASE_TOOLS = (
     + WORKTREE_TOOLS
 )
 
-# 平台连接工具（Agent Hub + Skill Store），仅在 hub_enabled=True 时注册
 HUB_TOOLS = AGENT_HUB_TOOLS + SKILL_STORE_TOOLS
 
 _ALL_TOOLS = list(BASE_TOOLS) + list(HUB_TOOLS) + list(AGENT_TOOLS)
@@ -130,7 +108,6 @@ def get_tool_input_schema(tool_name: str) -> dict:
 
 
 __all__ = [
-    # 基础类型和工具
     "ToolDefinition",
     "ToolExample",
     "RelatedTool",
@@ -144,7 +121,6 @@ __all__ = [
     "infer_category",
     "merge_tool_lists",
     "filter_tools_by_category",
-    # 工具列表
     "BASE_TOOLS",
     "HUB_TOOLS",
     "AGENT_TOOLS",
@@ -153,6 +129,7 @@ __all__ = [
     "AGENT_PACKAGE_TOOLS",
     "SKILL_STORE_TOOLS",
     "BROWSER_TOOLS",
+    "WINDOWS_CONNECTOR_TOOLS",
     "CODE_QUALITY_TOOLS",
     "FILESYSTEM_TOOLS",
     "MODE_TOOLS",
