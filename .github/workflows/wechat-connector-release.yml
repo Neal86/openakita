@@ -251,7 +251,7 @@ jobs:
         env:
           TAURI_CONFIG: '{"bundle":{"createUpdaterArtifacts":false}}'
           NO_STRIP: true
-        run: npx tauri build --bundles nsis
+        run: npx tauri build --bundles nsis --no-sign
       - name: Collect and hash installer
         id: installer
         shell: pwsh
