@@ -58,6 +58,8 @@ jobs:
           app = (root / "dashboard/src/app.js").read_text("utf-8")
           components = (root / "dashboard/src/components.js").read_text("utf-8")
           installer = (root / "install.ps1").read_text("utf-8")
+          bundle = (root / "dashboard/dist/index.js").read_text("utf-8")
+          build = (root / "dashboard/build_bundle.py").read_text("utf-8")
           assert manifest["version"] == version(plugin) == version(platform) == "0.5.1"
           assert manifest["entry"] == "dist/index.js" and manifest["api"] == "plugin_api.py"
           for rel in (
@@ -66,11 +68,14 @@ jobs:
               "management/overview.py", "task_center/service_v3.py", "wechat/runtime.py",
           ):
               assert (root / rel).is_file(), rel
-          assert 'if (tab === "wechat") loadHealth()' in app
+          assert 'if (tab === "wechat") loadHealth(false)' in app
           assert 'if (tab === "wechat") loadWeChat(true)' not in app
-          assert "Promise.allSettled" in app and "refreshCurrent" in app
+          assert "checkWeChatDesktop" in app and "/wechat/chats?limit=200" in app
           assert "document.visibilityState" in app and "Discard unsaved changes?" in app
           assert "ConfirmDialog" in components and "previousFocus" in components and 'e.key === "Tab"' in components
+          assert "modalStack" in components and "closeRef" in components
+          assert "_normalize_bundle" in build and "_TASK_CARD_BAD" in build
+          assert 't.status || (t.enabled === false ? "paused" : "active"), h("span", null, "Next run")' not in bundle
           assert "build_bundle.py" in installer and "v0.5.1 install complete" in installer
           print("v0.5.1 UX surfaces ok")
           PY
