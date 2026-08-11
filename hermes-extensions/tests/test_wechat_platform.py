@@ -55,15 +55,18 @@ def load_platform_module():
     base.MessageType = MessageType
     base.SendResult = SendResult
 
-    saved = {name: sys.modules.get(name) for name in (
-        "gateway", "gateway.config", "gateway.platforms", "gateway.platforms.base"
-    )}
-    sys.modules.update({
-        "gateway": gateway,
-        "gateway.config": config,
-        "gateway.platforms": platforms,
-        "gateway.platforms.base": base,
-    })
+    saved = {
+        name: sys.modules.get(name)
+        for name in ("gateway", "gateway.config", "gateway.platforms", "gateway.platforms.base")
+    }
+    sys.modules.update(
+        {
+            "gateway": gateway,
+            "gateway.config": config,
+            "gateway.platforms": platforms,
+            "gateway.platforms.base": base,
+        }
+    )
     try:
         name = "hx_wechat_platform_test"
         spec = importlib.util.spec_from_file_location(name, ADAPTER)
@@ -80,11 +83,20 @@ def load_platform_module():
                 sys.modules[key] = value
 
 
+def test_gateway_file_loader_can_import_hardened_runtime() -> None:
+    module = load_platform_module()
+    desktop = module._load_desktop_class()
+    assert desktop.__name__ == "WeChatDesktop"
+    assert hasattr(desktop, "_ui_transaction")
+
+
 def test_identical_text_with_distinct_ui_ids_is_not_same_inbound_message() -> None:
     module = load_platform_module()
     a = {"message_id": "row-1", "sender": "Alex", "time": "8:00 PM", "text": "?"}
     b = {"message_id": "row-2", "sender": "Alex", "time": "8:00 PM", "text": "?"}
-    assert module.WeChatDesktopPlatformAdapter._inbound_fingerprint("Support", a) != module.WeChatDesktopPlatformAdapter._inbound_fingerprint("Support", b)
+    assert module.WeChatDesktopPlatformAdapter._inbound_fingerprint(
+        "Support", a
+    ) != module.WeChatDesktopPlatformAdapter._inbound_fingerprint("Support", b)
 
 
 def test_configured_group_chat_is_routed_as_group() -> None:
