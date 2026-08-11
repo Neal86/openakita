@@ -66,16 +66,23 @@ jobs:
           manifest = json.loads((root/'dashboard/manifest.json').read_text('utf-8'))
           assert manifest['entry'] == 'dist/index.js'
           assert manifest['api'] == 'plugin_api.py'
+          assert manifest['icon'] == 'Activity'
           for rel in [
               'plugin.yaml', '__init__.py', 'install.ps1', 'doctor.ps1',
               'compatibility.py', 'dashboard/manifest.json',
-              'dashboard/dist/index.js', 'dashboard/plugin_api.py',
-              'management/overview.py', 'task_center/service_v3.py',
-              'wechat/adapter.py', 'wechat/runtime.py',
-              'platforms/wechat-desktop/plugin.yaml'
+              'dashboard/dist/index.js', 'dashboard/dist/style.css',
+              'dashboard/plugin_api.py', 'management/overview.py',
+              'task_center/service_v3.py', 'wechat/adapter.py',
+              'wechat/runtime.py', 'platforms/wechat-desktop/plugin.yaml'
           ]:
               assert (root/rel).is_file(), rel
           assert not (root/'dashboard/compat_api.py').exists()
+          ui = (root/'dashboard/dist/index.js').read_text('utf-8')
+          api = (root/'dashboard/plugin_api.py').read_text('utf-8')
+          for token in ('Overview', 'Agents', 'Projects', 'Tasks', 'WeChat', 'Safe dry-run test'):
+              assert token in ui
+          for route in ('/wechat/health', '/wechat/status', '/wechat/dry-run'):
+              assert route in api
           PY
           (cd release && zip -qr "hermes-extensions-v${VERSION}.zip" "hermes-extensions-v${VERSION}")
           cd release
@@ -90,6 +97,7 @@ jobs:
           ! grep -q "/tests/" /tmp/archive.txt
           grep -q "hermes-extensions-v${VERSION}/plugin.yaml" /tmp/archive.txt
           grep -q "hermes-extensions-v${VERSION}/dashboard/dist/index.js" /tmp/archive.txt
+          grep -q "hermes-extensions-v${VERSION}/dashboard/dist/style.css" /tmp/archive.txt
           grep -q "hermes-extensions-v${VERSION}/dashboard/plugin_api.py" /tmp/archive.txt
           grep -q "hermes-extensions-v${VERSION}/management/overview.py" /tmp/archive.txt
           grep -q "hermes-extensions-v${VERSION}/task_center/service_v3.py" /tmp/archive.txt
@@ -114,4 +122,4 @@ jobs:
             "release/hermes-extensions-v${VERSION}.zip" \
             "release/hermes-extensions-v${VERSION}.zip.sha256" \
             --title "Hermes Extensions v${VERSION}" \
-            --notes "Standalone Hermes Extensions v${VERSION}. Includes transactional Windows install/rollback, cross-process WeChat UI serialization, improved inbound identity and polling health, configured group-chat routing, fair upcoming-task visibility, batched Cron history reads, canonical Management overview, cached compatibility probing, strict Dashboard API bodies, and graceful native Project fallback."
+            --notes "Hermes Extensions v${VERSION} adds the complete Management Center UI: Overview, searchable Agent/Project/Task management, capability-aware Project fallback, full lifecycle controls, responsive dialogs, WeChat gateway/desktop health, recent/unread chats, and fail-closed dry-run testing. It retains transactional Windows install/rollback, hardened cross-process WeChat automation, fair Task Center scheduling, and Hermes v0.16 compatibility."
