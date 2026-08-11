@@ -35,7 +35,9 @@ permissions:
   contents: write
 
 concurrency:
-  group: wechat-connector-${{ github.ref }}
+  # Keep each commit's full Windows build isolated. The native Desktop bundle can
+  # take a long time, and unrelated follow-up commits must not cancel it midway.
+  group: wechat-connector-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 
 env:
