@@ -35,6 +35,9 @@ TaskCenter = _load_module(
 ManagementCenter = _load_module(
     "management/service.py", "hermes_extensions_management_service"
 ).ManagementCenter
+WeChatDesktop = _load_module(
+    "wechat/runtime.py", "hermes_extensions_dashboard_wechat_runtime"
+).WeChatDesktop
 compat = _load_module("compatibility.py", "hermes_extensions_compatibility")
 overview_module = _load_module(
     "management/overview.py", "hermes_extensions_management_overview"
@@ -117,6 +120,11 @@ class ProjectActionBody(StrictBody):
     ]
     value: str | None = Field(default=None, max_length=4096)
     profile: str | None = Field(default=None, max_length=64)
+
+
+class WeChatDryRunBody(StrictBody):
+    chat: str = Field(min_length=1, max_length=256)
+    text: str = Field(min_length=1, max_length=4000)
 
 
 def _bad_request(exc: Exception) -> HTTPException:
@@ -231,6 +239,40 @@ def history(
 def management_overview() -> dict[str, Any]:
     try:
         return build_management_overview()
+    except Exception as exc:
+        raise _server_error(exc) from exc
+
+
+@router.get("/wechat/status")
+def wechat_status() -> dict[str, Any]:
+    try:
+        return WeChatDesktop().status()
+    except Exception as exc:
+        raise _server_error(exc) from exc
+
+
+@router.get("/wechat/chats")
+def wechat_chats(limit: int = Query(30, ge=1, le=200)) -> dict[str, Any]:
+    try:
+        return {"items": [row.to_dict() for row in WeChatDesktop().list_chats(limit)]}
+    except Exception as exc:
+        raise _server_error(exc) from exc
+
+
+@router.get("/wechat/unread")
+def wechat_unread(limit: int = Query(30, ge=1, le=200)) -> dict[str, Any]:
+    try:
+        return {"items": [row.to_dict() for row in WeChatDesktop().unread_chats(limit)]}
+    except Exception as exc:
+        raise _server_error(exc) from exc
+
+
+@router.post("/wechat/dry-run")
+def wechat_dry_run(body: WeChatDryRunBody) -> dict[str, Any]:
+    try:
+        return WeChatDesktop().send_message(body.chat, body.text, dry_run=True)
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
     except Exception as exc:
         raise _server_error(exc) from exc
 
