@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Any
 
-from compatibility import detect_capabilities, project_unavailable_payload
-from management.service import ManagementCenter
-from task_center import TaskCenter
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+if str(PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(PLUGIN_ROOT))
+
+from compatibility import detect_capabilities, project_unavailable_payload  # noqa: E402
+from management.service import ManagementCenter  # noqa: E402
+from task_center import TaskCenter  # noqa: E402
 
 
 def build_management_overview() -> dict[str, Any]:
