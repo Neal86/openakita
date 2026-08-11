@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
 
@@ -21,6 +22,17 @@ def test_status_fails_cleanly_when_not_available(tmp_path: Path, monkeypatch: py
     monkeypatch.setattr(WeChatDesktop, "available", staticmethod(lambda: False))
     result = WeChatDesktop(tmp_path).status()
     assert result["available"] is False
+
+
+def test_status_includes_persisted_gateway_health(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = WeChatDesktop(tmp_path)
+    client._health_path.write_text(
+        json.dumps({"status": "degraded", "consecutive_failures": 3}), "utf-8"
+    )
+    monkeypatch.setattr(WeChatDesktop, "available", staticmethod(lambda: False))
+    result = client.status()
+    assert result["gateway_health"]["status"] == "degraded"
+    assert result["gateway_health"]["consecutive_failures"] == 3
 
 
 def test_send_refuses_when_target_cannot_be_verified(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -91,3 +103,28 @@ def test_second_instance_times_out_while_ui_transaction_is_held(tmp_path: Path) 
         release.set()
         thread.join(timeout=2)
     assert not thread.is_alive()
+
+
+def test_message_ids_ignore_screen_coordinates_but_distinguish_duplicates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = WeChatDesktop(tmp_path)
+    fake_window = object()
+    monkeypatch.setattr(client, "_main_window", lambda: fake_window)
+    monkeypatch.setattr(type(client).__mro__[1], "open_chat", lambda self, chat: None)
+
+    rows_a = [
+        {"text": "?", "sender": "Alex", "time": "8:00 PM", "direction": "inbound", "top": 100, "left": 500},
+        {"text": "?", "sender": "Alex", "time": "8:00 PM", "direction": "inbound", "top": 140, "left": 500},
+    ]
+    rows_b = [
+        {"text": "?", "sender": "Alex", "time": "8:00 PM", "direction": "inbound", "top": 220, "left": 700},
+        {"text": "?", "sender": "Alex", "time": "8:00 PM", "direction": "inbound", "top": 260, "left": 700},
+    ]
+    monkeypatch.setattr(client, "_message_rows", lambda win, chat: rows_a)
+    first = client.get_messages("Support", 10)
+    monkeypatch.setattr(client, "_message_rows", lambda win, chat: rows_b)
+    second = client.get_messages("Support", 10)
+
+    assert [row["message_id"] for row in first] == [row["message_id"] for row in second]
+    assert first[0]["message_id"] != first[1]["message_id"]
