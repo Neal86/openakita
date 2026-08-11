@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -13,6 +14,22 @@ def write_jobs(home: Path, jobs: list[dict]) -> None:
     path = home / "cron" / "jobs.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"jobs": jobs}), "utf-8")
+
+
+def write_executions(home: Path, rows: list[tuple]) -> None:
+    path = home / "cron" / "executions.db"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(path)
+    try:
+        con.execute(
+            "CREATE TABLE executions (id INTEGER PRIMARY KEY, job_id TEXT, status TEXT, claimed_at TEXT)"
+        )
+        con.executemany(
+            "INSERT INTO executions(id, job_id, status, claimed_at) VALUES (?, ?, ?, ?)", rows
+        )
+        con.commit()
+    finally:
+        con.close()
 
 
 def test_profiles_and_cron_are_aggregated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -42,6 +59,33 @@ def test_structured_interval_is_expanded(tmp_path: Path, monkeypatch: pytest.Mon
     assert times[1] - times[0] == timedelta(hours=1)
 
 
+def test_upcoming_preserves_each_tasks_first_occurrence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(UTC)
+    write_jobs(
+        tmp_path,
+        [
+            {
+                "id": "fast",
+                "name": "every minute",
+                "schedule": {"kind": "interval", "minutes": 1},
+                "next_run_at": (now + timedelta(minutes=1)).isoformat(),
+            },
+            {
+                "id": "daily",
+                "name": "daily report",
+                "schedule": {"kind": "interval", "minutes": 1440},
+                "next_run_at": (now + timedelta(hours=12)).isoformat(),
+            },
+        ],
+    )
+    monkeypatch.setattr(TaskCenter, "kanban_tasks", lambda self, profile=None, include_completed=False: [])
+    rows = TaskCenter(tmp_path).upcoming(hours=24, limit=20)
+    ids = [row["id"] for row in rows]
+    assert "fast" in ids
+    assert "daily" in ids
+    assert rows == sorted(rows, key=TaskCenter._sort_key)
+
+
 def test_structured_once_is_not_recurring(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     start = datetime.now(UTC) + timedelta(hours=2)
     write_jobs(tmp_path, [{"id": "j2", "name": "one shot", "schedule": {"kind": "once", "run_at": start.isoformat()}, "next_run_at": start.isoformat()}])
@@ -50,6 +94,32 @@ def test_structured_once_is_not_recurring(tmp_path: Path, monkeypatch: pytest.Mo
     assert center.cron_jobs()[0]["recurring"] is False
     assert center.overview()["counts"]["one_shot"] == 1
     assert len(center.upcoming(hours=4)) == 1
+
+
+def test_overview_batches_cron_history_per_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(UTC).isoformat()
+    write_jobs(
+        tmp_path,
+        [
+            {"id": "a", "name": "a", "schedule": {"kind": "interval", "minutes": 60}, "next_run_at": now},
+            {"id": "b", "name": "b", "schedule": {"kind": "interval", "minutes": 60}, "next_run_at": now},
+        ],
+    )
+    write_executions(tmp_path, [(1, "a", "running", now), (2, "b", "completed", now)])
+    monkeypatch.setattr(TaskCenter, "kanban_tasks", lambda self, profile=None, include_completed=False: [])
+    center = TaskCenter(tmp_path)
+    calls = []
+    original = center._latest_cron_runs
+
+    def counted(profile, ids):
+        calls.append((profile, tuple(ids)))
+        return original(profile, ids)
+
+    monkeypatch.setattr(center, "_latest_cron_runs", counted)
+    data = center.overview()
+    assert len(calls) == 1
+    assert set(calls[0][1]) == {"a", "b"}
+    assert data["counts"]["running"] == 1
 
 
 def test_nondefault_cron_create_uses_global_profile_flag(tmp_path: Path) -> None:
