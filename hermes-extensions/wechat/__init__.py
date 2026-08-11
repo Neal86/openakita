@@ -1,5 +1,5 @@
 """Windows WeChat desktop automation for Hermes."""
 
-from .adapter import WeChatDesktop
+from .runtime import WeChatDesktop
 
 __all__ = ["WeChatDesktop"]
