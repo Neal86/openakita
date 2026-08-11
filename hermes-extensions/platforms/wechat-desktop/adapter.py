@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib.util
+import json
 import logging
 import os
 import sys
@@ -121,6 +122,38 @@ class WeChatDesktopPlatformAdapter(BasePlatformAdapter):
         self._last_error: str | None = None
         self._last_success_at: datetime | None = None
         self._health = "starting"
+        hermes_home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+        self._health_path = (
+            hermes_home
+            / "plugin-data"
+            / "hermes-extensions"
+            / "wechat"
+            / "gateway-health.json"
+        )
+        self._write_health()
+
+    def _health_payload(self) -> dict[str, Any]:
+        return {
+            "status": self._health,
+            "consecutive_failures": self._consecutive_failures,
+            "last_error": self._last_error,
+            "last_success_at": self._last_success_at.isoformat() if self._last_success_at else None,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+
+    def _write_health(self) -> None:
+        try:
+            self._health_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._health_path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps(self._health_payload(), ensure_ascii=False, indent=2),
+                "utf-8",
+            )
+            tmp.replace(self._health_path)
+        except OSError:
+            # Health persistence must never stop message delivery. Runtime state
+            # and logs remain authoritative if local storage is unavailable.
+            pass
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         del is_reconnect
@@ -128,9 +161,11 @@ class WeChatDesktopPlatformAdapter(BasePlatformAdapter):
         if not status.get("available"):
             self._health = "failed"
             self._last_error = str(status.get("reason") or "WeChat desktop unavailable")
+            self._write_health()
             return False
         self._health = "healthy"
         self._last_success_at = datetime.now(UTC)
+        self._write_health()
         self._mark_connected()
         if self._poll_task is None or self._poll_task.done():
             self._poll_task = asyncio.create_task(self._poll_loop())
@@ -139,6 +174,7 @@ class WeChatDesktopPlatformAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         self._running = False
         self._health = "stopped"
+        self._write_health()
         self._mark_disconnected()
         task = self._poll_task
         self._poll_task = None
@@ -150,12 +186,7 @@ class WeChatDesktopPlatformAdapter(BasePlatformAdapter):
                 pass
 
     def health_snapshot(self) -> dict[str, Any]:
-        return {
-            "status": self._health,
-            "consecutive_failures": self._consecutive_failures,
-            "last_error": self._last_error,
-            "last_success_at": self._last_success_at.isoformat() if self._last_success_at else None,
-        }
+        return self._health_payload()
 
     def _allowed(self, chat: str) -> bool:
         return not self.allowed_chats or chat in self.allowed_chats
@@ -169,9 +200,6 @@ class WeChatDesktopPlatformAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _inbound_fingerprint(chat: str, message: dict[str, Any]) -> str:
-        # Use UI message identity when supplied by the hardened desktop runtime.
-        # This allows two intentional identical messages ("?", "ok") to be
-        # distinct while still suppressing the same row observed on many polls.
         message_id = str(message.get("message_id") or "").strip()
         identity = "\0".join(
             [
@@ -202,17 +230,25 @@ class WeChatDesktopPlatformAdapter(BasePlatformAdapter):
 
     def _poll_success(self) -> None:
         if self._consecutive_failures >= DEGRADED_AFTER_FAILURES:
-            logger.info("WeChat Desktop polling recovered after %s consecutive failures", self._consecutive_failures)
+            logger.info(
+                "WeChat Desktop polling recovered after %s consecutive failures",
+                self._consecutive_failures,
+            )
         self._consecutive_failures = 0
         self._last_error = None
         self._last_success_at = datetime.now(UTC)
         self._health = "healthy"
+        self._write_health()
 
     def _poll_failure(self, exc: Exception) -> float:
         self._consecutive_failures += 1
         self._last_error = str(exc)
         self._health = "degraded" if self._consecutive_failures < 10 else "failed"
-        if self._consecutive_failures == DEGRADED_AFTER_FAILURES or self._consecutive_failures % 10 == 0:
+        self._write_health()
+        if (
+            self._consecutive_failures == DEGRADED_AFTER_FAILURES
+            or self._consecutive_failures % 10 == 0
+        ):
             logger.warning(
                 "WeChat Desktop polling failure #%s: %s",
                 self._consecutive_failures,
@@ -242,7 +278,9 @@ class WeChatDesktopPlatformAdapter(BasePlatformAdapter):
                     fingerprint = self._inbound_fingerprint(chat, latest)
                     outbound_fingerprint = self._outbound_fingerprint(text)
                     now = time.monotonic()
-                    if self._is_recent(self._seen.get(chat), fingerprint, now, INBOUND_DEDUP_SECONDS):
+                    if self._is_recent(
+                        self._seen.get(chat), fingerprint, now, INBOUND_DEDUP_SECONDS
+                    ):
                         continue
                     if self._is_recent(
                         self._recent_outbound.get(chat),
@@ -254,10 +292,11 @@ class WeChatDesktopPlatformAdapter(BasePlatformAdapter):
                         continue
                     self._seen[chat] = (fingerprint, now)
                     self._prune_dedup(now)
+                    chat_type = self._chat_type(chat)
                     source = self.build_source(
                         chat_id=chat,
                         chat_name=chat,
-                        chat_type=self._chat_type(chat),
+                        chat_type=chat_type,
                         user_id=str(latest.get("sender") or chat),
                         user_name=str(latest.get("sender") or chat),
                     )
@@ -265,10 +304,13 @@ class WeChatDesktopPlatformAdapter(BasePlatformAdapter):
                         text=text,
                         message_type=MessageType.TEXT,
                         source=source,
-                        message_id=str(latest.get("message_id") or f"wechat-desktop-{fingerprint[:20]}-{int(now)}"),
+                        message_id=str(
+                            latest.get("message_id")
+                            or f"wechat-desktop-{fingerprint[:20]}-{int(now)}"
+                        ),
                         raw_message={
                             "chat": chat,
-                            "chat_type": self._chat_type(chat),
+                            "chat_type": chat_type,
                             "text": text,
                             "sender": latest.get("sender"),
                             "display_time": latest.get("time"),
@@ -307,7 +349,10 @@ class WeChatDesktopPlatformAdapter(BasePlatformAdapter):
         now = time.monotonic()
         self._recent_outbound[chat] = (fingerprint, now)
         self._prune_dedup(now)
-        return SendResult(success=True, message_id=f"wechat-desktop-{fingerprint[:20]}-{int(now)}")
+        return SendResult(
+            success=True,
+            message_id=f"wechat-desktop-{fingerprint[:20]}-{int(now)}",
+        )
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         chat = str(chat_id or "").strip()
