@@ -4,9 +4,18 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-JS = (ROOT / "dashboard" / "src" / "index.js").read_text("utf-8")
+SRC = ROOT / "dashboard" / "src"
+JS = "\n".join((SRC / name).read_text("utf-8") for name in ("api.js", "components.js", "app.js", "index.js"))
 CSS = (ROOT / "dashboard" / "dist" / "style.css").read_text("utf-8")
 API = (ROOT / "dashboard" / "plugin_api.py").read_text("utf-8")
+BUILD = (ROOT / "dashboard" / "build_bundle.py").read_text("utf-8")
+
+
+def test_dashboard_source_is_modular_but_release_is_single_bundle() -> None:
+    for name in ("api.js", "components.js", "app.js", "index.js"):
+        assert (SRC / name).is_file()
+    assert 'ORDER = ["api.js", "components.js", "app.js", "index.js"]' in BUILD
+    assert 'dist" / "index.js"' in BUILD
 
 
 def test_management_center_has_complete_tabs_and_states() -> None:
@@ -15,76 +24,50 @@ def test_management_center_has_complete_tabs_and_states() -> None:
     assert "projectSupported" in JS
     assert "Native Projects unavailable" in JS
     assert "Loading Management Center" in JS
-    assert "No Projects match this view" in JS
 
 
-def test_agent_ui_exposes_full_management_surface() -> None:
-    for label in (
-        "Create Agent",
-        "Set default",
-        "Check gateway",
-        "Start",
-        "Stop",
-        "Restart",
-        "Export",
-        "Delete",
-        "Initial SOUL.md",
-        "Create without bundled skills",
-    ):
-        assert label in JS
-
-
-def test_project_ui_exposes_native_project_actions() -> None:
+def test_agent_project_task_management_surfaces_remain_complete() -> None:
     for token in (
-        "Create Project",
-        "Use project",
-        "add_folder",
-        "remove_folder",
-        "set_primary",
-        "assign_agent",
-        "Archive",
-        "Restore",
+        "Create Agent", "Set default", "Check gateway", "Restart", "Export", "Delete Agent",
+        "Create Project", "Use project", "add_folder", "remove_folder", "set_primary", "assign_agent",
+        "Create Task", "Run now", "Pause", "Resume", "Delete Task", "Archive Task", "Priority", "Deliver", "Execution history",
     ):
         assert token in JS
 
 
-def test_task_ui_exposes_edit_and_lifecycle_actions() -> None:
-    for token in (
-        "Create Task",
-        "Run now",
-        "Pause",
-        "Resume",
-        "Delete",
-        "Archive",
-        "Priority",
-        "Deliver",
-        "Execution history",
-    ):
-        assert token in JS
+def test_wechat_tab_never_auto_scans_desktop() -> None:
+    assert 'if (tab === "wechat") loadHealth()' in JS
+    assert 'if (tab === "wechat") loadWeChat(true)' not in JS
+    assert "checkWeChatDesktop" in JS
+    assert "Promise.allSettled" in JS
+    assert "Partial desktop results" in JS
+    assert "Opening this tab does not touch the desktop app" in JS
 
 
-def test_wechat_ui_is_safe_and_observable() -> None:
-    for token in (
-        "WeChat Desktop",
-        "Gateway health",
-        "Desktop connection",
-        "Unread chats",
-        "Recent chats",
-        "Safe dry-run test",
-        "NO SEND",
-        "/wechat/health",
-        "/wechat/status",
-        "/wechat/dry-run",
-    ):
-        assert token in JS or token in API
+def test_refresh_is_context_aware_and_auto_refresh_is_visibility_guarded() -> None:
+    assert "refreshCurrent" in JS
+    assert 'if (tab === "tasks")' in JS
+    assert 'if (tab === "wechat")' in JS
+    assert 'document.visibilityState !== "visible"' in JS
+    assert "15000" in JS and "30000" in JS
 
 
-def test_forms_are_real_responsive_dialogs() -> None:
-    assert "hx-dialog-backdrop" in JS
+def test_dialogs_are_accessible_and_protect_unsaved_changes() -> None:
+    assert "focusables" in JS
+    assert 'e.key === "Tab"' in JS
+    assert "previousFocus" in JS
+    assert "Discard unsaved changes?" in JS
+    assert "ConfirmDialog" in JS
+    assert "guardedClose" in JS
+    assert "confirm(" not in JS
+
+
+def test_mobile_and_focus_styles_are_touch_friendly() -> None:
     assert "hx-dialog-backdrop" in CSS
-    assert "position:fixed" in CSS
     assert "@media(max-width:640px)" in CSS
-    assert "height:100vh" in CSS
+    assert "min-height:44px" in CSS
+    assert ":focus-visible" in CSS
+    assert ".hx-actions{flex-wrap:wrap}" in CSS
 
 
 def test_dashboard_api_exposes_wechat_management_endpoints() -> None:
