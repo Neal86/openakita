@@ -3,6 +3,12 @@
 This adapter embeds Nous Research Hermes' ``AIAgent`` in the OpenAkita backend
 process. Desktop does not need Docker or a second Hermes gateway process.
 Server deployments may still use the existing Docker/HTTP runtime.
+
+Durable identity/capability state remains owned by OpenAkita. Before each
+native Hermes session starts, the capability bridge resolves the current Agent
+profile and registers the enabled OpenAkita tools into Hermes' central tool
+registry. Hermes' own private memory/context files are disabled so switching
+runtime never forks the Agent's long-term Memory/Skills/MCP state.
 """
 from __future__ import annotations
 
@@ -11,6 +17,8 @@ import importlib.metadata
 import os
 from collections.abc import AsyncIterator
 from typing import Any
+
+from .capability_bridge import prepare_native_hermes_capabilities
 
 
 class NativeHermesUnavailable(RuntimeError):
@@ -24,6 +32,7 @@ class NativeHermesRuntime:
     def available() -> bool:
         try:
             import run_agent  # noqa: F401
+
             return True
         except Exception:
             return False
@@ -70,6 +79,11 @@ class NativeHermesRuntime:
             "save_trajectories": False,
             "platform": "openakita-desktop",
             "session_id": cls._scoped_session_id(agent_id, session_id),
+            # OpenAkita owns durable Agent identity/memory. Hermes keeps its
+            # execution loop, subagents and native tools, but must not create a
+            # second long-term memory/context universe for the same Agent.
+            "skip_memory": True,
+            "skip_context_files": True,
         }
         if stream_delta_callback is not None:
             kwargs["stream_delta_callback"] = stream_delta_callback
@@ -91,6 +105,11 @@ class NativeHermesRuntime:
             )
         )
 
+    @staticmethod
+    def _merged_system(system: str, bridge_context: str) -> str:
+        parts = [part.strip() for part in (system, bridge_context) if part and part.strip()]
+        return "\n\n".join(parts)
+
     @classmethod
     async def run(
         cls,
@@ -99,15 +118,22 @@ class NativeHermesRuntime:
         agent_id: str,
         session_id: str = "",
         system: str = "",
+        tools: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         scoped_session = cls._scoped_session_id(agent_id, session_id)
+        snapshot = prepare_native_hermes_capabilities(
+            agent_id,
+            session_id=scoped_session,
+            explicit_tools=tools,
+        )
+        effective_system = cls._merged_system(system, snapshot.system_context)
 
         def _execute() -> dict[str, Any]:
             agent = cls._new_agent(agent_id=agent_id, session_id=session_id)
             result = agent.run_conversation(
                 user_message=message,
-                system_message=system or None,
+                system_message=effective_system or None,
                 task_id=scoped_session,
             )
             if isinstance(result, dict):
@@ -123,6 +149,7 @@ class NativeHermesRuntime:
                 "hermes_version": cls.version(),
                 "agent_profile_id": agent_id,
                 "hermes_session_id": scoped_session,
+                **snapshot.metadata(),
                 **(metadata or {}),
             },
         }
@@ -135,11 +162,18 @@ class NativeHermesRuntime:
         agent_id: str,
         session_id: str = "",
         system: str = "",
+        tools: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         scoped_session = cls._scoped_session_id(agent_id, session_id)
+        snapshot = prepare_native_hermes_capabilities(
+            agent_id,
+            session_id=scoped_session,
+            explicit_tools=tools,
+        )
+        effective_system = cls._merged_system(system, snapshot.system_context)
 
         def _on_delta(delta: Any) -> None:
             text = ""
@@ -164,7 +198,7 @@ class NativeHermesRuntime:
                 )
                 result = agent.run_conversation(
                     user_message=message,
-                    system_message=system or None,
+                    system_message=effective_system or None,
                     task_id=scoped_session,
                 )
                 # Some provider modes do not emit delta callbacks. Ensure the
@@ -201,6 +235,7 @@ class NativeHermesRuntime:
                 "hermes_version": cls.version(),
                 "agent_profile_id": agent_id,
                 "hermes_session_id": scoped_session,
+                **snapshot.metadata(),
                 **(metadata or {}),
             }
         finally:
