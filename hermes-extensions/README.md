@@ -2,25 +2,34 @@
 
 Standalone extensions for **NousResearch/hermes-agent**. This package does not depend on the OpenAkita runtime, APIs, agents, or databases.
 
-Current package version: **0.5.0**.
+Current package version: **0.5.1**.
 
-## Hermes Management Center v0.5.0
+## Hermes Management Center v0.5.1
 
-`hermes dashboard` gets one complete **Management Center** with five tabs:
+`hermes dashboard` gets one complete Management Center with five tabs:
 
-- **Overview** — Agent/runtime/task counters, upcoming work, Project capability state, WeChat Gateway health, and scoped partial-load errors.
-- **Agents** — native Hermes Profile create/clone/rename/edit/use/export/delete, workspace/model/provider/SOUL management, plus Gateway start/stop/restart/status.
-- **Projects** — native Hermes Project create/use/archive/restore, folder add/remove/set-primary, board binding and Workspace Agent assignment. On Hermes builds without `hermes project`, the UI explicitly shows an unsupported state and disables creation instead of allowing 409 failures.
-- **Tasks** — searchable/filterable native Cron and Kanban management with create/edit, Cron pause/resume/run/delete, Kanban assignment/priority/archive, upcoming occurrences and execution history.
-- **WeChat** — persisted Gateway health, manual desktop connectivity check, recent/unread chats and a fail-closed **dry-run only** test that never presses Enter.
+- **Overview** — Agent/runtime/task counters, upcoming work, Project capability state, persisted WeChat Gateway health and scoped partial-load errors.
+- **Agents** — native Hermes Profile create/clone/rename/edit/use/export/delete, workspace/model/provider/SOUL management and Gateway start/stop/restart/status.
+- **Projects** — native Hermes Project create/use/archive/restore, folder add/remove/set-primary, board binding and Workspace Agent assignment. Unsupported Hermes builds show an explicit compatibility state instead of exposing failing controls.
+- **Tasks** — searchable/filterable Cron and Kanban management with create/edit, Cron pause/resume/run/delete, Kanban assignment/priority/archive, upcoming occurrences and execution history.
+- **WeChat** — Gateway health, manual desktop checks, partial-result reporting, recent/unread chats and a fail-closed dry-run test that never presses Enter.
 
-The Dashboard now uses real responsive dialogs rather than appending create/edit cards at the bottom of the page. Search/filter controls, loading/empty/error/unsupported states, responsive mobile layouts and action feedback are included.
+### v0.5.1 UX polish
 
-### UI safety
+The frontend is now maintained as small source modules (`api.js`, `components.js`, `app.js`, `index.js`) and deterministically bundled into the single `dashboard/dist/index.js` file required by Hermes. Installation and Release builds both run `dashboard/build_bundle.py`, so Hermes still loads one normal plugin bundle.
 
-The Overview reads only persisted WeChat Gateway health and does **not** focus the WeChat window. Desktop UI Automation is triggered only from explicit WeChat-page actions such as **Check desktop** or **Run dry test**.
+User-facing UX improvements:
 
-The Management Center never exposes a casual one-click real WeChat send button. The built-in UI test path calls `dry_run=true`, verifies the exact conversation, types the payload and clears it without pressing Enter.
+- Entering the **WeChat** tab reads persisted health only and never automatically focuses or scans the Windows WeChat UI.
+- **Check desktop** is an explicit user action and uses partial-result handling, so a failed unread scan no longer hides a successful desktop status or recent-chat result.
+- The top **Refresh** button is context-aware: Tasks refreshes task state, WeChat refreshes health only, and other tabs refresh Management state.
+- Visible pages auto-refresh lightweight state (`30s` for Management/Tasks, `15s` for WeChat health) only while the document is visible. Auto-refresh never runs WeChat UI Automation.
+- Dialogs trap keyboard focus, support Escape/backdrop close, restore focus to the launching control and lock background scrolling.
+- Native browser `confirm()` prompts were replaced by a consistent in-product confirmation dialog.
+- Agent, Project and Task edit/create dialogs protect unsaved changes before closing.
+- Action buttons expose granular busy labels/states and block duplicate mutations while an action is running.
+- Mobile controls use touch-friendly targets and wrapped action rows.
+- Focus-visible styling is explicit for keyboard navigation.
 
 ## Windows WeChat Desktop
 
@@ -36,9 +45,7 @@ Registered tools:
 
 For known group conversations, configure exact names with `WECHAT_DESKTOP_GROUP_CHATS` (comma separated) or platform `extra.group_chats`. Those conversations enter Hermes with `chat_type="group"`; other chats remain `dm` unless explicitly configured.
 
-### Concurrency and health hardening
-
-The hardened `wechat/runtime.py` serializes UI operations across threads and processes. The exclusive transaction covers chat selection, exact-target verification, paste, final verification, Enter/dry-run cleanup and duplicate-send state. Lock timeout fails closed.
+The hardened `wechat/runtime.py` serializes UI operations across threads/processes. The exclusive transaction covers chat selection, exact-target verification, paste, final verification, Enter/dry-run cleanup and duplicate-send state. Lock timeout fails closed.
 
 Gateway polling persists `healthy`, `degraded`, `failed` or `stopped` state plus consecutive failures, last error and last successful poll. Repeated UIA failures back off exponentially; recovery resets health.
 
@@ -46,16 +53,7 @@ Gateway polling persists `healthy`, `degraded`, `failed` or `stopped` state plus
 
 Task Center v3 reads native per-profile Cron state/history plus Hermes Kanban surfaces and uses Hermes CLI for mutations.
 
-Registered tools:
-
-- `task_center_overview`
-- `task_center_upcoming`
-- `task_center_create`
-- `task_center_update`
-- `task_center_action`
-- `task_center_history`
-
-Upcoming scheduling is globally fair: every scheduled task gets first-occurrence visibility before high-frequency recurring jobs fill the remaining result budget. Cron execution status is queried in batches with one SQLite connection per Profile and only the latest run per job returned.
+Upcoming scheduling is globally fair: each scheduled task gets first-occurrence visibility before high-frequency recurring jobs fill the remaining result budget. Cron execution status is queried in batches with one SQLite connection per Profile and only the latest run per job returned.
 
 ## Agents and Projects
 
@@ -72,14 +70,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\doctor.ps1 -Installed
 ```
 
-Useful checks:
-
-```powershell
-hermes plugins list --plain --no-bundled
-hermes dashboard
-```
-
-The installer detects the actual Hermes Python interpreter, verifies dependencies, stages/compiles the new plugin, backs up the existing extension/WeChat platform/config, atomically replaces code, enables plugins and runs installed doctor checks. Failed upgrades restore plugin files and Hermes plugin configuration.
+The installer detects the actual Hermes Python interpreter, verifies dependencies, stages the plugin, builds the modular Dashboard bundle, compiles Python, backs up the current extension/WeChat platform/config, atomically replaces code, enables plugins and runs installed doctor checks. Failed upgrades restore plugin files and Hermes plugin configuration.
 
 A first installation or Dashboard backend Python change should restart only `hermes dashboard`. Frontend-only updates can use Dashboard rescan. WeChat platform/runtime Python changes require restarting the relevant Gateway.
 
@@ -99,15 +90,15 @@ The default mode is `-Installed`.
 The release workflow builds:
 
 ```text
-hermes-extensions-v0.5.0.zip
-hermes-extensions-v0.5.0.zip.sha256
+hermes-extensions-v0.5.1.zip
+hermes-extensions-v0.5.1.zip.sha256
 ```
 
-The archive contains only the standalone Hermes extension tree, excludes OpenAkita application code/tests, and contains pre-built `dashboard/dist/index.js` and `dashboard/dist/style.css`.
+The archive contains only the standalone Hermes extension tree, excludes OpenAkita application code/tests, includes modular Dashboard source for maintainability and includes the generated single `dashboard/dist/index.js` plus `dashboard/dist/style.css` consumed by Hermes.
 
 ## Validation
 
-CI covers Python compilation, Ruff, pytest, Dashboard JavaScript syntax, v0.5.0 UI contract checks, strict Dashboard request bodies, capability-aware Project UI behavior, full Agent/Project/Task action surfaces, WeChat Dashboard routes/dry-run safety, responsive-dialog CSS, fair Task scheduling, batched Cron history, cross-process WeChat locking, polling health/backoff, group-chat classification, real Windows `install.ps1` execution, doctor checks, rollback of plugin files/config and Release ZIP isolation/SHA256 generation.
+CI covers Python compilation, Ruff, pytest, syntax checks for each Dashboard source module and the generated bundle, v0.5.1 UI/UX contract tests, no-auto-UIA WeChat tab behavior, context-aware refresh, visibility-aware auto-refresh, partial desktop results, focus trapping/restoration, custom confirmation dialogs, unsaved-change protection, mobile touch targets, strict Dashboard request bodies, Project compatibility behavior, fair Task scheduling, batched Cron history, cross-process WeChat locking, polling health/backoff, real Windows `install.ps1` execution, doctor checks, rollback and Release ZIP isolation/SHA256 generation.
 
 A real WeChat acceptance test still requires native Windows with a logged-in WeChat client. CI cannot substitute for device-level UI Automation testing.
 
@@ -115,7 +106,7 @@ A real WeChat acceptance test still requires native Windows with a logged-in WeC
 
 - Default and active Profiles are protected from deletion.
 - Autonomous Agent tools do not expose Profile deletion or Gateway restart.
-- Human Dashboard Gateway restart requires confirmation and state verification.
+- Human Dashboard destructive/runtime actions use explicit confirmation UI.
 - Profile/SOUL paths are validated against traversal.
 - Provider credentials/API keys are not exposed by Management Center.
 - WeChat outbound sends fail closed when exact-target verification or the cross-process UI lock cannot be obtained.
