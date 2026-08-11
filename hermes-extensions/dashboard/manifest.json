@@ -3,7 +3,7 @@
   "label": "Management Center",
   "description": "Hermes Agents, Projects, Tasks, WeChat status, runtime controls, and extension management.",
   "icon": "Activity",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "tab": {
     "path": "/management-center",
     "position": "after:cron"
