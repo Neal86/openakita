@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from openakita.windows_connector.manager import WindowsConnectorManager
+from openakita.windows_connector.manager import LOCAL_NODE_ID, WindowsConnectorManager
 
 
 RESOURCE = {
@@ -119,3 +119,44 @@ async def test_execute_roundtrip_uses_server_side_agent_grant(tmp_path: Path, mo
     )
     assert result["ok"] is True
     assert result["result"]["title"] == "微信"
+
+
+@pytest.mark.asyncio
+async def test_local_transport_executes_without_remote_connector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = WindowsConnectorManager(tmp_path / "state.json")
+    monkeypatch.setattr(type(manager), "local_available", property(lambda _self: True))
+    monkeypatch.setattr(manager._local_executor, "resources", lambda: [RESOURCE])
+
+    await manager.refresh_local_resources()
+    grant = await manager.upsert_grant(
+        {
+            "node_id": LOCAL_NODE_ID,
+            "agent_profile_id": "support",
+            "resource_id": "app-1",
+            "permissions": {"read": True},
+        }
+    )
+
+    async def fail_remote_send(_node_id: str, _command: dict) -> None:
+        raise AssertionError("local execution must not use remote connector transport")
+
+    async def fake_local_execute(payload: dict) -> dict:
+        assert payload["grant_id"] == grant["id"]
+        assert payload["agent_profile_id"] == "support"
+        return {"ok": True, "result": {"transport": "local"}}
+
+    monkeypatch.setattr("openakita.windows_connector.manager.wechat_desktop_manager.send_command", fail_remote_send)
+    monkeypatch.setattr(manager._local_executor, "execute", fake_local_execute)
+
+    result = await manager.execute(
+        node_id=LOCAL_NODE_ID,
+        agent_profile_id="support",
+        resource_id="app-1",
+        action="inspect",
+        timeout=2,
+    )
+    assert result == {"ok": True, "result": {"transport": "local"}}
+    node = await manager.local_node()
+    assert node["id"] == LOCAL_NODE_ID
+    assert node["transport"] == "local"
+    assert node["connector_version"] == "embedded"
