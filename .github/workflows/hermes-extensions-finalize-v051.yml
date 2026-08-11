@@ -1,0 +1,109 @@
+name: Finalize Hermes Extensions v0.5.1
+
+on:
+  push:
+    branches: [feature/hermes-extensions]
+    paths:
+      - ".github/workflows/hermes-extensions-finalize-v051.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/hermes-extensions
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Fix final Task card layout
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('hermes-extensions/dashboard/src/app.js')
+          text = path.read_text('utf-8')
+          old = 'h("strong", null, t.status || (t.enabled === false ? "paused" : "active"), h("span", null, "Next run"), h("strong", null, fmt(t.next_run_at)))'
+          new = 'h("strong", null, t.status || (t.enabled === false ? "paused" : "active")), h("span", null, "Next run"), h("strong", null, fmt(t.next_run_at))'
+          if old in text:
+              text = text.replace(old, new, 1)
+              path.write_text(text, 'utf-8')
+          assert new in path.read_text('utf-8')
+          PY
+
+      - name: Validate and bundle
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r hermes-extensions/requirements.txt pytest ruff fastapi pydantic
+          python -m compileall -q hermes-extensions
+          ruff check hermes-extensions
+          for file in hermes-extensions/dashboard/src/api.js hermes-extensions/dashboard/src/components.js hermes-extensions/dashboard/src/app.js hermes-extensions/dashboard/src/index.js; do node --check "$file"; done
+          python hermes-extensions/dashboard/build_bundle.py
+          node --check hermes-extensions/dashboard/dist/index.js
+          pytest -q hermes-extensions/tests
+
+      - name: Validate v0.5.1 release surfaces
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path('hermes-extensions')
+          def version(path):
+              for line in path.read_text('utf-8').splitlines():
+                  if line.strip().startswith('version:'):
+                      return line.split(':',1)[1].strip().strip('"').strip("'")
+              raise AssertionError(path)
+          manifest = json.loads((root/'dashboard/manifest.json').read_text('utf-8'))
+          assert version(root/'plugin.yaml') == '0.5.1'
+          assert version(root/'platforms/wechat-desktop/plugin.yaml') == '0.5.1'
+          assert manifest['version'] == '0.5.1'
+          assert manifest['entry'] == 'dist/index.js' and manifest['api'] == 'plugin_api.py'
+          ui = (root/'dashboard/dist/index.js').read_text('utf-8')
+          for token in ('Discard unsaved changes?', 'Opening this tab never touches the desktop app', 'Partial desktop results', 'ConfirmDialog', 'document.visibilityState'):
+              assert token in ui
+          assert 'confirm(' not in ui
+          PY
+
+      - name: Commit final source and bundle
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add hermes-extensions/dashboard/src/app.js hermes-extensions/dashboard/dist/index.js
+          if ! git diff --cached --quiet; then
+            git commit -m "fix(ui): finalize v0.5.1 task card layout"
+            git push origin HEAD:feature/hermes-extensions
+          fi
+
+      - name: Build standalone ZIP
+        run: |
+          VERSION=0.5.1
+          rm -rf release
+          OUT="release/hermes-extensions-v${VERSION}"
+          mkdir -p "$OUT"
+          rsync -a hermes-extensions/ "$OUT/" --exclude tests --exclude __pycache__ --exclude .pytest_cache
+          python "$OUT/dashboard/build_bundle.py" --root "$OUT/dashboard"
+          (cd release && zip -qr "hermes-extensions-v${VERSION}.zip" "hermes-extensions-v${VERSION}")
+          cd release
+          sha256sum "hermes-extensions-v${VERSION}.zip" > "hermes-extensions-v${VERSION}.zip.sha256"
+          unzip -l "hermes-extensions-v${VERSION}.zip" | grep "dashboard/dist/index.js"
+          unzip -l "hermes-extensions-v${VERSION}.zip" | grep "install.ps1"
+          unzip -l "hermes-extensions-v${VERSION}.zip" | grep "platforms/wechat-desktop/plugin.yaml"
+
+      - name: Publish downloadable GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=hermes-extensions-v0.5.1
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/hermes-extensions-v0.5.1.zip release/hermes-extensions-v0.5.1.zip.sha256 --clobber
+          else
+            gh release create "$TAG" release/hermes-extensions-v0.5.1.zip release/hermes-extensions-v0.5.1.zip.sha256 --target feature/hermes-extensions --title "Hermes Extensions v0.5.1" --notes "Complete standalone Hermes Extensions v0.5.1 for Windows Hermes. Includes the polished Management Center UI, Agents/Tasks/Projects compatibility handling, hardened WeChat Desktop connector, transactional installer, doctor checks, modular bundled dashboard, unsaved-change protection, keyboard-accessible dialogs, context-aware refresh, and fail-closed dry-run testing."
+          fi
