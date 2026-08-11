@@ -37,11 +37,11 @@ def test_service_uses_worker_script_when_not_frozen(monkeypatch) -> None:
 def test_service_uses_sibling_worker_when_frozen(monkeypatch, tmp_path: Path) -> None:
     import sys
 
-    fake_exe = tmp_path / "OpenAkita-WeChat-Connector.exe"
+    fake_exe = tmp_path / "OpenAkita-Windows-Connector.exe"
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", str(fake_exe))
     command, cwd = ConnectorService._command()
-    assert command == [str(tmp_path / "OpenAkita-WeChat-Connector-Worker.exe")]
+    assert command == [str(tmp_path / "OpenAkita-Windows-Connector-Worker.exe")]
     assert cwd == tmp_path
 
 
