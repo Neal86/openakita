@@ -36,7 +36,7 @@ jobs:
           node-version: "20"
       - name: JavaScript source syntax
         run: node --check hermes-extensions/dashboard/src/index.js
-      - name: Validate v0.4.4 release surfaces
+      - name: Validate v0.4.5 release surfaces
         run: |
           python - <<'PY'
           import json
@@ -53,23 +53,34 @@ jobs:
           plugin = (root / 'plugin.yaml').read_text('utf-8')
           platform_yaml = (root / 'platforms/wechat-desktop/plugin.yaml').read_text('utf-8')
           api = (root / 'dashboard/plugin_api.py').read_text('utf-8')
+          tools = (root / 'tools.py').read_text('utf-8')
           compat = (root / 'compatibility.py').read_text('utf-8')
           installer = (root / 'install.ps1').read_text('utf-8')
           doctor = (root / 'doctor.ps1').read_text('utf-8')
+          runtime = (root / 'wechat/runtime.py').read_text('utf-8')
+          task_v3 = (root / 'task_center/service_v3.py').read_text('utf-8')
 
           assert manifest['entry'] == 'dist/index.js'
           assert manifest['api'] == 'plugin_api.py'
-          assert manifest['version'] == yaml_version(plugin) == yaml_version(platform_yaml) == '0.4.4'
+          assert manifest['version'] == yaml_version(plugin) == yaml_version(platform_yaml) == '0.4.5'
           assert not (root / 'dashboard/compat_api.py').exists()
+          assert (root / 'management/overview.py').is_file()
+          assert (root / 'task_center/service_v3.py').is_file()
+          assert (root / 'wechat/runtime.py').is_file()
           assert '/capabilities' in api and 'project_supported' in api
+          assert 'service_v3.py' in api
+          assert 'build_management_overview' in api and 'build_management_overview' in tools
+          assert 'def _management_overview' not in api and 'def _management_overview' not in tools
           assert 'sys.modules[module_name] = module' in api
           assert 'ConfigDict(extra="forbid")' in api
           assert 'ttl_seconds' in compat and 'force' in compat and '_resolve_binary' in compat
           assert 'rolling back previous plugin files and Hermes plugin configuration' in installer
-          assert 'BackupConfig' in installer and 'ConfigExisted' in installer
-          assert 'APPDATA' in installer and 'uv\\tools\\hermes-agent' in installer
-          assert '[switch]$Preflight' in doctor and '[switch]$Installed' in doctor and '[switch]$Json' in doctor
-          print('v0.4.4 loader, compatibility, strict API, and transactional surfaces ok')
+          assert 'wechat\\runtime.py' in installer and 'task_center\\service_v3.py' in installer
+          assert 'wechat_runtime' in doctor and 'task_service_v3' in doctor
+          assert '_CrossProcessFileLock' in runtime and '_UI_THREAD_LOCK.acquire(timeout=' in runtime
+          assert '_latest_cron_runs' in task_v3 and 'first_rows' in task_v3
+          assert 'WECHAT_DESKTOP_GROUP_CHATS' in platform_yaml
+          print('v0.4.5 concurrency, fair task scheduling, canonical overview, and installer surfaces ok')
           PY
 
   windows-installer:
@@ -117,8 +128,8 @@ jobs:
             exit /b 0
           )
           if "%1"=="plugins" if "%2"=="list" (
-            echo hermes-extensions enabled 0.4.4 user
-            echo wechat-desktop enabled 0.4.4 user
+            echo hermes-extensions enabled 0.4.5 user
+            echo wechat-desktop enabled 0.4.5 user
             exit /b 0
           )
           if "%1"=="dashboard" if "%2"=="--status" (
@@ -151,6 +162,9 @@ jobs:
             (Join-Path $plugin "dashboard\manifest.json"),
             (Join-Path $plugin "dashboard\dist\index.js"),
             (Join-Path $plugin "dashboard\plugin_api.py"),
+            (Join-Path $plugin "management\overview.py"),
+            (Join-Path $plugin "task_center\service_v3.py"),
+            (Join-Path $plugin "wechat\runtime.py"),
             (Join-Path $platform "plugin.yaml")
           )) { if (-not (Test-Path $path)) { throw "Missing installed file: $path" } }
           & (Join-Path $plugin "doctor.ps1") -Installed -Json | Out-Host
