@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from openakita.wechat_desktop import wechat_desktop_manager
 from openakita.windows_connector import windows_connector_manager
+from openakita.windows_connector.manager import LOCAL_NODE_ID
 
 router = APIRouter(prefix="/api/windows-connector", tags=["Windows Connector"])
 RELEASE_FILENAME = "OpenAkita-Windows-Connector-Windows-x64.zip"
@@ -46,15 +47,25 @@ class ExecutePayload(BaseModel):
 
 @router.get("/nodes")
 async def list_nodes() -> dict[str, Any]:
-    nodes = await wechat_desktop_manager.list_nodes()
-    for node in nodes:
+    local = await windows_connector_manager.local_node(refresh=True)
+    remote_nodes = await wechat_desktop_manager.list_nodes()
+    nodes = [local]
+    for node in remote_nodes:
+        if node.get("id") == LOCAL_NODE_ID:
+            continue
+        node["transport"] = "remote"
+        node["embedded"] = False
         node["resources"] = await windows_connector_manager.list_resources(node["id"])
         node["grants"] = await windows_connector_manager.list_grants(node["id"])
+        nodes.append(node)
     return {"nodes": nodes}
 
 
 @router.get("/nodes/{node_id}/resources")
 async def list_resources(node_id: str) -> dict[str, Any]:
+    if node_id == LOCAL_NODE_ID:
+        resources = await windows_connector_manager.refresh_local_resources()
+        return {"resources": resources}
     node = await wechat_desktop_manager.get_node(node_id)
     if node is None:
         raise HTTPException(status_code=404, detail="Windows Connector 节点不存在")
@@ -63,6 +74,9 @@ async def list_resources(node_id: str) -> dict[str, Any]:
 
 @router.post("/nodes/{node_id}/refresh")
 async def refresh_resources(node_id: str) -> dict[str, bool]:
+    if node_id == LOCAL_NODE_ID:
+        await windows_connector_manager.refresh_local_resources()
+        return {"ok": True}
     try:
         await wechat_desktop_manager.send_command(
             node_id,
