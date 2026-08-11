@@ -38,7 +38,7 @@ class WindowsResource:
     updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "WindowsResource":
+    def from_dict(cls, raw: dict[str, Any]) -> WindowsResource:
         known = cls.__dataclass_fields__
         return cls(**{key: value for key, value in raw.items() if key in known})
 
@@ -60,7 +60,7 @@ class AgentResourceGrant:
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "AgentResourceGrant":
+    def from_dict(cls, raw: dict[str, Any]) -> AgentResourceGrant:
         known = cls.__dataclass_fields__
         return cls(**{key: value for key, value in raw.items() if key in known})
 
