@@ -37,7 +37,6 @@ function Test-PythonCandidate {
 
 function Find-HermesPython {
     $candidates = New-Object System.Collections.Generic.List[string]
-
     foreach ($base in @($env:APPDATA, $env:LOCALAPPDATA)) {
         if ($base) {
             $candidates.Add((Join-Path $base "uv\tools\hermes-agent\Scripts\python.exe"))
@@ -99,7 +98,10 @@ foreach ($RequiredPath in @(
     $DashboardSource,
     (Join-Path $Source "doctor.ps1"),
     (Join-Path $Source "compatibility.py"),
+    (Join-Path $Source "management\overview.py"),
+    (Join-Path $Source "task_center\service_v3.py"),
     (Join-Path $Source "wechat\adapter.py"),
+    (Join-Path $Source "wechat\runtime.py"),
     (Join-Path $PlatformSource "plugin.yaml"),
     $Requirements
 )) {
@@ -193,6 +195,9 @@ try {
         (Join-Path $StagePlugin "dashboard\manifest.json"),
         (Join-Path $StagePlugin "dashboard\dist\index.js"),
         (Join-Path $StagePlugin "dashboard\plugin_api.py"),
+        (Join-Path $StagePlugin "management\overview.py"),
+        (Join-Path $StagePlugin "task_center\service_v3.py"),
+        (Join-Path $StagePlugin "wechat\runtime.py"),
         (Join-Path $StagePlatform "plugin.yaml")
     )) {
         if (-not (Test-Path -LiteralPath $required)) { throw "Staging validation failed: missing $required" }
@@ -241,7 +246,7 @@ try {
     & (Join-Path $Target "doctor.ps1") -Installed
     if ($LASTEXITCODE -ne 0) { throw "Installed doctor verification failed with exit code $LASTEXITCODE." }
 
-    Write-Host "Hermes Extensions v0.4.4 install complete."
+    Write-Host "Hermes Extensions v0.4.5 install complete."
     Write-Host "Dashboard hot rescan: $DashboardRescanned"
     if (-not $Capabilities.project) {
         Write-Host "Projects: disabled for this Hermes build; Dashboard support can refresh after upgrade, while model Project tools require Hermes/plugin reload."
