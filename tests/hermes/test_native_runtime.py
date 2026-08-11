@@ -5,8 +5,8 @@ import types
 
 import pytest
 
-from openakita.hermes.models import HermesNode
 from openakita.hermes.client import HermesClient
+from openakita.hermes.models import HermesNode
 from openakita.hermes.native_runtime import NativeHermesRuntime
 
 
@@ -25,6 +25,10 @@ def test_native_agent_kwargs_route_to_openakita_gateway(monkeypatch: pytest.Monk
     assert kwargs["provider"] == "custom"
     assert kwargs["model"] == "agent:support"
     assert kwargs["session_id"] == "openakita:support:abc"
+    # OpenAkita owns durable Memory/Identity. Hermes remains the execution
+    # runtime and must not silently fork long-term state on runtime switch.
+    assert kwargs["skip_memory"] is True
+    assert kwargs["skip_context_files"] is True
 
 
 @pytest.mark.asyncio
@@ -42,6 +46,13 @@ async def test_native_run_uses_in_process_aiagent(monkeypatch: pytest.MonkeyPatc
     fake_module = types.ModuleType("run_agent")
     fake_module.AIAgent = FakeAgent
     monkeypatch.setitem(sys.modules, "run_agent", fake_module)
+    monkeypatch.setattr(
+        "openakita.hermes.native_runtime.prepare_native_hermes_capabilities",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            system_context="",
+            metadata=lambda: {"capability_bridge": "openakita"},
+        ),
+    )
 
     result = await NativeHermesRuntime.run(
         message="hello",
@@ -52,6 +63,7 @@ async def test_native_run_uses_in_process_aiagent(monkeypatch: pytest.MonkeyPatc
 
     assert result["content"] == "native-ok"
     assert result["metadata"]["runtime"] == "native"
+    assert result["metadata"]["capability_bridge"] == "openakita"
     assert result["metadata"]["hermes_session_id"] == "openakita:support:thread-a"
     assert calls["conversation"] == {
         "user_message": "hello",
@@ -61,12 +73,26 @@ async def test_native_run_uses_in_process_aiagent(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
-async def test_client_native_transport_never_uses_http(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_client_native_transport_forwards_tools_without_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
     async def fake_run(**kwargs):
+        captured.update(kwargs)
         return {"content": "ok", "usage": {}, "metadata": {"runtime": "native"}}
 
     monkeypatch.setattr(NativeHermesRuntime, "run", fake_run)
     node = HermesNode(id="embedded", name="Embedded", base_url="native://embedded")
-    response = await HermesClient(node).run(message="hello", agent_id="agent-1")
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "list_files",
+                "description": "List files",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    response = await HermesClient(node).run(message="hello", agent_id="agent-1", tools=tools)
     assert response.content == "ok"
     assert response.metadata["runtime"] == "native"
+    assert captured["tools"] == tools
