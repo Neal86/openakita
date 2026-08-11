@@ -9,16 +9,12 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+if str(PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(PLUGIN_ROOT))
 
 
 def _load_module(relative: str, module_name: str):
-    """Load a plugin module under a stable sys.modules name.
-
-    Python 3.11 dataclasses with postponed annotations consult ``sys.modules``
-    while the class decorator runs. Registering before ``exec_module`` keeps
-    dynamic dashboard loading equivalent to a normal import and prevents
-    ``NoneType.__dict__`` failures.
-    """
+    """Load a plugin module under a stable sys.modules name."""
     path = PLUGIN_ROOT / relative
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
@@ -34,12 +30,16 @@ def _load_module(relative: str, module_name: str):
 
 
 TaskCenter = _load_module(
-    "task_center/service_v2.py", "hermes_extensions_task_center_service"
+    "task_center/service_v3.py", "hermes_extensions_task_center_service"
 ).TaskCenter
 ManagementCenter = _load_module(
     "management/service.py", "hermes_extensions_management_service"
 ).ManagementCenter
 compat = _load_module("compatibility.py", "hermes_extensions_compatibility")
+overview_module = _load_module(
+    "management/overview.py", "hermes_extensions_management_overview"
+)
+build_management_overview = overview_module.build_management_overview
 router = APIRouter()
 
 
@@ -142,54 +142,6 @@ def _project_required() -> None:
         raise HTTPException(status_code=409, detail=_unsupported_project())
 
 
-def _management_overview() -> dict[str, Any]:
-    caps = _caps()
-    manager = ManagementCenter()
-    if caps.project:
-        data = manager.overview()
-    else:
-        agents = manager.agent_list(probe_runtime=True)
-        errors = [
-            {"scope": f"agent:{agent['name']}", "message": str(agent["status_error"])}
-            for agent in agents
-            if agent.get("status_error")
-        ]
-        errors.append({
-            "scope": "projects",
-            "message": compat.project_unavailable_payload()["message"],
-        })
-        data = {
-            "counts": {
-                "agents": len(agents),
-                "running_agents": sum(
-                    1
-                    for agent in agents
-                    if str(agent.get("gateway") or "").lower().startswith("running")
-                ),
-                "projects": 0,
-                "archived_projects": 0,
-            },
-            "agents": agents,
-            "projects": [],
-            "active_profile": manager._active_profile(),
-            "partial": True,
-            "errors": errors,
-        }
-
-    task_center = TaskCenter()
-    tasks = task_center.overview(include_completed=False)
-    data["task_counts"] = tasks.get("counts", {})
-    data["upcoming"] = task_center.upcoming(hours=24 * 7, limit=25)
-    if tasks.get("kanban_error"):
-        data.setdefault("errors", []).append(
-            {"scope": "tasks:kanban", "message": str(tasks["kanban_error"])}
-        )
-        data["partial"] = True
-    data["capabilities"] = caps.to_dict()
-    data["project_supported"] = caps.project
-    return data
-
-
 @router.get("/capabilities")
 def capabilities(refresh: bool = False) -> dict[str, Any]:
     caps = _caps(force=refresh)
@@ -278,7 +230,7 @@ def history(
 @router.get("/management/overview")
 def management_overview() -> dict[str, Any]:
     try:
-        return _management_overview()
+        return build_management_overview()
     except Exception as exc:
         raise _server_error(exc) from exc
 
