@@ -31,7 +31,7 @@ class ConnectorService:
     def _command() -> tuple[list[str], Path]:
         if getattr(sys, "frozen", False):
             executable_dir = Path(sys.executable).resolve().parent
-            worker = executable_dir / "OpenAkita-WeChat-Connector-Worker.exe"
+            worker = executable_dir / "OpenAkita-Windows-Connector-Worker.exe"
             return [str(worker)], executable_dir
         target = Path(__file__).with_name("worker.py")
         return [sys.executable, str(target)], target.parent
