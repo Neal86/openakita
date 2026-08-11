@@ -16,7 +16,7 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  HERMES_AGENT_VERSION: "0.18.2"
+  HERMES_AGENT_VERSION: "0.19.0"
 
 jobs:
   windows-installer:
@@ -41,15 +41,17 @@ jobs:
           python - <<'PY'
           import importlib.metadata
           from run_agent import AIAgent
+          import os
           version = importlib.metadata.version("hermes-agent")
-          assert version == "0.18.2", version
+          expected = os.environ["HERMES_AGENT_VERSION"]
+          assert version == expected, (version, expected)
           print("Hermes Agent embedded runtime:", version, AIAgent)
           PY
 
-      # Reuse the production Desktop preparation path.  Because this runner's
+      # Reuse the production Desktop preparation path. Because this runner's
       # Python 3.11 environment already contains Hermes, PyInstaller sees the
       # static run_agent import in native_runtime.py and collects Hermes into
-      # the backend bundle.  No Docker image is embedded or required.
+      # the backend bundle. No Docker image is embedded or required.
       - name: Desktop build prepare
         uses: ./.github/actions/desktop-build-prepare
         with:
@@ -81,7 +83,6 @@ jobs:
           test -d apps/setup-center/src-tauri/resources/openakita-server
           python - <<'PY'
           from pathlib import Path
-          root = Path("apps/setup-center/src-tauri/resources/openakita-server")
           toc = list(Path("build/pyinstaller_work").rglob("*.toc")) + list(Path("build").rglob("Analysis-*.toc"))
           text = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in toc if p.is_file())
           if "run_agent" not in text:
@@ -119,17 +120,15 @@ jobs:
           cargo fetch --locked
           cargo check
 
-      - name: Build Windows NSIS installer
+      - name: Build unsigned Windows NSIS installer
         working-directory: apps/setup-center
         shell: bash
         env:
-          TAURI_CONFIG: '{}'
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_CONFIG: '{"bundle":{"createUpdaterArtifacts":false}}'
           NO_STRIP: true
         run: |
           set -euo pipefail
-          npx tauri build --bundles nsis
+          npx tauri build --bundles nsis --no-sign
 
       - name: Collect installer
         shell: pwsh
@@ -166,6 +165,7 @@ jobs:
             "artifact": "OpenAkita-Hermes-Native-Windows-x64",
             "native_runtime": true,
             "docker_required": false,
+            "unsigned_installer": true,
             "success": true
           }
           JSON
