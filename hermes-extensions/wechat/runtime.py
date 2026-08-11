@@ -3,12 +3,17 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
+import sys
 import threading
 import time
 from pathlib import Path
 from typing import Iterator
 
-from .adapter import WeChatDesktop as _BaseWeChatDesktop, WeChatUnavailable
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+if str(PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(PLUGIN_ROOT))
+
+from wechat.adapter import WeChatDesktop as _BaseWeChatDesktop, WeChatUnavailable  # noqa: E402
 
 
 _UI_THREAD_LOCK = threading.RLock()
