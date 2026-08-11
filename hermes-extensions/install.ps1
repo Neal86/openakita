@@ -246,7 +246,7 @@ try {
     & (Join-Path $Target "doctor.ps1") -Installed
     if ($LASTEXITCODE -ne 0) { throw "Installed doctor verification failed with exit code $LASTEXITCODE." }
 
-    Write-Host "Hermes Extensions v0.4.5 install complete."
+    Write-Host "Hermes Extensions v0.5.0 install complete."
     Write-Host "Dashboard hot rescan: $DashboardRescanned"
     if (-not $Capabilities.project) {
         Write-Host "Projects: disabled for this Hermes build; Dashboard support can refresh after upgrade, while model Project tools require Hermes/plugin reload."
