@@ -1,13 +1,16 @@
 """OpenAkita <-> embedded Hermes capability bridge.
 
-The OpenAkita Agent profile remains the source of truth for durable capability
-selection. Hermes is only a runtime: it receives the capabilities enabled for
-the current profile and executes bridged OpenAkita tools through the existing
-ToolExecutor, preserving permission/risk/MCP/todo enforcement.
+OpenAkita remains the source of truth for durable Agent capabilities. Hermes
+receives a profile-filtered view and executes OpenAkita tools through the
+existing ToolExecutor so risk/permission/MCP/todo enforcement is preserved.
+
+Hermes' tool registry is process-global, therefore every bridge proxy uses a
+stable profile-scoped function name. This prevents two simultaneously active
+Agents from overwriting each other's proxy handlers or capability selection.
 """
 from __future__ import annotations
 
-import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -22,6 +25,8 @@ class HermesCapabilitySnapshot:
     profile_id: str
     toolset_name: str
     tool_schemas: list[dict[str, Any]] = field(default_factory=list)
+    # bridged Hermes function name -> original OpenAkita tool name
+    tool_name_map: dict[str, str] = field(default_factory=dict)
     skill_ids: list[str] = field(default_factory=list)
     tool_names: list[str] = field(default_factory=list)
     mcp_servers: list[str] = field(default_factory=list)
@@ -34,12 +39,26 @@ class HermesCapabilitySnapshot:
             "skill_ids": list(self.skill_ids),
             "tool_names": list(self.tool_names),
             "mcp_servers": list(self.mcp_servers),
+            "tool_name_map": dict(self.tool_name_map),
         }
 
 
-def _safe_name(value: str) -> str:
+def _safe_name(value: str, limit: int = 40) -> str:
     value = re.sub(r"[^a-zA-Z0-9_-]+", "_", value or "default").strip("_")
-    return value[:64] or "default"
+    return value[:limit] or "default"
+
+
+def _profile_key(profile_id: str) -> str:
+    """Short stable key used in Hermes proxy names (keeps function names <64 chars)."""
+    readable = _safe_name(profile_id, 18)
+    digest = hashlib.blake2s((profile_id or "default").encode("utf-8"), digest_size=4).hexdigest()
+    return f"{readable}_{digest}"
+
+
+def _bridge_tool_name(profile_id: str, original_name: str) -> str:
+    prefix = f"oa_{_profile_key(profile_id)}__"
+    remaining = max(8, 63 - len(prefix))
+    return prefix + _safe_name(original_name, remaining)
 
 
 def _mode_allows(value: str, selected: list[str], mode: str) -> bool:
@@ -122,56 +141,56 @@ def _selected_skill_entries(profile: Any) -> list[Any]:
     return result
 
 
+def _profile(profile_id: str) -> Any | None:
+    from openakita.agents.profile import get_profile_store
+
+    return get_profile_store().get(profile_id)
+
+
 def resolve_capabilities(
     profile_id: str,
     *,
     explicit_tools: list[dict[str, Any]] | None = None,
 ) -> HermesCapabilitySnapshot:
     """Resolve the durable OpenAkita capability view for one Agent profile."""
-    from openakita.agents.profile import get_profile_store
-
-    profile = get_profile_store().get(profile_id)
-    toolset_name = f"openakita-{_safe_name(profile_id)}"
+    profile = _profile(profile_id)
+    toolset_name = f"openakita-{_profile_key(profile_id)}"
     if profile is None:
         return HermesCapabilitySnapshot(profile_id=profile_id, toolset_name=toolset_name)
 
-    tool_schemas: dict[str, dict[str, Any]] = {}
+    original_schemas: dict[str, dict[str, Any]] = {}
     selected_skill_ids: list[str] = []
     instruction_blocks: list[str] = []
 
-    # Explicit schemas supplied by the Agent call site have the highest
-    # fidelity (they can include dynamically discovered MCP/plugin tools).
+    # Explicit schemas from the Agent call site have highest fidelity and can
+    # include dynamically discovered MCP/plugin tools.
     for raw in explicit_tools or []:
         normalized = _to_hermes_schema(raw)
         if not normalized:
             continue
-        name = str(normalized["name"])
-        if _tool_allowed(profile, tool_name=name):
-            tool_schemas[name] = normalized
+        original = str(normalized["name"])
+        if _tool_allowed(profile, tool_name=original):
+            original_schemas[original] = normalized
 
-    # The global SkillRegistry is the shared pool. AgentProfile only stores
-    # selection policy; switching runtime therefore never copies/moves skills.
+    # Shared SkillRegistry = global pool; profile = enable relationship only.
     for entry in _selected_skill_entries(profile):
         skill_id = str(getattr(entry, "skill_id", "") or "")
         if skill_id:
             selected_skill_ids.append(skill_id)
         if getattr(entry, "system", False):
-            raw_schema = entry.to_tool_schema()
-            normalized = _to_hermes_schema(raw_schema)
+            normalized = _to_hermes_schema(entry.to_tool_schema())
             if not normalized:
                 continue
-            name = str(normalized["name"])
+            original = str(normalized["name"])
             if _tool_allowed(
                 profile,
-                tool_name=name,
+                tool_name=original,
                 category=str(getattr(entry, "category", "") or ""),
             ):
-                tool_schemas.setdefault(name, normalized)
+                original_schemas.setdefault(original, normalized)
         else:
-            # External Agent Skills are instruction assets rather than a second
-            # executable runtime. Feed their instructions to Hermes while tool
-            # execution continues through OpenAkita/Hermes native tools.
-            body = ""
+            # External Agent Skills are durable instruction assets. Their body
+            # is supplied to Hermes, not copied to another persistent skill pool.
             try:
                 body = str(entry.get_body() or "").strip()
             except Exception:
@@ -180,6 +199,18 @@ def resolve_capabilities(
                 instruction_blocks.append(
                     f"### OpenAkita Skill: {getattr(entry, 'name', skill_id)}\n{body}"
                 )
+
+    tool_schemas: list[dict[str, Any]] = []
+    tool_name_map: dict[str, str] = {}
+    for original, schema in original_schemas.items():
+        bridged = _bridge_tool_name(profile_id, original)
+        proxy = dict(schema)
+        proxy["name"] = bridged
+        proxy["description"] = (
+            f"[OpenAkita tool: {original}] " + str(schema.get("description") or "")
+        ).strip()
+        tool_schemas.append(proxy)
+        tool_name_map[bridged] = original
 
     selected_mcp = [
         str(item)
@@ -191,8 +222,9 @@ def resolve_capabilities(
     context_parts = [
         "[OpenAkita Capability Bridge]",
         f"Agent profile: {profile_id}",
-        "OpenAkita is the source of truth for durable Skills, Tools, MCP, Memory and Tasks.",
-        "Use bridged OpenAkita tools when you need those durable assets; do not create a separate persistent copy inside Hermes.",
+        "OpenAkita is the source of truth for durable Skills, Tools, MCP, Memory, Identity and Tasks.",
+        "Use the oa_* bridged functions for OpenAkita capabilities. Their descriptions contain the original tool names.",
+        "Do not create a separate persistent copy of OpenAkita durable assets inside Hermes.",
     ]
     custom_prompt = str(getattr(profile, "custom_prompt", "") or "").strip()
     if custom_prompt:
@@ -207,9 +239,10 @@ def resolve_capabilities(
     return HermesCapabilitySnapshot(
         profile_id=profile_id,
         toolset_name=toolset_name,
-        tool_schemas=list(tool_schemas.values()),
+        tool_schemas=tool_schemas,
+        tool_name_map=tool_name_map,
         skill_ids=sorted(set(selected_skill_ids)),
-        tool_names=sorted(tool_schemas),
+        tool_names=sorted(original_schemas),
         mcp_servers=selected_mcp,
         system_context="\n\n".join(context_parts),
     )
@@ -223,11 +256,17 @@ async def _execute_openakita_tool(
     session_id: str = "",
 ) -> str:
     """Execute via OpenAkita's existing ToolExecutor whenever possible."""
-    from openakita.agents.profile import get_profile_store
-
-    profile = get_profile_store().get(profile_id)
+    profile = _profile(profile_id)
     if profile is None:
         return json.dumps({"error": f"Unknown Agent profile: {profile_id}"}, ensure_ascii=False)
+
+    # Defense in depth: a stale proxy registration cannot bypass a profile
+    # change performed after the Hermes session started.
+    if not _tool_allowed(profile, tool_name=tool_name):
+        return json.dumps(
+            {"error": f"Tool '{tool_name}' is not enabled for Agent '{profile_id}'"},
+            ensure_ascii=False,
+        )
 
     if tool_name == "call_mcp_tool":
         server = str(args.get("server") or args.get("server_name") or "")
@@ -270,13 +309,7 @@ def register_snapshot_with_hermes(
     *,
     session_id: str = "",
 ) -> str:
-    """Register selected OpenAkita tools into Hermes' central registry.
-
-    Hermes' registry is process-global. Registrations are idempotent and use
-    ``override=True`` so a profile refresh can replace a stale proxy handler.
-    The toolset name is profile-scoped, while the underlying durable tool pool
-    remains global in OpenAkita.
-    """
+    """Register this profile's unique proxies in Hermes' global registry."""
     if not snapshot.tool_schemas:
         return snapshot.toolset_name
 
@@ -287,21 +320,26 @@ def register_snapshot_with_hermes(
         return snapshot.toolset_name
 
     for schema in snapshot.tool_schemas:
-        name = str(schema.get("name") or "").strip()
-        if not name:
+        bridged_name = str(schema.get("name") or "").strip()
+        original_name = snapshot.tool_name_map.get(bridged_name, "")
+        if not bridged_name or not original_name:
             continue
 
-        async def _handler(args: dict[str, Any], _tool_name: str = name, **_kwargs: Any) -> str:
+        async def _handler(
+            args: dict[str, Any],
+            _original_name: str = original_name,
+            **_kwargs: Any,
+        ) -> str:
             return await _execute_openakita_tool(
                 snapshot.profile_id,
-                _tool_name,
+                _original_name,
                 args or {},
                 session_id=session_id,
             )
 
         try:
             hermes_registry.register(
-                name=name,
+                name=bridged_name,
                 toolset=snapshot.toolset_name,
                 schema=schema,
                 handler=_handler,
@@ -311,11 +349,9 @@ def register_snapshot_with_hermes(
                 override=True,
             )
         except TypeError:
-            # Compatibility with Hermes registry revisions that do not expose
-            # ``override``/``description`` kwargs yet.
             try:
                 hermes_registry.register(
-                    name=name,
+                    name=bridged_name,
                     toolset=snapshot.toolset_name,
                     schema=schema,
                     handler=_handler,
@@ -323,9 +359,9 @@ def register_snapshot_with_hermes(
                     is_async=True,
                 )
             except Exception as exc:
-                logger.warning("Failed to register bridged Hermes tool %s: %s", name, exc)
+                logger.warning("Failed to register bridged Hermes tool %s: %s", bridged_name, exc)
         except Exception as exc:
-            logger.warning("Failed to register bridged Hermes tool %s: %s", name, exc)
+            logger.warning("Failed to register bridged Hermes tool %s: %s", bridged_name, exc)
 
     return snapshot.toolset_name
 
