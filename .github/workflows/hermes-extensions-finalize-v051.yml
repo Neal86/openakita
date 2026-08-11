@@ -107,3 +107,5 @@ jobs:
           else
             gh release create "$TAG" release/hermes-extensions-v0.5.1.zip release/hermes-extensions-v0.5.1.zip.sha256 --target feature/hermes-extensions --title "Hermes Extensions v0.5.1" --notes "Complete standalone Hermes Extensions v0.5.1 for Windows Hermes. Includes the polished Management Center UI, Agents/Tasks/Projects compatibility handling, hardened WeChat Desktop connector, transactional installer, doctor checks, modular bundled dashboard, unsaved-change protection, keyboard-accessible dialogs, context-aware refresh, and fail-closed dry-run testing."
           fi
+
+# retrigger 2026-08-11
