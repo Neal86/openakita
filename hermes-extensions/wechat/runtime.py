@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import os
 import sys
 import threading
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Iterator
 
@@ -81,6 +83,7 @@ class WeChatDesktop(_BaseWeChatDesktop):
     def __init__(self, data_dir: Path | None = None, *, lock_timeout: float = 15.0) -> None:
         super().__init__(data_dir=data_dir)
         self._ui_lock_path = self.data_dir / "desktop-ui.lock"
+        self._health_path = self.data_dir / "gateway-health.json"
         self._ui_lock_timeout = max(0.1, float(lock_timeout))
 
     @contextlib.contextmanager
@@ -111,6 +114,19 @@ class WeChatDesktop(_BaseWeChatDesktop):
         finally:
             _UI_THREAD_LOCK.release()
 
+    def _gateway_health(self) -> dict | None:
+        try:
+            payload = json.loads(self._health_path.read_text("utf-8"))
+            return payload if isinstance(payload, dict) else None
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def status(self) -> dict:
+        result = super().status()
+        result["gateway_health"] = self._gateway_health()
+        result["ui_lock_timeout_seconds"] = self._ui_lock_timeout
+        return result
+
     def open_chat(self, chat: str) -> None:
         with self._ui_transaction():
             return super().open_chat(chat)
@@ -129,38 +145,21 @@ class WeChatDesktop(_BaseWeChatDesktop):
             win = self._main_window()
             rows = self._message_rows(win, chat)
             compact: list[dict] = []
-            previous_key = None
+            occurrence: dict[tuple[str, str, str, str, str], int] = defaultdict(int)
             for row in rows:
-                sender = row.get("sender")
-                shown_time = row.get("time")
-                direction = row.get("direction") or ""
-                key = (
-                    row["text"],
-                    sender,
-                    shown_time,
-                    direction,
-                    row.get("top"),
-                    row.get("left"),
-                )
-                if key == previous_key:
-                    continue
-                previous_key = key
-                identity_source = "\0".join(
-                    [
-                        chat,
-                        str(sender or ""),
-                        str(row["text"]),
-                        str(shown_time or ""),
-                        str(row.get("top") or ""),
-                        str(row.get("left") or ""),
-                        direction,
-                    ]
-                )
+                sender = str(row.get("sender") or "")
+                shown_time = str(row.get("time") or "")
+                direction = str(row.get("direction") or "")
+                text = str(row.get("text") or "")
+                base_identity = (chat, sender, text, shown_time, direction)
+                ordinal = occurrence[base_identity]
+                occurrence[base_identity] += 1
+                identity_source = "\0".join([*base_identity, str(ordinal)])
                 compact.append(
                     {
-                        "text": row["text"],
-                        "sender": sender,
-                        "time": shown_time,
+                        "text": text,
+                        "sender": row.get("sender"),
+                        "time": row.get("time"),
                         "direction": direction,
                         "message_id": hashlib.sha256(
                             identity_source.encode("utf-8")
