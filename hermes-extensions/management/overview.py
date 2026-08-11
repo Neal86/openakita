@@ -1,22 +1,20 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Any
 
-PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-if str(PLUGIN_ROOT) not in sys.path:
-    sys.path.insert(0, str(PLUGIN_ROOT))
 
-from compatibility import detect_capabilities, project_unavailable_payload  # noqa: E402
-from management.service import ManagementCenter  # noqa: E402
-from task_center import TaskCenter  # noqa: E402
+def build_management_overview(
+    *,
+    caps: Any,
+    manager: Any,
+    task_center: Any,
+    project_unavailable_message: str,
+) -> dict[str, Any]:
+    """Build the canonical management/task summary from already-resolved services.
 
-
-def build_management_overview() -> dict[str, Any]:
-    """Build the one canonical management/task summary used by UI and tools."""
-    caps = detect_capabilities()
-    manager = ManagementCenter()
+    Callers resolve capabilities and service instances once, preventing duplicate
+    Hermes capability probes or duplicate module caches in Dashboard/tool paths.
+    """
     if caps.project:
         data = manager.overview()
     else:
@@ -26,7 +24,7 @@ def build_management_overview() -> dict[str, Any]:
             for agent in agents
             if agent.get("status_error")
         ]
-        errors.append({"scope": "projects", "message": project_unavailable_payload()["message"]})
+        errors.append({"scope": "projects", "message": project_unavailable_message})
         data = {
             "counts": {
                 "agents": len(agents),
@@ -45,7 +43,6 @@ def build_management_overview() -> dict[str, Any]:
             "errors": errors,
         }
 
-    task_center = TaskCenter()
     tasks = task_center.overview(include_completed=False)
     data["task_counts"] = tasks.get("counts", {})
     data["upcoming"] = task_center.upcoming(hours=24 * 7, limit=25)
