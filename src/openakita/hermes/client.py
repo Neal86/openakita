@@ -85,6 +85,7 @@ class HermesClient:
                 agent_id=agent_id,
                 session_id=session_id,
                 system=system,
+                tools=tools,
                 metadata=metadata,
             )
             return HermesResponse(
@@ -144,6 +145,7 @@ class HermesClient:
                 agent_id=agent_id,
                 session_id=session_id,
                 system=system,
+                tools=tools,
                 metadata=metadata,
             ):
                 yield event
