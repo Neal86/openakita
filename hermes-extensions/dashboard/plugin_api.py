@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Literal
@@ -14,7 +16,6 @@ if str(PLUGIN_ROOT) not in sys.path:
 
 
 def _load_module(relative: str, module_name: str):
-    """Load a plugin module under a stable sys.modules name."""
     path = PLUGIN_ROOT / relative
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
@@ -150,6 +151,24 @@ def _project_required() -> None:
         raise HTTPException(status_code=409, detail=_unsupported_project())
 
 
+def _wechat_health() -> dict[str, Any]:
+    hermes_home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    path = hermes_home / "plugin-data" / "hermes-extensions" / "wechat" / "gateway-health.json"
+    if not path.exists():
+        return {
+            "status": "unknown",
+            "consecutive_failures": 0,
+            "last_error": None,
+            "last_success_at": None,
+            "updated_at": None,
+        }
+    try:
+        data = json.loads(path.read_text("utf-8"))
+        return data if isinstance(data, dict) else {"status": "unknown"}
+    except Exception as exc:
+        return {"status": "unknown", "last_error": f"Unable to read gateway health: {exc}"}
+
+
 @router.get("/capabilities")
 def capabilities(refresh: bool = False) -> dict[str, Any]:
     caps = _caps(force=refresh)
@@ -241,6 +260,11 @@ def management_overview() -> dict[str, Any]:
         return build_management_overview()
     except Exception as exc:
         raise _server_error(exc) from exc
+
+
+@router.get("/wechat/health")
+def wechat_health() -> dict[str, Any]:
+    return _wechat_health()
 
 
 @router.get("/wechat/status")
