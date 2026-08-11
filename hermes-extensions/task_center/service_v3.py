@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from task_center.service_v2 import TaskCenter as _TaskCenterV2, _as_dt, _now
@@ -32,18 +32,25 @@ class TaskCenter(_TaskCenterV2):
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='executions'"
             ).fetchone():
                 return {}
-            # Stay comfortably below SQLite's default variable limit.
+            # Stay comfortably below SQLite's default variable limit. Window
+            # ranking keeps all historical rows inside SQLite and returns only
+            # one latest row per requested job to Python.
             for offset in range(0, len(wanted), 400):
                 batch = wanted[offset : offset + 400]
                 placeholders = ",".join("?" for _ in batch)
                 query = (
-                    f"SELECT * FROM executions WHERE job_id IN ({placeholders}) "
-                    "ORDER BY claimed_at DESC, id DESC"
+                    "SELECT * FROM ("
+                    "  SELECT e.*, ROW_NUMBER() OVER ("
+                    "    PARTITION BY job_id ORDER BY claimed_at DESC, id DESC"
+                    "  ) AS _hx_rank "
+                    f"  FROM executions e WHERE job_id IN ({placeholders})"
+                    ") WHERE _hx_rank = 1"
                 )
                 for raw in con.execute(query, batch):
                     row = dict(raw)
+                    row.pop("_hx_rank", None)
                     job_id = str(row.get("job_id") or "")
-                    if not job_id or job_id in latest:
+                    if not job_id:
                         continue
                     row["profile"] = profile
                     row["type"] = "cron_run"
@@ -179,8 +186,6 @@ class TaskCenter(_TaskCenterV2):
                         }
                     )
         except Exception:
-            # overview() carries structured Kanban errors; upcoming remains
-            # best-effort rather than failing all Cron visibility.
             pass
 
         first_rows.sort(key=self._sort_key)
@@ -190,8 +195,6 @@ class TaskCenter(_TaskCenterV2):
         selected = list(first_rows)
         remaining = max_items - len(selected)
         extras: list[dict[str, Any]] = []
-        # Each recurring job can contribute at most the remaining output budget.
-        # This bounds memory even for every-minute jobs across a 90-day horizon.
         for job, first in recurrence_sources:
             extras.extend(self._expand_recurrence(job, first, horizon, remaining))
         extras.sort(key=self._sort_key)
@@ -200,7 +203,5 @@ class TaskCenter(_TaskCenterV2):
         return selected[:max_items]
 
     @staticmethod
-    def _bounded_horizon(hours: int):
-        from datetime import timedelta
-
+    def _bounded_horizon(hours: int) -> timedelta:
         return timedelta(hours=max(1, min(int(hours), 2160)))
