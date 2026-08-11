@@ -150,9 +150,10 @@ class WeChatDesktopPlatformAdapter(BasePlatformAdapter):
                 "utf-8",
             )
             tmp.replace(self._health_path)
-        except OSError:
-            # Health persistence must never stop message delivery. Runtime state
-            # and logs remain authoritative if local storage is unavailable.
+        except Exception:
+            # Health persistence is best-effort telemetry. It must never stop
+            # customer message polling/delivery under any local filesystem or
+            # partial-initialization failure.
             pass
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
