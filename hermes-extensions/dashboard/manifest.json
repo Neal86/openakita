@@ -1,9 +1,9 @@
 {
   "name": "hermes-extensions",
   "label": "Management Center",
-  "description": "Hermes Agents, Projects, Tasks, runtime status, and extension management.",
-  "icon": "LayoutDashboard",
-  "version": "0.4.5",
+  "description": "Hermes Agents, Projects, Tasks, WeChat status, runtime controls, and extension management.",
+  "icon": "Activity",
+  "version": "0.5.0",
   "tab": {
     "path": "/management-center",
     "position": "after:cron"
