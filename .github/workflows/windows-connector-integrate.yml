@@ -11,8 +11,10 @@ on:
       - "scripts/finalize_windows_connector.py"
       - "src/openakita/windows_connector/**"
       - "src/openakita/api/routes/windows_connector.py"
+      - "src/openakita/wechat_desktop/connector_bundle/**"
       - "apps/setup-center/src/components/WindowsConnectorPanel.tsx"
       - "tests/windows_connector/**"
+      - "tests/wechat_desktop/**"
 
 permissions:
   contents: write
