@@ -5,6 +5,8 @@
   const React = HX.React;
   const h = HX.h;
   const { useEffect, useRef } = React;
+  const DIALOG_STACK = [];
+  let DIALOG_ID = 0;
 
   HX.Card = function Card(p) { return h("section", { className: "hx-card " + (p.className || "") }, p.children); };
   HX.Pill = function Pill(p) { return h("span", { className: "hx-pill " + (p.kind || "") }, p.children); };
@@ -30,18 +32,34 @@
   HX.Dialog = function Dialog(p) {
     const boxRef = useRef(null);
     const previousFocus = useRef(null);
+    const closeRef = useRef(p.onRequestClose);
+    const lockedRef = useRef(Boolean(p.locked));
+    const idRef = useRef(null);
+    closeRef.current = p.onRequestClose;
+    lockedRef.current = Boolean(p.locked);
+    if (idRef.current == null) idRef.current = ++DIALOG_ID;
+
     useEffect(function () {
       if (!p.open) return undefined;
+      const id = idRef.current;
+      DIALOG_STACK.push(id);
       previousFocus.current = document.activeElement;
       const previousOverflow = document.body.style.overflow;
       document.body.style.overflow = "hidden";
       const timer = setTimeout(function () {
+        if (DIALOG_STACK[DIALOG_STACK.length - 1] !== id) return;
         const items = focusables(boxRef.current);
         if (items.length) items[0].focus();
         else if (boxRef.current) boxRef.current.focus();
       }, 0);
+
       function onKey(e) {
-        if (e.key === "Escape" && !p.locked) { e.preventDefault(); p.onRequestClose(); return; }
+        if (DIALOG_STACK[DIALOG_STACK.length - 1] !== id) return;
+        if (e.key === "Escape" && !lockedRef.current) {
+          e.preventDefault();
+          if (typeof closeRef.current === "function") closeRef.current();
+          return;
+        }
         if (e.key !== "Tab") return;
         const items = focusables(boxRef.current);
         if (!items.length) { e.preventDefault(); return; }
@@ -50,19 +68,25 @@
         if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
         else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
       }
+
       document.addEventListener("keydown", onKey);
       return function () {
         clearTimeout(timer);
         document.removeEventListener("keydown", onKey);
+        const index = DIALOG_STACK.lastIndexOf(id);
+        if (index >= 0) DIALOG_STACK.splice(index, 1);
         document.body.style.overflow = previousOverflow;
         const target = previousFocus.current;
-        if (target && typeof target.focus === "function" && document.contains(target)) target.focus();
+        if (target && typeof target.focus === "function" && document.contains(target)) {
+          setTimeout(function () { try { target.focus(); } catch (_) {} }, 0);
+        }
       };
-    }, [p.open, p.locked]);
+    }, [p.open]);
+
     if (!p.open) return null;
-    return h("div", { className: "hx-dialog-backdrop", role: "presentation", onMouseDown: function (e) { if (e.target === e.currentTarget && !p.locked) p.onRequestClose(); } },
+    return h("div", { className: "hx-dialog-backdrop", role: "presentation", onMouseDown: function (e) { if (e.target === e.currentTarget && !lockedRef.current && typeof closeRef.current === "function") closeRef.current(); } },
       h("div", { ref: boxRef, className: "hx-dialog", role: "dialog", "aria-modal": "true", "aria-label": p.title, tabIndex: -1 },
-        h("div", { className: "hx-dialog-head" }, h("div", null, h("h2", null, p.title), p.subtitle ? h("div", { className: "hx-muted" }, p.subtitle) : null), h("button", { type: "button", className: "hx-icon-button", disabled: p.locked, onClick: p.onRequestClose, "aria-label": "Close" }, "×")),
+        h("div", { className: "hx-dialog-head" }, h("div", null, h("h2", null, p.title), p.subtitle ? h("div", { className: "hx-muted" }, p.subtitle) : null), h("button", { type: "button", className: "hx-icon-button", disabled: Boolean(p.locked), onClick: p.onRequestClose, "aria-label": "Close" }, "×")),
         h("div", { className: "hx-dialog-body" }, p.children)
       )
     );
