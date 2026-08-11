@@ -1,0 +1,12 @@
+{
+  "workflow": "Hermes Native Windows Release",
+  "run_id": "31454921954",
+  "run_attempt": "1",
+  "head_sha": "cfce9f6e3c854ee86b38769576e9f03239ef155f",
+  "hermes_agent_version": "0.19.0",
+  "artifact": "OpenAkita-Hermes-Native-Windows-x64",
+  "native_runtime": true,
+  "docker_required": false,
+  "unsigned_installer": true,
+  "success": true
+}
