@@ -1,21 +1,12 @@
 from __future__ import annotations
 
-import importlib.util
-import sys
+import threading
 from pathlib import Path
 
 import pytest
 
-
-ROOT = Path(__file__).resolve().parents[1]
-ADAPTER_PATH = ROOT / "wechat" / "adapter.py"
-_spec = importlib.util.spec_from_file_location("hx_wechat_adapter_test", ADAPTER_PATH)
-assert _spec and _spec.loader
-adapter_mod = importlib.util.module_from_spec(_spec)
-sys.modules[_spec.name] = adapter_mod
-_spec.loader.exec_module(adapter_mod)
-WeChatDesktop = adapter_mod.WeChatDesktop
-WeChatUnavailable = adapter_mod.WeChatUnavailable
+from wechat import WeChatDesktop
+from wechat.adapter import WeChatUnavailable
 
 
 class FakeEditor:
@@ -76,3 +67,27 @@ def test_duplicate_send_is_suppressed(tmp_path: Path, monkeypatch: pytest.Monkey
     assert first["sent"] is True
     assert second["duplicate_suppressed"] is True
     assert keys.count("{ENTER}") == 1
+
+
+def test_second_instance_times_out_while_ui_transaction_is_held(tmp_path: Path) -> None:
+    first = WeChatDesktop(tmp_path, lock_timeout=0.2)
+    second = WeChatDesktop(tmp_path, lock_timeout=0.1)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold_lock() -> None:
+        with first._ui_transaction():
+            entered.set()
+            release.wait(timeout=2)
+
+    thread = threading.Thread(target=hold_lock)
+    thread.start()
+    assert entered.wait(timeout=1)
+    try:
+        with pytest.raises(WeChatUnavailable, match="Timed out"):
+            with second._ui_transaction():
+                pass
+    finally:
+        release.set()
+        thread.join(timeout=2)
+    assert not thread.is_alive()
