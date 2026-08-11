@@ -1,6 +1,6 @@
 name: hermes-extensions
-version: "0.4.5"
-description: Standalone Hermes extensions for hardened Windows WeChat automation, task management, and native Agent/Project administration when supported
+version: "0.5.0"
+description: Standalone Hermes extensions with complete Management Center UI, hardened Windows WeChat automation, task management, and native Agent/Project administration when supported
 provides_tools:
   - wechat_status
   - wechat_list_chats
