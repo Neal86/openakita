@@ -1,0 +1,111 @@
+name: Windows Connector integration
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/hermes-multi-agent]
+    paths:
+      - ".github/workflows/windows-connector-integrate.yml"
+      - "scripts/integrate_windows_connector.py"
+      - "scripts/integrate_windows_connector_ci.py"
+      - "scripts/finalize_windows_connector.py"
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/hermes-multi-agent
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Apply confirmed Windows Connector integration
+        run: |
+          python scripts/integrate_windows_connector.py
+          python scripts/finalize_windows_connector.py
+          python scripts/integrate_windows_connector_ci.py
+
+      - name: Compile changed Python modules
+        run: |
+          python -m compileall -q \
+            src/openakita/windows_connector \
+            src/openakita/api/routes/windows_connector.py \
+            src/openakita/api/routes/wechat_desktop.py \
+            src/openakita/hermes/capability_bridge.py \
+            src/openakita/wechat_desktop/connector_bundle \
+            src/openakita/core/_tool_executor_legacy.py
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install -e ./openakita-plugin-sdk
+
+      - name: Ruff Windows Connector changes
+        run: |
+          ruff check \
+            src/openakita/windows_connector \
+            src/openakita/api/routes/windows_connector.py \
+            tests/windows_connector \
+            scripts/integrate_windows_connector.py \
+            scripts/integrate_windows_connector_ci.py \
+            scripts/finalize_windows_connector.py
+
+      - name: Windows Connector and regression tests
+        run: |
+          pytest -q tests/windows_connector tests/wechat_desktop tests/hermes
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/setup-center/package-lock.json
+
+      - name: Build Setup Center
+        working-directory: apps/setup-center
+        run: npm ci && npm run build
+
+      - name: Verify generated connector workflow keeps native build guarantees
+        run: |
+          grep -F 'HERMES_AGENT_VERSION: "0.19.0"' .github/workflows/wechat-connector-release.yml
+          grep -F 'npx tauri build --bundles nsis --no-sign' .github/workflows/wechat-connector-release.yml
+          grep -F 'createUpdaterArtifacts' .github/workflows/wechat-connector-release.yml
+          grep -F 'OpenAkita-Windows-Connector-Windows-x64' .github/workflows/wechat-connector-release.yml
+          grep -F 'windows-connector-latest' .github/workflows/wechat-connector-release.yml
+
+      - name: Commit integrated code
+        run: |
+          if git diff --quiet; then
+            echo "No generated integration changes"
+            exit 0
+          fi
+          git config user.name "openakita-actions"
+          git config user.email "actions@users.noreply.github.com"
+          git add \
+            src/openakita/api/server.py \
+            src/openakita/api/routes/wechat_desktop.py \
+            src/openakita/api/routes/windows_connector.py \
+            src/openakita/wechat_desktop/connector_bundle \
+            src/openakita/core/_tool_executor_legacy.py \
+            src/openakita/hermes/capability_bridge.py \
+            src/openakita/windows_connector \
+            apps/setup-center/src/views/IMView.tsx \
+            apps/setup-center/src/components/WindowsConnectorPanel.tsx \
+            scripts/build_wechat_connector.py \
+            tests/wechat_desktop/test_connector_desktop_ui.py \
+            .github/workflows/wechat-connector-release.yml
+          git commit -m "feat: integrate generic Windows Connector runtime [skip ci]"
+          git pull --rebase origin feature/hermes-multi-agent
+          git push origin HEAD:feature/hermes-multi-agent
