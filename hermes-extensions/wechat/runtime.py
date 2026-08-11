@@ -16,11 +16,7 @@ _LOCK_LOCAL = threading.local()
 
 
 class _CrossProcessFileLock:
-    """Small cross-process lock used to serialize WeChat UI side effects.
-
-    WeChat is one shared desktop window. Different Hermes processes (gateway,
-    tools, dashboard workers) must never search/select/type concurrently.
-    """
+    """Small cross-process lock used to serialize WeChat UI side effects."""
 
     def __init__(self, path: Path, timeout: float = 15.0) -> None:
         self.path = path
@@ -84,19 +80,22 @@ class WeChatDesktop(_BaseWeChatDesktop):
 
     @contextlib.contextmanager
     def _ui_transaction(self) -> Iterator[None]:
-        # Re-entrant for nested calls such as get_messages -> open_chat. The
-        # process file lock is acquired only by the outermost call.
-        with _UI_THREAD_LOCK:
-            depth = int(getattr(_LOCK_LOCAL, "depth", 0))
-            if depth:
-                _LOCK_LOCAL.depth = depth + 1
-                try:
-                    yield
-                finally:
-                    _LOCK_LOCAL.depth -= 1
-                return
+        depth = int(getattr(_LOCK_LOCAL, "depth", 0))
+        if depth:
+            _LOCK_LOCAL.depth = depth + 1
+            try:
+                yield
+            finally:
+                _LOCK_LOCAL.depth -= 1
+            return
 
-            lock = _CrossProcessFileLock(self._ui_lock_path, self._ui_lock_timeout)
+        acquired = _UI_THREAD_LOCK.acquire(timeout=self._ui_lock_timeout)
+        if not acquired:
+            raise WeChatUnavailable(
+                "Timed out waiting for another local WeChat operation; refusing concurrent UI automation"
+            )
+        lock = _CrossProcessFileLock(self._ui_lock_path, self._ui_lock_timeout)
+        try:
             lock.acquire()
             _LOCK_LOCAL.depth = 1
             try:
@@ -104,6 +103,8 @@ class WeChatDesktop(_BaseWeChatDesktop):
             finally:
                 _LOCK_LOCAL.depth = 0
                 lock.release()
+        finally:
+            _UI_THREAD_LOCK.release()
 
     def open_chat(self, chat: str) -> None:
         with self._ui_transaction():
@@ -128,7 +129,14 @@ class WeChatDesktop(_BaseWeChatDesktop):
                 sender = row.get("sender")
                 shown_time = row.get("time")
                 direction = row.get("direction") or ""
-                key = (row["text"], sender, shown_time, direction, row.get("top"), row.get("left"))
+                key = (
+                    row["text"],
+                    sender,
+                    shown_time,
+                    direction,
+                    row.get("top"),
+                    row.get("left"),
+                )
                 if key == previous_key:
                     continue
                 previous_key = key
@@ -149,7 +157,9 @@ class WeChatDesktop(_BaseWeChatDesktop):
                         "sender": sender,
                         "time": shown_time,
                         "direction": direction,
-                        "message_id": hashlib.sha256(identity_source.encode("utf-8")).hexdigest()[:24],
+                        "message_id": hashlib.sha256(
+                            identity_source.encode("utf-8")
+                        ).hexdigest()[:24],
                     }
                 )
             return compact[-max(1, min(int(limit), 100)) :]
@@ -162,9 +172,6 @@ class WeChatDesktop(_BaseWeChatDesktop):
         dry_run: bool = False,
         duplicate_ttl: int = 600,
     ) -> dict:
-        # Includes state read/write and the entire select -> verify -> type ->
-        # verify -> Enter critical section, so another process cannot switch
-        # the shared desktop between final verification and send.
         with self._ui_transaction():
             return super().send_message(
                 chat,
