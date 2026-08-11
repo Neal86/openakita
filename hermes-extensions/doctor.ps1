@@ -98,6 +98,9 @@ if ($Installed) {
     $Report["dashboard_manifest"] = Test-Path -LiteralPath (Join-Path $PluginRoot "dashboard\manifest.json")
     $Report["dashboard_bundle"] = Test-Path -LiteralPath (Join-Path $PluginRoot "dashboard\dist\index.js")
     $Report["dashboard_api"] = Test-Path -LiteralPath (Join-Path $PluginRoot "dashboard\plugin_api.py")
+    $Report["management_overview"] = Test-Path -LiteralPath (Join-Path $PluginRoot "management\overview.py")
+    $Report["task_service_v3"] = Test-Path -LiteralPath (Join-Path $PluginRoot "task_center\service_v3.py")
+    $Report["wechat_runtime"] = Test-Path -LiteralPath (Join-Path $PluginRoot "wechat\runtime.py")
     $Report["wechat_platform"] = Test-Path -LiteralPath (Join-Path $PlatformRoot "plugin.yaml")
     if ($Hermes -and $Report.capability_plugins) {
         try {
@@ -131,7 +134,10 @@ if (-not $Report.shared_dependencies) { $Warnings.Add("Shared plugin Python depe
 if (-not $Report.wechat_dependencies) { $Warnings.Add("Windows WeChat Python dependencies are not installed yet.") }
 
 if ($Installed) {
-    foreach ($key in @("plugin_manifest", "dashboard_manifest", "dashboard_bundle", "dashboard_api", "wechat_platform")) {
+    foreach ($key in @(
+        "plugin_manifest", "dashboard_manifest", "dashboard_bundle", "dashboard_api",
+        "management_overview", "task_service_v3", "wechat_runtime", "wechat_platform"
+    )) {
         if (-not $Report[$key]) { $Errors.Add("Installed component missing: $key") }
     }
     if (-not $Report.plugin_detected) { $Errors.Add("Hermes does not discover hermes-extensions.") }
