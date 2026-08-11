@@ -47,6 +47,19 @@
   function LoadingBlock(p) { return h("div", { className: "hx-loading" }, h("span", { className: "hx-spinner" }), p.children || "Loading…"); }
 
   function Dialog(p) {
+    useEffect(function () {
+      if (!p.open) return undefined;
+      const previousOverflow = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+      function onKey(e) {
+        if (e.key === "Escape" && !p.locked) p.onClose();
+      }
+      document.addEventListener("keydown", onKey);
+      return function () {
+        document.removeEventListener("keydown", onKey);
+        document.body.style.overflow = previousOverflow;
+      };
+    }, [p.open, p.locked, p.onClose]);
     if (!p.open) return null;
     return h("div", { className: "hx-dialog-backdrop", role: "presentation", onMouseDown: function (e) { if (e.target === e.currentTarget && !p.locked) p.onClose(); } },
       h("div", { className: "hx-dialog", role: "dialog", "aria-modal": "true", "aria-label": p.title },
@@ -136,8 +149,10 @@
         ]);
         setTasks(results[0]);
         setUpcoming(results[1].items || []);
+        return results[0];
       } catch (e) {
         setError(errText(e));
+        return null;
       } finally {
         setTasksLoading(false);
       }
@@ -172,6 +187,10 @@
     const taskProfiles = (tasks && tasks.profiles) || [];
     const agentNames = agents.map(function (a) { return a.name; });
     const taskRows = taskProfiles.flatMap(function (p) { return (p.cron || []).concat(p.kanban || []); });
+
+    function flattenTaskOverview(data) {
+      return ((data && data.profiles) || []).flatMap(function (p) { return (p.cron || []).concat(p.kanban || []); });
+    }
 
     async function doAction(key, fn, success, after) {
       setBusy(key); setError(""); setNotice("");
@@ -224,7 +243,9 @@
     function agentAction(agent, action, value, label) {
       return doAction("agent:" + agent.name + ":" + action, function () {
         return request("/agents/" + encodeURIComponent(agent.name) + "/action", { method: "POST", body: JSON.stringify({ action: action, value: value || null }) });
-      }, label || "Agent action completed.", action === "gateway_status" ? function (result) { if (result && result.agent) setAgentDetail(result.agent); } : null);
+      }, label || "Agent action completed.", function (result) {
+        if (result && result.agent && agentDetail && agentDetail.name === agent.name) setAgentDetail(result.agent);
+      });
     }
 
     async function restartAgent(agent) {
@@ -285,12 +306,24 @@
     }
 
     async function openTask(task) {
-      setTaskDetail(Object.assign({}, task)); setHistory([]); setHistoryLoading(true); setError(""); setTab("tasks");
+      setHistory([]); setHistoryLoading(true); setError(""); setTab("tasks");
       try {
-        const q = task.profile ? "?profile=" + encodeURIComponent(task.profile) + "&limit=40" : "?limit=40";
-        const data = await request("/tasks/" + encodeURIComponent(task.type) + "/" + encodeURIComponent(task.id) + "/history" + q);
+        let actual = Object.assign({}, task);
+        const hasEditablePayload = Object.prototype.hasOwnProperty.call(actual, "prompt") || Object.prototype.hasOwnProperty.call(actual, "body") || Object.prototype.hasOwnProperty.call(actual, "priority");
+        if (!hasEditablePayload && task && task.type && task.id) {
+          const q = new URLSearchParams({ include_completed: "true" });
+          if (task.profile) q.set("profile", task.profile);
+          const detailOverview = await request("/overview?" + q.toString());
+          const candidate = flattenTaskOverview(detailOverview).find(function (row) {
+            return row.id === task.id && row.type === task.type && (!task.profile || row.profile === task.profile);
+          });
+          if (candidate) actual = Object.assign({}, candidate);
+        }
+        setTaskDetail(actual);
+        const historyQuery = actual.profile ? "?profile=" + encodeURIComponent(actual.profile) + "&limit=40" : "?limit=40";
+        const data = await request("/tasks/" + encodeURIComponent(actual.type) + "/" + encodeURIComponent(actual.id) + "/history" + historyQuery);
         setHistory(data.items || []);
-      } catch (e) { setError(errText(e)); }
+      } catch (e) { setError(errText(e)); setTaskDetail(Object.assign({}, task)); }
       finally { setHistoryLoading(false); }
     }
 
@@ -314,6 +347,11 @@
       if (outcome.ok) {
         await loadTasks();
         if (destructive) { setTaskDetail(null); setHistory([]); }
+        else if (taskDetail && taskDetail.id === task.id && taskDetail.type === task.type) {
+          if (action === "pause") setTaskDetail(Object.assign({}, taskDetail, { enabled: false }));
+          if (action === "resume") setTaskDetail(Object.assign({}, taskDetail, { enabled: true }));
+          if (action === "assign" && value) setTaskDetail(Object.assign({}, taskDetail, { profile: value }));
+        }
       }
     }
 
