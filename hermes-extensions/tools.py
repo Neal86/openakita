@@ -150,7 +150,17 @@ def task_center_history(args: dict, **kwargs) -> str:
 
 def management_overview(args: dict, **kwargs) -> str:
     del args, kwargs
-    return _result(build_management_overview)
+
+    def load() -> dict[str, Any]:
+        caps = detect_capabilities()
+        return build_management_overview(
+            caps=caps,
+            manager=ManagementCenter(),
+            task_center=TaskCenter(),
+            project_unavailable_message=project_unavailable_payload()["message"],
+        )
+
+    return _result(load)
 
 
 def agent_list(args: dict, **kwargs) -> str:
