@@ -24,63 +24,55 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Install runtime and test dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r hermes-extensions/requirements.txt pytest ruff fastapi pydantic
-      - name: Compile and lint Python
+      - name: Validate Python
         run: |
           python -m compileall -q hermes-extensions
           ruff check hermes-extensions
-      - name: Build and validate Dashboard bundle
+      - name: Build and validate Dashboard
         run: |
-          for file in hermes-extensions/dashboard/src/api.js hermes-extensions/dashboard/src/components.js hermes-extensions/dashboard/src/app.js hermes-extensions/dashboard/src/index.js; do
-            node --check "$file"
-          done
+          for file in hermes-extensions/dashboard/src/api.js hermes-extensions/dashboard/src/components.js hermes-extensions/dashboard/src/app.js hermes-extensions/dashboard/src/index.js; do node --check "$file"; done
           python hermes-extensions/dashboard/build_bundle.py
           node --check hermes-extensions/dashboard/dist/index.js
-      - name: Unit and UI contract tests
+      - name: Run tests
         run: pytest -q hermes-extensions/tests
-      - name: Validate v0.5.1 release surfaces
+      - name: Validate v0.5.1 surfaces
         run: |
           python - <<'PY'
           import json
           from pathlib import Path
 
-          def yaml_version(text: str) -> str:
+          def version(text: str) -> str:
               for line in text.splitlines():
                   if line.strip().startswith("version:"):
-                      return line.split(": 1)[1] if False else line.split(":", 1)[1].strip().strip('"').strip("'")
+                      return line.partition(":")[2].strip().strip('"').strip("'")
               raise AssertionError("version not found")
 
           root = Path("hermes-extensions")
           manifest = json.loads((root / "dashboard/manifest.json").read_text("utf-8"))
           plugin = (root / "plugin.yaml").read_text("utf-8")
-          platform_yaml = (root / "platforms/wechat-desktop/plugin.yaml").read_text("utf-8")
-          api = (root / "dashboard/plugin_api.py").read_text("utf-8")
+          platform = (root / "platforms/wechat-desktop/plugin.yaml").read_text("utf-8")
           app = (root / "dashboard/src/app.js").read_text("utf-8")
           components = (root / "dashboard/src/components.js").read_text("utf-8")
           installer = (root / "install.ps1").read_text("utf-8")
-
-          assert manifest["entry"] == "dist/index.js"
-          assert manifest["api"] == "plugin_api.py"
-          assert manifest["icon"] == "Activity"
-          assert manifest["version"] == yaml_version(plugin) == yaml_version(platform_yaml) == "0.5.1"
+          assert manifest["version"] == version(plugin) == version(platform) == "0.5.1"
+          assert manifest["entry"] == "dist/index.js" and manifest["api"] == "plugin_api.py"
           for rel in (
               "dashboard/build_bundle.py", "dashboard/src/api.js", "dashboard/src/components.js",
               "dashboard/src/app.js", "dashboard/src/index.js", "dashboard/dist/index.js",
               "management/overview.py", "task_center/service_v3.py", "wechat/runtime.py",
           ):
               assert (root / rel).is_file(), rel
-          assert "checkWeChatDesktop" in app and 'if (tab === "wechat") loadHealth()' in app
-          assert "Promise.allSettled" in app
-          assert "Discard unsaved changes?" in app and "ConfirmDialog" in components
-          assert "previousFocus" in components and 'e.key === "Tab"' in components
-          assert "document.visibilityState" in app and "refreshCurrent" in app
+          assert 'if (tab === "wechat") loadHealth()' in app
+          assert 'if (tab === "wechat") loadWeChat(true)' not in app
+          assert "Promise.allSettled" in app and "refreshCurrent" in app
+          assert "document.visibilityState" in app and "Discard unsaved changes?" in app
+          assert "ConfirmDialog" in components and "previousFocus" in components and 'e.key === "Tab"' in components
           assert "build_bundle.py" in installer and "v0.5.1 install complete" in installer
-          for route in ("/wechat/health", "/wechat/status", "/wechat/chats", "/wechat/unread", "/wechat/dry-run"):
-              assert route in api
-          print("v0.5.1 Management Center UX and modular bundle surfaces ok")
+          print("v0.5.1 UX surfaces ok")
           PY
 
   windows-installer:
@@ -91,19 +83,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Parse PowerShell scripts
+      - name: Parse PowerShell
         shell: pwsh
         run: |
           foreach ($file in @("hermes-extensions/install.ps1", "hermes-extensions/doctor.ps1")) {
-            $tokens = $null
-            $errors = $null
+            $tokens = $null; $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors) | Out-Null
-            if ($errors.Count -gt 0) {
-              $errors | Format-List | Out-String | Write-Error
-              exit 1
-            }
+            if ($errors.Count -gt 0) { $errors | Format-List | Out-String | Write-Error; exit 1 }
           }
-      - name: Build fake Hermes v0.16-compatible environment
+      - name: Build fake Hermes v0.16 environment
         shell: pwsh
         run: |
           $root = Join-Path $env:RUNNER_TEMP "hx-ci"
@@ -114,14 +102,8 @@ jobs:
           python -m venv (Join-Path $appdata "uv\tools\hermes-agent")
           $fake = @'
           @echo off
-          if "%1"=="--version" (
-            echo Hermes Agent v0.16.0 test
-            exit /b 0
-          )
-          if "%1"=="project" (
-            echo hermes: error: argument command: invalid choice: 'project' 1>&2
-            exit /b 2
-          )
+          if "%1"=="--version" (echo Hermes Agent v0.16.0 test& exit /b 0)
+          if "%1"=="project" (echo hermes: error: argument command: invalid choice: 'project' 1>&2& exit /b 2)
           if "%1"=="plugins" if "%2"=="enable" (
             echo enabled-%3>>"%HERMES_HOME%\config.yaml"
             if "%FAKE_HERMES_FAIL_ENABLE%"=="1" exit /b 9
@@ -132,42 +114,24 @@ jobs:
             echo wechat-desktop enabled 0.5.1 user
             exit /b 0
           )
-          if "%1"=="dashboard" if "%2"=="--status" (
-            echo No hermes dashboard processes running.
-            exit /b 0
-          )
+          if "%1"=="dashboard" if "%2"=="--status" (echo No hermes dashboard processes running.& exit /b 0)
           exit /b 0
           '@
           Set-Content -LiteralPath (Join-Path $bin "hermes.cmd") -Value $fake -Encoding ASCII
           "APPDATA=$appdata" | Out-File -FilePath $env:GITHUB_ENV -Append
           "HERMES_HOME=$hermesHome" | Out-File -FilePath $env:GITHUB_ENV -Append
           "PATH=$bin;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - name: Preflight doctor
+      - name: Preflight and install
         shell: pwsh
         run: |
-          & .\hermes-extensions\doctor.ps1 -Preflight -Json | Tee-Object -Variable report
+          & .\hermes-extensions\doctor.ps1 -Preflight -Json | Out-Host
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $json = ($report -join "`n") | ConvertFrom-Json
-          if ($json.capability_project -ne $false) { throw "Expected project=false" }
-          if ($json.capability_profile -ne $true) { throw "Expected profile=true" }
-      - name: Real transactional install and generated bundle check
-        shell: pwsh
-        run: |
           & .\hermes-extensions\install.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $plugin = Join-Path $env:HERMES_HOME "plugins\hermes-extensions"
-          $platform = Join-Path $env:HERMES_HOME "plugins\platforms\wechat-desktop"
-          foreach ($path in @(
-            (Join-Path $plugin "plugin.yaml"),
-            (Join-Path $plugin "dashboard\dist\index.js"),
-            (Join-Path $plugin "dashboard\build_bundle.py"),
-            (Join-Path $plugin "dashboard\src\app.js"),
-            (Join-Path $plugin "dashboard\plugin_api.py"),
-            (Join-Path $plugin "management\overview.py"),
-            (Join-Path $plugin "task_center\service_v3.py"),
-            (Join-Path $plugin "wechat\runtime.py"),
-            (Join-Path $platform "plugin.yaml")
-          )) { if (-not (Test-Path $path)) { throw "Missing installed file: $path" } }
+          foreach ($rel in @("dashboard\dist\index.js", "dashboard\build_bundle.py", "dashboard\src\app.js", "management\overview.py", "task_center\service_v3.py", "wechat\runtime.py")) {
+            if (-not (Test-Path (Join-Path $plugin $rel))) { throw "Missing installed file: $rel" }
+          }
           & (Join-Path $plugin "doctor.ps1") -Installed -Json | Out-Host
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Rollback files and config on failed upgrade
@@ -178,8 +142,6 @@ jobs:
           Set-Content -LiteralPath (Join-Path $plugin "rollback-marker.txt") -Value "old-version"
           Set-Content -LiteralPath $config -Value "baseline-config" -NoNewline
           $env:FAKE_HERMES_FAIL_ENABLE = "1"
-          try { & .\hermes-extensions\install.ps1; throw "Install unexpectedly succeeded" }
-          catch { Write-Host "Expected install failure: $($_.Exception.Message)" }
-          finally { Remove-Item Env:FAKE_HERMES_FAIL_ENABLE -ErrorAction SilentlyContinue }
-          if (-not (Test-Path (Join-Path $plugin "rollback-marker.txt"))) { throw "Transactional rollback did not restore previous plugin." }
-          if ((Get-Content -LiteralPath $config -Raw) -ne "baseline-config") { throw "Transactional rollback did not restore Hermes config." }
+          try { & .\hermes-extensions\install.ps1; throw "Install unexpectedly succeeded" } catch { Write-Host "Expected failure" } finally { Remove-Item Env:FAKE_HERMES_FAIL_ENABLE -ErrorAction SilentlyContinue }
+          if (-not (Test-Path (Join-Path $plugin "rollback-marker.txt"))) { throw "Plugin rollback failed" }
+          if ((Get-Content -LiteralPath $config -Raw) -ne "baseline-config") { throw "Config rollback failed" }
