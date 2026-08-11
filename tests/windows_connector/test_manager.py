@@ -5,7 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from openakita.windows_connector.manager import LOCAL_NODE_ID, WindowsConnectorManager
+from openakita.windows_connector.manager import (
+    LOCAL_NODE_ID,
+    WindowsConnectorManager,
+)
 
 
 RESOURCE = {
