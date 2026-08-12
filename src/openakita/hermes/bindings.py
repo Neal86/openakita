@@ -29,6 +29,11 @@ class AgentHermesBinding:
             self.runtime_provider = HermesRuntimeProvider(str(self.runtime_provider))
         if not isinstance(self.hermes_routing_policy, HermesRoutingPolicy):
             self.hermes_routing_policy = HermesRoutingPolicy(str(self.hermes_routing_policy))
+        if self.runtime_provider == HermesRuntimeProvider.LOCAL:
+            # Local runtime never consults Hermes nodes.  Persisted node ids on
+            # a local binding are stale metadata and must not keep an otherwise
+            # unused Hermes instance artificially "in use".
+            self.hermes_node_ids = []
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
