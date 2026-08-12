@@ -1,0 +1,83 @@
+name: One-shot maintenance patch
+
+on:
+  push:
+    branches:
+      - feature/hermes-multi-agent
+    paths:
+      - .github/workflows/maintenance-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feature/hermes-multi-agent
+          fetch-depth: 0
+
+      - name: Apply exact maintenance edits
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          changed = []
+
+          for rel in (
+              ".github/workflows/release.yml",
+              ".github/workflows/release-dryrun.yml",
+          ):
+              path = Path(rel)
+              text = path.read_text("utf-8")
+              new = text.replace('node-version: "20"', 'node-version: "22"')
+              new = new.replace("node-version: '20'", "node-version: '22'")
+              if new != text:
+                  path.write_text(new, "utf-8")
+                  changed.append(rel)
+
+          spec = Path("build/openakita.spec")
+          text = spec.read_text("utf-8")
+          new = text.replace('    "openakita.core.llm",\n', "")
+          new = new.replace('    "openakita.core.tools",\n', "")
+          if new != text:
+              spec.write_text(new, "utf-8")
+              changed.append(str(spec))
+
+          bootstrap = Path("build/prepare_bootstrap_resources.py")
+          text = bootstrap.read_text("utf-8")
+          old = '''            with urllib.request.urlopen(url, timeout=90) as resp, tmp.open("wb") as fh:\n                shutil.copyfileobj(resp, fh)'''
+          new = '''            request = urllib.request.Request(\n                url,\n                headers={\n                    "User-Agent": "OpenAkita-Bootstrap/1.0",\n                    "Accept": "application/octet-stream",\n                },\n            )\n            with urllib.request.urlopen(request, timeout=90) as resp, tmp.open("wb") as fh:\n                shutil.copyfileobj(resp, fh)'''
+          if old not in text:
+              raise SystemExit("bootstrap download_with_retries pattern changed; refusing broad edit")
+          text2 = text.replace(old, new, 1)
+          old_head = '        req = urllib.request.Request(url, method="HEAD")'
+          new_head = '''        req = urllib.request.Request(\n            url,\n            method="HEAD",\n            headers={"User-Agent": "OpenAkita-Bootstrap/1.0"},\n        )'''
+          if old_head not in text2:
+              raise SystemExit("bootstrap head_check pattern changed; refusing broad edit")
+          text2 = text2.replace(old_head, new_head, 1)
+          if text2 != text:
+              bootstrap.write_text(text2, "utf-8")
+              changed.append(str(bootstrap))
+
+          print("Changed files:")
+          for rel in changed:
+              print(" -", rel)
+          if not changed:
+              raise SystemExit("No maintenance edits were needed")
+          PY
+
+      - name: Commit exact edits
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "openakita-maintenance-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add .github/workflows/release.yml .github/workflows/release-dryrun.yml build/openakita.spec build/prepare_bootstrap_resources.py
+          git diff --cached --check
+          git commit -m "fix: align release runtime and packaging hardening"
+          git push origin HEAD:feature/hermes-multi-agent
