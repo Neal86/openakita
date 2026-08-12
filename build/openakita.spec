@@ -34,8 +34,6 @@ hidden_imports_core = [
     "openakita.config",
     "openakita.runtime_env",
     "openakita.core.agent",
-    "openakita.core.llm",
-    "openakita.core.tools",
     "openakita.memory",
     "openakita.memory.manager",
     "openakita.memory.vector_store",
