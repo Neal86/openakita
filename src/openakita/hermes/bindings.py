@@ -60,7 +60,9 @@ class AgentHermesBindingStore:
                 continue
             try:
                 rows.append(AgentHermesBinding.from_dict(item))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, AttributeError, OverflowError):
+                # Keep valid bindings available when a single persisted row
+                # was written by an older version or manually corrupted.
                 continue
         return rows
 
