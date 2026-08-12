@@ -64,6 +64,12 @@ def test_node_store_skips_malformed_rows(tmp_path: Path):
                 "nodes": [
                     {"id": "ok", "name": "OK", "base_url": "http://ok:8000"},
                     {"id": "bad", "name": "Bad", "base_url": 123},
+                    {
+                        "id": "overflow",
+                        "name": "Overflow",
+                        "base_url": "http://overflow:8000",
+                        "max_concurrency": float("inf"),
+                    },
                     "not-an-object",
                 ]
             }
@@ -71,7 +77,7 @@ def test_node_store_skips_malformed_rows(tmp_path: Path):
         "utf-8",
     )
     rows = HermesNodeStore(path).list()
-    assert any(node.id == "ok" for node in rows)
+    assert [node.id for node in rows] == ["ok"]
 
 
 def test_binding_defaults_are_backward_compatible(tmp_path: Path):
