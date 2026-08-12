@@ -35,7 +35,6 @@ class NativeHermesRuntime:
 
     @staticmethod
     def available() -> bool:
-        """Report package presence without hiding import-time dependency errors."""
         try:
             return importlib.util.find_spec("run_agent") is not None
         except (ImportError, AttributeError, ValueError):
@@ -64,11 +63,14 @@ class NativeHermesRuntime:
                 lock = asyncio.Lock()
                 cls._session_locks[scoped_session] = lock
             cls._session_refs[scoped_session] = cls._session_refs.get(scoped_session, 0) + 1
-        await lock.acquire()
+        acquired = False
         try:
+            await lock.acquire()
+            acquired = True
             yield
         finally:
-            lock.release()
+            if acquired:
+                lock.release()
             with cls._session_locks_guard:
                 refs = max(0, cls._session_refs.get(scoped_session, 1) - 1)
                 if refs:
@@ -109,7 +111,7 @@ class NativeHermesRuntime:
             raise NativeHermesUnavailable(
                 "Embedded Hermes runtime is not installed in this OpenAkita build"
             ) from exc
-        except Exception as exc:  # package exists but cannot initialize
+        except Exception as exc:
             raise NativeHermesExecutionError(
                 f"Embedded Hermes runtime failed to initialize: {exc}"
             ) from exc
@@ -267,9 +269,6 @@ class NativeHermesRuntime:
             except asyncio.CancelledError as exc:
                 cancelled = exc
             finally:
-                # Cancelling asyncio.to_thread does not stop its Python thread. Keep
-                # the session guard held until the worker really exits so a second
-                # request cannot overlap the same Hermes session.
                 if not worker_task.done():
                     try:
                         await asyncio.shield(worker_task)
