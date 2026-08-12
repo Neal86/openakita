@@ -5,8 +5,8 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 try:
     from .config_service import LOG_PATH, ensure_app_dir
