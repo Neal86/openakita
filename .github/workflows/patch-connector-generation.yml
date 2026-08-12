@@ -40,18 +40,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
           pip install -e ./openakita-plugin-sdk
-          ruff check src/openakita/wechat_desktop/manager.py src/openakita/windows_connector/manager.py src/openakita/api/routes/wechat_desktop.py src/openakita/api/routes/agents.py src/openakita/agents/profile.py tests/wechat_desktop/test_connection_generation.py tests/wechat_desktop/test_release_download.py tests/api/test_agent_data_delete_safety.py tests/api/test_profile_store_delete_safety.py
+          ruff check src/openakita/wechat_desktop/manager.py src/openakita/windows_connector/manager.py src/openakita/api/routes/wechat_desktop.py src/openakita/api/routes/agents.py src/openakita/api/routes/hub.py src/openakita/agents/profile.py tests/wechat_desktop/test_connection_generation.py tests/wechat_desktop/test_release_download.py tests/api/test_agent_data_delete_safety.py tests/api/test_profile_store_delete_safety.py
           pytest -q tests/wechat_desktop/test_connection_generation.py tests/wechat_desktop/test_release_download.py tests/api/test_agent_data_delete_safety.py tests/api/test_profile_store_delete_safety.py tests/windows_connector tests/wechat_desktop tests/hermes
           git diff --check
       - name: Commit safety hardening
         run: |
           git config user.name "openakita-maintenance-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add src/openakita/wechat_desktop/manager.py src/openakita/windows_connector/manager.py src/openakita/api/routes/wechat_desktop.py src/openakita/api/routes/agents.py src/openakita/agents/profile.py tests/wechat_desktop/test_connection_generation.py tests/wechat_desktop/test_release_download.py tests/api/test_agent_data_delete_safety.py tests/api/test_profile_store_delete_safety.py
+          git add src/openakita/wechat_desktop/manager.py src/openakita/windows_connector/manager.py src/openakita/api/routes/wechat_desktop.py src/openakita/api/routes/agents.py src/openakita/api/routes/hub.py src/openakita/agents/profile.py tests/wechat_desktop/test_connection_generation.py tests/wechat_desktop/test_release_download.py tests/api/test_agent_data_delete_safety.py tests/api/test_profile_store_delete_safety.py
           if git diff --cached --quiet; then
             echo "Safety hardening already applied."
             exit 0
           fi
-          git commit -m "fix: harden connector sessions and Agent data deletion"
+          git commit -m "fix: harden connector sessions and Agent data safety"
           git pull --rebase origin feature/hermes-multi-agent
           git push origin HEAD:feature/hermes-multi-agent
