@@ -467,6 +467,7 @@ class ProfileStore:
             try:
                 data = json.loads(fp.read_text(encoding="utf-8"))
                 profile = AgentProfile.from_dict(data)
+                self._validate_profile_id(profile.id)
                 profile = self._heal_loaded_profile(profile, fp)
                 self._cache[profile.id] = profile
                 loaded += 1
@@ -590,6 +591,7 @@ class ProfileStore:
 
     def save(self, profile: AgentProfile) -> None:
         """保存 Profile。ephemeral=True 的只存内存，否则写磁盘。"""
+        self._validate_profile_id(profile.id)
         with self._lock:
             if profile.ephemeral:
                 self._ephemeral[profile.id] = profile
@@ -699,13 +701,26 @@ class ProfileStore:
 
     _RESERVED_DIR_NAMES = frozenset({"profiles"})
 
-    def get_profile_dir(self, profile_id: str) -> Path:
-        """返回 Profile 专属数据目录 data/agents/{profile_id}/
+    @classmethod
+    def _validate_profile_id(cls, profile_id: str) -> str:
+        """Reject IDs that can escape the Agent storage root on any platform."""
+        if not isinstance(profile_id, str) or not profile_id:
+            raise ValueError("Profile ID must be a non-empty string")
+        if profile_id != profile_id.strip():
+            raise ValueError("Profile ID must not contain leading or trailing whitespace")
+        if (
+            profile_id in cls._RESERVED_DIR_NAMES
+            or profile_id in {".", ".."}
+            or "/" in profile_id
+            or "\\" in profile_id
+            or "\x00" in profile_id
+        ):
+            raise ValueError(f"Unsafe Profile ID: {profile_id!r}")
+        return profile_id
 
-        Raises ValueError if profile_id collides with reserved directory names.
-        """
-        if profile_id in self._RESERVED_DIR_NAMES:
-            raise ValueError(f"Profile ID '{profile_id}' conflicts with a reserved directory name")
+    def get_profile_dir(self, profile_id: str) -> Path:
+        """返回 Profile 专属数据目录 data/agents/{profile_id}/。"""
+        profile_id = self._validate_profile_id(profile_id)
         return self._base_dir / profile_id
 
     def ensure_profile_dir(self, profile_id: str) -> Path:
@@ -785,7 +800,8 @@ class ProfileStore:
         return count
 
     def _persist(self, profile: AgentProfile) -> None:
-        fp = self._profiles_dir / f"{profile.id}.json"
+        profile_id = self._validate_profile_id(profile.id)
+        fp = self._profiles_dir / f"{profile_id}.json"
         atomic_json_write(fp, profile.to_dict())
 
     @staticmethod

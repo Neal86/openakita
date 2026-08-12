@@ -45,3 +45,25 @@ def test_store_delete_success_removes_data_json_and_cache(tmp_path):
     assert store.get(profile.id) is None
     assert not profile_json.exists()
     assert not profile_dir.exists()
+
+
+@pytest.mark.parametrize(
+    "profile_id",
+    ["../escape", "..\\escape", ".", "..", "profiles", " leading", "trailing "],
+)
+def test_store_rejects_unsafe_profile_ids_before_any_write(tmp_path, profile_id):
+    base_dir = tmp_path / "agents"
+    store = ProfileStore(base_dir)
+    profile = AgentProfile(
+        id=profile_id,
+        name="Unsafe",
+        type=AgentType.CUSTOM,
+        created_by="import",
+    )
+
+    with pytest.raises(ValueError):
+        store.save(profile)
+
+    assert list((base_dir / "profiles").glob("*.json")) == []
+    assert not (tmp_path / "escape.json").exists()
+    assert not (tmp_path / "escape").exists()
