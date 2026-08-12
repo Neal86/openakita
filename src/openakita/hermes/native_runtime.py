@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import importlib.metadata
 import os
+import threading
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -27,6 +28,9 @@ class NativeHermesUnavailable(RuntimeError):
 
 class NativeHermesRuntime:
     """Small async wrapper around Hermes' synchronous ``AIAgent`` API."""
+
+    _session_locks: dict[str, asyncio.Lock] = {}
+    _session_locks_guard = threading.Lock()
 
     @staticmethod
     def available() -> bool:
@@ -52,6 +56,15 @@ class NativeHermesRuntime:
         return f"openakita:{raw_agent}:{raw_session}"
 
     @classmethod
+    def _session_lock(cls, scoped_session: str) -> asyncio.Lock:
+        with cls._session_locks_guard:
+            lock = cls._session_locks.get(scoped_session)
+            if lock is None:
+                lock = asyncio.Lock()
+                cls._session_locks[scoped_session] = lock
+            return lock
+
+    @classmethod
     def _agent_kwargs(
         cls,
         *,
@@ -59,9 +72,6 @@ class NativeHermesRuntime:
         session_id: str,
         stream_delta_callback=None,
     ) -> dict[str, Any]:
-        # Hermes talks back to OpenAkita's OpenAI-compatible internal gateway.
-        # Provider/model/API-key ownership therefore stays in OpenAkita rather
-        # than being duplicated inside every embedded Hermes profile.
         base_url = os.environ.get(
             "OPENAKITA_HERMES_LLM_BASE_URL",
             os.environ.get("OPENAI_BASE_URL", "http://127.0.0.1:18900/v1"),
@@ -79,9 +89,6 @@ class NativeHermesRuntime:
             "save_trajectories": False,
             "platform": "openakita-desktop",
             "session_id": cls._scoped_session_id(agent_id, session_id),
-            # OpenAkita owns durable Agent identity/memory. Hermes keeps its
-            # execution loop, subagents and native tools, but must not create a
-            # second long-term memory/context universe for the same Agent.
             "skip_memory": True,
             "skip_context_files": True,
         }
@@ -122,25 +129,26 @@ class NativeHermesRuntime:
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         scoped_session = cls._scoped_session_id(agent_id, session_id)
-        snapshot = prepare_native_hermes_capabilities(
-            agent_id,
-            session_id=scoped_session,
-            explicit_tools=tools,
-        )
-        effective_system = cls._merged_system(system, snapshot.system_context)
-
-        def _execute() -> dict[str, Any]:
-            agent = cls._new_agent(agent_id=agent_id, session_id=session_id)
-            result = agent.run_conversation(
-                user_message=message,
-                system_message=effective_system or None,
-                task_id=scoped_session,
+        async with cls._session_lock(scoped_session):
+            snapshot = prepare_native_hermes_capabilities(
+                agent_id,
+                session_id=scoped_session,
+                explicit_tools=tools,
             )
-            if isinstance(result, dict):
-                return result
-            return {"final_response": str(result)}
+            effective_system = cls._merged_system(system, snapshot.system_context)
 
-        result = await asyncio.to_thread(_execute)
+            def _execute() -> dict[str, Any]:
+                agent = cls._new_agent(agent_id=agent_id, session_id=session_id)
+                result = agent.run_conversation(
+                    user_message=message,
+                    system_message=effective_system or None,
+                    task_id=scoped_session,
+                )
+                if isinstance(result, dict):
+                    return result
+                return {"final_response": str(result)}
+
+            result = await asyncio.to_thread(_execute)
         return {
             "content": str(result.get("final_response") or result.get("content") or ""),
             "usage": result.get("usage") or {},
@@ -165,79 +173,80 @@ class NativeHermesRuntime:
         tools: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         scoped_session = cls._scoped_session_id(agent_id, session_id)
-        snapshot = prepare_native_hermes_capabilities(
-            agent_id,
-            session_id=scoped_session,
-            explicit_tools=tools,
-        )
-        effective_system = cls._merged_system(system, snapshot.system_context)
+        async with cls._session_lock(scoped_session):
+            loop = asyncio.get_running_loop()
+            queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+            snapshot = prepare_native_hermes_capabilities(
+                agent_id,
+                session_id=scoped_session,
+                explicit_tools=tools,
+            )
+            effective_system = cls._merged_system(system, snapshot.system_context)
+            emitted_delta = threading.Event()
 
-        def _on_delta(delta: Any) -> None:
-            text = ""
-            if isinstance(delta, str):
-                text = delta
-            elif isinstance(delta, dict):
-                text = str(delta.get("content") or delta.get("delta") or "")
-            else:
-                text = str(delta or "")
-            if text:
-                loop.call_soon_threadsafe(
-                    queue.put_nowait,
-                    {"type": "text_delta", "content": text, "runtime": "native"},
-                )
-
-        def _worker() -> None:
-            try:
-                agent = cls._new_agent(
-                    agent_id=agent_id,
-                    session_id=session_id,
-                    stream_delta_callback=_on_delta,
-                )
-                result = agent.run_conversation(
-                    user_message=message,
-                    system_message=effective_system or None,
-                    task_id=scoped_session,
-                )
-                # Some provider modes do not emit delta callbacks. Ensure the
-                # caller still receives a final response in those modes.
-                final = result.get("final_response") if isinstance(result, dict) else str(result)
-                if final:
+            def _on_delta(delta: Any) -> None:
+                text = ""
+                if isinstance(delta, str):
+                    text = delta
+                elif isinstance(delta, dict):
+                    text = str(delta.get("content") or delta.get("delta") or "")
+                else:
+                    text = str(delta or "")
+                if text:
+                    emitted_delta.set()
                     loop.call_soon_threadsafe(
                         queue.put_nowait,
-                        {"type": "final", "content": str(final), "runtime": "native"},
+                        {"type": "text_delta", "content": text, "runtime": "native"},
                     )
-            except Exception as exc:
-                loop.call_soon_threadsafe(
-                    queue.put_nowait,
-                    {"type": "error", "error": str(exc), "runtime": "native"},
-                )
-            finally:
-                loop.call_soon_threadsafe(queue.put_nowait, None)
 
-        task = asyncio.create_task(asyncio.to_thread(_worker))
-        try:
-            while True:
-                event = await queue.get()
-                if event is None:
-                    break
-                if event.get("type") == "error":
-                    raise NativeHermesUnavailable(
-                        str(event.get("error") or "Hermes native runtime failed")
+            def _worker() -> None:
+                try:
+                    agent = cls._new_agent(
+                        agent_id=agent_id,
+                        session_id=session_id,
+                        stream_delta_callback=_on_delta,
                     )
-                yield event
-            await task
-            yield {
-                "type": "done",
-                "runtime": "native",
-                "hermes_version": cls.version(),
-                "agent_profile_id": agent_id,
-                "hermes_session_id": scoped_session,
-                **snapshot.metadata(),
-                **(metadata or {}),
-            }
-        finally:
-            if not task.done():
-                task.cancel()
+                    result = agent.run_conversation(
+                        user_message=message,
+                        system_message=effective_system or None,
+                        task_id=scoped_session,
+                    )
+                    final = result.get("final_response") if isinstance(result, dict) else str(result)
+                    if final and not emitted_delta.is_set():
+                        loop.call_soon_threadsafe(
+                            queue.put_nowait,
+                            {"type": "final", "content": str(final), "runtime": "native"},
+                        )
+                except Exception as exc:
+                    loop.call_soon_threadsafe(
+                        queue.put_nowait,
+                        {"type": "error", "error": str(exc), "runtime": "native"},
+                    )
+                finally:
+                    loop.call_soon_threadsafe(queue.put_nowait, None)
+
+            task = asyncio.create_task(asyncio.to_thread(_worker))
+            try:
+                while True:
+                    event = await queue.get()
+                    if event is None:
+                        break
+                    if event.get("type") == "error":
+                        raise NativeHermesUnavailable(
+                            str(event.get("error") or "Hermes native runtime failed")
+                        )
+                    yield event
+                await task
+                yield {
+                    "type": "done",
+                    "runtime": "native",
+                    "hermes_version": cls.version(),
+                    "agent_profile_id": agent_id,
+                    "hermes_session_id": scoped_session,
+                    **snapshot.metadata(),
+                    **(metadata or {}),
+                }
+            finally:
+                if not task.done():
+                    task.cancel()
