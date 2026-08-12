@@ -38,4 +38,5 @@ jobs:
           git config user.email "actions@users.noreply.github.com"
           git add src/openakita/api/auth.py src/openakita/api/server.py src/openakita/main.py tests/api/test_web_access_data_root.py
           git commit -m "fix: persist web access config in durable data root"
+          git pull --rebase origin feature/hermes-multi-agent
           git push origin HEAD:feature/hermes-multi-agent
