@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from openakita.hermes.bindings import AgentHermesBindingStore
 from openakita.hermes.container_manager import ContainerManagerError, HermesContainerManager
 from openakita.hermes.execution import (
     AgentExecutionConfig,
@@ -44,7 +45,11 @@ def _native_info(instance) -> dict:
     if not is_native:
         return {"transport": "docker", "native": False}
     available = NativeHermesRuntime.available()
-    running = bool(instance.enabled and available and instance.lifecycle_status == InstanceLifecycle.RUNNING)
+    running = bool(
+        instance.enabled
+        and available
+        and instance.lifecycle_status == InstanceLifecycle.RUNNING
+    )
     return {
         "transport": "native_windows" if sys.platform == "win32" else "native",
         "native": True,
@@ -76,6 +81,20 @@ def _native_logs(instance, tail: int) -> str:
     return "\n".join(rows[-max(1, tail):])
 
 
+def _bound_profiles(instance_id: str) -> list[str]:
+    profiles: list[str] = []
+    for config in AgentExecutionStore().list():
+        bound = config.hermes_instance_id == instance_id
+        shared = (
+            instance_id == HermesLifecycleService.SHARED_ID
+            and config.execution_mode == ExecutionMode.HERMES
+            and config.hermes_instance_mode == HermesInstanceMode.SHARED
+        )
+        if bound or shared:
+            profiles.append(config.profile_id)
+    return sorted(set(profiles))
+
+
 @router.get("/agents/{profile_id}")
 def get_agent_execution(profile_id: str) -> dict:
     return {"execution": AgentExecutionStore().get(profile_id).to_dict()}
@@ -87,13 +106,20 @@ async def set_agent_execution(profile_id: str, payload: ExecutionPayload) -> dic
     service = HermesLifecycleService()
     config, instance = await service.apply(config)
     AgentExecutionStore().upsert(config)
-    return {"execution": config.to_dict(), "instance": instance.to_dict() if instance else None}
+    return {
+        "execution": config.to_dict(),
+        "instance": instance.to_dict() if instance else None,
+    }
 
 
 @router.delete("/agents/{profile_id}")
 def reset_agent_execution(profile_id: str) -> dict:
     AgentExecutionStore().delete(profile_id)
-    return {"deleted": True, "execution": AgentExecutionConfig(profile_id).to_dict()}
+    AgentHermesBindingStore().delete(profile_id)
+    return {
+        "deleted": True,
+        "execution": AgentExecutionConfig(profile_id).to_dict(),
+    }
 
 
 @router.get("/instances")
@@ -120,17 +146,24 @@ async def list_instances() -> dict:
             try:
                 data["container"] = await service.containers.inspect(instance)
             except Exception as exc:
-                data["container"] = {"exists": False, "running": False, "error": str(exc)}
+                data["container"] = {
+                    "exists": False,
+                    "running": False,
+                    "error": str(exc),
+                }
         else:
-            data["container"] = {"available": False, "error": "Docker socket unavailable"}
+            data["container"] = {
+                "available": False,
+                "error": "Docker socket unavailable",
+            }
         bindings = [
-            x.to_dict()
-            for x in executions
-            if x.hermes_instance_id == instance.id
+            item.to_dict()
+            for item in executions
+            if item.hermes_instance_id == instance.id
             or (
                 instance.id == "shared"
-                and x.execution_mode == ExecutionMode.HERMES
-                and x.hermes_instance_mode == HermesInstanceMode.SHARED
+                and item.execution_mode == ExecutionMode.HERMES
+                and item.hermes_instance_mode == HermesInstanceMode.SHARED
             )
         ]
         data["agents"] = bindings
@@ -205,7 +238,10 @@ async def test_instance(instance_id: str) -> dict:
         raise HTTPException(status_code=409, detail="Hermes 实例尚未启动")
     if HermesLifecycleService.is_native(instance):
         if not NativeHermesRuntime.available():
-            raise HTTPException(status_code=503, detail="Embedded Hermes runtime unavailable")
+            raise HTTPException(
+                status_code=503,
+                detail="Embedded Hermes runtime unavailable",
+            )
         try:
             result = await NativeHermesRuntime.run(
                 message="Reply exactly OPENAKITA_HERMES_OK and nothing else.",
@@ -216,14 +252,28 @@ async def test_instance(instance_id: str) -> dict:
                 metadata={"health_check": True},
             )
         except Exception as exc:
-            failed = replace(instance, health_status="unhealthy", last_error=str(exc))
+            failed = replace(
+                instance,
+                health_status="unhealthy",
+                last_error=str(exc),
+            )
             HermesInstanceStore().upsert(failed)
-            raise HTTPException(status_code=503, detail=f"Hermes Runtime 测试失败: {exc}") from exc
+            raise HTTPException(
+                status_code=503,
+                detail=f"Hermes Runtime 测试失败: {exc}",
+            ) from exc
         content = str(result.get("content") or "").strip()
         if "OPENAKITA_HERMES_OK" not in content:
-            failed = replace(instance, health_status="degraded", last_error=f"unexpected health response: {content[:200]}")
+            failed = replace(
+                instance,
+                health_status="degraded",
+                last_error=f"unexpected health response: {content[:200]}",
+            )
             HermesInstanceStore().upsert(failed)
-            raise HTTPException(status_code=502, detail="Hermes Runtime 返回了异常的健康检查内容")
+            raise HTTPException(
+                status_code=502,
+                detail="Hermes Runtime 返回了异常的健康检查内容",
+            )
         updated = replace(
             instance,
             health_status="healthy",
@@ -240,11 +290,17 @@ async def test_instance(instance_id: str) -> dict:
     try:
         return await HermesRouter().test_node(instance_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail="执行模式实例不存在") from None
+        raise HTTPException(
+            status_code=404,
+            detail="执行模式实例不存在",
+        ) from None
 
 
 @router.get("/instances/{instance_id}/logs")
-async def instance_logs(instance_id: str, tail: int = Query(200, ge=1, le=1000)) -> dict:
+async def instance_logs(
+    instance_id: str,
+    tail: int = Query(200, ge=1, le=1000),
+) -> dict:
     instance = HermesInstanceStore().get(instance_id)
     if instance is None:
         raise HTTPException(status_code=404, detail="执行模式实例不存在")
@@ -261,6 +317,15 @@ async def delete_instance(instance_id: str, delete_data: bool = False) -> dict:
     instance = HermesInstanceStore().get(instance_id)
     if instance is None:
         raise HTTPException(status_code=404, detail="执行模式实例不存在")
+    bound_profiles = _bound_profiles(instance.id)
+    if bound_profiles:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "该 Hermes 实例仍被 Agent 使用，请先切换这些 Agent 的执行模式: "
+                + ", ".join(bound_profiles)
+            ),
+        )
     instance = _normalized_instance(instance)
     try:
         await HermesLifecycleService().remove(instance, delete_data=delete_data)
