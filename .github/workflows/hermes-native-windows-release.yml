@@ -10,7 +10,14 @@ on:
       - src/openakita/hermes/**
       - src/openakita/windows_connector/**
       - src/openakita/api/routes/windows_connector.py
+      - src/openakita/api/routes/execution_instances.py
+      - apps/setup-center/src/App.tsx
+      - apps/setup-center/src/types.ts
+      - apps/setup-center/src/components/Sidebar.tsx
       - apps/setup-center/src/components/WindowsConnectorPanel.tsx
+      - apps/setup-center/src/views/ExecutionInstancesView.tsx
+      - apps/setup-center/src/views/IMConfigView.tsx
+      - scripts/finalize_windows_agent_runtime_routing.py
       - .github/workflows/hermes-native-windows-release.yml
 
 permissions:
@@ -34,6 +41,16 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
+
+      - name: Apply final Windows device and Agent routing integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/finalize_windows_agent_runtime_routing.py
+          grep -F '"windows_devices"' apps/setup-center/src/types.ts
+          grep -F 'view === "windows_devices"' apps/setup-center/src/App.tsx
+          grep -F 'Windows 设备' apps/setup-center/src/components/Sidebar.tsx
+          grep -F 'Windows Connector capabilities have priority' src/openakita/hermes/capability_bridge.py
 
       - name: Install pinned Hermes Agent runtime
         shell: bash
@@ -152,8 +169,11 @@ jobs:
 
           This build includes the OpenAkita desktop app, embedded Hermes Agent runtime,
           embedded local Windows Connector runtime, remote Windows Connector transport,
-          WeChat integration, and local app/browser discovery.
+          Windows device management UI, WeChat integration, and local app/browser discovery.
           Local apps do not require a separately installed Connector.
+          When an Agent has an authorized Windows Connector resource, that Agent-owned
+          capability is preferred over Hermes runtime-native computer control; Hermes
+          native computer control remains a fallback when Connector resources are unavailable.
           Docker is not required for the embedded Hermes runtime.
           "@ | Set-Content -Encoding UTF8 (Join-Path $root "README.txt")
 
@@ -185,7 +205,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload wechat-connector-latest "release-artifacts/OpenAkita-Portable-Windows-x64.zip" --repo "${{ github.repository }}" --clobber
+          $tag = "openakita-windows-latest"
+          $file = "release-artifacts/OpenAkita-Portable-Windows-x64.zip"
+          gh release view $tag --repo "${{ github.repository }}" *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "OpenAkita Portable Windows x64" --notes "OpenAkita Windows portable build with embedded Hermes and Windows Connector runtime."
+          }
+          gh release upload $tag $file --repo "${{ github.repository }}" --clobber
 
       - name: Record successful build run
         if: success()
@@ -206,9 +232,11 @@ jobs:
             "windows_connector_integrated": true,
             "embedded_local_windows_runtime": true,
             "remote_windows_transport": true,
+            "windows_device_ui": true,
+            "agent_capability_precedence": true,
             "docker_required": false,
             "nsis_built": false,
-            "release_tag": "wechat-connector-latest",
+            "release_tag": "openakita-windows-latest",
             "release_published": true,
             "success": true
           }
