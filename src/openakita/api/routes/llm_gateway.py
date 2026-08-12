@@ -160,6 +160,8 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
         errors: list[str] = []
         for client in clients:
             yielded_content = False
+            saw_tool_call = False
+            tool_call_index = 0
             try:
                 async for event in client.chat_stream(**kwargs):
                     event_type = str(event.get("type") or "") if isinstance(event, dict) else ""
@@ -170,13 +172,29 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
                             yield chunk(request_id, display_model, {"content": text})
                     elif event_type in {"tool_use", "tool_call"}:
                         yielded_content = True
+                        saw_tool_call = True
                         call_id = str(event.get("id") or uuid.uuid4().hex)
                         name = str(event.get("name") or "tool")
                         arguments = event.get("input") or event.get("arguments") or {}
                         if not isinstance(arguments, str):
                             arguments = json.dumps(arguments, ensure_ascii=False)
-                        yield chunk(request_id, display_model, {"tool_calls": [{"index": 0, "id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}]})
-                yield chunk(request_id, display_model, {}, "stop")
+                        yield chunk(
+                            request_id,
+                            display_model,
+                            {
+                                "tool_calls": [
+                                    {
+                                        "index": tool_call_index,
+                                        "id": call_id,
+                                        "type": "function",
+                                        "function": {"name": name, "arguments": arguments},
+                                    }
+                                ]
+                            },
+                        )
+                        tool_call_index += 1
+                finish_reason = "tool_calls" if saw_tool_call else "stop"
+                yield chunk(request_id, display_model, {}, finish_reason)
                 yield "data: [DONE]\n\n"
                 return
             except asyncio.CancelledError:
@@ -184,7 +202,8 @@ async def chat_completions(payload: ChatCompletionRequest, request: Request):
             except Exception as exc:
                 errors.append(str(exc))
                 if yielded_content:
-                    yield chunk(request_id, display_model, {}, "stop")
+                    finish_reason = "tool_calls" if saw_tool_call else "stop"
+                    yield chunk(request_id, display_model, {}, finish_reason)
                     yield "data: [DONE]\n\n"
                     return
         error = {"error": {"message": "All configured model endpoints failed: " + "; ".join(errors), "type": "upstream_error"}}
