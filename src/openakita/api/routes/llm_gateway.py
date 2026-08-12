@@ -87,6 +87,8 @@ def _clients_for(request: Request, payload: ChatCompletionRequest) -> tuple[list
     full = LLMClient()
     profile_id = _profile_id(payload.model, payload)
     profile = _profile_from_app(request, profile_id) if profile_id else None
+    if profile_id and profile is None:
+        raise HTTPException(status_code=404, detail=f"Agent profile not found: {profile_id}")
     preferred = getattr(profile, "preferred_endpoint", None) if profile else None
     policy = getattr(profile, "endpoint_policy", "prefer") if profile else "prefer"
     if payload.model.startswith("endpoint:"):
