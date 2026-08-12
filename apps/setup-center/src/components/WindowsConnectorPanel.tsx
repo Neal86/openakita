@@ -56,6 +56,8 @@ type NodeInfo = {
   name: string;
   status: string;
   connector_version?: string;
+  transport?: "local" | "remote" | string;
+  embedded?: boolean;
   resources: Resource[];
 };
 
@@ -137,7 +139,7 @@ function ResourceCard({
   };
 
   const updateRemark = async (grantId: string, value: string) => {
-    const response = await safeFetch(`${DEFAULT_API}/api/windows-connector/grants/${encodeURIComponent(grantId)}/remark`, {
+    const response = await safeFetch(`${api}/api/windows-connector/grants/${encodeURIComponent(grantId)}/remark`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ remark: value }),
@@ -296,11 +298,11 @@ export function WindowsConnectorPanel({ apiBaseUrl = DEFAULT_API }: { apiBaseUrl
     <div className="h-full overflow-y-auto p-5">
       <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-lg font-bold">本机应用 / Windows Connector</h2>
-          <p className="mt-1 text-sm text-muted-foreground">自动发现已配对电脑上的运行应用。微信按实例/账号区分，Chrome/Edge 按窗口或可用的 CDP Tab 区分；只有明确授权的资源才可被 Agent 操作。</p>
+          <h2 className="text-lg font-bold">Windows 应用与设备</h2>
+          <p className="mt-1 text-sm text-muted-foreground">本机由 OpenAkita 内嵌 Windows Runtime 自动发现并直接操作，不需要安装 Connector；其他 Windows 电脑安装远程 Connector 后配对。微信按实例/账号区分，Chrome/Edge 按窗口或可用的 CDP Tab 区分，只有明确授权的资源才可被 Agent 操作。</p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={() => void download()} disabled={downloading}><Download size={14} />下载 Connector</Button>
+          <Button variant="outline" onClick={() => void download()} disabled={downloading}><Download size={14} />下载远程 Connector</Button>
           <Button variant="outline" onClick={() => void load()} disabled={loading}><RefreshCw size={14} className={loading ? "animate-spin" : ""} />刷新</Button>
         </div>
       </div>
@@ -310,21 +312,33 @@ export function WindowsConnectorPanel({ apiBaseUrl = DEFAULT_API }: { apiBaseUrl
           <Card key={node.id} className="p-4">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
-                <div className="font-semibold">{node.name}</div>
-                <div className="text-xs text-muted-foreground">{node.id} · Connector {node.connector_version || "未知"}</div>
+                <div className="flex items-center gap-2 font-semibold">
+                  <span>{node.name}</span>
+                  {node.embedded && <Badge variant="outline">内嵌 Runtime</Badge>}
+                  {!node.embedded && <Badge variant="outline">远程 Connector</Badge>}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {node.id} · {node.embedded ? "本机直连" : `Connector ${node.connector_version || "未知"}`}
+                </div>
               </div>
               <div className="flex items-center gap-2">
-                <Badge variant={node.status === "online" ? "default" : "secondary"}>{node.status === "online" ? "在线" : "离线"}</Badge>
+                <Badge variant={node.status === "online" ? "default" : "secondary"}>{node.status === "online" ? "在线" : node.status === "unsupported" ? "当前系统不支持" : "离线"}</Badge>
                 <Button size="sm" variant="outline" disabled={node.status !== "online"} onClick={() => void refreshNode(node.id)}><RefreshCw size={13} />扫描应用</Button>
               </div>
             </div>
             <div className="space-y-3">
               {resources.map((resource) => <ResourceCard key={resource.id} api={api} node={node} resource={resource} profiles={profiles} reload={load} />)}
-              {!resources.length && <div className="rounded-lg border border-dashed py-10 text-center text-sm text-muted-foreground">暂未发现运行中的可见应用。启动 Connector 后点击“扫描应用”。</div>}
+              {!resources.length && (
+                <div className="rounded-lg border border-dashed py-10 text-center text-sm text-muted-foreground">
+                  {node.embedded
+                    ? "暂未发现运行中的可见应用。打开本机应用后点击“扫描应用”。"
+                    : "暂未发现远程设备上的可见应用。确认远程 Connector 在线后点击“扫描应用”。"}
+                </div>
+              )}
             </div>
           </Card>
         ))}
-        {!nodes.length && <Card className="p-10 text-center text-sm text-muted-foreground">暂无已配对 Windows 节点。先在微信桌面页生成配对码并运行 Windows Connector。</Card>}
+        {!nodes.length && <Card className="p-10 text-center text-sm text-muted-foreground">暂无 Windows 设备信息。</Card>}
       </div>
     </div>
   );
