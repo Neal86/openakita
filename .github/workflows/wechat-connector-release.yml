@@ -1,4 +1,4 @@
-name: Windows Connector Windows release
+name: Windows Connector Release
 
 on:
   workflow_dispatch:
@@ -83,7 +83,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish Windows Connector release
+      - name: Publish standalone Windows Connector release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -92,6 +92,6 @@ jobs:
           $file = "dist/OpenAkita-Windows-Connector-Windows-x64.zip"
           gh release view $tag --repo "${{ github.repository }}" *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "OpenAkita Windows Connector Windows x64" --notes "Generic remote Windows Connector for OpenAkita."
+            gh release create $tag --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "OpenAkita Windows Connector Windows x64" --notes "Standalone generic remote Windows Connector for OpenAkita."
           }
           gh release upload $tag $file --repo "${{ github.repository }}" --clobber
