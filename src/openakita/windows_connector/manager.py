@@ -29,7 +29,6 @@ LOCAL_NODE_ID = "local"
 
 @contextmanager
 def _exclusive_file_lock(path: Path) -> Iterator[None]:
-    """Cross-process advisory lock for connector state updates."""
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = path.open("a+b")
     try:
@@ -118,34 +117,15 @@ class AgentResourceGrant:
         return cls(**{key: value for key, value in raw.items() if key in known})
 
     def permissions(self) -> dict[str, bool]:
-        return {
-            "read": self.read,
-            "screenshot": self.screenshot,
-            "mouse": self.mouse,
-            "keyboard": self.keyboard,
-            "launch": self.launch,
-            "close": self.close,
-        }
+        return {"read": self.read, "screenshot": self.screenshot, "mouse": self.mouse, "keyboard": self.keyboard, "launch": self.launch, "close": self.close}
 
 
 class WindowsConnectorManager:
     ACTION_PERMISSION = {
-        "list": "read",
-        "inspect": "read",
-        "read_ui": "read",
-        "browser_read": "read",
-        "screenshot": "screenshot",
-        "focus": "mouse",
-        "click": "mouse",
-        "double_click": "mouse",
-        "scroll": "mouse",
-        "browser_click": "mouse",
-        "type": "keyboard",
-        "hotkey": "keyboard",
-        "browser_type": "keyboard",
-        "browser_navigate": "keyboard",
-        "launch": "launch",
-        "close": "close",
+        "list": "read", "inspect": "read", "read_ui": "read", "browser_read": "read",
+        "screenshot": "screenshot", "focus": "mouse", "click": "mouse", "double_click": "mouse",
+        "scroll": "mouse", "browser_click": "mouse", "type": "keyboard", "hotkey": "keyboard",
+        "browser_type": "keyboard", "browser_navigate": "keyboard", "launch": "launch", "close": "close",
     }
 
     def __init__(self, path: Path = STATE_PATH) -> None:
@@ -154,6 +134,7 @@ class WindowsConnectorManager:
         self._grants: dict[str, AgentResourceGrant] = {}
         self._pending: dict[str, tuple[str, asyncio.Future[dict[str, Any]]]] = {}
         self._lock = asyncio.Lock()
+        self._local_execution_lock = asyncio.Lock()
         self._local_executor = WindowsCommandExecutor()
         self._migrate_legacy_state()
         self._load()
@@ -227,10 +208,7 @@ class WindowsConnectorManager:
         payload = {
             "version": 4,
             "grants": [asdict(grant) for grant in self._grants.values()],
-            "resources": {
-                node_id: [asdict(resource) for resource in rows.values()]
-                for node_id, rows in self._resources.items()
-            },
+            "resources": {node_id: [asdict(resource) for resource in rows.values()] for node_id, rows in self._resources.items()},
         }
         encoded = json.dumps(payload, ensure_ascii=False, indent=2)
         with _exclusive_file_lock(self._lock_path):
@@ -275,16 +253,7 @@ class WindowsConnectorManager:
     async def local_node(self, *, refresh: bool = False) -> dict[str, Any]:
         if refresh:
             await self.refresh_local_resources()
-        return {
-            "id": LOCAL_NODE_ID,
-            "name": "本机",
-            "status": "online" if self.local_available else "unsupported",
-            "connector_version": "embedded",
-            "transport": "local",
-            "embedded": True,
-            "resources": await self.list_resources(LOCAL_NODE_ID),
-            "grants": await self.list_grants(LOCAL_NODE_ID),
-        }
+        return {"id": LOCAL_NODE_ID, "name": "本机", "status": "online" if self.local_available else "unsupported", "connector_version": "embedded", "transport": "local", "embedded": True, "resources": await self.list_resources(LOCAL_NODE_ID), "grants": await self.list_grants(LOCAL_NODE_ID)}
 
     async def list_resources(self, node_id: str) -> list[dict[str, Any]]:
         async with self._lock:
@@ -298,18 +267,7 @@ class WindowsConnectorManager:
         for item in rows:
             identity = item.stable_identity or item.fingerprint
             raw = asdict(item)
-            raw["grants"] = [
-                self._grant_dict(grant)
-                for grant in grants
-                if grant.node_id == node_id
-                and (
-                    grant.resource_id == item.id
-                    or (
-                        identity_counts.get(identity) == 1
-                        and (grant.stable_identity or grant.fingerprint) == identity
-                    )
-                )
-            ]
+            raw["grants"] = [self._grant_dict(grant) for grant in grants if grant.node_id == node_id and (grant.resource_id == item.id or (identity_counts.get(identity) == 1 and (grant.stable_identity or grant.fingerprint) == identity))]
             result.append(raw)
         return result
 
@@ -348,16 +306,7 @@ class WindowsConnectorManager:
             if resource is None:
                 raise ValueError("selected Windows resource is not currently available")
             stable_identity = resource.stable_identity or resource.fingerprint
-            existing = next(
-                (
-                    grant
-                    for grant in self._grants.values()
-                    if grant.node_id == node_id
-                    and grant.agent_profile_id == agent_id
-                    and (grant.stable_identity or grant.fingerprint) == stable_identity
-                ),
-                None,
-            )
+            existing = next((grant for grant in self._grants.values() if grant.node_id == node_id and grant.agent_profile_id == agent_id and (grant.stable_identity or grant.fingerprint) == stable_identity), None)
             permissions = raw.get("permissions") or {}
             grant = AgentResourceGrant(
                 id=existing.id if existing else f"grant-{secrets.token_hex(12)}",
@@ -427,10 +376,7 @@ class WindowsConnectorManager:
     async def commands_for_attach(self, node_id: str) -> list[dict[str, Any]]:
         if node_id == LOCAL_NODE_ID:
             return []
-        return [
-            {"version": 1, "event": "windows.permissions.sync", "payload": {"grants": await self.permission_snapshot(node_id)}},
-            {"version": 1, "event": "windows.resources.refresh", "payload": {}},
-        ]
+        return [{"version": 1, "event": "windows.permissions.sync", "payload": {"grants": await self.permission_snapshot(node_id)}}, {"version": 1, "event": "windows.resources.refresh", "payload": {}}]
 
     async def _resolve_grant(self, node_id: str, agent_profile_id: str, resource_id: str, action: str) -> tuple[AgentResourceGrant, WindowsResource]:
         async with self._lock:
@@ -438,8 +384,7 @@ class WindowsConnectorManager:
             resource = resources.get(resource_id)
             if resource is None:
                 raise PermissionError("Windows resource is offline or unknown")
-            exact = [grant for grant in self._grants.values() if grant.node_id == node_id and grant.agent_profile_id == agent_profile_id and grant.resource_id == resource.id]
-            candidates = exact
+            candidates = [grant for grant in self._grants.values() if grant.node_id == node_id and grant.agent_profile_id == agent_profile_id and grant.resource_id == resource.id]
             if not candidates:
                 identity = resource.stable_identity or resource.fingerprint
                 collisions = [item for item in resources.values() if (item.stable_identity or item.fingerprint) == identity]
@@ -459,10 +404,20 @@ class WindowsConnectorManager:
         grant, resource = await self._resolve_grant(node_id, agent_profile_id, resource_id, action)
         payload = {"agent_profile_id": agent_profile_id, "resource_id": resource.id, "resource_fingerprint": resource.fingerprint, "grant_id": grant.id, "action": action, "arguments": arguments or {}}
         if node_id == LOCAL_NODE_ID:
-            self._local_executor.sync_grants(await self.permission_snapshot(LOCAL_NODE_ID))
-            def run_local() -> dict[str, Any]:
-                return asyncio.run(self._local_executor.execute(payload))
-            return await asyncio.wait_for(asyncio.to_thread(run_local), timeout=timeout)
+            async with self._local_execution_lock:
+                self._local_executor.sync_grants(await self.permission_snapshot(LOCAL_NODE_ID))
+
+                def run_local() -> dict[str, Any]:
+                    return asyncio.run(self._local_executor.execute(payload))
+
+                worker = asyncio.create_task(asyncio.to_thread(run_local))
+                try:
+                    return await asyncio.wait_for(asyncio.shield(worker), timeout=timeout)
+                except (TimeoutError, asyncio.TimeoutError):
+                    # The Windows API call cannot be force-killed safely. Hold the
+                    # execution lock until it really ends, then report the timeout.
+                    await worker
+                    raise
 
         request_id = f"wc-{secrets.token_hex(8)}"
         loop = asyncio.get_running_loop()
