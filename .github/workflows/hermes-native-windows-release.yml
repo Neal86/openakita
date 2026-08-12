@@ -1,4 +1,4 @@
-name: Hermes Native Windows Release
+name: OpenAkita Portable Windows Release
 
 on:
   workflow_dispatch:
@@ -19,7 +19,7 @@ env:
   HERMES_AGENT_VERSION: "0.19.0"
 
 jobs:
-  windows-installer:
+  windows-portable:
     runs-on: windows-latest
     timeout-minutes: 180
     steps:
@@ -48,10 +48,6 @@ jobs:
           print("Hermes Agent embedded runtime:", version, AIAgent)
           PY
 
-      # Reuse the production Desktop preparation path. Because this runner's
-      # Python 3.11 environment already contains Hermes, PyInstaller sees the
-      # static run_agent import in native_runtime.py and collects Hermes into
-      # the backend bundle. No Docker image is embedded or required.
       - name: Desktop build prepare
         uses: ./.github/actions/desktop-build-prepare
         with:
@@ -120,7 +116,7 @@ jobs:
           cargo fetch --locked
           cargo check
 
-      - name: Build unsigned Windows NSIS installer
+      - name: Build portable OpenAkita desktop executable
         working-directory: apps/setup-center
         shell: bash
         env:
@@ -128,18 +124,7 @@ jobs:
           NO_STRIP: true
         run: |
           set -euo pipefail
-          npx tauri build --bundles nsis --no-sign
-
-      - name: Collect installer
-        shell: pwsh
-        run: |
-          $files = Get-ChildItem "apps/setup-center/src-tauri/target/release/bundle/nsis/*.exe"
-          if (-not $files) { throw "NSIS installer not found" }
-          New-Item -ItemType Directory -Force -Path "release-artifacts" | Out-Null
-          foreach ($file in $files) {
-            Copy-Item $file.FullName "release-artifacts/$($file.Name)"
-            Get-FileHash $file.FullName -Algorithm SHA256 | Format-List
-          }
+          npx tauri build --no-bundle --no-sign
 
       - name: Build unzip-and-run portable package
         shell: pwsh
@@ -187,14 +172,6 @@ jobs:
           if ($proc.HasExited) { throw "Portable OpenAkita exited during startup: $($proc.ExitCode)" }
           Stop-Process -Id $proc.Id -Force
 
-      - name: Upload Windows installer artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: OpenAkita-Hermes-Native-Windows-x64
-          path: release-artifacts/*.exe
-          if-no-files-found: error
-          retention-days: 30
-
       - name: Upload portable Windows artifact
         uses: actions/upload-artifact@v4
         with:
@@ -203,16 +180,11 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish Windows packages to GitHub Release
+      - name: Publish portable package to GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $files = Get-ChildItem "release-artifacts/*.exe"
-          if (-not $files) { throw "NSIS installer not found for Release upload" }
-          foreach ($file in $files) {
-            gh release upload wechat-connector-latest $file.FullName --repo "${{ github.repository }}" --clobber
-          }
           gh release upload wechat-connector-latest "release-artifacts/OpenAkita-Portable-Windows-x64.zip" --repo "${{ github.repository }}" --clobber
 
       - name: Record successful build run
@@ -223,18 +195,17 @@ jobs:
           mkdir -p ci-results
           cat > ci-results/hermes-native-windows-release.json <<JSON
           {
-            "workflow": "Hermes Native Windows Release",
+            "workflow": "OpenAkita Portable Windows Release",
             "run_id": "${GITHUB_RUN_ID}",
             "run_attempt": "${GITHUB_RUN_ATTEMPT}",
             "head_sha": "${GITHUB_SHA}",
             "hermes_agent_version": "${HERMES_AGENT_VERSION}",
-            "artifact": "OpenAkita-Hermes-Native-Windows-x64",
             "portable_artifact": "OpenAkita-Portable-Windows-x64",
             "portable_release_file": "OpenAkita-Portable-Windows-x64.zip",
             "native_runtime": true,
             "windows_connector_integrated": true,
             "docker_required": false,
-            "unsigned_installer": true,
+            "nsis_built": false,
             "release_tag": "wechat-connector-latest",
             "release_published": true,
             "success": true
@@ -244,5 +215,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add ci-results/hermes-native-windows-release.json
           git diff --cached --quiet && exit 0
-          git commit -m "ci: record Hermes native Windows release [skip ci]"
+          git commit -m "ci: record OpenAkita portable Windows release [skip ci]"
           git push origin HEAD:${GITHUB_REF_NAME}
