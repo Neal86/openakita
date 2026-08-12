@@ -1,13 +1,15 @@
-"""Internal OpenAI-compatible LLM gateway used by Hermes containers.
+"""Internal OpenAI-compatible LLM gateway used by Hermes runtimes.
 
-No additional API key is required.  Deployment keeps /v1 on the private Docker
-network; it must not be routed publicly.  The gateway calls LLMClient directly
-and therefore cannot recurse into Agent -> Hermes routing.
+The route is reachable from localhost/private Docker networking but still
+requires a dedicated internal bearer secret. Network location alone is never
+an authorization boundary.
 """
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
+import os
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -35,6 +37,18 @@ class ChatCompletionRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+def _gateway_secret() -> str:
+    return os.environ.get("OPENAKITA_HERMES_LLM_API_KEY", "openakita-internal")
+
+
+def _require_internal_gateway(request: Request) -> None:
+    expected = _gateway_secret()
+    auth = request.headers.get("authorization", "")
+    supplied = auth[7:].strip() if auth.lower().startswith("bearer ") else request.headers.get("x-api-key", "").strip()
+    if not expected or not supplied or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="Internal Hermes gateway authentication required")
+
+
 def _profile_id(model: str, payload: ChatCompletionRequest) -> str | None:
     if model.startswith("agent:"):
         return model.split(":", 1)[1].strip() or None
@@ -54,7 +68,6 @@ def _profile_from_app(request: Request, profile_id: str) -> Any | None:
             profile = getter(profile_id)
             if profile is not None:
                 return profile
-    # Robust fallback for serve-mode layouts.
     try:
         from openakita.config import settings
         roots = [Path(settings.project_root) / "data" / "agents" / "profiles", Path(settings.project_root) / "data" / "profiles"]
@@ -74,12 +87,9 @@ def _clients_for(request: Request, payload: ChatCompletionRequest) -> tuple[list
     profile = _profile_from_app(request, profile_id) if profile_id else None
     preferred = getattr(profile, "preferred_endpoint", None) if profile else None
     policy = getattr(profile, "endpoint_policy", "prefer") if profile else "prefer"
-
-    # endpoint:<name> remains available for diagnostics; normal Hermes calls use agent:<id>.
     if payload.model.startswith("endpoint:"):
         preferred = payload.model.split(":", 1)[1]
         policy = "require"
-
     if not preferred:
         return [full], profile_id or "openakita-auto"
     matched = [endpoint for endpoint in full.endpoints if endpoint.name == preferred or endpoint.model == preferred]
@@ -104,13 +114,15 @@ def _call_kwargs(payload: ChatCompletionRequest) -> dict[str, Any]:
 
 
 @router.get("/health")
-def gateway_health() -> dict[str, Any]:
+def gateway_health(request: Request) -> dict[str, Any]:
+    _require_internal_gateway(request)
     client = LLMClient()
     return {"status": "ok", "service": "openakita-llm-gateway", "models": len(client.endpoints)}
 
 
 @router.get("/models")
-def list_gateway_models() -> dict[str, Any]:
+def list_gateway_models(request: Request) -> dict[str, Any]:
+    _require_internal_gateway(request)
     now = int(time.time())
     client = LLMClient()
     data = [{"id": "openakita-auto", "object": "model", "created": now, "owned_by": "openakita"}]
@@ -125,11 +137,11 @@ def list_gateway_models() -> dict[str, Any]:
 
 @router.post("/chat/completions")
 async def chat_completions(payload: ChatCompletionRequest, request: Request):
+    _require_internal_gateway(request)
     if not payload.messages:
         raise HTTPException(status_code=400, detail="messages must not be empty")
     clients, display_model = _clients_for(request, payload)
     kwargs = _call_kwargs(payload)
-
     if not payload.stream:
         errors: list[str] = []
         for client in clients:
