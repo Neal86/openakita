@@ -15,7 +15,6 @@ import ipaddress
 import logging
 import os
 import secrets
-import shutil
 import threading
 import time
 from pathlib import Path
@@ -106,9 +105,10 @@ def resolve_web_access_data_dir() -> Path:
 
     ``OPENAKITA_DATA_DIR`` is authoritative for container/VPS deployments.
     Otherwise reuse ``settings.data_dir`` when available, with the historical
-    ``project_root/data`` directory as fallback. If an explicit durable root
-    is newly introduced, copy the legacy authentication file once so upgrades
-    do not silently forget the user's password/JWT identity.
+    ``project_root/data`` directory as fallback. When a durable root is newly
+    introduced, migrate only the authentication JSON and do so through the
+    existing validated atomic-I/O path. Other server data keeps its historical
+    location unless it has its own explicit persistence migration.
     """
     explicit = os.environ.get("OPENAKITA_DATA_DIR", "").strip()
     legacy = Path.cwd() / "data"
@@ -140,22 +140,33 @@ def resolve_web_access_data_dir() -> Path:
         migration_lock = FileLock(str(target_file) + ".migration.lock")
         with migration_lock:
             if not target_file.exists() and legacy_file.exists():
-                try:
-                    shutil.copy2(legacy_file, target_file)
-                    backup = legacy_file.with_suffix(legacy_file.suffix + ".bak")
-                    if backup.exists():
-                        shutil.copy2(backup, target_file.with_suffix(target_file.suffix + ".bak"))
-                    logger.info(
-                        "Migrated web access config from %s to durable root %s",
+                legacy_data = read_json_safe(legacy_file)
+                if isinstance(legacy_data, dict):
+                    try:
+                        atomic_json_write(
+                            target_file,
+                            legacy_data,
+                            backup=True,
+                            fsync=True,
+                            allow_fallback=False,
+                        )
+                        logger.info(
+                            "Migrated web access config from %s to durable root %s",
+                            legacy_file,
+                            target_file,
+                        )
+                    except OSError as exc:
+                        logger.warning(
+                            "Failed to migrate web access config from %s to %s: %s",
+                            legacy_file,
+                            target_file,
+                            exc,
+                        )
+                else:
+                    logger.error(
+                        "Legacy web access config %s is not recoverable; "
+                        "leaving durable target absent",
                         legacy_file,
-                        target_file,
-                    )
-                except OSError as exc:
-                    logger.warning(
-                        "Failed to migrate web access config from %s to %s: %s",
-                        legacy_file,
-                        target_file,
-                        exc,
                     )
     return target
 

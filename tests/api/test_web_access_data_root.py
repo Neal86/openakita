@@ -53,3 +53,22 @@ def test_existing_durable_config_wins_over_legacy(tmp_path: Path, monkeypatch):
 
     resolve_web_access_data_dir()
     assert json.loads((durable / "web_access.json").read_text("utf-8"))["token_version"] == 9
+
+
+def test_corrupt_legacy_uses_backup_during_migration(tmp_path: Path, monkeypatch):
+    from openakita import config as config_module
+
+    project = tmp_path / "project"
+    legacy_dir = project / "data"
+    durable = tmp_path / "durable"
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "web_access.json").write_text("{broken", "utf-8")
+    (legacy_dir / "web_access.json.bak").write_text(
+        '{"jwt_secret":"' + ("b" * 64) + '","data_epoch":"e","token_version":4}',
+        "utf-8",
+    )
+    monkeypatch.setenv("OPENAKITA_DATA_DIR", str(durable))
+    monkeypatch.setattr(config_module.settings, "project_root", project)
+
+    resolve_web_access_data_dir()
+    assert json.loads((durable / "web_access.json").read_text("utf-8"))["token_version"] == 4
