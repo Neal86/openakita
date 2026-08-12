@@ -35,7 +35,11 @@ class HermesNodeStore:
                 continue
             try:
                 nodes.append(HermesNode.from_dict(row))
-            except (TypeError, ValueError):
+            except (AttributeError, TypeError, ValueError):
+                # Treat one malformed persisted row as isolated corruption.
+                # HermesNode.__post_init__ may raise AttributeError when a field
+                # that must be a string (for example base_url) was stored with
+                # another JSON type by an older/broken writer.
                 continue
         return nodes
 
