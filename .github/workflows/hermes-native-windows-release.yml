@@ -55,7 +55,7 @@ jobs:
             echo 'Old remote Connector UI is still mounted in IM config'
             exit 1
           fi
-          grep -F 'Windows Connector capabilities have priority' src/openakita/hermes/capability_bridge.py
+          grep -F 'def _tool_allowed' src/openakita/hermes/capability_bridge.py
 
       - name: Install pinned Hermes Agent runtime
         shell: bash
