@@ -153,6 +153,7 @@ class WindowsConnectorManager:
         self._resources: dict[str, dict[str, WindowsResource]] = {}
         self._grants: dict[str, AgentResourceGrant] = {}
         self._pending: dict[str, tuple[str, asyncio.Future[dict[str, Any]]]] = {}
+        self._remote_connections: dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._local_execution_lock = asyncio.Lock()
         self._local_executor = WindowsCommandExecutor()
@@ -276,7 +277,24 @@ class WindowsConnectorManager:
                 except OSError:
                     pass
 
-    async def sync_resources(self, node_id: str, rows: list[dict[str, Any]]) -> None:
+    async def begin_remote_connection(self, node_id: str, connection_id: str) -> None:
+        if not node_id or not connection_id:
+            raise ValueError("node_id and connection_id are required")
+        async with self._lock:
+            self._remote_connections[node_id] = connection_id
+
+    async def end_remote_connection(self, node_id: str, connection_id: str) -> None:
+        async with self._lock:
+            if self._remote_connections.get(node_id) == connection_id:
+                self._remote_connections.pop(node_id, None)
+
+    async def sync_resources(
+        self,
+        node_id: str,
+        rows: list[dict[str, Any]],
+        *,
+        connection_id: str = "",
+    ) -> None:
         synced: dict[str, WindowsResource] = {}
         for raw in rows:
             try:
@@ -288,6 +306,12 @@ class WindowsConnectorManager:
             item.updated_at = datetime.now(UTC).isoformat()
             synced[item.id] = item
         async with self._lock:
+            if (
+                node_id != LOCAL_NODE_ID
+                and connection_id
+                and self._remote_connections.get(node_id) != connection_id
+            ):
+                raise ConnectionError("stale connector resource sync")
             self._resources[node_id] = synced
             self._save_locked()
 
@@ -611,9 +635,19 @@ class WindowsConnectorManager:
                 self._pending.pop(request_id, None)
 
     async def handle_result(
-        self, node_id: str, request_id: str, payload: dict[str, Any]
+        self,
+        node_id: str,
+        request_id: str,
+        payload: dict[str, Any],
+        *,
+        connection_id: str = "",
     ) -> None:
         async with self._lock:
+            if (
+                connection_id
+                and self._remote_connections.get(node_id) != connection_id
+            ):
+                raise ConnectionError("stale connector command result")
             pending = self._pending.get(request_id)
         if pending is None:
             return

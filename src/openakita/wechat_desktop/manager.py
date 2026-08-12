@@ -284,6 +284,18 @@ class WeChatDesktopManager:
             expected = node.token_hash if node else ""
         return bool(expected) and secrets.compare_digest(expected, self._hash(node_token))
 
+    async def assert_current_connection(self, node_id: str, connection_id: str) -> None:
+        """Reject events from a socket that has already been superseded."""
+        async with self._lock:
+            node = self._nodes.get(node_id)
+            if (
+                node is None
+                or not connection_id
+                or node.connection_id != connection_id
+                or node.send is None
+            ):
+                raise ConnectionError("connector session has been replaced or disconnected")
+
     async def revoke_node(self, node_id: str) -> bool:
         async with self._lock:
             if self._nodes.pop(node_id, None) is None:
@@ -326,18 +338,29 @@ class WeChatDesktopManager:
             node.connection_id = ""
             node.last_heartbeat_at = datetime.now(UTC)
 
-    async def heartbeat(self, node_id: str) -> None:
+    async def heartbeat(self, node_id: str, *, connection_id: str = "") -> None:
         async with self._lock:
             node = self._nodes.get(node_id)
-            if node:
-                node.status = "online"
-                node.last_heartbeat_at = datetime.now(UTC)
+            if node is None:
+                return
+            if connection_id and node.connection_id != connection_id:
+                raise ConnectionError("stale connector heartbeat")
+            node.status = "online"
+            node.last_heartbeat_at = datetime.now(UTC)
 
-    async def sync_accounts(self, node_id: str, accounts: list[dict[str, Any]]) -> None:
+    async def sync_accounts(
+        self,
+        node_id: str,
+        accounts: list[dict[str, Any]],
+        *,
+        connection_id: str = "",
+    ) -> None:
         async with self._lock:
             node = self._nodes.get(node_id)
             if node is None:
                 raise ValueError("unknown connector node")
+            if connection_id and node.connection_id != connection_id:
+                raise ConnectionError("stale connector account sync")
             previous = node.accounts
             synced: dict[str, WeChatAccount] = {}
             for item in accounts if isinstance(accounts, list) else []:
@@ -372,9 +395,12 @@ class WeChatDesktopManager:
         *,
         groups: list[dict[str, Any]],
         contacts: list[dict[str, Any]],
+        connection_id: str = "",
     ) -> None:
         async with self._lock:
             node = self._nodes.get(node_id)
+            if node is not None and connection_id and node.connection_id != connection_id:
+                raise ConnectionError("stale connector conversation sync")
             account = node.accounts.get(account_id) if node else None
             if account is None:
                 raise ValueError("unknown WeChat account")

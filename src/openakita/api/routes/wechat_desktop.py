@@ -320,6 +320,7 @@ async def connector_websocket(websocket: WebSocket) -> None:
         connector_version=connector_version,
         connection_id=connection_id,
     )
+    await windows_connector_manager.begin_remote_connection(node_id, connection_id)
 
     try:
         await websocket.send_json(
@@ -351,11 +352,18 @@ async def connector_websocket(websocket: WebSocket) -> None:
             if not isinstance(payload, dict):
                 payload = {}
             try:
+                await wechat_desktop_manager.assert_current_connection(
+                    node_id, connection_id
+                )
                 if event == "node.heartbeat":
-                    await wechat_desktop_manager.heartbeat(node_id)
+                    await wechat_desktop_manager.heartbeat(
+                        node_id, connection_id=connection_id
+                    )
                 elif event == "windows.resources.sync":
                     await windows_connector_manager.sync_resources(
-                        node_id, payload.get("resources") or []
+                        node_id,
+                        payload.get("resources") or [],
+                        connection_id=connection_id,
                     )
                 elif event == "windows.command.result":
                     request_id = str(
@@ -365,11 +373,16 @@ async def connector_websocket(websocket: WebSocket) -> None:
                     )
                     if request_id:
                         await windows_connector_manager.handle_result(
-                            node_id, request_id, payload
+                            node_id,
+                            request_id,
+                            payload,
+                            connection_id=connection_id,
                         )
                 elif event == "wechat.accounts.sync":
                     await wechat_desktop_manager.sync_accounts(
-                        node_id, payload.get("accounts") or []
+                        node_id,
+                        payload.get("accounts") or [],
+                        connection_id=connection_id,
                     )
                 elif event == "wechat.conversations.sync":
                     await wechat_desktop_manager.sync_conversations(
@@ -377,6 +390,7 @@ async def connector_websocket(websocket: WebSocket) -> None:
                         str(payload.get("wechat_account_id") or ""),
                         groups=payload.get("groups") or [],
                         contacts=payload.get("contacts") or [],
+                        connection_id=connection_id,
                     )
                 elif event == "wechat.message.received":
                     bot_id = str(
@@ -418,6 +432,7 @@ async def connector_websocket(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
+        await windows_connector_manager.end_remote_connection(node_id, connection_id)
         await wechat_desktop_manager.detach_node(
             node_id, connection_id=connection_id
         )
