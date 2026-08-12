@@ -66,6 +66,30 @@ async def test_switching_to_native_clears_previous_hermes_instance_id(
     assert binding.hermes_node_ids == []
 
 
+def test_legacy_native_record_drops_stale_hermes_instance_id(tmp_path: Path):
+    path = tmp_path / "execution.json"
+    path.write_text(
+        json.dumps(
+            {
+                "agents": [
+                    {
+                        "profile_id": "customer",
+                        "execution_mode": "native",
+                        "hermes_instance_mode": "dedicated",
+                        "hermes_instance_id": "dedicated-customer",
+                    }
+                ]
+            }
+        ),
+        "utf-8",
+    )
+
+    restored = AgentExecutionStore(path).get("customer")
+
+    assert restored.execution_mode == ExecutionMode.NATIVE
+    assert restored.hermes_instance_id is None
+
+
 def test_execution_store_skips_malformed_rows(tmp_path: Path):
     path = tmp_path / "execution.json"
     path.write_text(
