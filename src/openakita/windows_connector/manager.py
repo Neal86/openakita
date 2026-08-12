@@ -36,8 +36,7 @@ def _exclusive_file_lock(path: Path) -> Iterator[None]:
         if os.name == "nt":
             import msvcrt
 
-            handle.seek(0)
-            if handle.tell() == 0:
+            if path.stat().st_size == 0:
                 handle.write(b"0")
                 handle.flush()
             handle.seek(0)
@@ -130,8 +129,6 @@ class AgentResourceGrant:
 
 
 class WindowsConnectorManager:
-    """Unified registry for local and remote Windows application resources."""
-
     ACTION_PERMISSION = {
         "list": "read",
         "inspect": "read",
@@ -188,7 +185,8 @@ class WindowsConnectorManager:
         if not isinstance(raw, dict):
             raise ValueError("state root must be an object")
         grants: dict[str, AgentResourceGrant] = {}
-        for row in raw.get("grants", []) if isinstance(raw.get("grants", []), list) else []:
+        grant_rows = raw.get("grants", [])
+        for row in grant_rows if isinstance(grant_rows, list) else []:
             try:
                 grant = AgentResourceGrant.from_dict(row)
                 if grant.id and grant.node_id and grant.agent_profile_id and grant.resource_id:
@@ -410,11 +408,7 @@ class WindowsConnectorManager:
 
     async def permission_snapshot(self, node_id: str) -> list[dict[str, Any]]:
         async with self._lock:
-            return [
-                self._grant_dict(grant)
-                for grant in self._grants.values()
-                if grant.node_id == node_id
-            ]
+            return [self._grant_dict(grant) for grant in self._grants.values() if grant.node_id == node_id]
 
     async def push_permissions(self, node_id: str) -> bool:
         snapshot = await self.permission_snapshot(node_id)
@@ -423,10 +417,7 @@ class WindowsConnectorManager:
             await self._set_sync_state(node_id, "synced")
             return True
         try:
-            await wechat_desktop_manager.send_command(
-                node_id,
-                {"version": 1, "event": "windows.permissions.sync", "payload": {"grants": snapshot}},
-            )
+            await wechat_desktop_manager.send_command(node_id, {"version": 1, "event": "windows.permissions.sync", "payload": {"grants": snapshot}})
         except ConnectionError as exc:
             await self._set_sync_state(node_id, "pending", str(exc))
             return False
@@ -437,48 +428,23 @@ class WindowsConnectorManager:
         if node_id == LOCAL_NODE_ID:
             return []
         return [
-            {
-                "version": 1,
-                "event": "windows.permissions.sync",
-                "payload": {"grants": await self.permission_snapshot(node_id)},
-            },
+            {"version": 1, "event": "windows.permissions.sync", "payload": {"grants": await self.permission_snapshot(node_id)}},
             {"version": 1, "event": "windows.resources.refresh", "payload": {}},
         ]
 
-    async def _resolve_grant(
-        self,
-        node_id: str,
-        agent_profile_id: str,
-        resource_id: str,
-        action: str,
-    ) -> tuple[AgentResourceGrant, WindowsResource]:
+    async def _resolve_grant(self, node_id: str, agent_profile_id: str, resource_id: str, action: str) -> tuple[AgentResourceGrant, WindowsResource]:
         async with self._lock:
             resources = self._resources.get(node_id, {})
             resource = resources.get(resource_id)
             if resource is None:
                 raise PermissionError("Windows resource is offline or unknown")
-            exact = [
-                grant
-                for grant in self._grants.values()
-                if grant.node_id == node_id
-                and grant.agent_profile_id == agent_profile_id
-                and grant.resource_id == resource.id
-            ]
+            exact = [grant for grant in self._grants.values() if grant.node_id == node_id and grant.agent_profile_id == agent_profile_id and grant.resource_id == resource.id]
             candidates = exact
             if not candidates:
                 identity = resource.stable_identity or resource.fingerprint
-                collisions = [
-                    item for item in resources.values()
-                    if (item.stable_identity or item.fingerprint) == identity
-                ]
+                collisions = [item for item in resources.values() if (item.stable_identity or item.fingerprint) == identity]
                 if len(collisions) == 1:
-                    candidates = [
-                        grant
-                        for grant in self._grants.values()
-                        if grant.node_id == node_id
-                        and grant.agent_profile_id == agent_profile_id
-                        and (grant.stable_identity or grant.fingerprint) == identity
-                    ]
+                    candidates = [grant for grant in self._grants.values() if grant.node_id == node_id and grant.agent_profile_id == agent_profile_id and (grant.stable_identity or grant.fingerprint) == identity]
         if not candidates:
             raise PermissionError("Agent is not authorized for this Windows resource")
         grant = candidates[0]
@@ -489,40 +455,21 @@ class WindowsConnectorManager:
             raise PermissionError(f"Agent grant does not allow {permission} for action {action}")
         return grant, resource
 
-    async def execute(
-        self,
-        *,
-        node_id: str,
-        agent_profile_id: str,
-        resource_id: str,
-        action: str,
-        arguments: dict[str, Any] | None = None,
-        timeout: float = 60.0,
-    ) -> dict[str, Any]:
+    async def execute(self, *, node_id: str, agent_profile_id: str, resource_id: str, action: str, arguments: dict[str, Any] | None = None, timeout: float = 60.0) -> dict[str, Any]:
         grant, resource = await self._resolve_grant(node_id, agent_profile_id, resource_id, action)
-        payload = {
-            "agent_profile_id": agent_profile_id,
-            "resource_id": resource.id,
-            "resource_fingerprint": resource.fingerprint,
-            "grant_id": grant.id,
-            "action": action,
-            "arguments": arguments or {},
-        }
+        payload = {"agent_profile_id": agent_profile_id, "resource_id": resource.id, "resource_fingerprint": resource.fingerprint, "grant_id": grant.id, "action": action, "arguments": arguments or {}}
         if node_id == LOCAL_NODE_ID:
             self._local_executor.sync_grants(await self.permission_snapshot(LOCAL_NODE_ID))
-            return await asyncio.wait_for(self._local_executor.execute(payload), timeout=timeout)
+            def run_local() -> dict[str, Any]:
+                return asyncio.run(self._local_executor.execute(payload))
+            return await asyncio.wait_for(asyncio.to_thread(run_local), timeout=timeout)
 
         request_id = f"wc-{secrets.token_hex(8)}"
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
         async with self._lock:
             self._pending[request_id] = (node_id, future)
-        command = {
-            "version": 1,
-            "event": "windows.command",
-            "request_id": request_id,
-            "payload": payload,
-        }
+        command = {"version": 1, "event": "windows.command", "request_id": request_id, "payload": payload}
         try:
             await wechat_desktop_manager.send_command(node_id, command)
             return await asyncio.wait_for(future, timeout=timeout)
