@@ -6,22 +6,19 @@ import json
 import threading
 from pathlib import Path
 
+from filelock import FileLock
+
 from openakita.utils.atomic_io import atomic_json_write
 
 from .models import HermesNode
+from .paths import hermes_data_path
 
 
 class HermesNodeStore:
     def __init__(self, path: Path | None = None) -> None:
-        if path is None:
-            try:
-                from openakita.config import settings
-
-                path = Path(settings.project_root) / "data" / "hermes_nodes.json"
-            except Exception:
-                path = Path.cwd() / "data" / "hermes_nodes.json"
-        self.path = Path(path)
+        self.path = Path(path or hermes_data_path("hermes_nodes.json"))
         self._lock = threading.RLock()
+        self._file_lock = FileLock(str(self.path) + ".lock")
 
     def _read_unlocked(self) -> list[HermesNode]:
         if not self.path.exists():
@@ -30,30 +27,48 @@ class HermesNodeStore:
             payload = json.loads(self.path.read_text("utf-8"))
         except (OSError, json.JSONDecodeError):
             return []
-        rows = payload.get("nodes", payload if isinstance(payload, list) else [])
-        return [HermesNode.from_dict(row) for row in rows if isinstance(row, dict)]
+        if isinstance(payload, list):
+            raw_rows = payload
+        elif isinstance(payload, dict):
+            raw_rows = payload.get("nodes", [])
+        else:
+            return []
+        if not isinstance(raw_rows, list):
+            return []
+        nodes: list[HermesNode] = []
+        for row in raw_rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                nodes.append(HermesNode.from_dict(row))
+            except (TypeError, ValueError):
+                continue
+        return nodes
 
     def _write_unlocked(self, nodes: list[HermesNode]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_json_write(self.path, {"version": 1, "nodes": [n.to_dict() for n in nodes]})
+        atomic_json_write(
+            self.path,
+            {"version": 1, "nodes": [node.to_dict() for node in nodes]},
+        )
 
     def list(self) -> list[HermesNode]:
-        with self._lock:
+        with self._lock, self._file_lock:
             return self._read_unlocked()
 
     def get(self, node_id: str) -> HermesNode | None:
-        with self._lock:
-            return next((node for node in self._read_unlocked() if node.id == node_id), None)
+        with self._lock, self._file_lock:
+            return next(
+                (node for node in self._read_unlocked() if node.id == node_id),
+                None,
+            )
 
     def save_all(self, nodes: list[HermesNode]) -> None:
-        with self._lock:
+        with self._lock, self._file_lock:
             self._write_unlocked(nodes)
 
     def upsert(self, node: HermesNode) -> HermesNode:
-        # Keep the complete read-modify-write transaction under one lock.
-        # Without this, simultaneous requests could both read the same old
-        # snapshot and the later writer would silently discard the earlier one.
-        with self._lock:
+        with self._lock, self._file_lock:
             nodes = self._read_unlocked()
             for index, existing in enumerate(nodes):
                 if existing.id == node.id:
@@ -65,7 +80,7 @@ class HermesNodeStore:
             return node
 
     def delete(self, node_id: str) -> bool:
-        with self._lock:
+        with self._lock, self._file_lock:
             nodes = self._read_unlocked()
             kept = [node for node in nodes if node.id != node_id]
             if len(kept) == len(nodes):
