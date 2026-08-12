@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,44 @@ async def test_router_fails_over_to_second_node(tmp_path: Path, monkeypatch):
     assert calls == ["one", "two"]
     assert store.get("one").consecutive_failures == 1
     assert store.get("two").consecutive_failures == 0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_router_runs_restore_inflight_to_zero(tmp_path: Path, monkeypatch):
+    store = HermesNodeStore(tmp_path / "nodes.json")
+    store.upsert(
+        HermesNode(
+            id="shared",
+            name="Shared",
+            base_url="http://shared",
+            max_concurrency=2,
+        )
+    )
+    router = HermesRouter(store)
+    both_started = asyncio.Event()
+    started = 0
+
+    async def fake_run(self, **kwargs):
+        nonlocal started
+        started += 1
+        if started == 2:
+            both_started.set()
+        await both_started.wait()
+        await asyncio.sleep(0)
+        return HermesResponse(content="ok", node_id=self.node.id)
+
+    monkeypatch.setattr("openakita.hermes.client.HermesClient.run", fake_run)
+    first, second = await asyncio.gather(
+        router.run(message="one", agent_id="agent-a"),
+        router.run(message="two", agent_id="agent-b"),
+    )
+
+    assert first.content == "ok"
+    assert second.content == "ok"
+    node = store.get("shared")
+    assert node is not None
+    assert node.current_inflight == 0
+    assert node.consecutive_failures == 0
 
 
 @pytest.mark.asyncio
