@@ -67,8 +67,8 @@ from .routes import (
     token_stats,
     upload,
     wechat_onboard,
-    windows_connector,
     wecom_onboard,
+    windows_connector,
     workspace_io,
     workspaces,
 )
