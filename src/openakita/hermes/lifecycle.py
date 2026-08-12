@@ -136,6 +136,10 @@ class HermesLifecycleService:
 
     async def apply(self, config: AgentExecutionConfig, *, profile_metadata: dict | None = None) -> tuple[AgentExecutionConfig, HermesInstance | None]:
         if config.execution_mode == ExecutionMode.NATIVE:
+            # Native execution must not retain a previous Hermes instance id.
+            # Otherwise instance deletion sees the stale id as an active binding
+            # even though the Agent has already switched back to OpenAkita native.
+            config.hermes_instance_id = None
             AgentHermesBindingStore().upsert(AgentHermesBinding(profile_id=config.profile_id, runtime_provider=HermesRuntimeProvider.LOCAL))
             return config, None
 
