@@ -113,9 +113,18 @@ class HermesContainerManager:
 
     async def remove(self, instance: HermesInstance, *, delete_data: bool = False) -> None:
         self._validate(instance)
-        await self._run("rm", "-f", instance.container_name, check=False)
+        state = await self.inspect(instance)
+        if state["exists"]:
+            await self._run("rm", "-f", instance.container_name)
         if delete_data:
-            await self._run("volume", "rm", instance.volume_name, check=False)
+            code, _, _ = await self._run(
+                "volume", "inspect", instance.volume_name, check=False
+            )
+            if code == 0:
+                # A requested data deletion is part of the operation contract.
+                # Propagate a real removal failure instead of forgetting the
+                # instance while its volume remains on disk.
+                await self._run("volume", "rm", instance.volume_name)
 
     async def logs(self, instance: HermesInstance, *, tail: int = 200) -> str:
         self._validate(instance)
