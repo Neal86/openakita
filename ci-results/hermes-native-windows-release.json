@@ -1,12 +1,16 @@
 {
-  "workflow": "Hermes Native Windows Release",
-  "run_id": "31454921954",
+  "workflow": "OpenAkita Portable Windows Release",
+  "run_id": "31550486501",
   "run_attempt": "1",
-  "head_sha": "cfce9f6e3c854ee86b38769576e9f03239ef155f",
+  "head_sha": "eb1d0bfc11f28098b6a49598a579987ef62c172f",
   "hermes_agent_version": "0.19.0",
-  "artifact": "OpenAkita-Hermes-Native-Windows-x64",
+  "portable_artifact": "OpenAkita-Portable-Windows-x64",
+  "portable_release_file": "OpenAkita-Portable-Windows-x64.zip",
   "native_runtime": true,
+  "windows_connector_integrated": true,
   "docker_required": false,
-  "unsigned_installer": true,
+  "nsis_built": false,
+  "release_tag": "wechat-connector-latest",
+  "release_published": true,
   "success": true
 }
