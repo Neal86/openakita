@@ -1,0 +1,41 @@
+name: One-shot parallel CI hardening
+
+on:
+  push:
+    branches:
+      - feature/hermes-multi-agent
+    paths:
+      - scripts/patch_parallel_ci.py
+      - .github/workflows/patch-parallel-ci.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feature/hermes-multi-agent
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Apply patch
+        run: python scripts/patch_parallel_ci.py
+      - name: Verify real parallel behavior
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install -e ./openakita-plugin-sdk
+          ruff check tests/test_tool_parallel_execution.py
+          pytest tests/test_tool_parallel_execution.py -v
+          git diff --check
+      - name: Commit CI hardening
+        run: |
+          git config user.name "openakita-maintenance-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add .github/workflows/ci.yml
+          git commit -m "ci: require real parallel tool regression"
+          git push origin HEAD:feature/hermes-multi-agent
