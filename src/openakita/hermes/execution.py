@@ -11,7 +11,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from filelock import FileLock
+
 from openakita.utils.atomic_io import atomic_json_write
+
+from .paths import hermes_data_path
 
 
 def _now() -> str:
@@ -119,28 +123,60 @@ class HermesInstance:
 
 
 class _JsonStore:
-    def __init__(self, path: Path, key: str, factory: Callable[..., Any], identity: Callable[[Any], str]):
-        self.path, self.key, self.factory, self.identity = Path(path), key, factory, identity
+    def __init__(
+        self,
+        path: Path,
+        key: str,
+        factory: Callable[..., Any],
+        identity: Callable[[Any], str],
+    ) -> None:
+        self.path = Path(path)
+        self.key = key
+        self.factory = factory
+        self.identity = identity
         self._lock = threading.RLock()
+        self._file_lock = FileLock(str(self.path) + ".lock")
 
-    def list(self):
-        with self._lock:
-            if not self.path.exists():
-                return []
+    def _read_unlocked(self) -> list[Any]:
+        if not self.path.exists():
+            return []
+        try:
+            raw = json.loads(self.path.read_text("utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        if not isinstance(raw, dict):
+            return []
+        raw_rows = raw.get(self.key, [])
+        if not isinstance(raw_rows, list):
+            return []
+        rows: list[Any] = []
+        for item in raw_rows:
+            if not isinstance(item, dict):
+                continue
             try:
-                raw = json.loads(self.path.read_text("utf-8"))
-            except (OSError, json.JSONDecodeError):
-                return []
-            return [self.factory(**row) for row in raw.get(self.key, []) if isinstance(row, dict)]
+                rows.append(self.factory(**item))
+            except (TypeError, ValueError):
+                continue
+        return rows
 
-    def save(self, rows) -> None:
-        with self._lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_json_write(self.path, {"version": 1, self.key: [row.to_dict() for row in rows]})
+    def _write_unlocked(self, rows: list[Any]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_json_write(
+            self.path,
+            {"version": 1, self.key: [row.to_dict() for row in rows]},
+        )
 
-    def upsert(self, row):
-        with self._lock:
-            rows = self.list()
+    def list(self) -> list[Any]:
+        with self._lock, self._file_lock:
+            return self._read_unlocked()
+
+    def save(self, rows: list[Any]) -> None:
+        with self._lock, self._file_lock:
+            self._write_unlocked(rows)
+
+    def upsert(self, row: Any) -> Any:
+        with self._lock, self._file_lock:
+            rows = self._read_unlocked()
             wanted = self.identity(row)
             for index, current in enumerate(rows):
                 if self.identity(current) == wanted:
@@ -148,44 +184,63 @@ class _JsonStore:
                     break
             else:
                 rows.append(row)
-            self.save(rows)
+            self._write_unlocked(rows)
             return row
 
     def delete(self, row_id: str) -> bool:
-        with self._lock:
-            rows = self.list()
+        with self._lock, self._file_lock:
+            rows = self._read_unlocked()
             kept = [row for row in rows if self.identity(row) != row_id]
             if len(rows) == len(kept):
                 return False
-            self.save(kept)
+            self._write_unlocked(kept)
             return True
 
 
-def _data_path(name: str) -> Path:
-    try:
-        from openakita.config import settings
-        return Path(settings.project_root) / "data" / name
-    except Exception:
-        return Path.cwd() / "data" / name
-
-
 class AgentExecutionStore:
-    def __init__(self, path: Path | None = None):
-        self._store = _JsonStore(path or _data_path("agent_execution.json"), "agents", lambda **d: AgentExecutionConfig(**d), lambda x: x.profile_id)
+    def __init__(self, path: Path | None = None) -> None:
+        self._store = _JsonStore(
+            path or hermes_data_path("agent_execution.json"),
+            "agents",
+            lambda **data: AgentExecutionConfig(**data),
+            lambda item: item.profile_id,
+        )
 
-    def list(self) -> list[AgentExecutionConfig]: return self._store.list()
+    def list(self) -> list[AgentExecutionConfig]:
+        return self._store.list()
+
     def get(self, profile_id: str) -> AgentExecutionConfig:
         profile_id = safe_id(profile_id)
-        return next((x for x in self.list() if x.profile_id == profile_id), AgentExecutionConfig(profile_id))
-    def upsert(self, config: AgentExecutionConfig) -> AgentExecutionConfig: return self._store.upsert(config)
-    def delete(self, profile_id: str) -> bool: return self._store.delete(safe_id(profile_id))
+        return next(
+            (item for item in self.list() if item.profile_id == profile_id),
+            AgentExecutionConfig(profile_id),
+        )
+
+    def upsert(self, config: AgentExecutionConfig) -> AgentExecutionConfig:
+        return self._store.upsert(config)
+
+    def delete(self, profile_id: str) -> bool:
+        return self._store.delete(safe_id(profile_id))
 
 
 class HermesInstanceStore:
-    def __init__(self, path: Path | None = None):
-        self._store = _JsonStore(path or _data_path("hermes_instances.json"), "instances", lambda **d: HermesInstance(**d), lambda x: x.id)
+    def __init__(self, path: Path | None = None) -> None:
+        self._store = _JsonStore(
+            path or hermes_data_path("hermes_instances.json"),
+            "instances",
+            lambda **data: HermesInstance(**data),
+            lambda item: item.id,
+        )
 
-    def list(self) -> list[HermesInstance]: return self._store.list()
-    def get(self, instance_id: str) -> HermesInstance | None: return next((x for x in self.list() if x.id == instance_id), None)
-    def upsert(self, instance: HermesInstance) -> HermesInstance: return self._store.upsert(instance)
-    def delete(self, instance_id: str) -> bool: return self._store.delete(safe_id(instance_id))
+    def list(self) -> list[HermesInstance]:
+        return self._store.list()
+
+    def get(self, instance_id: str) -> HermesInstance | None:
+        instance_id = safe_id(instance_id)
+        return next((item for item in self.list() if item.id == instance_id), None)
+
+    def upsert(self, instance: HermesInstance) -> HermesInstance:
+        return self._store.upsert(instance)
+
+    def delete(self, instance_id: str) -> bool:
+        return self._store.delete(safe_id(instance_id))
