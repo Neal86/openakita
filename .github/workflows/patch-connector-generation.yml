@@ -6,6 +6,7 @@ on:
       - feature/hermes-multi-agent
     paths:
       - scripts/patch_connector_generation.py
+      - scripts/patch_wechat_release_zip.py
       - .github/workflows/patch-connector-generation.yml
   workflow_dispatch:
 
@@ -26,25 +27,27 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-      - name: Apply generation patch
-        run: python scripts/patch_connector_generation.py
-      - name: Verify generation isolation
+      - name: Apply connector hardening patches
+        run: |
+          python scripts/patch_connector_generation.py
+          python scripts/patch_wechat_release_zip.py
+      - name: Verify connector hardening
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
           pip install -e ./openakita-plugin-sdk
-          ruff check src/openakita/wechat_desktop/manager.py src/openakita/windows_connector/manager.py src/openakita/api/routes/wechat_desktop.py tests/wechat_desktop/test_connection_generation.py
-          pytest -q tests/wechat_desktop/test_connection_generation.py tests/windows_connector tests/wechat_desktop tests/hermes
+          ruff check src/openakita/wechat_desktop/manager.py src/openakita/windows_connector/manager.py src/openakita/api/routes/wechat_desktop.py tests/wechat_desktop/test_connection_generation.py tests/wechat_desktop/test_release_download.py
+          pytest -q tests/wechat_desktop/test_connection_generation.py tests/wechat_desktop/test_release_download.py tests/windows_connector tests/wechat_desktop tests/hermes
           git diff --check
-      - name: Commit generation hardening
+      - name: Commit connector hardening
         run: |
           git config user.name "openakita-maintenance-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add src/openakita/wechat_desktop/manager.py src/openakita/windows_connector/manager.py src/openakita/api/routes/wechat_desktop.py tests/wechat_desktop/test_connection_generation.py
+          git add src/openakita/wechat_desktop/manager.py src/openakita/windows_connector/manager.py src/openakita/api/routes/wechat_desktop.py tests/wechat_desktop/test_connection_generation.py tests/wechat_desktop/test_release_download.py
           if git diff --cached --quiet; then
-            echo "Generation hardening already applied."
+            echo "Connector hardening already applied."
             exit 0
           fi
-          git commit -m "fix(connector): reject stale websocket generations"
+          git commit -m "fix(connector): reject stale sessions and invalid release ZIPs"
           git pull --rebase origin feature/hermes-multi-agent
           git push origin HEAD:feature/hermes-multi-agent
