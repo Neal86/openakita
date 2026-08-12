@@ -77,7 +77,8 @@ jobs:
           set -euo pipefail
           git config user.name "openakita-maintenance-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add .github/workflows/release.yml .github/workflows/release-dryrun.yml build/openakita.spec build/prepare_bootstrap_resources.py
+          git add .github/workflows/release.yml .github/workflows/release-dryrun.yml
+          git add -f build/openakita.spec build/prepare_bootstrap_resources.py
           git diff --cached --check
           git commit -m "fix: align release runtime and packaging hardening"
           git push origin HEAD:feature/hermes-multi-agent
