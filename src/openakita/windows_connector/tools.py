@@ -8,12 +8,12 @@ from openakita.tools.handlers import default_handler_registry
 from openakita.wechat_desktop import wechat_desktop_manager
 
 from .context import current_agent_profile_id
-from .manager import windows_connector_manager
+from .manager import LOCAL_NODE_ID, windows_connector_manager
 
 
 def _base_properties() -> dict[str, Any]:
     return {
-        "node_id": {"type": "string", "description": "Windows Connector 节点 ID。先调用 windows_list_apps 获取。"},
+        "node_id": {"type": "string", "description": "Windows 设备节点 ID。先调用 windows_list_apps 获取；本机固定为 local。"},
         "resource_id": {"type": "string", "description": "已授权的应用/微信实例/浏览器 Tab resource_id。"},
     }
 
@@ -22,8 +22,8 @@ WINDOWS_CONNECTOR_TOOLS: list[dict[str, Any]] = [
     {
         "name": "windows_list_apps",
         "category": "Windows Connector",
-        "description": "List only the Windows apps, individual WeChat instances/accounts, browser windows and browser tabs explicitly authorized to the current Agent. Use this before any Windows Connector action.",
-        "detail": "列出当前 Agent 被明确授权操作的本机资源。不同微信实例和浏览器 Tab 会分别返回，并包含用户备注。未授权资源不会出现在结果中。",
+        "description": "List only the local or remote Windows apps, individual WeChat instances/accounts, browser windows and browser tabs explicitly authorized to the current Agent. Use this before any Windows action.",
+        "detail": "列出当前 Agent 被明确授权操作的本机及远程 Windows 资源。本机由 OpenAkita 内嵌 Runtime 直接发现和执行，不需要额外 Connector；远程设备通过 Connector 连接。不同微信实例和浏览器 Tab 会分别返回，并包含用户备注。未授权资源不会出现在结果中。",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
@@ -35,7 +35,7 @@ WINDOWS_CONNECTOR_TOOLS: list[dict[str, Any]] = [
     {
         "name": "windows_screenshot_app",
         "category": "Windows Connector",
-        "description": "Capture a screenshot of one authorized Windows app or browser tab through its paired Connector.",
+        "description": "Capture a screenshot of one authorized local or remote Windows app or browser tab.",
         "input_schema": {"type": "object", "properties": _base_properties(), "required": ["node_id", "resource_id"]},
     },
     {
@@ -185,32 +185,73 @@ class WindowsConnectorToolHandler:
             raise PermissionError("Windows Connector tool execution is missing executor-owned Agent identity")
         return profile_id
 
+    @staticmethod
+    def _append_authorized_resources(
+        rows: list[dict[str, Any]],
+        *,
+        node: dict[str, Any],
+        resources: list[dict[str, Any]],
+        agent_id: str,
+    ) -> None:
+        for resource in resources:
+            matching = [grant for grant in resource.get("grants", []) if grant.get("agent_profile_id") == agent_id]
+            if not matching:
+                continue
+            rows.append(
+                {
+                    "node_id": node["id"],
+                    "node_name": node["name"],
+                    "node_status": node["status"],
+                    "transport": node.get("transport", "remote"),
+                    "embedded": bool(node.get("embedded", False)),
+                    "resource_id": resource["id"],
+                    "kind": resource.get("kind"),
+                    "app_name": resource.get("app_name"),
+                    "title": resource.get("title"),
+                    "account_name": resource.get("account_name"),
+                    "url": resource.get("url"),
+                    "automation": resource.get("automation"),
+                    "limited": resource.get("limited", False),
+                    "remark": matching[0].get("remark", ""),
+                    "permissions": matching[0].get("permissions", {}),
+                }
+            )
+
     async def _list(self, agent_id: str) -> str:
-        nodes = await wechat_desktop_manager.list_nodes()
         rows: list[dict[str, Any]] = []
+
+        # The local Windows node is part of OpenAkita itself. Refresh discovery
+        # at tool-call time so newly opened/closed apps are reflected without a
+        # separately installed connector or websocket round-trip.
+        if windows_connector_manager.local_available:
+            local = await windows_connector_manager.local_node(refresh=True)
+            self._append_authorized_resources(
+                rows,
+                node=local,
+                resources=local.get("resources", []),
+                agent_id=agent_id,
+            )
+
+        # Remote Windows devices keep the existing paired connector transport.
+        # Exclude a hypothetical remote node named "local" so it can never
+        # shadow the embedded local runtime.
+        nodes = await wechat_desktop_manager.list_nodes()
         for node in nodes:
+            if str(node.get("id") or "") == LOCAL_NODE_ID:
+                continue
+            remote_node = {
+                **node,
+                "transport": "remote",
+                "embedded": False,
+            }
             resources = await windows_connector_manager.list_resources(node["id"])
-            for resource in resources:
-                matching = [grant for grant in resource.get("grants", []) if grant.get("agent_profile_id") == agent_id]
-                if not matching:
-                    continue
-                rows.append(
-                    {
-                        "node_id": node["id"],
-                        "node_name": node["name"],
-                        "node_status": node["status"],
-                        "resource_id": resource["id"],
-                        "kind": resource.get("kind"),
-                        "app_name": resource.get("app_name"),
-                        "title": resource.get("title"),
-                        "account_name": resource.get("account_name"),
-                        "url": resource.get("url"),
-                        "automation": resource.get("automation"),
-                        "limited": resource.get("limited", False),
-                        "remark": matching[0].get("remark", ""),
-                        "permissions": matching[0].get("permissions", {}),
-                    }
-                )
+            self._append_authorized_resources(
+                rows,
+                node=remote_node,
+                resources=resources,
+                agent_id=agent_id,
+            )
+
         return json.dumps({"authorized_resources": rows}, ensure_ascii=False)
 
     async def handle(self, tool_name: str, params: dict[str, Any]) -> str:
