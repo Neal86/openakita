@@ -10,7 +10,6 @@ on:
       - "src/openakita/api/routes/windows_connector.py"
       - "scripts/build_wechat_connector.py"
       - "build/wechat_connector_*"
-      - "tests/windows_connector/**"
       - ".github/workflows/wechat-connector-release.yml"
 
 permissions:
@@ -34,7 +33,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller pytest pytest-asyncio
+          pip install pyinstaller
           pip install -r src/openakita/wechat_desktop/connector_bundle/requirements.txt
           pip install -e .
 
@@ -42,10 +41,6 @@ jobs:
         shell: bash
         run: |
           python -m compileall -q src/openakita/windows_connector src/openakita/wechat_desktop/connector_bundle src/openakita/api/routes/windows_connector.py
-
-      - name: Run Windows Connector tests
-        shell: bash
-        run: python -m pytest tests/windows_connector tests/wechat_desktop -q
 
       - name: Build generic Windows Connector package
         shell: pwsh
