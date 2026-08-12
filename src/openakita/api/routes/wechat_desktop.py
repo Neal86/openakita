@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import secrets
+import shutil
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -13,13 +17,14 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from openakita.wechat_desktop import wechat_desktop_manager
 from openakita.windows_connector import windows_connector_manager
 
 router = APIRouter(prefix="/api/wechat-desktop")
+logger = logging.getLogger(__name__)
 RELEASE_FILENAME = "OpenAkita-WeChat-Connector-Windows-x64.zip"
 DEFAULT_RELEASE_URL = (
     "https://github.com/Neal86/openakita/releases/download/"
@@ -29,6 +34,7 @@ _PAIR_WINDOW_SECONDS = 300
 _PAIR_MAX_FAILURES = 10
 _pair_failures: dict[str, list[float]] = defaultdict(list)
 _pair_lock = asyncio.Lock()
+_download_lock = asyncio.Lock()
 
 
 class PairingCreateRequest(BaseModel):
@@ -48,10 +54,30 @@ def _client_key(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _data_dir() -> Path:
+    configured = os.environ.get("OPENAKITA_DATA_DIR", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    try:
+        from openakita.config import settings
+
+        return Path(settings.data_dir).resolve()
+    except Exception:
+        return Path.home() / ".openakita" / "data"
+
+
+def _release_cache_path() -> Path:
+    return _data_dir() / "releases" / RELEASE_FILENAME
+
+
 async def _pair_allowed(key: str) -> bool:
     now = time.monotonic()
     async with _pair_lock:
-        rows = [stamp for stamp in _pair_failures.get(key, []) if now - stamp < _PAIR_WINDOW_SECONDS]
+        rows = [
+            stamp
+            for stamp in _pair_failures.get(key, [])
+            if now - stamp < _PAIR_WINDOW_SECONDS
+        ]
         if rows:
             _pair_failures[key] = rows
         else:
@@ -62,7 +88,11 @@ async def _pair_allowed(key: str) -> bool:
 async def _record_pair_failure(key: str) -> None:
     now = time.monotonic()
     async with _pair_lock:
-        rows = [stamp for stamp in _pair_failures.get(key, []) if now - stamp < _PAIR_WINDOW_SECONDS]
+        rows = [
+            stamp
+            for stamp in _pair_failures.get(key, [])
+            if now - stamp < _PAIR_WINDOW_SECONDS
+        ]
         rows.append(now)
         _pair_failures[key] = rows
 
@@ -87,29 +117,44 @@ async def get_node(node_id: str) -> dict[str, Any]:
 
 @router.delete("/nodes/{node_id}")
 async def delete_node(node_id: str) -> dict[str, bool]:
+    grants = await windows_connector_manager.list_grants(node_id)
     if not await wechat_desktop_manager.revoke_node(node_id):
         raise HTTPException(status_code=404, detail="Windows 微信节点不存在")
+    for grant in grants:
+        grant_id = str(grant.get("id") or "")
+        if grant_id:
+            await windows_connector_manager.delete_grant(grant_id)
+    await windows_connector_manager.sync_resources(node_id, [])
     return {"ok": True}
 
 
 @router.post("/pairing-code")
 async def create_pairing_code(body: PairingCreateRequest) -> dict[str, Any]:
-    code = await wechat_desktop_manager.create_pairing_code(body.node_name, body.ttl_seconds)
+    code = await wechat_desktop_manager.create_pairing_code(
+        body.node_name, body.ttl_seconds
+    )
     return {"code": code, "expires_in": body.ttl_seconds}
 
 
 @router.post("/pairing-code/close")
 async def close_pairing_code(body: PairingCloseRequest) -> dict[str, bool]:
-    return {"ok": True, "closed": await wechat_desktop_manager.cancel_pairing_code(body.code)}
+    return {
+        "ok": True,
+        "closed": await wechat_desktop_manager.cancel_pairing_code(body.code),
+    }
 
 
 @router.post("/pair")
-async def pair_connector(body: PairingConsumeRequest, request: Request) -> dict[str, str]:
+async def pair_connector(
+    body: PairingConsumeRequest, request: Request
+) -> dict[str, str]:
     key = _client_key(request)
     if not await _pair_allowed(key):
         raise HTTPException(status_code=429, detail="配对失败次数过多，请稍后再试")
     try:
-        node_id, node_token, node_name = await wechat_desktop_manager.consume_pairing_code(body.code)
+        node_id, node_token, node_name = await wechat_desktop_manager.consume_pairing_code(
+            body.code
+        )
     except ValueError as exc:
         await _record_pair_failure(key)
         raise HTTPException(status_code=400, detail="配对码无效或已过期") from exc
@@ -128,56 +173,69 @@ async def get_delivery(request_id: str) -> dict[str, Any]:
 def _local_release_path() -> Path | None:
     configured = os.environ.get("OPENAKITA_WECHAT_CONNECTOR_PACKAGE", "").strip()
     candidates = [
-        Path(configured) if configured else None,
-        Path("data/releases") / RELEASE_FILENAME,
+        Path(configured).expanduser() if configured else None,
+        _release_cache_path(),
         Path(__file__).resolve().parents[4] / "dist" / RELEASE_FILENAME,
     ]
     return next((path for path in candidates if path and path.is_file()), None)
 
 
-def _download_release_bytes() -> bytes:
-    url = os.environ.get("OPENAKITA_WECHAT_CONNECTOR_DOWNLOAD_URL", DEFAULT_RELEASE_URL).strip()
-    request = urllib.request.Request(url, headers={"User-Agent": "OpenAkita-WeChat-Connector-Downloader/1.0"})
-    with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310 - fixed/admin configured URL
-        return response.read()
+def _download_release_to_cache() -> Path:
+    url = os.environ.get(
+        "OPENAKITA_WECHAT_CONNECTOR_DOWNLOAD_URL", DEFAULT_RELEASE_URL
+    ).strip()
+    cache = _release_cache_path()
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        prefix="wechat-desktop-connector-",
+        suffix=".zip",
+        dir=str(cache.parent),
+    )
+    os.close(fd)
+    temp = Path(temp_name)
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "OpenAkita-WeChat-Connector-Downloader/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response, temp.open(
+            "wb"
+        ) as out:  # noqa: S310
+            shutil.copyfileobj(response, out, length=1024 * 1024)
+        if temp.stat().st_size <= 0:
+            raise OSError("downloaded connector package is empty")
+        os.replace(temp, cache)
+        return cache
+    finally:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 @router.get("/connector/download", response_model=None)
-async def download_connector() -> FileResponse | StreamingResponse:
+async def download_connector() -> FileResponse:
     local_path = _local_release_path()
-    if local_path is not None:
-        return FileResponse(
-            local_path,
-            media_type="application/zip",
-            filename=RELEASE_FILENAME,
-            headers={"Cache-Control": "no-store"},
-        )
-    try:
-        payload = await asyncio.to_thread(_download_release_bytes)
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="Windows Connector 发布包尚未生成或暂时无法下载") from exc
-    try:
-        cache_path = Path("data/releases") / RELEASE_FILENAME
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = cache_path.with_suffix(".tmp")
-        tmp_path.write_bytes(payload)
-        tmp_path.replace(cache_path)
-    except OSError:
-        pass
-
-    return StreamingResponse(
-        iter([payload]),
+    if local_path is None:
+        async with _download_lock:
+            local_path = _local_release_path()
+            if local_path is None:
+                try:
+                    local_path = await asyncio.to_thread(_download_release_to_cache)
+                except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Windows Connector 发布包尚未生成或暂时无法下载",
+                    ) from exc
+    return FileResponse(
+        local_path,
         media_type="application/zip",
-        headers={
-            "Content-Disposition": f'attachment; filename="{RELEASE_FILENAME}"',
-            "Cache-Control": "no-store",
-            "Content-Length": str(len(payload)),
-        },
+        filename=RELEASE_FILENAME,
+        headers={"Cache-Control": "no-store"},
     )
 
 
 def _configured_bots_for_node(node_id: str) -> list[dict[str, Any]]:
-    """Read persisted OA Bot configuration and return this node's enabled desktop Bots."""
     try:
         from openakita.config import settings
 
@@ -201,18 +259,40 @@ def _configured_bots_for_node(node_id: str) -> list[dict[str, Any]]:
                         "allowed_contacts": creds.get("allowed_contacts") or [],
                         "ignore_senders": creds.get("ignore_senders") or [],
                         "mention_only": bool(creds.get("mention_only", False)),
-                        "private_chat_enabled": bool(creds.get("private_chat_enabled", False)),
+                        "private_chat_enabled": bool(
+                            creds.get("private_chat_enabled", False)
+                        ),
                         "auto_reply": bool(creds.get("auto_reply", True)),
                         "human_takeover": bool(creds.get("human_takeover", False)),
-                        "merge_window_seconds": int(creds.get("merge_window_seconds", 2)),
-                        "send_interval_seconds": int(creds.get("send_interval_seconds", 3)),
-                        "duplicate_ttl_seconds": int(creds.get("duplicate_ttl_seconds", 600)),
+                        "merge_window_seconds": int(
+                            creds.get("merge_window_seconds", 2)
+                        ),
+                        "send_interval_seconds": int(
+                            creds.get("send_interval_seconds", 3)
+                        ),
+                        "duplicate_ttl_seconds": int(
+                            creds.get("duplicate_ttl_seconds", 600)
+                        ),
                     },
                 }
             )
         return result
     except Exception:
         return []
+
+
+async def _send_event_error(websocket: WebSocket, event: str, exc: Exception) -> None:
+    try:
+        await websocket.send_json(
+            {
+                "event": "error",
+                "source_event": event,
+                "detail": str(exc),
+                "error_type": type(exc).__name__,
+            }
+        )
+    except Exception:
+        pass
 
 
 @router.websocket("/ws")
@@ -228,6 +308,7 @@ async def connector_websocket(websocket: WebSocket) -> None:
         return
 
     await websocket.accept()
+    connection_id = secrets.token_hex(12)
 
     async def send(payload: dict[str, Any]) -> None:
         await websocket.send_json(payload)
@@ -237,58 +318,106 @@ async def connector_websocket(websocket: WebSocket) -> None:
         node_token=node_token,
         send=send,
         connector_version=connector_version,
+        connection_id=connection_id,
     )
-    await websocket.send_json({"version": 1, "event": "node.ready", "node_id": node_id})
-    for command in _configured_bots_for_node(node_id):
-        await websocket.send_json(command)
-    for command in await windows_connector_manager.commands_for_attach(node_id):
-        await websocket.send_json(command)
 
     try:
+        await websocket.send_json(
+            {"version": 1, "event": "node.ready", "node_id": node_id}
+        )
+        for command in _configured_bots_for_node(node_id):
+            await websocket.send_json(command)
+        for command in await windows_connector_manager.commands_for_attach(node_id):
+            await websocket.send_json(command)
+
         while True:
             try:
-                envelope = json.loads(await websocket.receive_text())
+                raw = await websocket.receive_text()
+            except WebSocketDisconnect:
+                break
+            try:
+                envelope = json.loads(raw)
             except json.JSONDecodeError:
                 await websocket.send_json({"event": "error", "detail": "invalid JSON"})
                 continue
+            if not isinstance(envelope, dict):
+                await websocket.send_json(
+                    {"event": "error", "detail": "envelope must be an object"}
+                )
+                continue
+
             event = str(envelope.get("event") or "")
             payload = envelope.get("payload") or {}
             if not isinstance(payload, dict):
                 payload = {}
-            if event == "node.heartbeat":
-                await wechat_desktop_manager.heartbeat(node_id)
-            elif event == "windows.resources.sync":
-                await windows_connector_manager.sync_resources(node_id, payload.get("resources") or [])
-            elif event == "windows.command.result":
-                request_id = str(envelope.get("request_id") or payload.get("request_id") or "")
-                if request_id:
-                    await windows_connector_manager.handle_result(node_id, request_id, payload)
-            elif event == "wechat.accounts.sync":
-                await wechat_desktop_manager.sync_accounts(node_id, payload.get("accounts") or [])
-            elif event == "wechat.conversations.sync":
-                await wechat_desktop_manager.sync_conversations(
-                    node_id,
-                    str(payload.get("wechat_account_id") or ""),
-                    groups=payload.get("groups") or [],
-                    contacts=payload.get("contacts") or [],
-                )
-            elif event == "wechat.message.received":
-                bot_id = str(envelope.get("bot_id") or payload.get("bot_id") or "")
-                if bot_id:
+            try:
+                if event == "node.heartbeat":
+                    await wechat_desktop_manager.heartbeat(node_id)
+                elif event == "windows.resources.sync":
+                    await windows_connector_manager.sync_resources(
+                        node_id, payload.get("resources") or []
+                    )
+                elif event == "windows.command.result":
+                    request_id = str(
+                        envelope.get("request_id")
+                        or payload.get("request_id")
+                        or ""
+                    )
+                    if request_id:
+                        await windows_connector_manager.handle_result(
+                            node_id, request_id, payload
+                        )
+                elif event == "wechat.accounts.sync":
+                    await wechat_desktop_manager.sync_accounts(
+                        node_id, payload.get("accounts") or []
+                    )
+                elif event == "wechat.conversations.sync":
+                    await wechat_desktop_manager.sync_conversations(
+                        node_id,
+                        str(payload.get("wechat_account_id") or ""),
+                        groups=payload.get("groups") or [],
+                        contacts=payload.get("contacts") or [],
+                    )
+                elif event == "wechat.message.received":
+                    bot_id = str(
+                        envelope.get("bot_id") or payload.get("bot_id") or ""
+                    )
+                    if not bot_id:
+                        raise ValueError("bot_id is required")
                     await wechat_desktop_manager.dispatch_inbound(bot_id, payload)
-            elif event in {"wechat.message.accepted", "wechat.message.sent", "wechat.message.failed"}:
-                await wechat_desktop_manager.update_delivery_receipt(
-                    request_id=str(envelope.get("request_id") or payload.get("request_id") or ""),
-                    bot_id=str(envelope.get("bot_id") or payload.get("bot_id") or ""),
-                    node_id=node_id,
-                    status=event.rsplit(".", 1)[-1],
-                    detail=str(payload.get("detail") or ""),
+                elif event in {
+                    "wechat.message.accepted",
+                    "wechat.message.sent",
+                    "wechat.message.failed",
+                }:
+                    await wechat_desktop_manager.update_delivery_receipt(
+                        request_id=str(
+                            envelope.get("request_id")
+                            or payload.get("request_id")
+                            or ""
+                        ),
+                        bot_id=str(
+                            envelope.get("bot_id") or payload.get("bot_id") or ""
+                        ),
+                        node_id=node_id,
+                        status=event.rsplit(".", 1)[-1],
+                        detail=str(payload.get("detail") or ""),
+                    )
+                elif event == "config.applied":
+                    continue
+                else:
+                    raise ValueError(f"unsupported event: {event}")
+            except (ValueError, PermissionError, ConnectionError, KeyError, TypeError) as exc:
+                logger.warning(
+                    "Desktop connector event rejected: node=%s event=%s error=%s",
+                    node_id,
+                    event,
+                    exc,
                 )
-            elif event == "config.applied":
-                continue
-            else:
-                await websocket.send_json({"event": "error", "detail": f"unsupported event: {event}"})
+                await _send_event_error(websocket, event, exc)
     except WebSocketDisconnect:
         pass
     finally:
-        await wechat_desktop_manager.detach_node(node_id)
+        await wechat_desktop_manager.detach_node(
+            node_id, connection_id=connection_id
+        )
