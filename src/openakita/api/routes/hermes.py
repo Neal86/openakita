@@ -39,14 +39,17 @@ class AgentBindingPayload(BaseModel):
 
 
 def _managed_instance(node_id: str):
-    return HermesInstanceStore().get(node_id)
+    try:
+        return HermesInstanceStore().get(node_id)
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def _ensure_external_node_mutable(node_id: str) -> None:
     if _managed_instance(node_id) is not None:
         raise HTTPException(
             status_code=409,
-            detail="该 Hermes node 由执行实例管理，请在“执行实例”中修改、启停或删除",
+            detail="该 Hermes node 由执行实例管理，请在“执行实例”中修改、启停、测试或删除",
         )
 
 
@@ -137,6 +140,7 @@ def disable_node(node_id: str) -> dict:
 
 @router.post("/nodes/{node_id}/test")
 async def test_node(node_id: str) -> dict:
+    _ensure_external_node_mutable(node_id)
     try:
         return await HermesRouter().test_node(node_id)
     except KeyError:
