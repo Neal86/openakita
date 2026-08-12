@@ -82,6 +82,17 @@ jobs:
 
       - name: Ruff Windows Connector changes
         run: |
+          ruff check --fix \
+            src/openakita/windows_connector \
+            src/openakita/api/auth.py \
+            src/openakita/api/routes/windows_connector.py \
+            src/openakita/api/routes/execution_instances.py \
+            src/openakita/hermes/capability_bridge.py \
+            src/openakita/hermes/lifecycle.py \
+            tests/windows_connector \
+            scripts/integrate_windows_connector.py \
+            scripts/integrate_windows_connector_ci.py \
+            scripts/finalize_windows_connector.py
           ruff check \
             src/openakita/windows_connector \
             src/openakita/api/auth.py \
@@ -139,6 +150,7 @@ jobs:
             apps/setup-center/src/views/IMView.tsx \
             apps/setup-center/src/components/WindowsConnectorPanel.tsx \
             scripts/build_wechat_connector.py \
+            scripts/finalize_windows_connector.py \
             tests/windows_connector \
             tests/wechat_desktop/test_connector_desktop_ui.py
           git add -A scripts/finalize_windows_agent_runtime_routing.py
