@@ -19,6 +19,9 @@ from openakita.utils.atomic_io import atomic_json_write, read_json_safe
 SendCallable = Callable[[dict[str, Any]], Awaitable[None]]
 InboundCallback = Callable[[dict[str, Any]], Awaitable[None]]
 LEGACY_STATE_PATH = Path("data/wechat_desktop/nodes.json")
+PAIRING_TICKET_MAX = 256
+DELIVERY_RECEIPT_TTL = timedelta(hours=24)
+DELIVERY_RECEIPT_MAX = 2048
 
 
 def _default_state_path() -> Path:
@@ -132,6 +135,35 @@ class WeChatDesktopManager:
                 )
         return result
 
+    def _prune_pairings_locked(self, now: datetime | None = None) -> None:
+        now = now or datetime.now(UTC)
+        expired = [
+            key
+            for key, ticket in self._pairings.items()
+            if ticket.used or ticket.expires_at <= now
+        ]
+        for key in expired:
+            self._pairings.pop(key, None)
+        if len(self._pairings) > PAIRING_TICKET_MAX:
+            oldest = sorted(self._pairings.items(), key=lambda item: item[1].expires_at)
+            for key, _ticket in oldest[: len(self._pairings) - PAIRING_TICKET_MAX]:
+                self._pairings.pop(key, None)
+
+    def _prune_receipts_locked(self, now: datetime | None = None) -> None:
+        now = now or datetime.now(UTC)
+        cutoff = now - DELIVERY_RECEIPT_TTL
+        expired = [
+            request_id
+            for request_id, receipt in self._receipts.items()
+            if receipt.updated_at < cutoff
+        ]
+        for request_id in expired:
+            self._receipts.pop(request_id, None)
+        if len(self._receipts) > DELIVERY_RECEIPT_MAX:
+            oldest = sorted(self._receipts.items(), key=lambda item: item[1].updated_at)
+            for request_id, _receipt in oldest[: len(self._receipts) - DELIVERY_RECEIPT_MAX]:
+                self._receipts.pop(request_id, None)
+
     def _load_state(self) -> None:
         with self._file_lock:
             data = read_json_safe(self._state_path)
@@ -178,7 +210,8 @@ class WeChatDesktopManager:
             node_id = str(item.get("node_id") or "").strip()
             account_id = str(item.get("account_id") or "").strip()
             bot_id = str(item.get("bot_id") or "").strip()
-            if node_id and account_id and bot_id:
+            node = nodes.get(node_id)
+            if node_id and account_id and bot_id and node and account_id in node.accounts:
                 bindings[(node_id, account_id)] = bot_id
         self._nodes = nodes
         self._bindings = bindings
@@ -217,20 +250,24 @@ class WeChatDesktopManager:
     async def create_pairing_code(self, node_name: str, ttl_seconds: int = 600) -> str:
         code = "".join(str(secrets.randbelow(10)) for _ in range(8))
         async with self._lock:
+            self._prune_pairings_locked()
             self._pairings[self._hash(code)] = PairingTicket(
                 self._hash(code),
                 datetime.now(UTC) + timedelta(seconds=max(60, ttl_seconds)),
                 node_name.strip() or "Windows WeChat Connector",
             )
+            self._prune_pairings_locked()
         return code
 
     async def cancel_pairing_code(self, code: str) -> bool:
         async with self._lock:
+            self._prune_pairings_locked()
             return self._pairings.pop(self._hash(code.strip()), None) is not None
 
     async def consume_pairing_code(self, code: str) -> tuple[str, str, str]:
         digest = self._hash(code.strip())
         async with self._lock:
+            self._prune_pairings_locked()
             ticket = self._pairings.pop(digest, None)
             if ticket is None or ticket.used or ticket.expires_at < datetime.now(UTC):
                 raise ValueError("invalid or expired pairing code")
@@ -317,6 +354,14 @@ class WeChatDesktopManager:
                         groups=old.groups if old else {},
                         contacts=old.contacts if old else {},
                     )
+            removed_account_ids = set(previous) - set(synced)
+            if removed_account_ids:
+                for key in [
+                    key
+                    for key in self._bindings
+                    if key[0] == node_id and key[1] in removed_account_ids
+                ]:
+                    self._bindings.pop(key, None)
             node.accounts = synced
             self._save_state_locked()
 
@@ -410,10 +455,19 @@ class WeChatDesktopManager:
     ) -> None:
         if request_id:
             async with self._lock:
-                self._receipts[request_id] = DeliveryReceipt(request_id, bot_id, node_id, status, detail)
+                self._prune_receipts_locked()
+                self._receipts[request_id] = DeliveryReceipt(
+                    request_id,
+                    bot_id,
+                    node_id,
+                    status,
+                    detail,
+                )
+                self._prune_receipts_locked()
 
     async def get_delivery_receipt(self, request_id: str) -> dict[str, Any] | None:
         async with self._lock:
+            self._prune_receipts_locked()
             receipt = self._receipts.get(request_id)
             if receipt is None:
                 return None
