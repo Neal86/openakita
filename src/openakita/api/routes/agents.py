@@ -698,6 +698,12 @@ async def delete_agent_profile(profile_id: str):
         deleted = store.delete(profile_id)
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
+    except OSError as exc:
+        logger.error("[Agents API] Failed to delete profile %s data: %s", profile_id, exc)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete Agent profile data",
+        ) from exc
 
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found")
@@ -892,7 +898,27 @@ async def write_profile_identity_file(
     identity_dir.mkdir(parents=True, exist_ok=True)
 
     fp = identity_dir / filename
-    fp.write_text(body.content, encoding="utf-8")
+    from openakita.utils.atomic_io import safe_write
+
+    try:
+        safe_write(
+            fp,
+            body.content,
+            backup=True,
+            fsync=True,
+            allow_fallback=False,
+        )
+    except OSError as exc:
+        logger.error(
+            "[Agents API] Failed to persist identity file %s for %s: %s",
+            filename,
+            profile_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to persist Agent identity file",
+        ) from exc
 
     _invalidate_profile_runtime(request, profile_id, f"profile identity {filename} write")
     logger.info(f"[Agents API] Wrote identity file {filename} for profile {profile_id}")
@@ -980,7 +1006,18 @@ async def delete_profile_data(profile_id: str, request: Request):
 
     profile_dir = store.get_profile_dir(profile_id)
     if profile_dir.is_dir():
-        shutil.rmtree(profile_dir, ignore_errors=True)
+        try:
+            shutil.rmtree(profile_dir)
+        except OSError as exc:
+            logger.error(
+                "[Agents API] Failed to delete profile data for %s: %s",
+                profile_id,
+                exc,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to delete Agent profile data",
+            ) from exc
 
     store.update(
         profile_id,

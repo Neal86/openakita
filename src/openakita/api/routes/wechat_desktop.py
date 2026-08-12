@@ -12,6 +12,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -204,6 +205,17 @@ def _download_release_to_cache() -> Path:
             shutil.copyfileobj(response, out, length=1024 * 1024)
         if temp.stat().st_size <= 0:
             raise OSError("downloaded connector package is empty")
+        try:
+            with zipfile.ZipFile(temp) as archive:
+                if not archive.namelist():
+                    raise OSError("downloaded connector package has no files")
+                bad_member = archive.testzip()
+                if bad_member is not None:
+                    raise OSError(
+                        f"downloaded connector package failed CRC validation: {bad_member}"
+                    )
+        except zipfile.BadZipFile as exc:
+            raise OSError("downloaded connector package is not a valid ZIP archive") from exc
         os.replace(temp, cache)
         return cache
     finally:

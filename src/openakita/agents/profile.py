@@ -716,24 +716,30 @@ class ProfileStore:
         return d
 
     def delete(self, profile_id: str) -> bool:
-        """删除 Profile。SYSTEM 类型禁止删除。同时清理 Profile 专属目录。"""
+        """Delete a custom profile without hiding data-removal failures.
+
+        Profile-owned data is removed first. If that fails, the profile remains
+        fully registered and visible so the operator can retry instead of
+        leaving an apparently deleted Agent with residual private data.
+        """
+        import shutil
+
         with self._lock:
             existing = self._cache.get(profile_id)
             if existing is None:
                 return False
             if existing.is_system:
                 raise PermissionError(f"Cannot delete SYSTEM profile: {profile_id}")
-            del self._cache[profile_id]
+
+            profile_dir = self.get_profile_dir(profile_id)
+            if profile_dir.is_dir():
+                shutil.rmtree(profile_dir)
+                logger.info(f"ProfileStore cleaned profile dir: {profile_dir}")
+
             fp = self._profiles_dir / f"{profile_id}.json"
             if fp.exists():
                 fp.unlink()
-
-        import shutil
-
-        profile_dir = self.get_profile_dir(profile_id)
-        if profile_dir.is_dir():
-            shutil.rmtree(profile_dir, ignore_errors=True)
-            logger.info(f"ProfileStore cleaned profile dir: {profile_dir}")
+            del self._cache[profile_id]
 
         logger.info(f"ProfileStore deleted: {profile_id}")
         return True
