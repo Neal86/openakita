@@ -111,17 +111,19 @@ def _is_local_ws(ws: WebSocket) -> bool:
     return False
 
 
-def _authenticate_ws(ws: WebSocket, config: WebAccessConfig) -> bool:
-    """Authenticate WebSocket connection via query param or local access."""
-    # Local connections are exempt — same logic as HTTP middleware:
-    # direct local connections (no X-Forwarded-For) bypass auth even with
-    # trust_proxy; proxy-forwarded ones must provide a valid token.
-    if _is_local_ws(ws):
-        import os
+def _is_trusted_local_ws(ws: WebSocket) -> bool:
+    """Return True only for a direct loopback WebSocket connection."""
+    return (
+        _is_local_ws(ws)
+        and not ws.headers.get("x-forwarded-for")
+        and not ws.headers.get("forwarded")
+    )
 
-        trust_proxy = os.environ.get("TRUST_PROXY", "").lower() in ("1", "true", "yes")
-        if not trust_proxy or not ws.headers.get("x-forwarded-for"):
-            return True
+
+def _authenticate_ws(ws: WebSocket, config: WebAccessConfig) -> bool:
+    """Authenticate WebSocket connection via query param or direct local access."""
+    if _is_trusted_local_ws(ws):
+        return True
 
     # Check token from query params
     token = ws.query_params.get("token", "")
@@ -139,7 +141,7 @@ async def ws_events(ws: WebSocket):
         await ws.close(code=4001, reason="Authentication required")
         return
 
-    is_local = _is_local_ws(ws)
+    is_local = _is_trusted_local_ws(ws)
     await manager.connect(ws, is_local=is_local)
     try:
         # Send initial connection confirmation

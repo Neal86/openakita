@@ -432,8 +432,7 @@ def is_trusted_local(request: Request) -> bool:
     """
     if not _is_local_request(request):
         return False
-    trust_proxy = os.environ.get("TRUST_PROXY", "").lower() in ("1", "true", "yes")
-    if trust_proxy and request.headers.get("x-forwarded-for"):
+    if request.headers.get("x-forwarded-for") or request.headers.get("forwarded"):
         return False
     return True
 
