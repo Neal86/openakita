@@ -70,6 +70,12 @@ class AgentExecutionConfig:
             self.hermes_instance_mode = HermesInstanceMode(str(self.hermes_instance_mode))
         if not isinstance(self.hermes_sub_agent_memory_mode, SubAgentMemoryMode):
             self.hermes_sub_agent_memory_mode = SubAgentMemoryMode(str(self.hermes_sub_agent_memory_mode))
+        # Older builds could persist a dedicated/shared Hermes id even after an
+        # Agent switched back to native execution.  Normalize that stale field
+        # on every read so legacy data cannot keep an otherwise-unused instance
+        # falsely "bound" and undeletable.
+        if self.execution_mode == ExecutionMode.NATIVE:
+            self.hermes_instance_id = None
         self.updated_at = _now()
 
     def to_dict(self) -> dict[str, Any]:
