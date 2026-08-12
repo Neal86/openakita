@@ -10,14 +10,16 @@ on:
       - src/openakita/hermes/**
       - src/openakita/windows_connector/**
       - src/openakita/api/routes/windows_connector.py
+      - src/openakita/api/routes/wechat_desktop.py
       - src/openakita/api/routes/execution_instances.py
+      - src/openakita/api/routes/llm_gateway.py
       - apps/setup-center/src/App.tsx
       - apps/setup-center/src/types.ts
       - apps/setup-center/src/components/Sidebar.tsx
       - apps/setup-center/src/components/WindowsConnectorPanel.tsx
       - apps/setup-center/src/views/ExecutionInstancesView.tsx
       - apps/setup-center/src/views/IMConfigView.tsx
-      - scripts/finalize_windows_agent_runtime_routing.py
+      - .github/actions/desktop-build-prepare/action.yml
       - .github/workflows/hermes-native-windows-release.yml
 
 permissions:
@@ -36,17 +38,17 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python for Hermes preinstall
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
-      - name: Apply final Windows device and Agent routing integration
+      - name: Verify committed Windows device and Agent routing integration
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/finalize_windows_agent_runtime_routing.py
           grep -F 'openExecutionPage("windows")' apps/setup-center/src/components/Sidebar.tsx
           grep -F '<WindowsConnectorPanel apiBaseUrl={apiBaseUrl} />' apps/setup-center/src/views/ExecutionInstancesView.tsx
           if grep -F 'WechatDesktopPanel' apps/setup-center/src/views/IMConfigView.tsx; then
@@ -63,8 +65,8 @@ jobs:
           python -m pip install "hermes-agent==${HERMES_AGENT_VERSION}"
           python - <<'PY'
           import importlib.metadata
-          from run_agent import AIAgent
           import os
+          from run_agent import AIAgent
           version = importlib.metadata.version("hermes-agent")
           expected = os.environ["HERMES_AGENT_VERSION"]
           assert version == expected, (version, expected)
@@ -174,9 +176,8 @@ jobs:
           embedded local Windows Connector runtime, remote Windows Connector transport,
           Windows device management UI, WeChat integration, and local app/browser discovery.
           Local apps do not require a separately installed Connector.
-          When an Agent has an authorized Windows Connector resource, that Agent-owned
-          capability is preferred over Hermes runtime-native computer control; Hermes
-          native computer control remains a fallback when Connector resources are unavailable.
+          Agent-owned Windows Connector capabilities take priority over Hermes-native
+          computer control; Hermes native computer control remains a fallback only.
           Docker is not required for the embedded Hermes runtime.
           "@ | Set-Content -Encoding UTF8 (Join-Path $root "README.txt")
 
@@ -215,38 +216,3 @@ jobs:
             gh release create $tag --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "OpenAkita Portable Windows x64" --notes "OpenAkita Windows portable build with embedded Hermes and Windows Connector runtime."
           }
           gh release upload $tag $file --repo "${{ github.repository }}" --clobber
-
-      - name: Record successful build run
-        if: success()
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p ci-results
-          cat > ci-results/hermes-native-windows-release.json <<JSON
-          {
-            "workflow": "OpenAkita Portable Windows Release",
-            "run_id": "${GITHUB_RUN_ID}",
-            "run_attempt": "${GITHUB_RUN_ATTEMPT}",
-            "head_sha": "${GITHUB_SHA}",
-            "hermes_agent_version": "${HERMES_AGENT_VERSION}",
-            "portable_artifact": "OpenAkita-Portable-Windows-x64",
-            "portable_release_file": "OpenAkita-Portable-Windows-x64.zip",
-            "native_runtime": true,
-            "windows_connector_integrated": true,
-            "embedded_local_windows_runtime": true,
-            "remote_windows_transport": true,
-            "windows_device_ui": true,
-            "agent_capability_precedence": true,
-            "docker_required": false,
-            "nsis_built": false,
-            "release_tag": "openakita-windows-latest",
-            "release_published": true,
-            "success": true
-          }
-          JSON
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add ci-results/hermes-native-windows-release.json
-          git diff --cached --quiet && exit 0
-          git commit -m "ci: record OpenAkita portable Windows release [skip ci]"
-          git push origin HEAD:${GITHUB_REF_NAME}
