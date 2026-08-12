@@ -26,15 +26,33 @@ def hermes_data_root() -> Path:
     return _project_data_root()
 
 
+def _migration_temp(target: Path, kind: str) -> Path:
+    return target.with_name(
+        f".{target.name}.{os.getpid()}.{time.time_ns()}.migration.{kind}"
+    )
+
+
 def _copy_file_atomic(source: Path, target: Path) -> None:
     """Copy one migration file without exposing a partially written target."""
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f".{target.name}.{os.getpid()}.{time.time_ns()}.migration.tmp")
+    tmp = _migration_temp(target, "tmp")
     try:
         shutil.copy2(source, tmp)
         os.replace(tmp, target)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def _copy_dir_atomic(source: Path, target: Path) -> None:
+    """Copy a directory completely before publishing it at the durable path."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _migration_temp(target, "dir")
+    try:
+        shutil.copytree(source, tmp)
+        os.replace(tmp, target)
+    finally:
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _migrate_legacy(name: str, target: Path) -> None:
@@ -43,7 +61,9 @@ def _migrate_legacy(name: str, target: Path) -> None:
     File-backed Hermes stores use ``.bak`` recovery. Migrate the backup beside
     the primary so a corrupt legacy primary remains recoverable after moving to
     a durable data root. If only the backup survived, seed the new primary from
-    that backup as well. The legacy source is never removed.
+    that backup as well. Directory-backed isolation state is staged in a sibling
+    directory and renamed only after the full copy succeeds. The legacy source
+    is never removed.
     """
     if target.exists():
         return
@@ -63,7 +83,7 @@ def _migrate_legacy(name: str, target: Path) -> None:
             return
         try:
             if legacy.is_dir():
-                shutil.copytree(legacy, target)
+                _copy_dir_atomic(legacy, target)
                 return
             target_backup = target.with_suffix(target.suffix + ".bak")
             if legacy.exists():
