@@ -15,6 +15,7 @@ import ipaddress
 import logging
 import os
 import secrets
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -96,8 +97,67 @@ def _verify_password(password: str, hash_hex: str, salt_hex: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Web Access config (data/web_access.json)
+# Web Access config (durable data root)
 # ---------------------------------------------------------------------------
+
+
+def resolve_web_access_data_dir() -> Path:
+    """Return the durable directory that owns ``web_access.json``.
+
+    ``OPENAKITA_DATA_DIR`` is authoritative for container/VPS deployments.
+    Otherwise reuse ``settings.data_dir`` when available, with the historical
+    ``project_root/data`` directory as fallback. If an explicit durable root
+    is newly introduced, copy the legacy authentication file once so upgrades
+    do not silently forget the user's password/JWT identity.
+    """
+    explicit = os.environ.get("OPENAKITA_DATA_DIR", "").strip()
+    legacy = Path.cwd() / "data"
+    if explicit:
+        target = Path(explicit).expanduser().resolve()
+        try:
+            from openakita.config import settings
+
+            legacy = (Path(settings.project_root) / "data").resolve()
+        except Exception:
+            legacy = legacy.resolve()
+    else:
+        try:
+            from openakita.config import settings
+
+            legacy = (Path(settings.project_root) / "data").resolve()
+            configured = getattr(settings, "data_dir", None)
+            target = Path(configured).expanduser() if configured else legacy
+            if not target.is_absolute():
+                target = Path(settings.project_root) / target
+            target = target.resolve()
+        except Exception:
+            target = legacy.resolve()
+
+    target.mkdir(parents=True, exist_ok=True)
+    target_file = target / "web_access.json"
+    legacy_file = legacy / "web_access.json"
+    if target != legacy and not target_file.exists() and legacy_file.exists():
+        migration_lock = FileLock(str(target_file) + ".migration.lock")
+        with migration_lock:
+            if not target_file.exists() and legacy_file.exists():
+                try:
+                    shutil.copy2(legacy_file, target_file)
+                    backup = legacy_file.with_suffix(legacy_file.suffix + ".bak")
+                    if backup.exists():
+                        shutil.copy2(backup, target_file.with_suffix(target_file.suffix + ".bak"))
+                    logger.info(
+                        "Migrated web access config from %s to durable root %s",
+                        legacy_file,
+                        target_file,
+                    )
+                except OSError as exc:
+                    logger.warning(
+                        "Failed to migrate web access config from %s to %s: %s",
+                        legacy_file,
+                        target_file,
+                        exc,
+                    )
+    return target
 
 
 class WebAccessConfig:

@@ -29,7 +29,11 @@ from fastapi.responses import JSONResponse
 
 import openakita._ensure_utf8  # noqa: F401  # Windows UTF-8 编码保护
 
-from .auth import WebAccessConfig, create_auth_middleware
+from .auth import (
+    WebAccessConfig,
+    create_auth_middleware,
+    resolve_web_access_data_dir,
+)
 from .middleware_setup_gate import create_setup_gate_middleware
 from .routes import (
     _orgs_v2_legacy_redirects,
@@ -775,12 +779,7 @@ def create_app(
     # Web access authentication — registered BEFORE CORS so that in Starlette's
     # middleware stack (last-added = outermost) CORS wraps auth, ensuring all
     # responses (including 401) carry proper CORS headers.
-    try:
-        from openakita.config import settings
-
-        data_dir = Path(settings.project_root) / "data"
-    except Exception:
-        data_dir = Path.cwd() / "data"
+    data_dir = resolve_web_access_data_dir()
     web_access_config = WebAccessConfig(data_dir)
     app.state.web_access_config = web_access_config
 

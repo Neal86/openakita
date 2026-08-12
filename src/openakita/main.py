@@ -322,19 +322,14 @@ def _setup_session_backfill(agent_or_master):
 
 
 def _web_password_already_set() -> bool:
-    """PR-L1: 检查 data/web_access.json 是否已经存了哈希密码。
-
-    用于 lan_mode 开启时的安全闸：只要本机已配置过密码，就允许 0.0.0.0；
-    否则拒绝启动，避免无密码裸奔。
-    """
+    """Return whether the durable web-access config contains a password hash."""
     try:
-        ws = settings.user_workspace_path
-        web_access = Path(ws) / "data" / "web_access.json"
-        if not web_access.exists():
-            return False
-        import json as _json
+        from .api.auth import resolve_web_access_data_dir
+        from .utils.atomic_io import read_json_safe
 
-        data = _json.loads(web_access.read_text(encoding="utf-8"))
+        data = read_json_safe(resolve_web_access_data_dir() / "web_access.json")
+        if not isinstance(data, dict):
+            return False
         return bool(data.get("password_hash") or data.get("hash"))
     except Exception:
         return False
