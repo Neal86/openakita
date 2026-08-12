@@ -14,8 +14,14 @@ def main() -> None:
     path = Path("src/openakita/api/auth.py")
     replace_exact(
         path,
+        '        "/api/logs/frontend",\n',
+        '        "/api/logs/frontend",\n        "/openapi.json",\n',
+        "exact OpenAPI exemption",
+    )
+    replace_exact(
+        path,
         'AUTH_EXEMPT_PREFIXES = ("/web/", "/web", "/ws/", "/docs", "/openapi.json", "/redoc", "/user-docs")\n',
-        'AUTH_EXEMPT_PREFIXES = ("/web", "/ws", "/docs", "/openapi.json", "/redoc", "/user-docs")\n',
+        'AUTH_EXEMPT_PREFIXES = ("/web", "/ws", "/docs", "/redoc", "/user-docs")\n',
         "auth exempt prefix constants",
     )
     replace_exact(
@@ -33,7 +39,7 @@ def main() -> None:
 
     test = Path("tests/api/test_auth_exemption_boundaries.py")
     test.write_text(
-        '''from openakita.api.auth import _is_auth_exempt\n\n\ndef test_static_auth_exemptions_require_path_boundary():\n    assert _is_auth_exempt("/web")\n    assert _is_auth_exempt("/web/assets/app.js")\n    assert _is_auth_exempt("/docs")\n    assert _is_auth_exempt("/docs/")\n    assert _is_auth_exempt("/user-docs/guide")\n    assert _is_auth_exempt("/openapi.json")\n\n    assert not _is_auth_exempt("/webhook")\n    assert not _is_auth_exempt("/web-admin")\n    assert not _is_auth_exempt("/docs-private")\n    assert not _is_auth_exempt("/redoc-admin")\n    assert not _is_auth_exempt("/openapi.json.bak")\n    assert not _is_auth_exempt("/user-docs-private")\n''',
+        '''from openakita.api.auth import _is_auth_exempt\n\n\ndef test_static_auth_exemptions_require_path_boundary():\n    assert _is_auth_exempt("/web")\n    assert _is_auth_exempt("/web/assets/app.js")\n    assert _is_auth_exempt("/docs")\n    assert _is_auth_exempt("/docs/")\n    assert _is_auth_exempt("/user-docs/guide")\n    assert _is_auth_exempt("/openapi.json")\n\n    assert not _is_auth_exempt("/webhook")\n    assert not _is_auth_exempt("/web-admin")\n    assert not _is_auth_exempt("/docs-private")\n    assert not _is_auth_exempt("/redoc-admin")\n    assert not _is_auth_exempt("/openapi.json.bak")\n    assert not _is_auth_exempt("/openapi.json/anything")\n    assert not _is_auth_exempt("/user-docs-private")\n''',
         "utf-8",
     )
 
