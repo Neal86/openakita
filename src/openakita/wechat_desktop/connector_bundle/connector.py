@@ -138,47 +138,114 @@ class DesktopDriver:
             pass
 
 
+async def _cancel_tasks(*tasks: asyncio.Task[Any]) -> None:
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def run() -> None:
     config = load_config()
-    driver = DesktopDriver()
+    driver = await asyncio.to_thread(DesktopDriver)
     computer = WindowsCommandExecutor()
+    computer_lock = asyncio.Lock()
     url = ws_url(str(config["oa_url"]), str(config["node_id"]), str(config["node_token"]))
     bot_configs: dict[str, dict[str, Any]] = {}
+
+    async def computer_resources() -> list[dict[str, Any]]:
+        async with computer_lock:
+            return await asyncio.to_thread(computer.resources)
+
+    async def computer_execute(payload: dict[str, Any]) -> dict[str, Any]:
+        async with computer_lock:
+            return await asyncio.to_thread(lambda: asyncio.run(computer.execute(payload)))
 
     try:
         while True:
             try:
-                async with websockets.connect(url, ping_interval=20, ping_timeout=20, max_size=8 * 1024 * 1024) as socket:
+                async with websockets.connect(
+                    url,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    max_size=8 * 1024 * 1024,
+                ) as socket:
                     logger.info("已连接 OpenAkita OA")
-                    accounts = driver.accounts()
-                    await socket.send(json.dumps({"event": "wechat.accounts.sync", "payload": {"accounts": accounts}}, ensure_ascii=False))
-                    groups, contacts = driver.conversations()
-                    await socket.send(json.dumps({"event": "wechat.conversations.sync", "payload": {"wechat_account_id": accounts[0]["id"], "groups": groups, "contacts": contacts}}, ensure_ascii=False))
-                    await socket.send(json.dumps({"event": "windows.resources.sync", "payload": {"resources": computer.resources()}}, ensure_ascii=False))
+                    accounts = await asyncio.to_thread(driver.accounts)
+                    await socket.send(
+                        json.dumps(
+                            {"event": "wechat.accounts.sync", "payload": {"accounts": accounts}},
+                            ensure_ascii=False,
+                        )
+                    )
+                    groups, contacts = await asyncio.to_thread(driver.conversations)
+                    await socket.send(
+                        json.dumps(
+                            {
+                                "event": "wechat.conversations.sync",
+                                "payload": {
+                                    "wechat_account_id": accounts[0]["id"],
+                                    "groups": groups,
+                                    "contacts": contacts,
+                                },
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+                    await socket.send(
+                        json.dumps(
+                            {
+                                "event": "windows.resources.sync",
+                                "payload": {"resources": await computer_resources()},
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
 
                     async def heartbeat() -> None:
                         while True:
                             await asyncio.sleep(20)
-                            await socket.send(json.dumps({"event": "node.heartbeat", "payload": {}}))
+                            await socket.send(
+                                json.dumps({"event": "node.heartbeat", "payload": {}})
+                            )
 
                     async def resource_poll() -> None:
                         previous = ""
                         while True:
                             await asyncio.sleep(8)
-                            resources = computer.resources()
+                            resources = await computer_resources()
                             signature = json.dumps(resources, ensure_ascii=False, sort_keys=True)
                             if signature != previous:
                                 previous = signature
-                                await socket.send(json.dumps({"event": "windows.resources.sync", "payload": {"resources": resources}}, ensure_ascii=False))
+                                await socket.send(
+                                    json.dumps(
+                                        {
+                                            "event": "windows.resources.sync",
+                                            "payload": {"resources": resources},
+                                        },
+                                        ensure_ascii=False,
+                                    )
+                                )
 
                     async def poll() -> None:
                         while True:
                             await asyncio.sleep(0.5)
-                            for payload in driver.poll_messages():
+                            for message_payload in driver.poll_messages():
                                 for bot_id, cfg in list(bot_configs.items()):
-                                    if str(cfg.get("wechat_account_id") or "") != payload["wechat_account_id"]:
+                                    if (
+                                        str(cfg.get("wechat_account_id") or "")
+                                        != message_payload["wechat_account_id"]
+                                    ):
                                         continue
-                                    await socket.send(json.dumps({"event": "wechat.message.received", "bot_id": bot_id, "payload": payload}, ensure_ascii=False))
+                                    await socket.send(
+                                        json.dumps(
+                                            {
+                                                "event": "wechat.message.received",
+                                                "bot_id": bot_id,
+                                                "payload": message_payload,
+                                            },
+                                            ensure_ascii=False,
+                                        )
+                                    )
 
                     heartbeat_task = asyncio.create_task(heartbeat())
                     resource_task = asyncio.create_task(resource_poll())
@@ -192,36 +259,99 @@ async def run() -> None:
                             if event == "windows.permissions.sync":
                                 computer.sync_grants(payload.get("grants") or [])
                             elif event == "windows.resources.refresh":
-                                await socket.send(json.dumps({"event": "windows.resources.sync", "payload": {"resources": computer.resources()}}, ensure_ascii=False))
+                                await socket.send(
+                                    json.dumps(
+                                        {
+                                            "event": "windows.resources.sync",
+                                            "payload": {"resources": await computer_resources()},
+                                        },
+                                        ensure_ascii=False,
+                                    )
+                                )
                             elif event == "windows.command":
                                 request_id = str(envelope.get("request_id") or "")
                                 try:
-                                    result = await computer.execute(dict(payload))
+                                    result = await computer_execute(dict(payload))
                                 except Exception as exc:
-                                    result = {"ok": False, "error": str(exc), "error_type": type(exc).__name__}
-                                await socket.send(json.dumps({"event": "windows.command.result", "request_id": request_id, "payload": result}, ensure_ascii=False))
+                                    result = {
+                                        "ok": False,
+                                        "error": str(exc),
+                                        "error_type": type(exc).__name__,
+                                    }
+                                await socket.send(
+                                    json.dumps(
+                                        {
+                                            "event": "windows.command.result",
+                                            "request_id": request_id,
+                                            "payload": result,
+                                        },
+                                        ensure_ascii=False,
+                                    )
+                                )
                             elif event == "config.sync":
                                 bot_configs[bot_id] = dict(payload)
-                                chats = set(payload.get("allowed_groups") or []) | set(payload.get("allowed_contacts") or [])
-                                driver.listen(sorted(chats))
-                                await socket.send(json.dumps({"event": "config.applied", "bot_id": bot_id, "payload": {"ok": True}}))
+                                chats = set(payload.get("allowed_groups") or []) | set(
+                                    payload.get("allowed_contacts") or []
+                                )
+                                await asyncio.to_thread(driver.listen, sorted(chats))
+                                await socket.send(
+                                    json.dumps(
+                                        {
+                                            "event": "config.applied",
+                                            "bot_id": bot_id,
+                                            "payload": {"ok": True},
+                                        }
+                                    )
+                                )
                             elif event == "wechat.message.send":
                                 request_id = str(envelope.get("request_id") or "")
-                                await socket.send(json.dumps({"event": "wechat.message.accepted", "request_id": request_id, "bot_id": bot_id, "payload": {}}))
+                                await socket.send(
+                                    json.dumps(
+                                        {
+                                            "event": "wechat.message.accepted",
+                                            "request_id": request_id,
+                                            "bot_id": bot_id,
+                                            "payload": {},
+                                        }
+                                    )
+                                )
                                 try:
-                                    driver.send_text(str(payload["chat_id"]), str(payload["text"]))
-                                    await socket.send(json.dumps({"event": "wechat.message.sent", "request_id": request_id, "bot_id": bot_id, "payload": {}}))
+                                    await asyncio.to_thread(
+                                        driver.send_text,
+                                        str(payload["chat_id"]),
+                                        str(payload["text"]),
+                                    )
+                                    await socket.send(
+                                        json.dumps(
+                                            {
+                                                "event": "wechat.message.sent",
+                                                "request_id": request_id,
+                                                "bot_id": bot_id,
+                                                "payload": {},
+                                            }
+                                        )
+                                    )
                                 except Exception as exc:
-                                    await socket.send(json.dumps({"event": "wechat.message.failed", "request_id": request_id, "bot_id": bot_id, "payload": {"detail": str(exc)}}, ensure_ascii=False))
+                                    await socket.send(
+                                        json.dumps(
+                                            {
+                                                "event": "wechat.message.failed",
+                                                "request_id": request_id,
+                                                "bot_id": bot_id,
+                                                "payload": {"detail": str(exc)},
+                                            },
+                                            ensure_ascii=False,
+                                        )
+                                    )
                     finally:
-                        heartbeat_task.cancel()
-                        resource_task.cancel()
-                        poll_task.cancel()
+                        await _cancel_tasks(heartbeat_task, resource_task, poll_task)
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 logger.exception("Connector 连接失败: %s", exc)
                 await asyncio.sleep(5)
     finally:
-        driver.close()
+        await asyncio.to_thread(driver.close)
 
 
 if __name__ == "__main__":
