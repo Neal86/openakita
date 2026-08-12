@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from openakita.wechat_desktop import wechat_desktop_manager
 from openakita.windows_connector import windows_connector_manager
 from openakita.windows_connector.manager import LOCAL_NODE_ID
+from openakita.windows_connector.preview import preview_focus_resource
 
 router = APIRouter(prefix="/api/windows-connector", tags=["Windows Connector"])
 RELEASE_FILENAME = "OpenAkita-Windows-Connector-Windows-x64.zip"
@@ -66,6 +67,11 @@ class ExecutePayload(BaseModel):
     timeout_seconds: int = Field(default=60, ge=1, le=300)
 
 
+class PreviewFocusPayload(BaseModel):
+    node_id: str
+    resource_id: str
+
+
 def _client_key(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
@@ -84,7 +90,11 @@ def _release_cache_path() -> Path:
 async def _pair_allowed(key: str) -> bool:
     now = time.monotonic()
     async with _pair_lock:
-        rows = [stamp for stamp in _pair_failures.get(key, []) if now - stamp < _PAIR_WINDOW_SECONDS]
+        rows = [
+            stamp
+            for stamp in _pair_failures.get(key, [])
+            if now - stamp < _PAIR_WINDOW_SECONDS
+        ]
         if rows:
             _pair_failures[key] = rows
         else:
@@ -95,7 +105,11 @@ async def _pair_allowed(key: str) -> bool:
 async def _record_pair_failure(key: str) -> None:
     now = time.monotonic()
     async with _pair_lock:
-        rows = [stamp for stamp in _pair_failures.get(key, []) if now - stamp < _PAIR_WINDOW_SECONDS]
+        rows = [
+            stamp
+            for stamp in _pair_failures.get(key, [])
+            if now - stamp < _PAIR_WINDOW_SECONDS
+        ]
         rows.append(now)
         _pair_failures[key] = rows
 
@@ -107,22 +121,31 @@ async def _clear_pair_failures(key: str) -> None:
 
 @router.post("/pairing-code")
 async def create_pairing_code(body: PairingCreatePayload) -> dict[str, Any]:
-    code = await wechat_desktop_manager.create_pairing_code(body.node_name, body.ttl_seconds)
+    code = await wechat_desktop_manager.create_pairing_code(
+        body.node_name, body.ttl_seconds
+    )
     return {"code": code, "expires_in": body.ttl_seconds}
 
 
 @router.post("/pairing-code/close")
 async def close_pairing_code(body: PairingClosePayload) -> dict[str, bool]:
-    return {"ok": True, "closed": await wechat_desktop_manager.cancel_pairing_code(body.code)}
+    return {
+        "ok": True,
+        "closed": await wechat_desktop_manager.cancel_pairing_code(body.code),
+    }
 
 
 @router.post("/pair")
-async def pair_connector(body: PairingConsumePayload, request: Request) -> dict[str, str]:
+async def pair_connector(
+    body: PairingConsumePayload, request: Request
+) -> dict[str, str]:
     key = _client_key(request)
     if not await _pair_allowed(key):
         raise HTTPException(status_code=429, detail="配对失败次数过多，请稍后再试")
     try:
-        node_id, node_token, node_name = await wechat_desktop_manager.consume_pairing_code(body.code)
+        node_id, node_token, node_name = await wechat_desktop_manager.consume_pairing_code(
+            body.code
+        )
     except ValueError as exc:
         await _record_pair_failure(key)
         raise HTTPException(status_code=400, detail="配对码无效或已过期") from exc
@@ -175,6 +198,43 @@ async def refresh_resources(node_id: str) -> dict[str, bool]:
     except ConnectionError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"ok": True}
+
+
+@router.post("/preview-focus")
+async def preview_focus(body: PreviewFocusPayload) -> dict[str, Any]:
+    """Focus a discovered target so the operator can verify it before granting it.
+
+    Preview focus is deliberately limited to foreground/tab activation. It
+    cannot click, type, navigate, launch or close anything, and it never creates
+    or changes an Agent permission grant.
+    """
+    resources = await windows_connector_manager.list_resources(body.node_id)
+    if not any(str(row.get("id") or "") == body.resource_id for row in resources):
+        raise HTTPException(status_code=404, detail="Windows 目标已离线，请重新扫描应用")
+
+    if body.node_id == LOCAL_NODE_ID:
+        try:
+            result = await asyncio.to_thread(
+                preview_focus_resource,
+                windows_connector_manager._local_executor,  # noqa: SLF001 - operator preview uses embedded executor
+                body.resource_id,
+            )
+        except (PermissionError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True, "result": result, "delivered": True}
+
+    try:
+        await wechat_desktop_manager.send_command(
+            body.node_id,
+            {
+                "version": 1,
+                "event": "windows.preview.focus",
+                "payload": {"resource_id": body.resource_id},
+            },
+        )
+    except ConnectionError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"ok": True, "delivered": True}
 
 
 @router.get("/grants")
@@ -237,10 +297,16 @@ def _local_release_path() -> Path | None:
 
 
 def _download_release_to_cache() -> Path:
-    url = os.environ.get("OPENAKITA_WINDOWS_CONNECTOR_DOWNLOAD_URL", DEFAULT_RELEASE_URL).strip()
+    url = os.environ.get(
+        "OPENAKITA_WINDOWS_CONNECTOR_DOWNLOAD_URL", DEFAULT_RELEASE_URL
+    ).strip()
     cache = _release_cache_path()
     cache.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix="windows-connector-", suffix=".zip", dir=str(cache.parent))
+    fd, temp_name = tempfile.mkstemp(
+        prefix="windows-connector-",
+        suffix=".zip",
+        dir=str(cache.parent),
+    )
     os.close(fd)
     temp = Path(temp_name)
     request = urllib.request.Request(
@@ -248,7 +314,9 @@ def _download_release_to_cache() -> Path:
         headers={"User-Agent": "OpenAkita-Windows-Connector-Downloader/1.0"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=60) as response, temp.open("wb") as out:  # noqa: S310
+        with urllib.request.urlopen(request, timeout=60) as response, temp.open(
+            "wb"
+        ) as out:  # noqa: S310
             shutil.copyfileobj(response, out, length=1024 * 1024)
         if temp.stat().st_size <= 0:
             raise OSError("downloaded connector package is empty")
