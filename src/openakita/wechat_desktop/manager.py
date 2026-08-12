@@ -4,17 +4,37 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
+import os
 import secrets
+import shutil
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from filelock import FileLock
+
+from openakita.utils.atomic_io import atomic_json_write, read_json_safe
+
 SendCallable = Callable[[dict[str, Any]], Awaitable[None]]
 InboundCallback = Callable[[dict[str, Any]], Awaitable[None]]
-STATE_PATH = Path("data/wechat_desktop/nodes.json")
+LEGACY_STATE_PATH = Path("data/wechat_desktop/nodes.json")
+
+
+def _default_state_path() -> Path:
+    explicit = os.environ.get("OPENAKITA_DATA_DIR", "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve() / "wechat_desktop" / "nodes.json"
+    try:
+        from openakita.config import settings
+
+        return Path(settings.data_dir).resolve() / "wechat_desktop" / "nodes.json"
+    except Exception:
+        return Path.home() / ".openakita" / "data" / "wechat_desktop" / "nodes.json"
+
+
+STATE_PATH = _default_state_path()
 
 
 @dataclass(slots=True)
@@ -66,60 +86,133 @@ class DeliveryReceipt:
 
 class WeChatDesktopManager:
     def __init__(self, state_path: Path = STATE_PATH) -> None:
-        self._state_path = state_path
+        self._state_path = Path(state_path)
+        self._file_lock = FileLock(str(self._state_path) + ".lock")
         self._nodes: dict[str, WeChatNode] = {}
         self._pairings: dict[str, PairingTicket] = {}
         self._bindings: dict[tuple[str, str], str] = {}
         self._callbacks: dict[str, InboundCallback] = {}
         self._receipts: dict[str, DeliveryReceipt] = {}
         self._lock = asyncio.Lock()
+        self._migrate_legacy_state()
         self._load_state()
+
+    def _migrate_legacy_state(self) -> None:
+        if (
+            self._state_path.exists()
+            or self._state_path.resolve() == LEGACY_STATE_PATH.resolve()
+            or not LEGACY_STATE_PATH.exists()
+        ):
+            return
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._file_lock:
+            if self._state_path.exists() or not LEGACY_STATE_PATH.exists():
+                return
+            try:
+                shutil.copy2(LEGACY_STATE_PATH, self._state_path)
+            except OSError:
+                pass
 
     @staticmethod
     def _hash(value: str) -> str:
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _conversation_map(
+        items: list[dict[str, Any]], kind: str
+    ) -> dict[str, WeChatConversation]:
+        result: dict[str, WeChatConversation] = {}
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id") or "").strip()
+            if not item_id:
+                continue
+            result[item_id] = WeChatConversation(
+                item_id,
+                str(item.get("name") or item.get("nickname") or item_id),
+                kind,
+            )
+        return result
+
     def _load_state(self) -> None:
-        if not self._state_path.exists():
+        with self._file_lock:
+            data = read_json_safe(self._state_path)
+        if not isinstance(data, dict):
             return
-        try:
-            data = json.loads(self._state_path.read_text("utf-8"))
-            for raw in data.get("nodes", []):
-                accounts: dict[str, WeChatAccount] = {}
-                for item in raw.get("accounts", []):
-                    groups = {g["id"]: WeChatConversation(g["id"], g.get("name", g["id"]), "group") for g in item.get("groups", []) if g.get("id")}
-                    contacts = {c["id"]: WeChatConversation(c["id"], c.get("name", c["id"]), "private") for c in item.get("contacts", []) if c.get("id")}
-                    account = WeChatAccount(
-                        id=str(item["id"]), nickname=str(item.get("nickname") or item["id"]),
-                        avatar_url=str(item.get("avatar_url") or ""),
-                        login_status="offline", groups=groups, contacts=contacts,
-                    )
-                    accounts[account.id] = account
-                node = WeChatNode(
-                    id=str(raw["id"]), name=str(raw.get("name") or raw["id"]),
-                    token_hash=str(raw.get("token_hash") or ""), status="offline",
-                    connector_version=str(raw.get("connector_version") or ""), accounts=accounts,
+
+        nodes: dict[str, WeChatNode] = {}
+        raw_nodes = data.get("nodes", [])
+        for raw in raw_nodes if isinstance(raw_nodes, list) else []:
+            if not isinstance(raw, dict):
+                continue
+            node_id = str(raw.get("id") or "").strip()
+            token_hash = str(raw.get("token_hash") or "").strip()
+            if not node_id or not token_hash:
+                continue
+            accounts: dict[str, WeChatAccount] = {}
+            raw_accounts = raw.get("accounts", [])
+            for item in raw_accounts if isinstance(raw_accounts, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                account_id = str(item.get("id") or "").strip()
+                if not account_id:
+                    continue
+                account = WeChatAccount(
+                    id=account_id,
+                    nickname=str(item.get("nickname") or account_id),
+                    avatar_url=str(item.get("avatar_url") or ""),
+                    login_status="offline",
+                    groups=self._conversation_map(item.get("groups") or [], "group"),
+                    contacts=self._conversation_map(item.get("contacts") or [], "private"),
                 )
-                self._nodes[node.id] = node
-            for item in data.get("bindings", []):
-                self._bindings[(str(item["node_id"]), str(item["account_id"]))] = str(item["bot_id"])
-        except Exception:
-            self._nodes = {}
-            self._bindings = {}
+                accounts[account.id] = account
+            nodes[node_id] = WeChatNode(
+                id=node_id,
+                name=str(raw.get("name") or node_id),
+                token_hash=token_hash,
+                status="offline",
+                connector_version=str(raw.get("connector_version") or ""),
+                accounts=accounts,
+            )
+
+        bindings: dict[tuple[str, str], str] = {}
+        raw_bindings = data.get("bindings", [])
+        for item in raw_bindings if isinstance(raw_bindings, list) else []:
+            if not isinstance(item, dict):
+                continue
+            node_id = str(item.get("node_id") or "").strip()
+            account_id = str(item.get("account_id") or "").strip()
+            bot_id = str(item.get("bot_id") or "").strip()
+            if node_id and account_id and bot_id:
+                bindings[(node_id, account_id)] = bot_id
+
+        self._nodes = nodes
+        self._bindings = bindings
 
     def _save_state_locked(self) -> None:
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
+            "version": 2,
             "nodes": [
                 {
-                    "id": node.id, "name": node.name, "token_hash": node.token_hash,
+                    "id": node.id,
+                    "name": node.name,
+                    "token_hash": node.token_hash,
                     "connector_version": node.connector_version,
                     "accounts": [
                         {
-                            "id": account.id, "nickname": account.nickname,
+                            "id": account.id,
+                            "nickname": account.nickname,
                             "avatar_url": account.avatar_url,
-                            "groups": [{"id": x.id, "name": x.name} for x in account.groups.values()],
-                            "contacts": [{"id": x.id, "name": x.name} for x in account.contacts.values()],
+                            "groups": [
+                                {"id": item.id, "name": item.name}
+                                for item in account.groups.values()
+                            ],
+                            "contacts": [
+                                {"id": item.id, "name": item.name}
+                                for item in account.contacts.values()
+                            ],
                         }
                         for account in node.accounts.values()
                     ],
@@ -127,19 +220,26 @@ class WeChatDesktopManager:
                 for node in self._nodes.values()
             ],
             "bindings": [
-                {"node_id": node_id, "account_id": account_id, "bot_id": bot_id}
+                {
+                    "node_id": node_id,
+                    "account_id": account_id,
+                    "bot_id": bot_id,
+                }
                 for (node_id, account_id), bot_id in self._bindings.items()
             ],
         }
-        tmp = self._state_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), "utf-8")
-        tmp.replace(self._state_path)
+        with self._file_lock:
+            atomic_json_write(self._state_path, payload)
 
-    async def create_pairing_code(self, node_name: str, ttl_seconds: int = 600) -> str:
+    async def create_pairing_code(
+        self, node_name: str, ttl_seconds: int = 600
+    ) -> str:
         code = "".join(str(secrets.randbelow(10)) for _ in range(8))
         async with self._lock:
             self._pairings[self._hash(code)] = PairingTicket(
-                code_hash=self._hash(code), expires_at=datetime.now(UTC) + timedelta(seconds=max(60, ttl_seconds)),
+                code_hash=self._hash(code),
+                expires_at=datetime.now(UTC)
+                + timedelta(seconds=max(60, ttl_seconds)),
                 node_name=node_name.strip() or "Windows WeChat Connector",
             )
         return code
@@ -153,12 +253,18 @@ class WeChatDesktopManager:
         digest = self._hash(code.strip())
         async with self._lock:
             ticket = self._pairings.pop(digest, None)
-            if ticket is None or ticket.used or ticket.expires_at < datetime.now(UTC):
+            if (
+                ticket is None
+                or ticket.used
+                or ticket.expires_at < datetime.now(UTC)
+            ):
                 raise ValueError("invalid or expired pairing code")
             ticket.used = True
             node_id = f"wechat-node-{secrets.token_hex(5)}"
             node_token = secrets.token_urlsafe(32)
-            self._nodes[node_id] = WeChatNode(node_id, ticket.node_name, self._hash(node_token))
+            self._nodes[node_id] = WeChatNode(
+                node_id, ticket.node_name, self._hash(node_token)
+            )
             self._save_state_locked()
             return node_id, node_token, ticket.node_name
 
@@ -166,7 +272,9 @@ class WeChatDesktopManager:
         async with self._lock:
             node = self._nodes.get(node_id)
             expected = node.token_hash if node else ""
-        return bool(expected) and secrets.compare_digest(expected, self._hash(node_token))
+        return bool(expected) and secrets.compare_digest(
+            expected, self._hash(node_token)
+        )
 
     async def revoke_node(self, node_id: str) -> bool:
         async with self._lock:
@@ -177,7 +285,14 @@ class WeChatDesktopManager:
             self._save_state_locked()
             return True
 
-    async def attach_node(self, node_id: str, *, node_token: str, send: SendCallable, connector_version: str = "") -> WeChatNode:
+    async def attach_node(
+        self,
+        node_id: str,
+        *,
+        node_token: str,
+        send: SendCallable,
+        connector_version: str = "",
+    ) -> WeChatNode:
         if not await self.authenticate_node(node_id, node_token):
             raise PermissionError("invalid connector credentials")
         async with self._lock:
@@ -204,28 +319,41 @@ class WeChatDesktopManager:
                 node.status = "online"
                 node.last_heartbeat_at = datetime.now(UTC)
 
-    async def sync_accounts(self, node_id: str, accounts: list[dict[str, Any]]) -> None:
+    async def sync_accounts(
+        self, node_id: str, accounts: list[dict[str, Any]]
+    ) -> None:
         async with self._lock:
             node = self._nodes.get(node_id)
             if node is None:
                 raise ValueError("unknown connector node")
             previous = node.accounts
             synced: dict[str, WeChatAccount] = {}
-            for item in accounts:
+            for item in accounts if isinstance(accounts, list) else []:
+                if not isinstance(item, dict):
+                    continue
                 account_id = str(item.get("id") or "").strip()
                 if not account_id:
                     continue
                 old = previous.get(account_id)
                 synced[account_id] = WeChatAccount(
-                    id=account_id, nickname=str(item.get("nickname") or account_id),
+                    id=account_id,
+                    nickname=str(item.get("nickname") or account_id),
                     avatar_url=str(item.get("avatar_url") or ""),
                     login_status=str(item.get("login_status") or "unknown"),
-                    groups=old.groups if old else {}, contacts=old.contacts if old else {},
+                    groups=old.groups if old else {},
+                    contacts=old.contacts if old else {},
                 )
             node.accounts = synced
             self._save_state_locked()
 
-    async def sync_conversations(self, node_id: str, account_id: str, *, groups: list[dict[str, Any]], contacts: list[dict[str, Any]]) -> None:
+    async def sync_conversations(
+        self,
+        node_id: str,
+        account_id: str,
+        *,
+        groups: list[dict[str, Any]],
+        contacts: list[dict[str, Any]],
+    ) -> None:
         async with self._lock:
             node = self._nodes.get(node_id)
             account = node.accounts.get(account_id) if node else None
@@ -234,13 +362,6 @@ class WeChatDesktopManager:
             account.groups = self._conversation_map(groups, "group")
             account.contacts = self._conversation_map(contacts, "private")
             self._save_state_locked()
-
-    @staticmethod
-    def _conversation_map(items: list[dict[str, Any]], kind: str) -> dict[str, WeChatConversation]:
-        return {
-            str(item["id"]): WeChatConversation(str(item["id"]), str(item.get("name") or item.get("nickname") or item["id"]), kind)
-            for item in items if item.get("id")
-        }
 
     async def list_nodes(self) -> list[dict[str, Any]]:
         async with self._lock:
@@ -254,36 +375,61 @@ class WeChatDesktopManager:
     @staticmethod
     def _node_dict(node: WeChatNode) -> dict[str, Any]:
         return {
-            "id": node.id, "name": node.name, "status": node.status,
+            "id": node.id,
+            "name": node.name,
+            "status": node.status,
             "connector_version": node.connector_version,
-            "last_heartbeat_at": node.last_heartbeat_at.isoformat() if node.last_heartbeat_at else None,
+            "last_heartbeat_at": (
+                node.last_heartbeat_at.isoformat() if node.last_heartbeat_at else None
+            ),
             "accounts": [
                 {
-                    "id": a.id, "nickname": a.nickname, "avatar_url": a.avatar_url,
-                    "login_status": a.login_status,
-                    "groups": [{"id": x.id, "name": x.name, "type": x.type} for x in a.groups.values()],
-                    "contacts": [{"id": x.id, "name": x.name, "type": x.type} for x in a.contacts.values()],
+                    "id": account.id,
+                    "nickname": account.nickname,
+                    "avatar_url": account.avatar_url,
+                    "login_status": account.login_status,
+                    "groups": [
+                        {"id": item.id, "name": item.name, "type": item.type}
+                        for item in account.groups.values()
+                    ],
+                    "contacts": [
+                        {"id": item.id, "name": item.name, "type": item.type}
+                        for item in account.contacts.values()
+                    ],
                 }
-                for a in node.accounts.values()
+                for account in node.accounts.values()
             ],
         }
 
-    async def bind_account(self, node_id: str, account_id: str, bot_id: str, enabled: bool) -> None:
+    async def bind_account(
+        self,
+        node_id: str,
+        account_id: str,
+        bot_id: str,
+        enabled: bool,
+    ) -> None:
         key = (node_id, account_id)
         async with self._lock:
             node = self._nodes.get(node_id)
             if enabled and (node is None or account_id not in node.accounts):
-                raise ValueError("selected Windows node or WeChat account does not exist")
+                raise ValueError(
+                    "selected Windows node or WeChat account does not exist"
+                )
             existing = self._bindings.get(key)
             if enabled and existing and existing != bot_id:
-                raise ValueError(f"WeChat account {account_id} on node {node_id} is already bound to bot {existing}")
+                raise ValueError(
+                    f"WeChat account {account_id} on node {node_id} "
+                    f"is already bound to bot {existing}"
+                )
             if enabled:
                 self._bindings[key] = bot_id
             elif existing == bot_id:
                 self._bindings.pop(key, None)
             self._save_state_locked()
 
-    async def register_bot_callback(self, bot_id: str, callback: InboundCallback) -> None:
+    async def register_bot_callback(
+        self, bot_id: str, callback: InboundCallback
+    ) -> None:
         async with self._lock:
             self._callbacks[bot_id] = callback
 
@@ -291,25 +437,45 @@ class WeChatDesktopManager:
         async with self._lock:
             self._callbacks.pop(bot_id, None)
 
-    async def dispatch_inbound(self, bot_id: str, payload: dict[str, Any]) -> None:
+    async def dispatch_inbound(
+        self, bot_id: str, payload: dict[str, Any]
+    ) -> None:
         async with self._lock:
             callback = self._callbacks.get(bot_id)
         if callback is None:
             raise ValueError(f"wechat desktop bot is not running: {bot_id}")
         await callback(payload)
 
-    async def update_delivery_receipt(self, *, request_id: str, bot_id: str, node_id: str, status: str, detail: str = "") -> None:
+    async def update_delivery_receipt(
+        self,
+        *,
+        request_id: str,
+        bot_id: str,
+        node_id: str,
+        status: str,
+        detail: str = "",
+    ) -> None:
         if not request_id:
             return
         async with self._lock:
-            self._receipts[request_id] = DeliveryReceipt(request_id, bot_id, node_id, status, detail)
+            self._receipts[request_id] = DeliveryReceipt(
+                request_id, bot_id, node_id, status, detail
+            )
 
-    async def get_delivery_receipt(self, request_id: str) -> dict[str, Any] | None:
+    async def get_delivery_receipt(
+        self, request_id: str
+    ) -> dict[str, Any] | None:
         async with self._lock:
-            r = self._receipts.get(request_id)
-            return None if r is None else {
-                "request_id": r.request_id, "bot_id": r.bot_id, "node_id": r.node_id,
-                "status": r.status, "detail": r.detail, "updated_at": r.updated_at.isoformat(),
+            receipt = self._receipts.get(request_id)
+            if receipt is None:
+                return None
+            return {
+                "request_id": receipt.request_id,
+                "bot_id": receipt.bot_id,
+                "node_id": receipt.node_id,
+                "status": receipt.status,
+                "detail": receipt.detail,
+                "updated_at": receipt.updated_at.isoformat(),
             }
 
     async def send_command(self, node_id: str, command: dict[str, Any]) -> None:
