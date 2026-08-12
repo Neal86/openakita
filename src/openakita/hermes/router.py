@@ -22,6 +22,7 @@ class HermesRouter:
         self.store = store or get_hermes_store()
         self._round_robin: dict[str, int] = defaultdict(int)
         self._lock = asyncio.Lock()
+        self._capacity: dict[str, tuple[int, asyncio.Semaphore]] = {}
 
     def candidates(
         self,
@@ -38,6 +39,22 @@ class HermesRouter:
         ]
         return sorted(nodes, key=lambda node: (node.priority, node.id))
 
+    def _semaphore(self, node: HermesNode) -> asyncio.Semaphore:
+        limit = max(1, int(node.max_concurrency or 1))
+        existing = self._capacity.get(node.id)
+        if existing is None or existing[0] != limit:
+            semaphore = asyncio.Semaphore(limit)
+            self._capacity[node.id] = (limit, semaphore)
+            return semaphore
+        return existing[1]
+
+    async def _set_inflight(self, node: HermesNode, delta: int) -> None:
+        async with self._lock:
+            latest = self.store.get(node.id) or node
+            latest.current_inflight = max(0, int(latest.current_inflight) + delta)
+            node.current_inflight = latest.current_inflight
+            self.store.upsert(latest)
+
     async def _ordered(
         self,
         nodes: list[HermesNode],
@@ -49,7 +66,13 @@ class HermesRouter:
         if policy in {HermesRoutingPolicy.PRIORITY, HermesRoutingPolicy.PRIMARY_BACKUP}:
             return nodes
         if policy == HermesRoutingPolicy.LEAST_CONNECTIONS:
-            return sorted(nodes, key=lambda n: (n.current_inflight / n.max_concurrency, n.priority))
+            return sorted(
+                nodes,
+                key=lambda n: (
+                    n.current_inflight / max(1, n.max_concurrency),
+                    n.priority,
+                ),
+            )
         if policy == HermesRoutingPolicy.WEIGHTED:
             pool = [node for node in nodes for _ in range(max(1, node.weight))]
             first = random.choice(pool)
@@ -97,8 +120,9 @@ class HermesRouter:
         )
         errors: list[str] = []
         for index, node in enumerate(ordered):
-            node.current_inflight += 1
-            self.store.upsert(node)
+            semaphore = self._semaphore(node)
+            await semaphore.acquire()
+            await self._set_inflight(node, 1)
             try:
                 response = await HermesClient(node).run(
                     message=message,
@@ -109,15 +133,17 @@ class HermesRouter:
                     metadata=metadata,
                 )
                 node.mark_success()
+                self.store.upsert(node)
                 return response
             except Exception as exc:
                 node.mark_failure(str(exc))
+                self.store.upsert(node)
                 errors.append(f"{node.id}: {exc}")
                 if not allow_failover or index == len(ordered) - 1:
                     break
             finally:
-                node.current_inflight = max(0, node.current_inflight - 1)
-                self.store.upsert(node)
+                await self._set_inflight(node, -1)
+                semaphore.release()
         raise HermesRoutingError("All Hermes nodes failed: " + "; ".join(errors))
 
     async def run_stream(
@@ -134,12 +160,7 @@ class HermesRouter:
         required_capabilities: set[str] | None = None,
         allow_failover: bool = True,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Stream native Hermes SSE events and fail over before output begins.
-
-        Once a node has emitted any user-visible event, switching nodes would
-        duplicate or corrupt the response. Therefore failover is only attempted
-        when the failing node produced no events.
-        """
+        """Stream native Hermes SSE events and fail over before output begins."""
         ordered = await self._select(
             agent_id=agent_id,
             node_ids=node_ids,
@@ -149,8 +170,9 @@ class HermesRouter:
         errors: list[str] = []
         for index, node in enumerate(ordered):
             emitted = False
-            node.current_inflight += 1
-            self.store.upsert(node)
+            semaphore = self._semaphore(node)
+            await semaphore.acquire()
+            await self._set_inflight(node, 1)
             try:
                 async for event in HermesClient(node).run_stream(
                     message=message,
@@ -165,15 +187,17 @@ class HermesRouter:
                         event.setdefault("node_id", node.id)
                     yield event
                 node.mark_success()
+                self.store.upsert(node)
                 return
             except Exception as exc:
                 node.mark_failure(str(exc))
+                self.store.upsert(node)
                 errors.append(f"{node.id}: {exc}")
                 if emitted or not allow_failover or index == len(ordered) - 1:
                     break
             finally:
-                node.current_inflight = max(0, node.current_inflight - 1)
-                self.store.upsert(node)
+                await self._set_inflight(node, -1)
+                semaphore.release()
         raise HermesRoutingError("All Hermes streaming nodes failed: " + "; ".join(errors))
 
     async def test_node(self, node_id: str) -> dict[str, Any]:
