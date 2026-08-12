@@ -5,6 +5,8 @@ import asyncio
 import json
 import os
 import shlex
+import shutil
+import sys
 from dataclasses import replace
 from typing import Any
 
@@ -167,4 +169,11 @@ class HermesContainerManager:
 
     @staticmethod
     def available() -> bool:
-        return os.path.exists("/var/run/docker.sock") or bool(os.environ.get("DOCKER_HOST"))
+        if os.path.exists("/var/run/docker.sock") or bool(os.environ.get("DOCKER_HOST")):
+            return True
+        if sys.platform in {"win32", "darwin"}:
+            # Docker Desktop normally uses a platform-managed context/named pipe
+            # and does not require DOCKER_HOST. Presence of the CLI is enough to
+            # try the real operation; daemon failures are then surfaced by _run.
+            return shutil.which("docker") is not None
+        return False
