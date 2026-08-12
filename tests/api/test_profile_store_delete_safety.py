@@ -3,6 +3,7 @@ import shutil
 import pytest
 
 from openakita.agents.profile import AgentProfile, AgentType, ProfileStore
+from openakita.api.routes.hub import _write_profile_identity_files
 
 
 def _store_with_profile(tmp_path):
@@ -67,3 +68,18 @@ def test_store_rejects_unsafe_profile_ids_before_any_write(tmp_path, profile_id)
     assert list((base_dir / "profiles").glob("*.json")) == []
     assert not (tmp_path / "escape.json").exists()
     assert not (tmp_path / "escape").exists()
+
+
+def test_imported_identity_write_is_atomic_and_keeps_backup(tmp_path):
+    store, profile, profile_dir, _ = _store_with_profile(tmp_path)
+    identity_file = profile_dir / "identity" / "SOUL.md"
+    identity_file.write_text("old identity", "utf-8")
+
+    _write_profile_identity_files(
+        store,
+        profile.id,
+        {"SOUL.md": "new identity"},
+    )
+
+    assert identity_file.read_text("utf-8") == "new identity"
+    assert identity_file.with_suffix(".md.bak").read_text("utf-8") == "old identity"

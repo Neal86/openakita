@@ -104,7 +104,15 @@ def _write_profile_identity_files(
             continue
         if not isinstance(content, str):
             continue
-        (identity_dir / filename).write_text(content, encoding="utf-8")
+        from openakita.utils.atomic_io import safe_write
+
+        safe_write(
+            identity_dir / filename,
+            content,
+            backup=True,
+            fsync=True,
+            allow_fallback=False,
+        )
 
 
 def _invalidate_imported_profile_runtime(request: Request, profile_id: str) -> None:
