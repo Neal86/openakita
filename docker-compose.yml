@@ -65,3 +65,4 @@ networks:
 volumes:
   hermes_shared_data:
     name: openakita_hermes_shared_data
+    external: true
