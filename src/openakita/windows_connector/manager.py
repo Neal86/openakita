@@ -4,10 +4,11 @@ import asyncio
 import json
 import os
 import secrets
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from openakita.wechat_desktop import wechat_desktop_manager
 
@@ -24,6 +25,41 @@ def _default_state_path() -> Path:
 STATE_PATH = _default_state_path()
 LEGACY_STATE_PATH = Path("data/windows_connector/state.json")
 LOCAL_NODE_ID = "local"
+
+
+@contextmanager
+def _exclusive_file_lock(path: Path) -> Iterator[None]:
+    """Cross-process advisory lock for connector state updates."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            if handle.tell() == 0:
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 @dataclass(slots=True)
@@ -50,6 +86,8 @@ class WindowsResource:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> WindowsResource:
+        if not isinstance(raw, dict):
+            raise ValueError("resource row must be an object")
         known = cls.__dataclass_fields__
         return cls(**{key: value for key, value in raw.items() if key in known})
 
@@ -70,9 +108,13 @@ class AgentResourceGrant:
     launch: bool = False
     close: bool = False
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    sync_state: str = "synced"
+    sync_error: str = ""
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> AgentResourceGrant:
+        if not isinstance(raw, dict):
+            raise ValueError("grant row must be an object")
         known = cls.__dataclass_fields__
         return cls(**{key: value for key, value in raw.items() if key in known})
 
@@ -119,6 +161,14 @@ class WindowsConnectorManager:
         self._migrate_legacy_state()
         self._load()
 
+    @property
+    def _backup_path(self) -> Path:
+        return self.path.with_suffix(self.path.suffix + ".bak")
+
+    @property
+    def _lock_path(self) -> Path:
+        return self.path.with_suffix(self.path.suffix + ".lock")
+
     def _migrate_legacy_state(self) -> None:
         if self.path.exists() or self.path == LEGACY_STATE_PATH or not LEGACY_STATE_PATH.exists():
             return
@@ -132,42 +182,81 @@ class WindowsConnectorManager:
     def local_available(self) -> bool:
         return os.name == "nt"
 
-    def _load(self) -> None:
-        if not self.path.exists():
-            return
-        try:
-            raw = json.loads(self.path.read_text("utf-8"))
-            for row in raw.get("grants", []):
+    @staticmethod
+    def _decode_state(path: Path) -> tuple[dict[str, AgentResourceGrant], dict[str, dict[str, WindowsResource]]]:
+        raw = json.loads(path.read_text("utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("state root must be an object")
+        grants: dict[str, AgentResourceGrant] = {}
+        for row in raw.get("grants", []) if isinstance(raw.get("grants", []), list) else []:
+            try:
                 grant = AgentResourceGrant.from_dict(row)
-                self._grants[grant.id] = grant
-            for node_id, rows in (raw.get("resources") or {}).items():
-                self._resources[str(node_id)] = {
-                    item.id: item for item in (WindowsResource.from_dict(row) for row in rows)
-                }
-        except Exception:
-            self._grants = {}
-            self._resources = {}
+                if grant.id and grant.node_id and grant.agent_profile_id and grant.resource_id:
+                    grants[grant.id] = grant
+            except (TypeError, ValueError):
+                continue
+        resources: dict[str, dict[str, WindowsResource]] = {}
+        resource_root = raw.get("resources") or {}
+        if isinstance(resource_root, dict):
+            for node_id, rows in resource_root.items():
+                if not isinstance(rows, list):
+                    continue
+                decoded: dict[str, WindowsResource] = {}
+                for row in rows:
+                    try:
+                        item = WindowsResource.from_dict(row)
+                        if item.id and item.fingerprint:
+                            decoded[item.id] = item
+                    except (TypeError, ValueError):
+                        continue
+                resources[str(node_id)] = decoded
+        return grants, resources
+
+    def _load(self) -> None:
+        for candidate in (self.path, self._backup_path):
+            if not candidate.exists():
+                continue
+            try:
+                grants, resources = self._decode_state(candidate)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            self._grants = grants
+            self._resources = resources
+            return
 
     def _save_locked(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "version": 3,
+            "version": 4,
             "grants": [asdict(grant) for grant in self._grants.values()],
             "resources": {
                 node_id: [asdict(resource) for resource in rows.values()]
                 for node_id, rows in self._resources.items()
             },
         }
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), "utf-8")
-        tmp.replace(self.path)
+        encoded = json.dumps(payload, ensure_ascii=False, indent=2)
+        with _exclusive_file_lock(self._lock_path):
+            if self.path.exists():
+                try:
+                    self._backup_path.write_bytes(self.path.read_bytes())
+                except OSError:
+                    pass
+            tmp = self.path.with_name(f".{self.path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+            try:
+                tmp.write_text(encoded, "utf-8")
+                os.replace(tmp, self.path)
+            finally:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     async def sync_resources(self, node_id: str, rows: list[dict[str, Any]]) -> None:
         synced: dict[str, WindowsResource] = {}
         for raw in rows:
             try:
                 item = WindowsResource.from_dict(raw)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             if not item.id or not item.fingerprint:
                 continue
@@ -178,7 +267,6 @@ class WindowsConnectorManager:
             self._save_locked()
 
     async def refresh_local_resources(self) -> list[dict[str, Any]]:
-        """Discover local apps without requiring a separately installed connector."""
         if not self.local_available:
             await self.sync_resources(LOCAL_NODE_ID, [])
             return []
@@ -240,6 +328,17 @@ class WindowsConnectorManager:
         raw["permissions"] = grant.permissions()
         return raw
 
+    async def _set_sync_state(self, node_id: str, state: str, error: str = "") -> None:
+        async with self._lock:
+            changed = False
+            for grant in self._grants.values():
+                if grant.node_id == node_id:
+                    grant.sync_state = state
+                    grant.sync_error = error
+                    changed = True
+            if changed:
+                self._save_locked()
+
     async def upsert_grant(self, raw: dict[str, Any]) -> dict[str, Any]:
         node_id = str(raw.get("node_id") or "").strip()
         agent_id = str(raw.get("agent_profile_id") or "").strip()
@@ -251,7 +350,6 @@ class WindowsConnectorManager:
             if resource is None:
                 raise ValueError("selected Windows resource is not currently available")
             stable_identity = resource.stable_identity or resource.fingerprint
-            explicit_id = str(raw.get("id") or "").strip()
             existing = next(
                 (
                     grant
@@ -262,10 +360,9 @@ class WindowsConnectorManager:
                 ),
                 None,
             )
-            grant_id = explicit_id or (existing.id if existing else f"grant-{secrets.token_hex(6)}")
             permissions = raw.get("permissions") or {}
             grant = AgentResourceGrant(
-                id=grant_id,
+                id=existing.id if existing else f"grant-{secrets.token_hex(12)}",
                 node_id=node_id,
                 agent_profile_id=agent_id,
                 resource_id=resource.id,
@@ -279,13 +376,14 @@ class WindowsConnectorManager:
                 launch=bool(permissions.get("launch", raw.get("launch", False))),
                 close=bool(permissions.get("close", raw.get("close", False))),
                 created_at=existing.created_at if existing else datetime.now(UTC).isoformat(),
+                sync_state="synced" if node_id == LOCAL_NODE_ID else "pending",
+                sync_error="",
             )
-            if existing and existing.id != grant_id:
-                self._grants.pop(existing.id, None)
             self._grants[grant.id] = grant
             self._save_locked()
         await self.push_permissions(node_id)
-        return self._grant_dict(grant)
+        async with self._lock:
+            return self._grant_dict(self._grants[grant.id])
 
     async def delete_grant(self, grant_id: str) -> bool:
         async with self._lock:
@@ -302,10 +400,13 @@ class WindowsConnectorManager:
             if grant is None:
                 raise KeyError(grant_id)
             grant.remark = remark.strip()
+            if grant.node_id != LOCAL_NODE_ID:
+                grant.sync_state = "pending"
+                grant.sync_error = ""
             self._save_locked()
-            raw = self._grant_dict(grant)
         await self.push_permissions(grant.node_id)
-        return raw
+        async with self._lock:
+            return self._grant_dict(self._grants[grant_id])
 
     async def permission_snapshot(self, node_id: str) -> list[dict[str, Any]]:
         async with self._lock:
@@ -315,18 +416,22 @@ class WindowsConnectorManager:
                 if grant.node_id == node_id
             ]
 
-    async def push_permissions(self, node_id: str) -> None:
+    async def push_permissions(self, node_id: str) -> bool:
         snapshot = await self.permission_snapshot(node_id)
         if node_id == LOCAL_NODE_ID:
             self._local_executor.sync_grants(snapshot)
-            return
+            await self._set_sync_state(node_id, "synced")
+            return True
         try:
             await wechat_desktop_manager.send_command(
                 node_id,
                 {"version": 1, "event": "windows.permissions.sync", "payload": {"grants": snapshot}},
             )
-        except ConnectionError:
-            pass
+        except ConnectionError as exc:
+            await self._set_sync_state(node_id, "pending", str(exc))
+            return False
+        await self._set_sync_state(node_id, "synced")
+        return True
 
     async def commands_for_attach(self, node_id: str) -> list[dict[str, Any]]:
         if node_id == LOCAL_NODE_ID:
