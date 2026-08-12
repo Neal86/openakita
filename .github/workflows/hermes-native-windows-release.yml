@@ -47,9 +47,12 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/finalize_windows_agent_runtime_routing.py
-          grep -F '"windows_devices"' apps/setup-center/src/types.ts
-          grep -F 'view === "windows_devices"' apps/setup-center/src/App.tsx
-          grep -F 'Windows 设备' apps/setup-center/src/components/Sidebar.tsx
+          grep -F 'openExecutionPage("windows")' apps/setup-center/src/components/Sidebar.tsx
+          grep -F '<WindowsConnectorPanel apiBaseUrl={apiBaseUrl} />' apps/setup-center/src/views/ExecutionInstancesView.tsx
+          if grep -F 'WechatDesktopPanel' apps/setup-center/src/views/IMConfigView.tsx; then
+            echo 'Old remote Connector UI is still mounted in IM config'
+            exit 1
+          fi
           grep -F 'Windows Connector capabilities have priority' src/openakita/hermes/capability_bridge.py
 
       - name: Install pinned Hermes Agent runtime
