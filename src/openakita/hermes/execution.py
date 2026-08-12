@@ -149,7 +149,10 @@ class _JsonStore:
                 continue
             try:
                 rows.append(self.factory(**item))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, AttributeError, OverflowError):
+                # Persisted state is user-/version-mutable.  One malformed
+                # record must not make every otherwise-valid execution or
+                # instance record disappear from the API.
                 continue
         return rows
 
