@@ -267,7 +267,7 @@ export function IMView({
           <ToggleGroup
             type="single"
             value={activeTab}
-            onValueChange={(v) => { if (v) setActiveTab(v as "messages" | "groupPolicy" | "windowsApps"); }}
+            onValueChange={(v) => { if (v) setActiveTab(v as "messages" | "groupPolicy" | "windowsApps" | "windowsApps"); }}
             variant="outline"
             className="bg-background shadow-sm"
           >
