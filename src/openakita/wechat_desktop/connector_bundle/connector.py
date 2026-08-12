@@ -231,6 +231,10 @@ async def run() -> None:
                     max_size=8 * 1024 * 1024,
                 ) as socket:
                     logger.info("已连接 OpenAkita OA")
+                    # Each WebSocket attach receives the authoritative active Bot
+                    # configuration from OA. Drop stale configs from the previous
+                    # connection before applying that snapshot.
+                    bot_configs.clear()
                     accounts = await driver_call(driver.accounts)
                     await socket.send(
                         json.dumps(
@@ -383,6 +387,17 @@ async def run() -> None:
                                             "event": "config.applied",
                                             "bot_id": bot_id,
                                             "payload": {"ok": True},
+                                        }
+                                    )
+                                )
+                            elif event == "config.remove":
+                                bot_configs.pop(bot_id, None)
+                                await socket.send(
+                                    json.dumps(
+                                        {
+                                            "event": "config.applied",
+                                            "bot_id": bot_id,
+                                            "payload": {"ok": True, "removed": True},
                                         }
                                     )
                                 )

@@ -119,12 +119,33 @@ class WeChatDesktopAdapter(ChannelAdapter):
 
     async def stop(self) -> None:
         self._running = False
-        for task in self._merge_tasks.values():
+        tasks = list(self._merge_tasks.values())
+        for task in tasks:
             task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         self._merge_tasks.clear()
         self._pending.clear()
+        self._last_send.clear()
+        self._send_locks.clear()
+        try:
+            await wechat_desktop_manager.send_command(
+                self.node_id,
+                {
+                    "version": 1,
+                    "event": "config.remove",
+                    "bot_id": self.bot_id,
+                    "payload": {},
+                },
+            )
+        except ConnectionError:
+            # Reconnect starts from an empty connector-side config snapshot, so
+            # an offline node cannot preserve this stale Bot indefinitely.
+            pass
         await wechat_desktop_manager.unregister_bot_callback(self.bot_id)
-        await wechat_desktop_manager.bind_account(self.node_id, self.wechat_account_id, self.bot_id, False)
+        await wechat_desktop_manager.bind_account(
+            self.node_id, self.wechat_account_id, self.bot_id, False
+        )
 
     def _accept_payload(self, payload: dict[str, Any]) -> tuple[str, str, str] | None:
         if not self._running or not self.auto_reply or self.human_takeover:
