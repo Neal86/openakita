@@ -6,16 +6,26 @@ on:
     paths:
       - ".github/workflows/hermes-final-validation.yml"
       - "src/openakita/hermes/**"
+      - "src/openakita/api/auth.py"
       - "src/openakita/api/routes/hermes*.py"
       - "src/openakita/api/routes/llm_gateway.py"
+      - "src/openakita/api/routes/websocket.py"
       - "src/openakita/api/server.py"
+      - "src/openakita/utils/atomic_io.py"
+      - "src/openakita/core/_tool_executor_legacy.py"
+      - "src/openakita/agent/tools.py"
       - "tests/hermes/**"
+      - "tests/api/**"
+      - "tests/agent/**"
+      - "tests/llm/**"
+      - "tests/e2e/**"
+      - "tests/quality/**"
   workflow_dispatch:
 
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -28,9 +38,15 @@ jobs:
           pip install -e ".[dev]"
           pip install -e ./openakita-plugin-sdk
       - name: Ruff
-        run: ruff check src/
+        run: ruff check src/ tests/hermes tests/api tests/agent tests/llm
+      - name: Mypy
+        run: mypy src/
       - name: Hermes tests
         run: pytest -q tests/hermes
+      - name: Persistence and auth regressions
+        run: pytest -q tests/api/test_web_access_persistence.py tests/api/test_proxy_local_auth.py tests/agent/test_profile_reference_integrity.py
+      - name: Parallel tool execution
+        run: pytest -q tests/llm/unit/test_tool_parallel_execution.py
       - name: L0 smoke
         run: pytest -q tests/smoke
       - name: L1 unit
@@ -39,13 +55,21 @@ jobs:
         run: pytest -q tests/component
       - name: L3 integration
         run: pytest -q tests/integration
+      - name: L4 E2E replay
+        env:
+          LLM_TEST_MODE: replay
+        run: pytest -q tests/e2e
+      - name: L5 quality
+        env:
+          LLM_TEST_MODE: replay
+        run: pytest -q tests/quality
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: apps/setup-center/package-lock.json
-      - name: Setup Center build
+      - name: Setup Center lint and build
         working-directory: apps/setup-center
-        run: npm ci && npm run build
+        run: npm ci && npm run lint --if-present && npm run build
       - name: Compose validation
         run: docker compose -f deploy/hermes/docker-compose.example.yml config >/dev/null
