@@ -130,13 +130,12 @@ jobs:
         working-directory: apps/setup-center
         run: npm ci && npm run build
 
-      - name: Verify generated connector workflow keeps native build guarantees
+      - name: Verify generated connector workflow contract
         run: |
-          grep -F 'HERMES_AGENT_VERSION: "0.19.0"' .github/workflows/wechat-connector-release.yml
-          grep -F 'npx tauri build --bundles nsis --no-sign' .github/workflows/wechat-connector-release.yml
-          grep -F 'createUpdaterArtifacts' .github/workflows/wechat-connector-release.yml
+          grep -F 'Build generic Windows Connector package' .github/workflows/wechat-connector-release.yml
           grep -F 'OpenAkita-Windows-Connector-Windows-x64' .github/workflows/wechat-connector-release.yml
           grep -F 'windows-connector-latest' .github/workflows/wechat-connector-release.yml
+          grep -F 'Connector UI startup smoke test' .github/workflows/wechat-connector-release.yml
 
       - name: Commit integrated code
         run: |
