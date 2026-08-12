@@ -30,8 +30,8 @@ def main() -> None:
         "server auth imports",
     )
     old_server = '''    try:\n        from openakita.config import settings\n\n        data_dir = Path(settings.project_root) / "data"\n    except Exception:\n        data_dir = Path.cwd() / "data"\n    web_access_config = WebAccessConfig(data_dir)\n'''
-    new_server = '''    web_access_config = WebAccessConfig(resolve_web_access_data_dir())\n'''
-    replace_exact(server, old_server, new_server, "server WebAccessConfig root")
+    new_server = '''    data_dir = resolve_web_access_data_dir()\n    web_access_config = WebAccessConfig(data_dir)\n'''
+    replace_exact(server, old_server, new_server, "server durable data root")
 
     main_path = Path("src/openakita/main.py")
     old_main = '''def _web_password_already_set() -> bool:\n    """PR-L1: 检查 data/web_access.json 是否已经存了哈希密码。\n\n    用于 lan_mode 开启时的安全闸：只要本机已配置过密码，就允许 0.0.0.0；\n    否则拒绝启动，避免无密码裸奔。\n    """\n    try:\n        ws = settings.user_workspace_path\n        web_access = Path(ws) / "data" / "web_access.json"\n        if not web_access.exists():\n            return False\n        import json as _json\n\n        data = _json.loads(web_access.read_text(encoding="utf-8"))\n        return bool(data.get("password_hash") or data.get("hash"))\n    except Exception:\n        return False\n'''
