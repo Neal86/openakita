@@ -43,6 +43,7 @@ def test_execution_store_skips_malformed_rows(tmp_path: Path):
                 "agents": [
                     {"profile_id": "good", "execution_mode": "native"},
                     {"profile_id": "bad", "execution_mode": "invalid"},
+                    {"profile_id": 123, "execution_mode": "native"},
                     "not-an-object",
                 ]
             }
@@ -51,6 +52,28 @@ def test_execution_store_skips_malformed_rows(tmp_path: Path):
     )
     rows = AgentExecutionStore(path).list()
     assert [row.profile_id for row in rows] == ["good"]
+
+
+def test_instance_store_skips_bad_numeric_fields(tmp_path: Path):
+    path = tmp_path / "instances.json"
+    path.write_text(
+        json.dumps(
+            {
+                "instances": [
+                    {"id": "good", "name": "Good", "mode": "shared"},
+                    {
+                        "id": "bad",
+                        "name": "Bad",
+                        "mode": "shared",
+                        "max_concurrency": "not-a-number",
+                    },
+                ]
+            }
+        ),
+        "utf-8",
+    )
+    rows = HermesInstanceStore(path).list()
+    assert [row.id for row in rows] == ["good"]
 
 
 def test_instances_roundtrip(tmp_path: Path):
