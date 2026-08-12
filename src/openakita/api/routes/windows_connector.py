@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -10,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from openakita.wechat_desktop import wechat_desktop_manager
@@ -27,6 +29,7 @@ _PAIR_WINDOW_SECONDS = 300
 _PAIR_MAX_FAILURES = 10
 _pair_failures: dict[str, list[float]] = defaultdict(list)
 _pair_lock = asyncio.Lock()
+_download_lock = asyncio.Lock()
 
 
 class PairingCreatePayload(BaseModel):
@@ -43,7 +46,6 @@ class PairingClosePayload(BaseModel):
 
 
 class GrantPayload(BaseModel):
-    id: str | None = None
     node_id: str
     agent_profile_id: str
     resource_id: str
@@ -66,6 +68,17 @@ class ExecutePayload(BaseModel):
 
 def _client_key(request: Request) -> str:
     return request.client.host if request.client else "unknown"
+
+
+def _data_dir() -> Path:
+    configured = os.environ.get("OPENAKITA_DATA_DIR", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return Path.home() / ".openakita" / "data"
+
+
+def _release_cache_path() -> Path:
+    return _data_dir() / "releases" / RELEASE_FILENAME
 
 
 async def _pair_allowed(key: str) -> bool:
@@ -118,8 +131,9 @@ async def pair_connector(body: PairingConsumePayload, request: Request) -> dict[
 
 
 @router.get("/nodes")
-async def list_nodes() -> dict[str, Any]:
-    local = await windows_connector_manager.local_node(refresh=True)
+async def list_nodes(refresh_local: bool = False) -> dict[str, Any]:
+    """Return cached state by default; discovery is explicit to keep polling cheap."""
+    local = await windows_connector_manager.local_node(refresh=refresh_local)
     remote_nodes = await wechat_desktop_manager.list_nodes()
     nodes = [local]
     for node in remote_nodes:
@@ -134,9 +148,13 @@ async def list_nodes() -> dict[str, Any]:
 
 
 @router.get("/nodes/{node_id}/resources")
-async def list_resources(node_id: str) -> dict[str, Any]:
+async def list_resources(node_id: str, refresh: bool = False) -> dict[str, Any]:
     if node_id == LOCAL_NODE_ID:
-        resources = await windows_connector_manager.refresh_local_resources()
+        resources = (
+            await windows_connector_manager.refresh_local_resources()
+            if refresh
+            else await windows_connector_manager.list_resources(LOCAL_NODE_ID)
+        )
         return {"resources": resources}
     node = await wechat_desktop_manager.get_node(node_id)
     if node is None:
@@ -167,7 +185,7 @@ async def list_grants(node_id: str | None = None) -> dict[str, Any]:
 @router.post("/grants")
 async def save_grant(body: GrantPayload) -> dict[str, Any]:
     try:
-        grant = await windows_connector_manager.upsert_grant(body.model_dump(exclude_none=True))
+        grant = await windows_connector_manager.upsert_grant(body.model_dump())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"grant": grant}
@@ -204,50 +222,62 @@ async def execute(body: ExecutePayload) -> dict[str, Any]:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ConnectionError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except TimeoutError as exc:
+    except (TimeoutError, asyncio.TimeoutError) as exc:
         raise HTTPException(status_code=504, detail="Windows Connector 命令超时") from exc
 
 
 def _local_release_path() -> Path | None:
     configured = os.environ.get("OPENAKITA_WINDOWS_CONNECTOR_PACKAGE", "").strip()
     candidates = [
-        Path(configured) if configured else None,
-        Path("data/releases") / RELEASE_FILENAME,
+        Path(configured).expanduser() if configured else None,
+        _release_cache_path(),
         Path(__file__).resolve().parents[4] / "dist" / RELEASE_FILENAME,
     ]
     return next((path for path in candidates if path and path.is_file()), None)
 
 
-def _download_release_bytes() -> bytes:
+def _download_release_to_cache() -> Path:
     url = os.environ.get("OPENAKITA_WINDOWS_CONNECTOR_DOWNLOAD_URL", DEFAULT_RELEASE_URL).strip()
-    request = urllib.request.Request(url, headers={"User-Agent": "OpenAkita-Windows-Connector-Downloader/1.0"})
-    with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310 - admin-configured release URL
-        return response.read()
+    cache = _release_cache_path()
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix="windows-connector-", suffix=".zip", dir=str(cache.parent))
+    os.close(fd)
+    temp = Path(temp_name)
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "OpenAkita-Windows-Connector-Downloader/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response, temp.open("wb") as out:  # noqa: S310
+            shutil.copyfileobj(response, out, length=1024 * 1024)
+        if temp.stat().st_size <= 0:
+            raise OSError("downloaded connector package is empty")
+        os.replace(temp, cache)
+        return cache
+    finally:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 @router.get("/connector/download", response_model=None)
-async def download_connector() -> FileResponse | StreamingResponse:
+async def download_connector() -> FileResponse:
     local = _local_release_path()
-    if local is not None:
-        return FileResponse(local, media_type="application/zip", filename=RELEASE_FILENAME, headers={"Cache-Control": "no-store"})
-    try:
-        payload = await asyncio.to_thread(_download_release_bytes)
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="Windows Connector 发布包尚未生成或暂时无法下载") from exc
-    try:
-        cache = Path("data/releases") / RELEASE_FILENAME
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        tmp = cache.with_suffix(".tmp")
-        tmp.write_bytes(payload)
-        tmp.replace(cache)
-    except OSError:
-        pass
-    return StreamingResponse(
-        iter([payload]),
+    if local is None:
+        async with _download_lock:
+            local = _local_release_path()
+            if local is None:
+                try:
+                    local = await asyncio.to_thread(_download_release_to_cache)
+                except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Windows Connector 发布包尚未生成或暂时无法下载",
+                    ) from exc
+    return FileResponse(
+        local,
         media_type="application/zip",
-        headers={
-            "Content-Disposition": f'attachment; filename="{RELEASE_FILENAME}"',
-            "Cache-Control": "no-store",
-            "Content-Length": str(len(payload)),
-        },
+        filename=RELEASE_FILENAME,
+        headers={"Cache-Control": "no-store"},
     )
