@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 import urllib.error
 import urllib.request
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -23,6 +25,10 @@ DEFAULT_RELEASE_URL = (
     "https://github.com/Neal86/openakita/releases/download/"
     f"wechat-connector-latest/{RELEASE_FILENAME}"
 )
+_PAIR_WINDOW_SECONDS = 300
+_PAIR_MAX_FAILURES = 10
+_pair_failures: dict[str, list[float]] = defaultdict(list)
+_pair_lock = asyncio.Lock()
 
 
 class PairingCreateRequest(BaseModel):
@@ -36,6 +42,34 @@ class PairingConsumeRequest(BaseModel):
 
 class PairingCloseRequest(BaseModel):
     code: str = Field(min_length=6, max_length=20)
+
+
+def _client_key(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+async def _pair_allowed(key: str) -> bool:
+    now = time.monotonic()
+    async with _pair_lock:
+        rows = [stamp for stamp in _pair_failures.get(key, []) if now - stamp < _PAIR_WINDOW_SECONDS]
+        if rows:
+            _pair_failures[key] = rows
+        else:
+            _pair_failures.pop(key, None)
+        return len(rows) < _PAIR_MAX_FAILURES
+
+
+async def _record_pair_failure(key: str) -> None:
+    now = time.monotonic()
+    async with _pair_lock:
+        rows = [stamp for stamp in _pair_failures.get(key, []) if now - stamp < _PAIR_WINDOW_SECONDS]
+        rows.append(now)
+        _pair_failures[key] = rows
+
+
+async def _clear_pair_failures(key: str) -> None:
+    async with _pair_lock:
+        _pair_failures.pop(key, None)
 
 
 @router.get("/nodes")
@@ -70,11 +104,16 @@ async def close_pairing_code(body: PairingCloseRequest) -> dict[str, bool]:
 
 
 @router.post("/pair")
-async def pair_connector(body: PairingConsumeRequest) -> dict[str, str]:
+async def pair_connector(body: PairingConsumeRequest, request: Request) -> dict[str, str]:
+    key = _client_key(request)
+    if not await _pair_allowed(key):
+        raise HTTPException(status_code=429, detail="配对失败次数过多，请稍后再试")
     try:
         node_id, node_token, node_name = await wechat_desktop_manager.consume_pairing_code(body.code)
     except ValueError as exc:
+        await _record_pair_failure(key)
         raise HTTPException(status_code=400, detail="配对码无效或已过期") from exc
+    await _clear_pair_failures(key)
     return {"node_id": node_id, "node_token": node_token, "node_name": node_name}
 
 
@@ -117,10 +156,6 @@ async def download_connector() -> FileResponse | StreamingResponse:
         payload = await asyncio.to_thread(_download_release_bytes)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise HTTPException(status_code=503, detail="Windows Connector 发布包尚未生成或暂时无法下载") from exc
-
-    # Cache the validated remote package under persistent /app/data so future
-    # downloads do not depend on GitHub availability. Cache failure must not
-    # block the current successful download.
     try:
         cache_path = Path("data/releases") / RELEASE_FILENAME
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -227,7 +262,7 @@ async def connector_websocket(websocket: WebSocket) -> None:
             elif event == "windows.command.result":
                 request_id = str(envelope.get("request_id") or payload.get("request_id") or "")
                 if request_id:
-                    await windows_connector_manager.handle_result(request_id, payload)
+                    await windows_connector_manager.handle_result(node_id, request_id, payload)
             elif event == "wechat.accounts.sync":
                 await wechat_desktop_manager.sync_accounts(node_id, payload.get("accounts") or [])
             elif event == "wechat.conversations.sync":
