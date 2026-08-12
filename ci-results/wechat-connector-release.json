@@ -1,8 +1,8 @@
 {
   "workflow": "WeChat Connector Windows release",
-  "run_id": "31544653260",
+  "run_id": "31561840749",
   "run_attempt": "1",
-  "head_sha": "8a0df2e933a95093ee614a6e09c10e902444f801",
+  "head_sha": "48f3b1f3cccd6be67338bae1e95078da16895eef",
   "event": "push",
   "connector_checks": "success",
   "connector_install": "success",
@@ -11,12 +11,12 @@
   "connector_ruff_report": "All checks passed!\n",
   "connector_mypy": "success",
   "connector_frontend": "success",
-  "windows_release": "success",
+  "windows_release": "failure",
   "native_desktop_release": "success",
-  "hermes_final": "success",
-  "publish_stable_release": "success",
+  "hermes_final": "skipped",
+  "publish_stable_release": "skipped",
   "hermes_agent_version": "0.19.0",
   "native_runtime": true,
   "docker_required_for_windows_desktop": false,
-  "success": true
+  "success": false
 }
