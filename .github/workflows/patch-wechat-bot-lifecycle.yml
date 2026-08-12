@@ -1,0 +1,41 @@
+name: One-shot WeChat bot lifecycle cleanup
+
+on:
+  push:
+    branches:
+      - feature/hermes-multi-agent
+    paths:
+      - scripts/patch_wechat_bot_lifecycle.py
+      - .github/workflows/patch-wechat-bot-lifecycle.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feature/hermes-multi-agent
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Apply exact patch
+        run: python scripts/patch_wechat_bot_lifecycle.py
+      - name: Verify
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install -e ./openakita-plugin-sdk
+          ruff check src/openakita/channels/adapters/wechat_desktop.py src/openakita/wechat_desktop/connector_bundle/connector.py tests/wechat_desktop/test_bot_lifecycle_cleanup.py
+          pytest -q tests/wechat_desktop/test_bot_lifecycle_cleanup.py tests/wechat_desktop
+          git diff --check
+      - name: Commit patch
+        run: |
+          git config user.name "openakita-maintenance-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/openakita/channels/adapters/wechat_desktop.py src/openakita/wechat_desktop/connector_bundle/connector.py tests/wechat_desktop/test_bot_lifecycle_cleanup.py
+          git commit -m "fix: clean stale WeChat bot configs"
+          git push origin HEAD:feature/hermes-multi-agent
