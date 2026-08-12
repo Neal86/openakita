@@ -1,7 +1,7 @@
 """Internal OpenAI-compatible LLM gateway used by Hermes runtimes.
 
 The route is reachable from localhost/private Docker networking but still
-requires a dedicated internal bearer secret. Network location alone is never
+requires a dedicated per-install bearer secret. Network location alone is never
 an authorization boundary.
 """
 from __future__ import annotations
@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
-import os
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -21,6 +20,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from openakita.api.openai_compat import chunk, completion_response, convert_tools, split_system
+from openakita.hermes.internal_auth import internal_gateway_secret
 from openakita.llm.client import LLMClient
 
 router = APIRouter(prefix="/v1", tags=["LLM Gateway"])
@@ -37,15 +37,11 @@ class ChatCompletionRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-def _gateway_secret() -> str:
-    return os.environ.get("OPENAKITA_HERMES_LLM_API_KEY", "openakita-internal")
-
-
 def _require_internal_gateway(request: Request) -> None:
-    expected = _gateway_secret()
+    expected = internal_gateway_secret()
     auth = request.headers.get("authorization", "")
     supplied = auth[7:].strip() if auth.lower().startswith("bearer ") else request.headers.get("x-api-key", "").strip()
-    if not expected or not supplied or not hmac.compare_digest(supplied, expected):
+    if not supplied or not hmac.compare_digest(supplied, expected):
         raise HTTPException(status_code=401, detail="Internal Hermes gateway authentication required")
 
 
