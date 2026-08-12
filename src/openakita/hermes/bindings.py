@@ -8,9 +8,12 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from filelock import FileLock
+
 from openakita.utils.atomic_io import atomic_json_write
 
 from .models import HermesRoutingPolicy, HermesRuntimeProvider
+from .paths import hermes_data_path
 
 
 @dataclass
@@ -41,49 +44,66 @@ class AgentHermesBinding:
 
 class AgentHermesBindingStore:
     def __init__(self, path: Path | None = None) -> None:
-        if path is None:
-            try:
-                from openakita.config import settings
-                path = Path(settings.project_root) / "data" / "agent_hermes_bindings.json"
-            except Exception:
-                path = Path.cwd() / "data" / "agent_hermes_bindings.json"
-        self.path = Path(path)
+        self.path = Path(path or hermes_data_path("agent_hermes_bindings.json"))
         self._lock = threading.RLock()
+        self._file_lock = FileLock(str(self.path) + ".lock")
+
+    def _read_unlocked(self) -> list[AgentHermesBinding]:
+        if not self.path.exists():
+            return []
+        try:
+            raw = json.loads(self.path.read_text("utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        if not isinstance(raw, dict):
+            return []
+        raw_rows = raw.get("bindings", [])
+        if not isinstance(raw_rows, list):
+            return []
+        rows: list[AgentHermesBinding] = []
+        for item in raw_rows:
+            if not isinstance(item, dict):
+                continue
+            try:
+                rows.append(AgentHermesBinding.from_dict(item))
+            except (TypeError, ValueError):
+                continue
+        return rows
 
     def list(self) -> list[AgentHermesBinding]:
-        with self._lock:
-            if not self.path.exists():
-                return []
-            try:
-                raw = json.loads(self.path.read_text("utf-8"))
-            except (OSError, json.JSONDecodeError):
-                return []
-            return [AgentHermesBinding.from_dict(x) for x in raw.get("bindings", [])]
+        with self._lock, self._file_lock:
+            return self._read_unlocked()
 
     def get(self, profile_id: str) -> AgentHermesBinding:
-        return next((item for item in self.list() if item.profile_id == profile_id), AgentHermesBinding(profile_id=profile_id))
+        return next(
+            (item for item in self.list() if item.profile_id == profile_id),
+            AgentHermesBinding(profile_id=profile_id),
+        )
 
-    def _save(self, rows: list[AgentHermesBinding]) -> None:
+    def _save_unlocked(self, rows: list[AgentHermesBinding]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_json_write(self.path, {"version": 1, "bindings": [x.to_dict() for x in rows]})
+        atomic_json_write(
+            self.path,
+            {"version": 1, "bindings": [item.to_dict() for item in rows]},
+        )
 
     def upsert(self, binding: AgentHermesBinding) -> AgentHermesBinding:
-        with self._lock:
-            rows = self.list()
+        with self._lock, self._file_lock:
+            rows = self._read_unlocked()
             for index, current in enumerate(rows):
                 if current.profile_id == binding.profile_id:
                     rows[index] = binding
                     break
             else:
                 rows.append(binding)
-            self._save(rows)
+            self._save_unlocked(rows)
             return binding
 
     def delete(self, profile_id: str) -> bool:
-        with self._lock:
-            rows = self.list()
+        with self._lock, self._file_lock:
+            rows = self._read_unlocked()
             kept = [item for item in rows if item.profile_id != profile_id]
             if len(kept) == len(rows):
                 return False
-            self._save(kept)
+            self._save_unlocked(kept)
             return True
