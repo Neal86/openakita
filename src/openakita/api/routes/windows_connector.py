@@ -222,7 +222,7 @@ async def execute(body: ExecutePayload) -> dict[str, Any]:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ConnectionError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (TimeoutError, asyncio.TimeoutError) as exc:
+    except TimeoutError as exc:
         raise HTTPException(status_code=504, detail="Windows Connector 命令超时") from exc
 
 
