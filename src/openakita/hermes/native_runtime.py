@@ -20,6 +20,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from .capability_bridge import prepare_native_hermes_capabilities
+from .internal_auth import internal_gateway_secret
 
 
 class NativeHermesUnavailable(RuntimeError):
@@ -50,7 +51,6 @@ class NativeHermesRuntime:
 
     @staticmethod
     def _scoped_session_id(agent_id: str, session_id: str) -> str:
-        """Keep Hermes session state isolated across OpenAkita Agent profiles."""
         raw_agent = (agent_id or "default").strip() or "default"
         raw_session = (session_id or "default").strip() or "default"
         return f"openakita:{raw_agent}:{raw_session}"
@@ -76,7 +76,7 @@ class NativeHermesRuntime:
             "OPENAKITA_HERMES_LLM_BASE_URL",
             os.environ.get("OPENAI_BASE_URL", "http://127.0.0.1:18900/v1"),
         ).rstrip("/")
-        api_key = os.environ.get("OPENAKITA_HERMES_LLM_API_KEY", "openakita-internal")
+        api_key = internal_gateway_secret()
         model = os.environ.get("OPENAKITA_HERMES_MODEL", f"agent:{agent_id}")
         provider = os.environ.get("OPENAKITA_HERMES_PROVIDER", "custom")
         kwargs: dict[str, Any] = {
