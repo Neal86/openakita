@@ -1,7 +1,10 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from openakita.hermes import paths as hermes_paths
+from openakita.hermes.bindings import AgentHermesBindingStore
 from openakita.hermes.execution import (
     AgentExecutionConfig,
     AgentExecutionStore,
@@ -11,6 +14,8 @@ from openakita.hermes.execution import (
     HermesInstanceStore,
 )
 from openakita.hermes.isolation import HermesIsolationManager
+from openakita.hermes.lifecycle import HermesLifecycleService
+from openakita.hermes.models import HermesRuntimeProvider
 
 
 def test_old_agent_defaults_to_native(tmp_path: Path):
@@ -33,6 +38,32 @@ def test_execution_config_roundtrip(tmp_path: Path):
     restored = store.get("customer")
     assert restored.execution_mode == ExecutionMode.HERMES
     assert restored.hermes_instance_id == "dedicated-customer"
+
+
+@pytest.mark.asyncio
+async def test_switching_to_native_clears_previous_hermes_instance_id(
+    tmp_path: Path,
+    monkeypatch,
+):
+    binding_path = tmp_path / "bindings.json"
+    monkeypatch.setattr(
+        "openakita.hermes.lifecycle.AgentHermesBindingStore",
+        lambda: AgentHermesBindingStore(binding_path),
+    )
+    config = AgentExecutionConfig(
+        profile_id="customer",
+        execution_mode=ExecutionMode.NATIVE,
+        hermes_instance_mode=HermesInstanceMode.DEDICATED,
+        hermes_instance_id="dedicated-customer",
+    )
+
+    normalized, instance = await HermesLifecycleService().apply(config)
+
+    assert instance is None
+    assert normalized.hermes_instance_id is None
+    binding = AgentHermesBindingStore(binding_path).get("customer")
+    assert binding.runtime_provider == HermesRuntimeProvider.LOCAL
+    assert binding.hermes_node_ids == []
 
 
 def test_execution_store_skips_malformed_rows(tmp_path: Path):
