@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 import urllib.error
 import urllib.request
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -21,6 +23,10 @@ DEFAULT_RELEASE_URL = (
     "https://github.com/Neal86/openakita/releases/download/"
     f"windows-connector-latest/{RELEASE_FILENAME}"
 )
+_PAIR_WINDOW_SECONDS = 300
+_PAIR_MAX_FAILURES = 10
+_pair_failures: dict[str, list[float]] = defaultdict(list)
+_pair_lock = asyncio.Lock()
 
 
 class PairingCreatePayload(BaseModel):
@@ -58,6 +64,34 @@ class ExecutePayload(BaseModel):
     timeout_seconds: int = Field(default=60, ge=1, le=300)
 
 
+def _client_key(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+async def _pair_allowed(key: str) -> bool:
+    now = time.monotonic()
+    async with _pair_lock:
+        rows = [stamp for stamp in _pair_failures.get(key, []) if now - stamp < _PAIR_WINDOW_SECONDS]
+        if rows:
+            _pair_failures[key] = rows
+        else:
+            _pair_failures.pop(key, None)
+        return len(rows) < _PAIR_MAX_FAILURES
+
+
+async def _record_pair_failure(key: str) -> None:
+    now = time.monotonic()
+    async with _pair_lock:
+        rows = [stamp for stamp in _pair_failures.get(key, []) if now - stamp < _PAIR_WINDOW_SECONDS]
+        rows.append(now)
+        _pair_failures[key] = rows
+
+
+async def _clear_pair_failures(key: str) -> None:
+    async with _pair_lock:
+        _pair_failures.pop(key, None)
+
+
 @router.post("/pairing-code")
 async def create_pairing_code(body: PairingCreatePayload) -> dict[str, Any]:
     code = await wechat_desktop_manager.create_pairing_code(body.node_name, body.ttl_seconds)
@@ -70,11 +104,16 @@ async def close_pairing_code(body: PairingClosePayload) -> dict[str, bool]:
 
 
 @router.post("/pair")
-async def pair_connector(body: PairingConsumePayload) -> dict[str, str]:
+async def pair_connector(body: PairingConsumePayload, request: Request) -> dict[str, str]:
+    key = _client_key(request)
+    if not await _pair_allowed(key):
+        raise HTTPException(status_code=429, detail="配对失败次数过多，请稍后再试")
     try:
         node_id, node_token, node_name = await wechat_desktop_manager.consume_pairing_code(body.code)
     except ValueError as exc:
+        await _record_pair_failure(key)
         raise HTTPException(status_code=400, detail="配对码无效或已过期") from exc
+    await _clear_pair_failures(key)
     return {"node_id": node_id, "node_token": node_token, "node_name": node_name}
 
 
