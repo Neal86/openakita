@@ -4,11 +4,12 @@ import asyncio
 import json
 import os
 import secrets
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from openakita.wechat_desktop import wechat_desktop_manager
 
@@ -413,7 +414,7 @@ class WindowsConnectorManager:
                 worker = asyncio.create_task(asyncio.to_thread(run_local))
                 try:
                     return await asyncio.wait_for(asyncio.shield(worker), timeout=timeout)
-                except (TimeoutError, asyncio.TimeoutError):
+                except TimeoutError:
                     # The Windows API call cannot be force-killed safely. Hold the
                     # execution lock until it really ends, then report the timeout.
                     await worker
