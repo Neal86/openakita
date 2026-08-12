@@ -166,6 +166,44 @@ async def test_volume_inspect_daemon_failure_propagates(monkeypatch):
         await manager.remove(instance, delete_data=True)
 
 
+@pytest.mark.asyncio
+async def test_network_inspect_daemon_failure_propagates(monkeypatch):
+    manager = HermesContainerManager()
+    calls = []
+
+    async def run(*args, **kwargs):
+        calls.append(args)
+        if args[:2] == ("network", "inspect"):
+            return 1, "", "Cannot connect to the Docker daemon"
+        raise AssertionError(f"unexpected docker call: {args}")
+
+    monkeypatch.setattr(manager, "_run", run)
+    with pytest.raises(ContainerManagerError, match="Cannot connect"):
+        await manager.ensure_network("openakita")
+    assert calls == [("network", "inspect", "openakita")]
+
+
+@pytest.mark.asyncio
+async def test_missing_network_is_created(monkeypatch):
+    manager = HermesContainerManager()
+    calls = []
+
+    async def run(*args, **kwargs):
+        calls.append(args)
+        if args[:2] == ("network", "inspect"):
+            return 1, "", "Error: network openakita not found"
+        if args[:2] == ("network", "create"):
+            return 0, "openakita", ""
+        raise AssertionError(f"unexpected docker call: {args}")
+
+    monkeypatch.setattr(manager, "_run", run)
+    await manager.ensure_network("openakita")
+    assert calls == [
+        ("network", "inspect", "openakita"),
+        ("network", "create", "openakita"),
+    ]
+
+
 def test_docker_desktop_cli_counts_as_available_on_windows(monkeypatch):
     from openakita.hermes import container_manager as module
 
