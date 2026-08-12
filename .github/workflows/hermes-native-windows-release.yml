@@ -63,7 +63,7 @@ jobs:
       - name: Run Hermes/OpenAkita tests
         shell: bash
         run: |
-          python -m pytest tests/hermes tests/wechat_desktop -q
+          python -m pytest tests/hermes tests/wechat_desktop tests/windows_connector -q
 
       - name: Copy backend and third-party license to Tauri resources
         shell: bash
@@ -141,6 +141,52 @@ jobs:
             Get-FileHash $file.FullName -Algorithm SHA256 | Format-List
           }
 
+      - name: Build unzip-and-run portable package
+        shell: pwsh
+        run: |
+          $root = "release-artifacts/OpenAkita-Portable-Windows-x64"
+          $resources = Join-Path $root "resources"
+          if (Test-Path $root) { Remove-Item $root -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $resources | Out-Null
+
+          $desktop = "apps/setup-center/src-tauri/target/release/openakita-desktop.exe"
+          if (!(Test-Path $desktop)) { throw "OpenAkita desktop executable missing: $desktop" }
+          Copy-Item $desktop (Join-Path $root "OpenAkita.exe")
+
+          $server = "apps/setup-center/src-tauri/resources/openakita-server"
+          $bootstrap = "apps/setup-center/src-tauri/resources/bootstrap"
+          if (!(Test-Path $server)) { throw "embedded backend resource missing" }
+          if (!(Test-Path $bootstrap)) { throw "bootstrap resource missing" }
+          Copy-Item $server (Join-Path $resources "openakita-server") -Recurse
+          Copy-Item $bootstrap (Join-Path $resources "bootstrap") -Recurse
+
+          @"
+          OpenAkita Portable Windows x64
+
+          1. Extract the entire ZIP to a normal writable folder.
+          2. Double-click OpenAkita.exe.
+          3. Do not move OpenAkita.exe out of this folder; the resources folder must stay beside it.
+
+          This build includes the OpenAkita desktop app, embedded Hermes Agent runtime,
+          generic Windows Connector support, WeChat desktop integration, and local app/browser discovery.
+          Docker is not required for the embedded Hermes runtime.
+          "@ | Set-Content -Encoding UTF8 (Join-Path $root "README.txt")
+
+          $zip = "release-artifacts/OpenAkita-Portable-Windows-x64.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path "$root/*" -DestinationPath $zip -CompressionLevel Optimal
+          if (!(Test-Path $zip)) { throw "portable ZIP was not created" }
+          Get-FileHash $zip -Algorithm SHA256 | Format-List
+
+      - name: Portable startup smoke test
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path "release-artifacts/OpenAkita-Portable-Windows-x64/OpenAkita.exe"
+          $proc = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 12
+          if ($proc.HasExited) { throw "Portable OpenAkita exited during startup: $($proc.ExitCode)" }
+          Stop-Process -Id $proc.Id -Force
+
       - name: Upload Windows installer artifact
         uses: actions/upload-artifact@v4
         with:
@@ -149,7 +195,15 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish Windows installer to GitHub Release
+      - name: Upload portable Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenAkita-Portable-Windows-x64
+          path: release-artifacts/OpenAkita-Portable-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish Windows packages to GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -159,6 +213,7 @@ jobs:
           foreach ($file in $files) {
             gh release upload wechat-connector-latest $file.FullName --repo "${{ github.repository }}" --clobber
           }
+          gh release upload wechat-connector-latest "release-artifacts/OpenAkita-Portable-Windows-x64.zip" --repo "${{ github.repository }}" --clobber
 
       - name: Record successful build run
         if: success()
@@ -174,7 +229,10 @@ jobs:
             "head_sha": "${GITHUB_SHA}",
             "hermes_agent_version": "${HERMES_AGENT_VERSION}",
             "artifact": "OpenAkita-Hermes-Native-Windows-x64",
+            "portable_artifact": "OpenAkita-Portable-Windows-x64",
+            "portable_release_file": "OpenAkita-Portable-Windows-x64.zip",
             "native_runtime": true,
+            "windows_connector_integrated": true,
             "docker_required": false,
             "unsigned_installer": true,
             "release_tag": "wechat-connector-latest",
