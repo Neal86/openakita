@@ -50,6 +50,7 @@ AUTH_EXEMPT_PATHS = frozenset(
         "/api/auth/setup",
         "/api/auth/setup-status",
         "/api/logs/frontend",
+        "/openapi.json",
         # Connector pairing is authenticated by a one-time pairing code.
         # Keep only the redemption endpoint public; node management and
         # pairing-code creation still require normal web authentication.
@@ -57,7 +58,7 @@ AUTH_EXEMPT_PATHS = frozenset(
         "/api/windows-connector/pair",
     }
 )
-AUTH_EXEMPT_PREFIXES = ("/web/", "/web", "/ws/", "/docs", "/openapi.json", "/redoc", "/user-docs")
+AUTH_EXEMPT_PREFIXES = ("/web", "/ws", "/docs", "/redoc", "/user-docs")
 
 # ---------------------------------------------------------------------------
 # Password hashing (scrypt, stdlib)
@@ -221,8 +222,9 @@ class WebAccessConfig:
 
     def verify_password(self, password: str) -> bool:
         self._refresh_if_changed()
-        h = self._data.get("password_hash", "")
-        s = self._data.get("password_salt", "")
+        with self._lock:
+            h = self._data.get("password_hash", "")
+            s = self._data.get("password_salt", "")
         if not h or not s:
             return False
         return _verify_password(password, h, s)
@@ -463,10 +465,18 @@ def is_private_direct_request(request: Request) -> bool:
 
 
 def _is_auth_exempt(path: str) -> bool:
-    """Check if the path is exempt from authentication."""
+    """Check auth exemptions using real path-segment boundaries.
+
+    A raw ``startswith`` would make ``/webhook`` inherit the exemption for
+    ``/web`` and ``/docs-private`` inherit ``/docs``. Only the exact path or a
+    slash-delimited child path is exempt.
+    """
     if path in AUTH_EXEMPT_PATHS:
         return True
-    return any(path.startswith(prefix) for prefix in AUTH_EXEMPT_PREFIXES)
+    return any(
+        path == prefix or path.startswith(prefix.rstrip("/") + "/")
+        for prefix in AUTH_EXEMPT_PREFIXES
+    )
 
 
 def create_auth_middleware(config: WebAccessConfig):
