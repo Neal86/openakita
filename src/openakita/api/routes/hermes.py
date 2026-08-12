@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from openakita.hermes.bindings import AgentHermesBinding, AgentHermesBindingStore
 from openakita.hermes.execution import HermesInstanceStore
@@ -28,6 +28,14 @@ class HermesNodePayload(BaseModel):
     tags: list[str] = Field(default_factory=list)
     max_concurrency: int = Field(4, ge=1)
     timeout_seconds: int = Field(180, ge=1, le=3600)
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        normalized = value.strip().rstrip("/")
+        if not normalized.startswith(("http://", "https://")):
+            raise ValueError("External Hermes node base_url must use http:// or https://")
+        return normalized
 
 
 class AgentBindingPayload(BaseModel):
@@ -61,6 +69,13 @@ def _bound_profiles(node_id: str) -> list[str]:
             if node_id in binding.hermes_node_ids
         }
     )
+
+
+def _require_agent_profile(profile_id: str) -> None:
+    from openakita.agents.profile import get_profile_store
+
+    if not get_profile_store().exists(profile_id):
+        raise HTTPException(status_code=404, detail="Agent profile not found")
 
 
 @router.get("/nodes")
@@ -161,11 +176,13 @@ def stats() -> dict:
 
 @router.get("/agents/{profile_id}")
 def get_binding(profile_id: str) -> dict:
+    _require_agent_profile(profile_id)
     return {"binding": AgentHermesBindingStore().get(profile_id).to_dict()}
 
 
 @router.put("/agents/{profile_id}")
 def update_binding(profile_id: str, payload: AgentBindingPayload) -> dict:
+    _require_agent_profile(profile_id)
     try:
         binding = AgentHermesBinding(profile_id=profile_id, **payload.model_dump())
     except (TypeError, ValueError) as exc:
