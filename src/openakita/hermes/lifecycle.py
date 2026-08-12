@@ -43,12 +43,31 @@ class HermesLifecycleService:
     def _native_url(instance_id: str) -> str:
         return f"native://{instance_id}"
 
+    @staticmethod
+    def _default_container_url(instance: HermesInstance) -> str:
+        return f"http://{instance.container_name}:8642"
+
     @classmethod
     def is_native(cls, instance: HermesInstance) -> bool:
-        return instance.base_url.startswith("native://") or cls.native_default()
+        """Return whether this *instance* explicitly uses the embedded runtime.
+
+        Platform defaults decide how a newly-created/default instance is
+        initialized; they must not override an explicitly persisted HTTP(S)
+        endpoint.  Otherwise Windows would silently turn remote/container
+        Hermes instances into ``native://`` instances on read/start/stop.
+        """
+        return isinstance(instance.base_url, str) and instance.base_url.startswith("native://")
+
+    @classmethod
+    def _should_migrate_default_to_native(cls, instance: HermesInstance) -> bool:
+        if not cls.native_default() or cls.is_native(instance):
+            return False
+        base_url = (instance.base_url or "").rstrip("/")
+        default_url = cls._default_container_url(instance).rstrip("/")
+        return not base_url or base_url == default_url
 
     def normalize_instance(self, instance: HermesInstance) -> HermesInstance:
-        if not self.native_default() or instance.base_url.startswith("native://"):
+        if not self._should_migrate_default_to_native(instance):
             return instance
         normalized = replace(instance, base_url=self._native_url(instance.id))
         if instance.enabled:
@@ -67,8 +86,8 @@ class HermesLifecycleService:
 
     def ensure_shared(self) -> HermesInstance:
         instance = self.instances.get(self.SHARED_ID)
-        use_native = self.native_default()
         if instance is None:
+            use_native = self.native_default()
             instance = HermesInstance(
                 id=self.SHARED_ID,
                 name="Hermes 共享实例",
@@ -80,10 +99,13 @@ class HermesLifecycleService:
                 lifecycle_status=InstanceLifecycle.PENDING,
                 max_concurrency=16,
             )
-        if use_native:
+        elif self._should_migrate_default_to_native(instance):
+            instance = replace(instance, base_url=self._native_url(instance.id))
+
+        if self.is_native(instance):
             instance = self._native_state(replace(instance, image=self.RUNTIME_IMAGE))
         else:
-            instance = replace(instance, image=self.RUNTIME_IMAGE, base_url="http://openakita-hermes-shared:8642")
+            instance = replace(instance, image=self.RUNTIME_IMAGE)
         self.instances.upsert(instance)
         self._register_node(instance)
         return instance
@@ -118,22 +140,26 @@ class HermesLifecycleService:
             return config, None
 
         self.isolation.ensure(config.profile_id, metadata=profile_metadata or config.to_dict())
-        use_native = self.native_default()
         if config.hermes_instance_mode == HermesInstanceMode.SHARED:
             instance = self.ensure_shared()
             config.hermes_instance_id = instance.id
         else:
             instance_id = config.hermes_instance_id or f"dedicated-{config.profile_id}"
-            instance = self.instances.get(instance_id) or HermesInstance(
+            existing = self.instances.get(instance_id)
+            instance = existing or HermesInstance(
                 id=instance_id,
                 name=f"{config.profile_id} 专属 Hermes",
                 mode=HermesInstanceMode.DEDICATED,
                 image=self.RUNTIME_IMAGE,
                 agent_profile_id=config.profile_id,
                 max_concurrency=4,
+                base_url=self._native_url(instance_id) if self.native_default() else "",
             )
             instance = replace(instance, image=self.RUNTIME_IMAGE)
-            if use_native:
+            if existing is not None and self._should_migrate_default_to_native(instance):
+                instance = replace(instance, base_url=self._native_url(instance.id))
+
+            if self.is_native(instance):
                 instance = self._native_state(instance)
             elif HermesContainerManager.available():
                 try:
@@ -157,7 +183,8 @@ class HermesLifecycleService:
         return config, instance
 
     async def start(self, instance: HermesInstance) -> HermesInstance:
-        if self.is_native(instance) or self.native_default():
+        instance = self.normalize_instance(instance)
+        if self.is_native(instance):
             if not NativeHermesRuntime.available():
                 raise ContainerManagerError("Embedded Hermes runtime unavailable")
             updated = self._native_state(replace(instance, enabled=True, base_url=self._native_url(instance.id)))
@@ -170,7 +197,8 @@ class HermesLifecycleService:
         return updated
 
     async def stop(self, instance: HermesInstance) -> HermesInstance:
-        if self.is_native(instance) or self.native_default():
+        instance = self.normalize_instance(instance)
+        if self.is_native(instance):
             updated = replace(instance, enabled=False, base_url=self._native_url(instance.id), lifecycle_status=InstanceLifecycle.STOPPED, health_status="disabled", last_error=None)
         else:
             if instance.mode == HermesInstanceMode.SHARED:
@@ -181,7 +209,8 @@ class HermesLifecycleService:
         return updated
 
     async def restart(self, instance: HermesInstance) -> HermesInstance:
-        if self.is_native(instance) or self.native_default():
+        instance = self.normalize_instance(instance)
+        if self.is_native(instance):
             if not NativeHermesRuntime.available():
                 raise ContainerManagerError("Embedded Hermes runtime unavailable")
             updated = self._native_state(replace(instance, enabled=True, base_url=self._native_url(instance.id)))
