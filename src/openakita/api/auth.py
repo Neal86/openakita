@@ -12,16 +12,19 @@ from __future__ import annotations
 import hashlib
 import hmac
 import ipaddress
-import json
 import logging
 import os
 import secrets
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from filelock import FileLock
+
+from openakita.utils.atomic_io import atomic_json_write, read_json_safe
 
 from ..core.auth.tokens import TokenClaims, decode_jwt, encode_jwt
 
@@ -102,123 +105,122 @@ class WebAccessConfig:
     def __init__(self, data_dir: Path) -> None:
         self._path = data_dir / "web_access.json"
         self._data: dict[str, Any] = {}
-        self._lock = __import__("threading").Lock()
+        self._lock = threading.RLock()
+        self._file_lock = FileLock(str(self._path) + ".lock")
+        self._disk_version: tuple[int, int] | None = None
         self._load()
 
+    def _read_disk_locked(self) -> dict[str, Any]:
+        raw = read_json_safe(self._path)
+        if raw is None:
+            return {}
+        if not isinstance(raw, dict):
+            logger.error("Invalid web access config root in %s; ignoring it", self._path)
+            return {}
+        return dict(raw)
+
+    def _stat_disk_version(self) -> tuple[int, int] | None:
+        try:
+            stat = self._path.stat()
+        except OSError:
+            return None
+        return stat.st_mtime_ns, stat.st_size
+
+    def _save_locked(self) -> None:
+        atomic_json_write(
+            self._path,
+            self._data,
+            backup=True,
+            fsync=True,
+            allow_fallback=False,
+        )
+        self._disk_version = self._stat_disk_version()
+
     def _load(self) -> None:
-        if self._path.exists():
-            try:
-                self._data = json.loads(self._path.read_text("utf-8"))
-            except Exception:
-                # File is corrupt (e.g. truncated by power loss before fsync
-                # took effect). Log at ERROR with traceback; we regenerate a
-                # fresh config below. User-visible consequence: any previously
-                # stored password is lost, so the user will need to set it
-                # again. We don't keep a backup because the only meaningful
-                # field is the password hash, which is by design non-recoverable.
-                logger.error(
-                    "Failed to read %s — file appears corrupted; "
-                    "regenerating fresh config (any saved password will be lost)",
-                    self._path,
-                    exc_info=True,
+        with self._lock, self._file_lock:
+            self._data = self._read_disk_locked()
+            env_password = os.environ.get(PASSWORD_ENV_VAR, "").strip()
+            needs_save = False
+
+            if not self._data.get("jwt_secret"):
+                self._data["jwt_secret"] = secrets.token_hex(32)
+                needs_save = True
+
+            if not self._data.get("data_epoch"):
+                self._data["data_epoch"] = secrets.token_hex(8)
+                needs_save = True
+
+            if not self._data.get("token_version"):
+                self._data["token_version"] = 1
+                needs_save = True
+
+            if env_password:
+                existing_hash = self._data.get("password_hash", "")
+                existing_salt = self._data.get("password_salt", "")
+                if (
+                    not existing_hash
+                    or not existing_salt
+                    or not _verify_password(env_password, existing_hash, existing_salt)
+                ):
+                    hash_hex, salt_hex = _hash_password(env_password)
+                    self._data["password_hash"] = hash_hex
+                    self._data["password_salt"] = salt_hex
+                    self._data["password_plain_hint"] = _make_hint(env_password)
+                    self._data["password_user_set"] = True
+                    needs_save = True
+                elif not self._data.get("password_user_set"):
+                    self._data["password_user_set"] = True
+                    needs_save = True
+
+            if needs_save:
+                self._data["updated_at"] = time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
                 )
-                self._data = {}
+                self._save_locked()
+            else:
+                self._disk_version = self._stat_disk_version()
 
-        env_password = os.environ.get(PASSWORD_ENV_VAR, "").strip()
-        needs_save = False
+    def _refresh_for_mutation_locked(self) -> None:
+        latest = self._read_disk_locked()
+        if latest:
+            self._data = latest
+        self._disk_version = self._stat_disk_version()
 
-        if not self._data.get("jwt_secret"):
-            self._data["jwt_secret"] = secrets.token_hex(32)
-            needs_save = True
-
-        if not self._data.get("data_epoch"):
-            self._data["data_epoch"] = secrets.token_hex(8)
-            needs_save = True
-
-        if not self._data.get("token_version"):
-            self._data["token_version"] = 1
-            needs_save = True
-
-        if env_password:
-            # Environment variable overrides stored password — but only update
-            # if the password actually changed (avoids needless rehash on every start)
-            existing_hash = self._data.get("password_hash", "")
-            existing_salt = self._data.get("password_salt", "")
-            if (
-                not existing_hash
-                or not existing_salt
-                or not _verify_password(env_password, existing_hash, existing_salt)
-            ):
-                hash_hex, salt_hex = _hash_password(env_password)
-                self._data["password_hash"] = hash_hex
-                self._data["password_salt"] = salt_hex
-                self._data["password_plain_hint"] = _make_hint(env_password)
-                self._data["password_user_set"] = True
-                needs_save = True
-            elif not self._data.get("password_user_set"):
-                self._data["password_user_set"] = True
-                needs_save = True
-        # Note: the auto-generated password branch was intentionally removed in
-        # v1.28. A fresh install now leaves ``password_hash`` empty until the
-        # user completes the Setup flow (see ``middleware_setup_gate``). This
-        # eliminates the previous footgun where the auto-generated password
-        # was only printed once to logs and easily missed in Docker / systemd
-        # deployments.
-
-        if needs_save:
-            self._data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            self._save()
-
-    def _save(self) -> None:
-        """Persist ``self._data`` to disk atomically and durably.
-
-        Sequence: write to ``*.tmp`` → ``flush`` + ``fsync`` the file →
-        ``os.replace`` for atomic swap → ``fsync`` parent dir (POSIX only).
-        This protects against power loss between bytes-flush and rename, which
-        is the most common cause of ``web_access.json`` corruption reports.
-        Windows does not support directory ``fsync`` but ``os.replace`` is
-        atomic on NTFS so the rename itself is durable enough.
-        """
-        with self._lock:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._path.with_suffix(".tmp")
-            payload = json.dumps(self._data, indent=2) + "\n"
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.write(payload)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self._path)
-            if os.name == "posix":
-                try:
-                    dir_fd = os.open(str(self._path.parent), os.O_RDONLY)
-                    try:
-                        os.fsync(dir_fd)
-                    finally:
-                        os.close(dir_fd)
-                except OSError as exc:
-                    logger.warning(
-                        "Failed to fsync data dir %s: %s",
-                        self._path.parent,
-                        exc,
-                    )
+    def _refresh_if_changed(self) -> None:
+        observed = self._stat_disk_version()
+        if observed == self._disk_version:
+            return
+        with self._lock, self._file_lock:
+            observed = self._stat_disk_version()
+            if observed == self._disk_version:
+                return
+            latest = self._read_disk_locked()
+            if latest:
+                self._data = latest
+            self._disk_version = self._stat_disk_version()
 
     @property
     def jwt_secret(self) -> str:
+        self._refresh_if_changed()
         return self._data["jwt_secret"]
 
     @property
     def token_version(self) -> int:
+        self._refresh_if_changed()
         return self._data.get("token_version", 1)
 
     @property
     def data_epoch(self) -> str:
+        self._refresh_if_changed()
         return self._data.get("data_epoch", "")
 
     @property
     def password_hint(self) -> str:
+        self._refresh_if_changed()
         return self._data.get("password_plain_hint", "")
 
     def verify_password(self, password: str) -> bool:
+        self._refresh_if_changed()
         h = self._data.get("password_hash", "")
         s = self._data.get("password_salt", "")
         if not h or not s:
@@ -227,6 +229,7 @@ class WebAccessConfig:
 
     @property
     def password_user_set(self) -> bool:
+        self._refresh_if_changed()
         return self._data.get("password_user_set", False)
 
     @property
@@ -239,17 +242,22 @@ class WebAccessConfig:
         the same condition that :meth:`verify_password` checks before
         comparing.
         """
+        self._refresh_if_changed()
         return bool(self._data.get("password_hash")) and bool(self._data.get("password_salt"))
 
     def change_password(self, new_password: str) -> None:
         hash_hex, salt_hex = _hash_password(new_password)
-        self._data["password_hash"] = hash_hex
-        self._data["password_salt"] = salt_hex
-        self._data["password_plain_hint"] = _make_hint(new_password)
-        self._data["password_user_set"] = True
-        self._data["token_version"] = self.token_version + 1
-        self._data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        self._save()
+        with self._lock, self._file_lock:
+            self._refresh_for_mutation_locked()
+            self._data["password_hash"] = hash_hex
+            self._data["password_salt"] = salt_hex
+            self._data["password_plain_hint"] = _make_hint(new_password)
+            self._data["password_user_set"] = True
+            self._data["token_version"] = int(self._data.get("token_version", 1)) + 1
+            self._data["updated_at"] = time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+            )
+            self._save_locked()
 
     def clear_password(self) -> None:
         """Drop the password hash so the Setup flow is required again.
@@ -264,13 +272,17 @@ class WebAccessConfig:
         them would invalidate session storage signed under those keys, which
         is more disruptive than necessary for a password reset.
         """
-        self._data.pop("password_hash", None)
-        self._data.pop("password_salt", None)
-        self._data.pop("password_plain_hint", None)
-        self._data["password_user_set"] = False
-        self._data["token_version"] = self.token_version + 1
-        self._data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        self._save()
+        with self._lock, self._file_lock:
+            self._refresh_for_mutation_locked()
+            self._data.pop("password_hash", None)
+            self._data.pop("password_salt", None)
+            self._data.pop("password_plain_hint", None)
+            self._data["password_user_set"] = False
+            self._data["token_version"] = int(self._data.get("token_version", 1)) + 1
+            self._data["updated_at"] = time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+            )
+            self._save_locked()
 
     def create_access_token(self) -> str:
         claims = TokenClaims(
