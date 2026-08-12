@@ -57,20 +57,21 @@ def _native_info(instance) -> dict:
 
 
 def _native_logs(instance, tail: int) -> str:
+    instance = _normalized_instance(instance)
     info = _native_info(instance)
     rows = [
         f"[{datetime.now(UTC).isoformat()}] Hermes embedded runtime",
         f"instance={instance.id}",
         f"transport={info.get('transport')}",
         f"version={info.get('version')}",
-        f"pid={info.get('pid')}",
+        f"backend_pid={info.get('pid')}",
         f"enabled={instance.enabled}",
         f"lifecycle={instance.lifecycle_status.value}",
         f"health={instance.health_status}",
         f"base_url={instance.base_url}",
         f"last_success_at={instance.last_success_at or '-'}",
         f"last_error={instance.last_error or '-'}",
-        "Native Hermes executes inside the OpenAkita backend process; no Docker container is required.",
+        "Native Hermes is embedded in the OpenAkita backend; the PID above belongs to the backend process.",
     ]
     return "\n".join(rows[-max(1, tail):])
 
@@ -101,14 +102,20 @@ async def list_instances() -> dict:
     service.ensure_shared()
     executions = AgentExecutionStore().list()
     rows = []
-    for instance in service.instances.list():
-        data = instance.to_dict()
+    for stored in service.instances.list():
+        instance = _normalized_instance(stored)
         runtime = _native_info(instance)
+        data = instance.to_dict()
         data["runtime"] = runtime
         if runtime.get("native"):
-            data["container"] = {"available": False, "exists": False, "running": runtime.get("running", False), "native": True}
+            data["container"] = {
+                "available": False,
+                "exists": False,
+                "running": runtime.get("running", False),
+                "native": True,
+            }
             if runtime.get("available") and instance.enabled:
-                data["health_status"] = "healthy"
+                data["health_status"] = instance.health_status or "unknown"
         elif HermesContainerManager.available():
             try:
                 data["container"] = await service.containers.inspect(instance)
@@ -117,9 +124,14 @@ async def list_instances() -> dict:
         else:
             data["container"] = {"available": False, "error": "Docker socket unavailable"}
         bindings = [
-            x.to_dict() for x in executions
+            x.to_dict()
+            for x in executions
             if x.hermes_instance_id == instance.id
-            or (instance.id == "shared" and x.execution_mode == ExecutionMode.HERMES and x.hermes_instance_mode == HermesInstanceMode.SHARED)
+            or (
+                instance.id == "shared"
+                and x.execution_mode == ExecutionMode.HERMES
+                and x.hermes_instance_mode == HermesInstanceMode.SHARED
+            )
         ]
         data["agents"] = bindings
         data["agent_count"] = len(bindings)
@@ -138,6 +150,7 @@ def get_instance(instance_id: str) -> dict:
     instance = HermesInstanceStore().get(instance_id)
     if instance is None:
         raise HTTPException(status_code=404, detail="执行模式实例不存在")
+    instance = _normalized_instance(instance)
     data = instance.to_dict()
     data["runtime"] = _native_info(instance)
     return {"instance": data}
@@ -148,6 +161,7 @@ async def start_instance(instance_id: str) -> dict:
     instance = HermesInstanceStore().get(instance_id)
     if instance is None:
         raise HTTPException(status_code=404, detail="执行模式实例不存在")
+    instance = _normalized_instance(instance)
     try:
         updated = await HermesLifecycleService().start(instance)
     except ContainerManagerError as exc:
@@ -160,6 +174,7 @@ async def stop_instance(instance_id: str) -> dict:
     instance = HermesInstanceStore().get(instance_id)
     if instance is None:
         raise HTTPException(status_code=404, detail="执行模式实例不存在")
+    instance = _normalized_instance(instance)
     try:
         updated = await HermesLifecycleService().stop(instance)
     except ContainerManagerError as exc:
@@ -172,6 +187,7 @@ async def restart_instance(instance_id: str) -> dict:
     instance = HermesInstanceStore().get(instance_id)
     if instance is None:
         raise HTTPException(status_code=404, detail="执行模式实例不存在")
+    instance = _normalized_instance(instance)
     try:
         updated = await HermesLifecycleService().restart(instance)
     except ContainerManagerError as exc:
@@ -184,15 +200,43 @@ async def test_instance(instance_id: str) -> dict:
     instance = HermesInstanceStore().get(instance_id)
     if instance is None:
         raise HTTPException(status_code=404, detail="执行模式实例不存在")
+    instance = _normalized_instance(instance)
     if not instance.enabled or instance.lifecycle_status != InstanceLifecycle.RUNNING:
         raise HTTPException(status_code=409, detail="Hermes 实例尚未启动")
-    instance = _normalized_instance(instance)
     if HermesLifecycleService.is_native(instance):
         if not NativeHermesRuntime.available():
             raise HTTPException(status_code=503, detail="Embedded Hermes runtime unavailable")
-        updated = replace(instance, health_status="healthy", last_success_at=datetime.now(UTC).isoformat(), last_error=None)
+        try:
+            result = await NativeHermesRuntime.run(
+                message="Reply exactly OPENAKITA_HERMES_OK and nothing else.",
+                agent_id=instance.agent_profile_id or "default",
+                session_id=f"health-{instance.id}",
+                system="This is an OpenAkita runtime health check.",
+                tools=[],
+                metadata={"health_check": True},
+            )
+        except Exception as exc:
+            failed = replace(instance, health_status="unhealthy", last_error=str(exc))
+            HermesInstanceStore().upsert(failed)
+            raise HTTPException(status_code=503, detail=f"Hermes Runtime 测试失败: {exc}") from exc
+        content = str(result.get("content") or "").strip()
+        if "OPENAKITA_HERMES_OK" not in content:
+            failed = replace(instance, health_status="degraded", last_error=f"unexpected health response: {content[:200]}")
+            HermesInstanceStore().upsert(failed)
+            raise HTTPException(status_code=502, detail="Hermes Runtime 返回了异常的健康检查内容")
+        updated = replace(
+            instance,
+            health_status="healthy",
+            last_success_at=datetime.now(UTC).isoformat(),
+            last_error=None,
+        )
         HermesInstanceStore().upsert(updated)
-        return {"ok": True, "instance_id": instance.id, "runtime": _native_info(updated), "message": "Windows 内嵌 Hermes Runtime 可用"}
+        return {
+            "ok": True,
+            "instance_id": instance.id,
+            "runtime": _native_info(updated),
+            "message": "Hermes Runtime 端到端测试通过",
+        }
     try:
         return await HermesRouter().test_node(instance_id)
     except KeyError:
@@ -217,6 +261,7 @@ async def delete_instance(instance_id: str, delete_data: bool = False) -> dict:
     instance = HermesInstanceStore().get(instance_id)
     if instance is None:
         raise HTTPException(status_code=404, detail="执行模式实例不存在")
+    instance = _normalized_instance(instance)
     try:
         await HermesLifecycleService().remove(instance, delete_data=delete_data)
     except ContainerManagerError as exc:
