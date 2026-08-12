@@ -33,6 +33,15 @@ class HermesContainerManager:
             raise ContainerManagerError(stderr or stdout or f"docker exited {proc.returncode}")
         return proc.returncode or 0, stdout, stderr
 
+    @staticmethod
+    def _is_missing_container_error(message: str) -> bool:
+        lowered = message.lower()
+        return "no such container" in lowered or "no such object" in lowered
+
+    @staticmethod
+    def _is_missing_volume_error(message: str) -> bool:
+        return "no such volume" in message.lower()
+
     def _validate(self, instance: HermesInstance) -> None:
         if not instance.container_name.startswith(self.CONTAINER_PREFIX):
             raise ContainerManagerError("refusing non-OpenAkita container name")
@@ -43,13 +52,34 @@ class HermesContainerManager:
 
     async def inspect(self, instance: HermesInstance) -> dict[str, Any]:
         self._validate(instance)
-        code, stdout, _ = await self._run("inspect", instance.container_name, "--format", "{{json .State}}", check=False)
-        if code != 0 or not stdout:
-            return {"exists": False, "running": False, "status": "missing"}
+        code, stdout, stderr = await self._run(
+            "inspect",
+            instance.container_name,
+            "--format",
+            "{{json .State}}",
+            check=False,
+        )
+        if code != 0:
+            detail = stderr or stdout
+            if self._is_missing_container_error(detail):
+                return {"exists": False, "running": False, "status": "missing"}
+            raise ContainerManagerError(
+                detail or f"docker inspect exited {code} for {instance.container_name}"
+            )
+        if not stdout:
+            raise ContainerManagerError(
+                f"docker inspect returned empty state for {instance.container_name}"
+            )
         try:
             state = json.loads(stdout)
-        except json.JSONDecodeError:
-            state = {}
+        except json.JSONDecodeError as exc:
+            raise ContainerManagerError(
+                f"docker inspect returned invalid state for {instance.container_name}"
+            ) from exc
+        if not isinstance(state, dict):
+            raise ContainerManagerError(
+                f"docker inspect returned invalid state for {instance.container_name}"
+            )
         return {
             "exists": True,
             "running": bool(state.get("Running")),
@@ -117,14 +147,17 @@ class HermesContainerManager:
         if state["exists"]:
             await self._run("rm", "-f", instance.container_name)
         if delete_data:
-            code, _, _ = await self._run(
+            code, stdout, stderr = await self._run(
                 "volume", "inspect", instance.volume_name, check=False
             )
             if code == 0:
-                # A requested data deletion is part of the operation contract.
-                # Propagate a real removal failure instead of forgetting the
-                # instance while its volume remains on disk.
                 await self._run("volume", "rm", instance.volume_name)
+            else:
+                detail = stderr or stdout
+                if not self._is_missing_volume_error(detail):
+                    raise ContainerManagerError(
+                        detail or f"docker volume inspect exited {code} for {instance.volume_name}"
+                    )
 
     async def logs(self, instance: HermesInstance, *, tail: int = 200) -> str:
         self._validate(instance)
