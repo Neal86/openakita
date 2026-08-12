@@ -431,7 +431,13 @@ async def import_agent(
                 skipped.append(f"{old_id} → {pid}")
 
             profile = AgentProfile.from_dict(pdata)
-            profile_store.save(profile)
+            try:
+                profile_store.save(profile)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid Agent profile: {exc}",
+                ) from exc
             _write_profile_identity_files(profile_store, profile.id, identity_files)
             _invalidate_imported_profile_runtime(request, profile.id)
             imported.append(profile.to_dict())

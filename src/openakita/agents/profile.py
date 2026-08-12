@@ -25,7 +25,7 @@ from ..core.capabilities import (
     build_capability_id,
     build_namespace,
 )
-from ..utils.atomic_io import atomic_json_write
+from ..utils.atomic_io import atomic_json_write, read_json_safe
 
 logger = logging.getLogger(__name__)
 
@@ -465,7 +465,9 @@ class ProfileStore:
         loaded = 0
         for fp in self._profiles_dir.glob("*.json"):
             try:
-                data = json.loads(fp.read_text(encoding="utf-8"))
+                data = read_json_safe(fp)
+                if not isinstance(data, dict):
+                    raise ValueError("profile JSON is not recoverable")
                 profile = AgentProfile.from_dict(data)
                 self._validate_profile_id(profile.id)
                 profile = self._heal_loaded_profile(profile, fp)
@@ -604,8 +606,8 @@ class ProfileStore:
             existing = self._cache.get(profile.id)
             if existing and existing.is_system:
                 self._validate_system_update(existing, profile)
-            self._cache[profile.id] = profile
             self._persist(profile)
+            self._cache[profile.id] = profile
         logger.info(f"ProfileStore saved: {profile.id} ({profile.type.value})")
 
     # 仅用于判断"用户是否实质修改了系统 Agent"的字段集（hidden/visibility 不算）
@@ -693,8 +695,8 @@ class ProfileStore:
                 data.pop("memory_mode", None)
             data.update(updates)
             profile = AgentProfile.from_dict(data)
-            self._cache[profile_id] = profile
             self._persist(profile)
+            self._cache[profile_id] = profile
 
         logger.info(f"ProfileStore updated: {profile_id}")
         return profile
@@ -802,7 +804,13 @@ class ProfileStore:
     def _persist(self, profile: AgentProfile) -> None:
         profile_id = self._validate_profile_id(profile.id)
         fp = self._profiles_dir / f"{profile_id}.json"
-        atomic_json_write(fp, profile.to_dict())
+        atomic_json_write(
+            fp,
+            profile.to_dict(),
+            backup=True,
+            fsync=True,
+            allow_fallback=False,
+        )
 
     @staticmethod
     def _validate_system_update(
