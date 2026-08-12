@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import threading
 from pathlib import Path
 
 from filelock import FileLock
 
-from openakita.utils.atomic_io import atomic_json_write
+from openakita.utils.atomic_io import atomic_json_write, read_json_safe
 
 from .models import HermesNode
 from .paths import hermes_data_path
@@ -21,12 +20,7 @@ class HermesNodeStore:
         self._file_lock = FileLock(str(self.path) + ".lock")
 
     def _read_unlocked(self) -> list[HermesNode]:
-        if not self.path.exists():
-            return []
-        try:
-            payload = json.loads(self.path.read_text("utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return []
+        payload = read_json_safe(self.path)
         if isinstance(payload, list):
             raw_rows = payload
         elif isinstance(payload, dict):
