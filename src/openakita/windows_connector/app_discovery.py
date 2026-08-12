@@ -86,16 +86,13 @@ def _uia_browser_tabs(window_row: dict[str, Any]) -> list[dict[str, Any]]:
         app_name = str(window_row.get("app_name") or "Browser")
         process_name = str(window_row.get("process_name") or "")
         exe_path = str(window_row.get("exe_path") or "")
-        # A same-title tab must never inherit another tab's grant. UIA has no
-        # durable tab ID, so prefer safety over automatic reattachment.
         stable_identity = _fingerprint("browser_tab", exe_path or process_name, hwnd, runtime_id or index, title)
-        volatile_window_id = _fingerprint("browser_tab", hwnd, runtime_id or index, title)
         rows.append(
             {
                 "id": _resource_id("browser_tab", hwnd, runtime_id or index, title),
                 "fingerprint": stable_identity,
                 "stable_identity": stable_identity,
-                "volatile_window_id": volatile_window_id,
+                "volatile_window_id": tab_locator,
                 "kind": "browser_tab",
                 "app_name": app_name,
                 "process_name": process_name,
@@ -105,7 +102,7 @@ def _uia_browser_tabs(window_row: dict[str, Any]) -> list[dict[str, Any]]:
                 "exe_path": exe_path,
                 "account_name": "",
                 "browser_profile": "uia",
-                "tab_id": f"uia:{tab_locator}",
+                "tab_id": f"uia:{index}",
                 "url": "",
                 "automation": "uia_tab",
                 "controllable": True,
@@ -143,8 +140,6 @@ def _enum_windows() -> list[dict[str, Any]]:
         account_name = ""
         automation = "uia"
         limited = False
-        # Process identity wins over window title. A browser tab/page titled
-        # "微信" is still a browser and must never become a WeChat resource.
         if lowered in {"chrome.exe", "msedge.exe", "firefox.exe", "brave.exe"}:
             kind = "browser_window"
             app_name = _browser_name(process_name, app_name)
@@ -154,9 +149,6 @@ def _enum_windows() -> list[dict[str, Any]]:
             app_name = "微信"
             account_name = _wechat_account_hint(int(hwnd), title)
         if kind == "wechat":
-            # Nickname is the durable discriminator when available. If it is
-            # unavailable include the current hwnd so a grant cannot silently
-            # jump to another logged-in WeChat instance.
             stable_identity = _fingerprint(kind, exe_path or lowered, account_name or int(hwnd))
         else:
             stable_identity = _fingerprint(kind, exe_path or lowered, title)
@@ -209,16 +201,13 @@ def _cdp_tabs(port: int, browser_name: str) -> list[dict[str, Any]]:
         ws_url = str(target.get("webSocketDebuggerUrl") or "").strip()
         if not tab_id or not ws_url:
             continue
-        # CDP target IDs are the only unambiguous discriminator for two tabs
-        # with identical titles/URLs. Do not share grants across target IDs.
         stable_identity = _fingerprint("browser_tab", browser_name, port, tab_id)
-        volatile_window_id = stable_identity
         rows.append(
             {
                 "id": _resource_id("browser_tab", browser_name, port, tab_id),
                 "fingerprint": stable_identity,
                 "stable_identity": stable_identity,
-                "volatile_window_id": volatile_window_id,
+                "volatile_window_id": stable_identity,
                 "kind": "browser_tab",
                 "app_name": browser_name,
                 "process_name": "",
@@ -249,8 +238,6 @@ def discover_resources() -> list[dict[str, Any]]:
     for port in (9222, 9223, 9225, 9333):
         cdp_tabs.extend(_cdp_tabs(port, "Chromium Browser"))
 
-    # Do not deduplicate only by title: two same-title tabs are independent
-    # resources and can have different Agent grants.
     cdp_titles = {str(row.get("title") or "").casefold() for row in cdp_tabs if row.get("title")}
     uia_tabs = [row for row in uia_tabs if str(row.get("title") or "").casefold() not in cdp_titles]
 
