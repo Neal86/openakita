@@ -23,52 +23,95 @@ class WindowsCommandExecutor:
         self._grants: dict[str, dict[str, Any]] = {}
 
     def sync_grants(self, grants: list[dict[str, Any]]) -> None:
-        self._grants = {str(item.get("id") or ""): dict(item) for item in grants if item.get("id")}
+        self._grants = {
+            str(item.get("id") or ""): dict(item)
+            for item in grants
+            if item.get("id")
+        }
 
     def resources(self) -> list[dict[str, Any]]:
         return discover_resources()
 
-    def _resource(self, resource_id: str, fingerprint: str = "") -> dict[str, Any]:
+    @staticmethod
+    def _identity(item: dict[str, Any]) -> str:
+        return str(item.get("stable_identity") or item.get("fingerprint") or "")
+
+    def _resource(
+        self,
+        resource_id: str,
+        fingerprint: str = "",
+        stable_identity: str = "",
+    ) -> dict[str, Any]:
         resources = self.resources()
         for item in resources:
-            if item.get("id") == resource_id:
+            if str(item.get("id") or "") == resource_id:
                 return item
-        if fingerprint:
-            matches = [item for item in resources if item.get("fingerprint") == fingerprint]
+        identity = stable_identity or fingerprint
+        if identity:
+            matches = [item for item in resources if self._identity(item) == identity]
             if len(matches) == 1:
                 return matches[0]
             if len(matches) > 1:
-                raise ConnectorPermissionError("resource fingerprint is ambiguous; refresh the grant")
+                raise ConnectorPermissionError(
+                    "resource stable identity is ambiguous; refresh the grant"
+                )
         raise RuntimeError("resource is no longer available")
 
-    def _authorize(self, payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    def _authorize(
+        self, payload: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         grant_id = str(payload.get("grant_id") or "")
         agent_id = str(payload.get("agent_profile_id") or "")
         resource_id = str(payload.get("resource_id") or "")
         fingerprint = str(payload.get("resource_fingerprint") or "")
+        stable_identity = str(payload.get("resource_stable_identity") or "")
         action = str(payload.get("action") or "")
         grant = self._grants.get(grant_id)
         if not grant or str(grant.get("agent_profile_id") or "") != agent_id:
             raise ConnectorPermissionError("invalid Agent grant")
+
         grant_resource_id = str(grant.get("resource_id") or "")
-        grant_fingerprint = str(grant.get("fingerprint") or "")
+        grant_identity = str(
+            grant.get("stable_identity") or grant.get("fingerprint") or ""
+        )
+        requested_identity = stable_identity or fingerprint
         if grant_resource_id != resource_id:
-            if not fingerprint or grant_fingerprint != fingerprint:
+            if not requested_identity or grant_identity != requested_identity:
                 raise ConnectorPermissionError("grant does not match requested resource")
-            matches = [item for item in self.resources() if item.get("fingerprint") == fingerprint]
-            if len(matches) != 1 or str(matches[0].get("id") or "") != resource_id:
-                raise ConnectorPermissionError("grant fallback identity is ambiguous or stale")
+            matches = [
+                item
+                for item in self.resources()
+                if self._identity(item) == requested_identity
+            ]
+            if (
+                len(matches) != 1
+                or str(matches[0].get("id") or "") != resource_id
+            ):
+                raise ConnectorPermissionError(
+                    "grant fallback identity is ambiguous or stale"
+                )
+
         permissions = grant.get("permissions") or {}
         required = {
-            "inspect": "read", "read_ui": "read", "browser_read": "read",
+            "inspect": "read",
+            "read_ui": "read",
+            "browser_read": "read",
             "screenshot": "screenshot",
-            "focus": "mouse", "click": "mouse", "double_click": "mouse", "scroll": "mouse", "browser_click": "mouse",
-            "type": "keyboard", "hotkey": "keyboard", "browser_type": "keyboard", "browser_navigate": "keyboard",
-            "launch": "launch", "close": "close",
+            "focus": "mouse",
+            "click": "mouse",
+            "double_click": "mouse",
+            "scroll": "mouse",
+            "browser_click": "mouse",
+            "type": "keyboard",
+            "hotkey": "keyboard",
+            "browser_type": "keyboard",
+            "browser_navigate": "keyboard",
+            "launch": "launch",
+            "close": "close",
         }.get(action)
         if not required or not bool(permissions.get(required, False)):
             raise ConnectorPermissionError(f"grant does not allow action: {action}")
-        return grant, self._resource(resource_id, fingerprint)
+        return grant, self._resource(resource_id, fingerprint, stable_identity)
 
     @staticmethod
     def _focus(hwnd: int) -> None:
@@ -116,9 +159,15 @@ class WindowsCommandExecutor:
         title = str(resource.get("title") or "").strip()
         if not title:
             raise RuntimeError("authorized UIA tab is no longer available")
-        matches = [item for item in controls if str(item.window_text() or "").strip() == title]
+        matches = [
+            item
+            for item in controls
+            if str(item.window_text() or "").strip() == title
+        ]
         if len(matches) != 1:
-            raise ConnectorPermissionError("authorized UIA tab identity is ambiguous or stale")
+            raise ConnectorPermissionError(
+                "authorized UIA tab identity is ambiguous or stale"
+            )
         try:
             matches[0].select()
         except Exception:
@@ -132,8 +181,12 @@ class WindowsCommandExecutor:
             result["controls"] = [
                 {
                     "name": str(control.window_text() or ""),
-                    "type": str(getattr(control.element_info, "control_type", "") or ""),
-                    "automation_id": str(getattr(control.element_info, "automation_id", "") or ""),
+                    "type": str(
+                        getattr(control.element_info, "control_type", "") or ""
+                    ),
+                    "automation_id": str(
+                        getattr(control.element_info, "automation_id", "") or ""
+                    ),
                 }
                 for control in window.descendants()[:250]
             ]
@@ -143,7 +196,11 @@ class WindowsCommandExecutor:
 
     def _screenshot(self, resource: dict[str, Any]) -> dict[str, Any]:
         if resource.get("automation") == "cdp":
-            data = self._cdp_command(resource, "Page.captureScreenshot", {"format": "png", "fromSurface": True})
+            data = self._cdp_command(
+                resource,
+                "Page.captureScreenshot",
+                {"format": "png", "fromSurface": True},
+            )
             encoded = str(data.get("data") or "")
             if encoded:
                 return {"mime_type": "image/png", "base64": encoded}
@@ -159,21 +216,34 @@ class WindowsCommandExecutor:
                     raise RuntimeError("authorized window has no capturable area")
                 from PIL import ImageGrab
 
-                image = ImageGrab.grab(bbox=(rect.left, rect.top, rect.right, rect.bottom), all_screens=True)
+                image = ImageGrab.grab(
+                    bbox=(rect.left, rect.top, rect.right, rect.bottom),
+                    all_screens=True,
+                )
             except Exception as fallback_exc:
-                raise RuntimeError("unable to capture only the authorized window") from fallback_exc
+                raise RuntimeError(
+                    "unable to capture only the authorized window"
+                ) from fallback_exc
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
-        return {"mime_type": "image/png", "base64": base64.b64encode(buffer.getvalue()).decode("ascii")}
+        return {
+            "mime_type": "image/png",
+            "base64": base64.b64encode(buffer.getvalue()).decode("ascii"),
+        }
 
-    def _uia_click(self, resource: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+    def _uia_click(
+        self, resource: dict[str, Any], args: dict[str, Any]
+    ) -> dict[str, Any]:
         self._select_uia_tab(resource)
         window = self._uia_window(resource)
         target = str(args.get("target") or "").strip()
         if target:
             try:
                 control = window.child_window(title=target)
-                control.click_input(double=bool(args.get("double", False)), button=str(args.get("button") or "left"))
+                control.click_input(
+                    double=bool(args.get("double", False)),
+                    button=str(args.get("button") or "left"),
+                )
                 return {"clicked": target}
             except Exception:
                 pass
@@ -182,21 +252,28 @@ class WindowsCommandExecutor:
             raise ValueError("target or x/y is required")
         rect = window.rectangle()
         if not (rect.left <= x < rect.right and rect.top <= y < rect.bottom):
-            raise ConnectorPermissionError("click coordinates are outside the authorized window")
+            raise ConnectorPermissionError(
+                "click coordinates are outside the authorized window"
+            )
         from pywinauto import mouse
 
         if bool(args.get("double", False)):
-            mouse.double_click(button=str(args.get("button") or "left"), coords=(x, y))
+            mouse.double_click(
+                button=str(args.get("button") or "left"), coords=(x, y)
+            )
         else:
             mouse.click(button=str(args.get("button") or "left"), coords=(x, y))
         return {"clicked": [x, y]}
 
-    def _type(self, resource: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+    def _type(
+        self, resource: dict[str, Any], args: dict[str, Any]
+    ) -> dict[str, Any]:
         self._select_uia_tab(resource)
         self._focus(int(resource.get("hwnd") or 0))
         text = str(args.get("text") or "")
         if args.get("clear_first"):
             from pywinauto.keyboard import send_keys
+
             send_keys("^a")
         try:
             import pyperclip
@@ -206,6 +283,7 @@ class WindowsCommandExecutor:
             send_keys("^v")
         except Exception:
             from pywinauto.keyboard import send_keys
+
             send_keys(text, with_spaces=True)
         return {"typed": len(text)}
 
@@ -213,26 +291,47 @@ class WindowsCommandExecutor:
     def _cdp_target(resource: dict[str, Any]) -> dict[str, Any]:
         profile = str(resource.get("browser_profile") or "")
         if not profile.startswith("cdp:"):
-            raise RuntimeError("browser tab does not expose CDP; use its UIA tab resource instead")
+            raise RuntimeError(
+                "browser tab does not expose CDP; use its UIA tab resource instead"
+            )
         port = int(profile.split(":", 1)[1])
         tab_id = str(resource.get("tab_id") or "")
-        request = urllib.request.Request(f"http://127.0.0.1:{port}/json", headers={"User-Agent": "OpenAkita-Windows-Connector/1.0"})
-        with urllib.request.urlopen(request, timeout=2) as response:  # noqa: S310 - localhost only
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/json",
+            headers={"User-Agent": "OpenAkita-Windows-Connector/1.0"},
+        )
+        with urllib.request.urlopen(request, timeout=2) as response:  # noqa: S310
             tabs = json.loads(response.read().decode("utf-8"))
-        target = next((item for item in tabs if str(item.get("id") or "") == tab_id), None)
+        target = next(
+            (item for item in tabs if str(item.get("id") or "") == tab_id), None
+        )
         if target is None or not target.get("webSocketDebuggerUrl"):
             raise RuntimeError("browser tab is no longer available")
         return target
 
     @classmethod
-    def _cdp_command(cls, resource: dict[str, Any], method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _cdp_command(
+        cls,
+        resource: dict[str, Any],
+        method: str,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         from websockets.sync.client import connect
 
         target = cls._cdp_target(resource)
         ws_url = str(target["webSocketDebuggerUrl"])
-        with connect(ws_url, open_timeout=3, close_timeout=1, max_size=16 * 1024 * 1024) as socket:
+        with connect(
+            ws_url,
+            open_timeout=3,
+            close_timeout=1,
+            max_size=16 * 1024 * 1024,
+        ) as socket:
             request_id = 1
-            socket.send(json.dumps({"id": request_id, "method": method, "params": params or {}}))
+            socket.send(
+                json.dumps(
+                    {"id": request_id, "method": method, "params": params or {}}
+                )
+            )
             while True:
                 message = json.loads(socket.recv(timeout=8))
                 if message.get("id") != request_id:
@@ -246,11 +345,18 @@ class WindowsCommandExecutor:
         result = cls._cdp_command(
             resource,
             "Runtime.evaluate",
-            {"expression": expression, "returnByValue": True, "awaitPromise": True, "userGesture": True},
+            {
+                "expression": expression,
+                "returnByValue": True,
+                "awaitPromise": True,
+                "userGesture": True,
+            },
         )
         remote = result.get("result") or {}
         if remote.get("subtype") == "error":
-            raise RuntimeError(str(remote.get("description") or "browser evaluation failed"))
+            raise RuntimeError(
+                str(remote.get("description") or "browser evaluation failed")
+            )
         return remote.get("value")
 
     @staticmethod
@@ -258,13 +364,24 @@ class WindowsCommandExecutor:
         return json.dumps(value, ensure_ascii=False)
 
     @classmethod
-    def _browser_action(cls, resource: dict[str, Any], action: str, args: dict[str, Any]) -> Any:
+    def _browser_action(
+        cls, resource: dict[str, Any], action: str, args: dict[str, Any]
+    ) -> Any:
         if resource.get("automation") != "cdp":
             if action == "browser_read":
-                return {"limited": True, "message": "该 Tab 仅有 UIA 权限；请用 windows_inspect_app 读取可访问控件。"}
-            raise RuntimeError("该 Tab 未启用 CDP；可使用 windows_focus/click/type 的 UIA 操作，或开启 Chrome/Edge remote debugging 获得 DOM 控制")
+                return {
+                    "limited": True,
+                    "message": "该 Tab 仅有 UIA 权限；请用 windows_inspect_app 读取可访问控件。",
+                }
+            raise RuntimeError(
+                "该 Tab 未启用 CDP；可使用 windows_focus/click/type 的 UIA 操作，"
+                "或开启 Chrome/Edge remote debugging 获得 DOM 控制"
+            )
         if action == "browser_read":
-            return cls._cdp_eval(resource, "({title:document.title,url:location.href,text:(document.body&&document.body.innerText||'').slice(0,100000)})")
+            return cls._cdp_eval(
+                resource,
+                "({title:document.title,url:location.href,text:(document.body&&document.body.innerText||'').slice(0,100000)})",
+            )
         if action == "browser_navigate":
             url = str(args.get("url") or "").strip()
             if not url:
@@ -315,15 +432,21 @@ class WindowsCommandExecutor:
         exe_path = str(resource.get("exe_path") or "").strip()
         if not exe_path or not os.path.isfile(exe_path):
             raise RuntimeError("该授权资源没有可重新启动的可执行文件路径")
-        process = subprocess.Popen([exe_path], close_fds=True)  # noqa: S603 - exact discovered executable only
+        process = subprocess.Popen([exe_path], close_fds=True)  # noqa: S603
         return {"launched": exe_path, "pid": process.pid}
 
     def _close(self, resource: dict[str, Any]) -> dict[str, Any]:
-        if resource.get("automation") == "cdp" and resource.get("kind") == "browser_tab":
+        if (
+            resource.get("automation") == "cdp"
+            and resource.get("kind") == "browser_tab"
+        ):
             tab_id = str(resource.get("tab_id") or "")
             self._cdp_command(resource, "Target.closeTarget", {"targetId": tab_id})
             return {"closed": resource.get("id"), "scope": "tab"}
-        if resource.get("automation") == "uia_tab" and resource.get("kind") == "browser_tab":
+        if (
+            resource.get("automation") == "uia_tab"
+            and resource.get("kind") == "browser_tab"
+        ):
             self._select_uia_tab(resource)
             self._focus(int(resource.get("hwnd") or 0))
             from pywinauto.keyboard import send_keys
@@ -356,23 +479,42 @@ class WindowsCommandExecutor:
             self._select_uia_tab(resource)
             self._focus(int(resource.get("hwnd") or 0))
             from pywinauto.keyboard import send_keys
+
             send_keys(str(args.get("keys") or ""))
             return {"ok": True, "result": {"sent": args.get("keys")}}
         if action == "scroll":
             self._select_uia_tab(resource)
             window = self._uia_window(resource)
             rect = window.rectangle()
-            x = int(args.get("x") if args.get("x") is not None else (rect.left + rect.right) // 2)
-            y = int(args.get("y") if args.get("y") is not None else (rect.top + rect.bottom) // 2)
+            x = int(
+                args.get("x")
+                if args.get("x") is not None
+                else (rect.left + rect.right) // 2
+            )
+            y = int(
+                args.get("y")
+                if args.get("y") is not None
+                else (rect.top + rect.bottom) // 2
+            )
             if not (rect.left <= x < rect.right and rect.top <= y < rect.bottom):
-                raise ConnectorPermissionError("scroll coordinates are outside the authorized window")
+                raise ConnectorPermissionError(
+                    "scroll coordinates are outside the authorized window"
+                )
             self._focus(int(resource.get("hwnd") or 0))
             from pywinauto import mouse
 
-            mouse.scroll(coords=(x, y), wheel_dist=int(args.get("amount") or -3))
-            return {"ok": True, "result": {"scrolled": True, "coords": [x, y]}}
+            mouse.scroll(
+                coords=(x, y), wheel_dist=int(args.get("amount") or -3)
+            )
+            return {
+                "ok": True,
+                "result": {"scrolled": True, "coords": [x, y]},
+            }
         if action.startswith("browser_"):
-            return {"ok": True, "result": self._browser_action(resource, action, args)}
+            return {
+                "ok": True,
+                "result": self._browser_action(resource, action, args),
+            }
         if action == "launch":
             return {"ok": True, "result": self._launch(resource)}
         if action == "close":
