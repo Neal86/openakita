@@ -8,6 +8,9 @@ on:
       - "src/openakita/windows_connector/**"
       - "src/openakita/wechat_desktop/connector_bundle/**"
       - "src/openakita/api/routes/windows_connector.py"
+      - "tests/windows_connector/**"
+      - "tests/wechat_desktop/**"
+      - "tests/hermes/**"
       - "scripts/build_wechat_connector.py"
       - "build/wechat_connector_*"
       - ".github/workflows/wechat-connector-release.yml"
@@ -35,12 +38,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller
           pip install -r src/openakita/wechat_desktop/connector_bundle/requirements.txt
-          pip install -e .
+          pip install -e ".[dev]"
+          pip install -e ./openakita-plugin-sdk
 
       - name: Compile Windows Connector modules
         shell: bash
         run: |
           python -m compileall -q src/openakita/windows_connector src/openakita/wechat_desktop/connector_bundle src/openakita/api/routes/windows_connector.py
+
+      - name: Windows Connector release regression gate
+        shell: pwsh
+        run: python -m pytest -q tests/windows_connector tests/wechat_desktop tests/hermes
 
       - name: Build generic Windows Connector package
         shell: pwsh
