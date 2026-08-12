@@ -1,6 +1,9 @@
 from pathlib import Path
 
 
+"""One-shot helper that makes the parallel-tool regression mandatory in CI."""
+
+
 def main() -> None:
     path = Path(".github/workflows/ci.yml")
     text = path.read_text("utf-8")
