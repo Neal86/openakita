@@ -44,6 +44,11 @@ class HermesContainerManager:
     def _is_missing_volume_error(message: str) -> bool:
         return "no such volume" in message.lower()
 
+    @staticmethod
+    def _is_missing_network_error(message: str) -> bool:
+        lowered = message.lower()
+        return "no such network" in lowered or ("network " in lowered and " not found" in lowered)
+
     def _validate(self, instance: HermesInstance) -> None:
         if not instance.container_name.startswith(self.CONTAINER_PREFIX):
             raise ContainerManagerError("refusing non-OpenAkita container name")
@@ -91,9 +96,16 @@ class HermesContainerManager:
         }
 
     async def ensure_network(self, network: str) -> None:
-        code, _, _ = await self._run("network", "inspect", network, check=False)
-        if code != 0:
+        code, stdout, stderr = await self._run("network", "inspect", network, check=False)
+        if code == 0:
+            return
+        detail = stderr or stdout
+        if self._is_missing_network_error(detail):
             await self._run("network", "create", network)
+            return
+        raise ContainerManagerError(
+            detail or f"docker network inspect exited {code} for {network}"
+        )
 
     async def create_or_start(self, instance: HermesInstance) -> HermesInstance:
         self._validate(instance)
