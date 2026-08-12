@@ -1,9 +1,10 @@
 """Filesystem isolation helpers for profiles sharing one Hermes instance."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
+
+from openakita.utils.atomic_io import atomic_json_write
 
 from .execution import safe_id
 from .paths import hermes_data_path
@@ -41,15 +42,7 @@ class HermesIsolationManager:
             path.mkdir(parents=True, exist_ok=True)
         if metadata is not None:
             target = paths["config"] / "profile.json"
-            temp = target.with_name(f".{target.name}.tmp")
-            try:
-                temp.write_text(
-                    json.dumps(metadata, ensure_ascii=False, indent=2),
-                    "utf-8",
-                )
-                temp.replace(target)
-            finally:
-                temp.unlink(missing_ok=True)
+            atomic_json_write(target, metadata, fsync=True)
         return {key: str(value) for key, value in paths.items()}
 
     def sub_agent_root(
