@@ -88,12 +88,7 @@ class AgentResourceGrant:
 
 
 class WindowsConnectorManager:
-    """Unified registry for local and remote Windows application resources.
-
-    The local Windows node is embedded into OpenAkita and executes in-process.
-    Remote nodes continue to use the paired connector transport. Both transports
-    share the same resource/grant model so Agent permissions behave identically.
-    """
+    """Unified registry for local and remote Windows application resources."""
 
     ACTION_PERMISSION = {
         "list": "read",
@@ -118,7 +113,7 @@ class WindowsConnectorManager:
         self.path = path
         self._resources: dict[str, dict[str, WindowsResource]] = {}
         self._grants: dict[str, AgentResourceGrant] = {}
-        self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._pending: dict[str, tuple[str, asyncio.Future[dict[str, Any]]]] = {}
         self._lock = asyncio.Lock()
         self._local_executor = WindowsCommandExecutor()
         self._migrate_legacy_state()
@@ -255,7 +250,19 @@ class WindowsConnectorManager:
             resource = self._resources.get(node_id, {}).get(resource_id)
             if resource is None:
                 raise ValueError("selected Windows resource is not currently available")
-            grant_id = str(raw.get("id") or f"grant-{secrets.token_hex(6)}")
+            stable_identity = resource.stable_identity or resource.fingerprint
+            explicit_id = str(raw.get("id") or "").strip()
+            existing = next(
+                (
+                    grant
+                    for grant in self._grants.values()
+                    if grant.node_id == node_id
+                    and grant.agent_profile_id == agent_id
+                    and (grant.stable_identity or grant.fingerprint) == stable_identity
+                ),
+                None,
+            )
+            grant_id = explicit_id or (existing.id if existing else f"grant-{secrets.token_hex(6)}")
             permissions = raw.get("permissions") or {}
             grant = AgentResourceGrant(
                 id=grant_id,
@@ -263,15 +270,18 @@ class WindowsConnectorManager:
                 agent_profile_id=agent_id,
                 resource_id=resource.id,
                 fingerprint=resource.fingerprint,
-                stable_identity=resource.stable_identity or resource.fingerprint,
-                remark=str(raw.get("remark") or "").strip(),
+                stable_identity=stable_identity,
+                remark=str(raw.get("remark") or (existing.remark if existing else "")).strip(),
                 read=bool(permissions.get("read", raw.get("read", True))),
                 screenshot=bool(permissions.get("screenshot", raw.get("screenshot", True))),
                 mouse=bool(permissions.get("mouse", raw.get("mouse", False))),
                 keyboard=bool(permissions.get("keyboard", raw.get("keyboard", False))),
                 launch=bool(permissions.get("launch", raw.get("launch", False))),
                 close=bool(permissions.get("close", raw.get("close", False))),
+                created_at=existing.created_at if existing else datetime.now(UTC).isoformat(),
             )
+            if existing and existing.id != grant_id:
+                self._grants.pop(existing.id, None)
             self._grants[grant.id] = grant
             self._save_locked()
         await self.push_permissions(node_id)
@@ -401,7 +411,7 @@ class WindowsConnectorManager:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
         async with self._lock:
-            self._pending[request_id] = future
+            self._pending[request_id] = (node_id, future)
         command = {
             "version": 1,
             "event": "windows.command",
@@ -415,10 +425,15 @@ class WindowsConnectorManager:
             async with self._lock:
                 self._pending.pop(request_id, None)
 
-    async def handle_result(self, request_id: str, payload: dict[str, Any]) -> None:
+    async def handle_result(self, node_id: str, request_id: str, payload: dict[str, Any]) -> None:
         async with self._lock:
-            future = self._pending.get(request_id)
-        if future is not None and not future.done():
+            pending = self._pending.get(request_id)
+        if pending is None:
+            return
+        expected_node_id, future = pending
+        if expected_node_id != node_id:
+            return
+        if not future.done():
             future.set_result(payload)
 
 
