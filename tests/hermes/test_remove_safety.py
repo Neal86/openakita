@@ -117,3 +117,50 @@ async def test_missing_volume_is_already_clean(monkeypatch):
     monkeypatch.setattr(manager, "_run", run)
     await manager.remove(instance, delete_data=True)
     assert calls == [("volume", "inspect", instance.volume_name)]
+
+
+@pytest.mark.asyncio
+async def test_container_inspect_daemon_failure_is_not_missing(monkeypatch):
+    manager = HermesContainerManager()
+    instance = _instance("dedicated-daemon")
+
+    async def run(*args, **kwargs):
+        assert args[0] == "inspect"
+        return 1, "", "Cannot connect to the Docker daemon"
+
+    monkeypatch.setattr(manager, "_run", run)
+    with pytest.raises(ContainerManagerError, match="Cannot connect"):
+        await manager.inspect(instance)
+
+
+@pytest.mark.asyncio
+async def test_container_inspect_only_explicit_missing_is_missing(monkeypatch):
+    manager = HermesContainerManager()
+    instance = _instance("dedicated-gone")
+
+    async def run(*args, **kwargs):
+        assert args[0] == "inspect"
+        return 1, "", f"Error: No such object: {instance.container_name}"
+
+    monkeypatch.setattr(manager, "_run", run)
+    state = await manager.inspect(instance)
+    assert state == {"exists": False, "running": False, "status": "missing"}
+
+
+@pytest.mark.asyncio
+async def test_volume_inspect_daemon_failure_propagates(monkeypatch):
+    manager = HermesContainerManager()
+    instance = _instance("dedicated-volume-daemon")
+
+    async def inspect(_instance):
+        return {"exists": False, "running": False}
+
+    async def run(*args, **kwargs):
+        if args[:2] == ("volume", "inspect"):
+            return 1, "", "Cannot connect to the Docker daemon"
+        raise AssertionError(f"unexpected docker call: {args}")
+
+    monkeypatch.setattr(manager, "inspect", inspect)
+    monkeypatch.setattr(manager, "_run", run)
+    with pytest.raises(ContainerManagerError, match="Cannot connect"):
+        await manager.remove(instance, delete_data=True)
