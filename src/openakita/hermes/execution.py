@@ -1,7 +1,6 @@
 """Agent execution-mode and Hermes instance persistence."""
 from __future__ import annotations
 
-import json
 import re
 import threading
 from collections.abc import Callable
@@ -13,7 +12,7 @@ from typing import Any
 
 from filelock import FileLock
 
-from openakita.utils.atomic_io import atomic_json_write
+from openakita.utils.atomic_io import atomic_json_write, read_json_safe
 
 from .paths import hermes_data_path
 
@@ -138,12 +137,7 @@ class _JsonStore:
         self._file_lock = FileLock(str(self.path) + ".lock")
 
     def _read_unlocked(self) -> list[Any]:
-        if not self.path.exists():
-            return []
-        try:
-            raw = json.loads(self.path.read_text("utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return []
+        raw = read_json_safe(self.path)
         if not isinstance(raw, dict):
             return []
         raw_rows = raw.get(self.key, [])
