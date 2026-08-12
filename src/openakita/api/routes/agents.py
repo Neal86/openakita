@@ -39,6 +39,7 @@ VALID_BOT_TYPES = frozenset(
         "onebot_reverse",
         "qqbot",
         "wechat",
+        "wechat_desktop",
     }
 )
 VALID_PROFILE_LIST_MODES = frozenset({"all", "inclusive", "exclusive"})
@@ -679,20 +680,22 @@ async def delete_agent_profile(profile_id: str):
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found")
 
-    # Remove the dedicated container but preserve its volume by default. Shared
-    # Hermes keeps running because other Agents may still use it.
-    try:
-        from openakita.hermes.bindings import AgentHermesBindingStore
-        from openakita.hermes.execution import (
-            AgentExecutionStore,
-            ExecutionMode,
-            HermesInstanceMode,
-            HermesInstanceStore,
-        )
-        from openakita.hermes.lifecycle import HermesLifecycleService
+    # Profile deletion is authoritative.  Container cleanup is best-effort,
+    # but execution/binding metadata must always be removed so a failed Docker
+    # call cannot leave a ghost Agent bound to Hermes state.
+    from openakita.hermes.bindings import AgentHermesBindingStore
+    from openakita.hermes.execution import (
+        AgentExecutionStore,
+        ExecutionMode,
+        HermesInstanceMode,
+        HermesInstanceStore,
+    )
+    from openakita.hermes.lifecycle import HermesLifecycleService
 
-        execution_store = AgentExecutionStore()
-        execution = execution_store.get(profile_id)
+    execution_store = AgentExecutionStore()
+    binding_store = AgentHermesBindingStore()
+    execution = execution_store.get(profile_id)
+    try:
         if (
             execution.execution_mode == ExecutionMode.HERMES
             and execution.hermes_instance_mode == HermesInstanceMode.DEDICATED
@@ -701,12 +704,13 @@ async def delete_agent_profile(profile_id: str):
             instance = HermesInstanceStore().get(execution.hermes_instance_id)
             if instance is not None:
                 await HermesLifecycleService().remove(instance, delete_data=False)
-        execution_store.delete(profile_id)
-        AgentHermesBindingStore().delete(profile_id)
     except Exception as exc:
-        # Agent deletion itself remains authoritative. Keep the saved instance
-        # record when Docker cleanup fails so the instance page can retry it.
-        logger.warning("[Agents API] Hermes cleanup failed for %s: %s", profile_id, exc)
+        # Preserve the instance record when Docker cleanup fails so the
+        # execution-instance page/operator can retry removing the resource.
+        logger.warning("[Agents API] Hermes runtime cleanup failed for %s: %s", profile_id, exc)
+    finally:
+        execution_store.delete(profile_id)
+        binding_store.delete(profile_id)
 
     logger.info(f"[Agents API] Deleted profile: {profile_id}")
     emit_agent_profiles_changed("deleted", profile_id=profile_id)
@@ -895,11 +899,6 @@ async def get_profile_memory_stats(profile_id: str):
             profile_id,
             e.reason,
         )
-        # Surface this in the unified DegradedBanner too. The registry
-        # key is per-profile so two simultaneously-broken profiles
-        # render as two separate banner entries. ``manual_quarantine``
-        # is intentional — there is no generic quarantine target for
-        # arbitrary profile dirs, so the repair is operator-driven.
         try:
             from openakita.storage.degraded import registry as _degraded
 
@@ -982,8 +981,6 @@ async def get_topology(request: Request):
     pool = getattr(request.app.state, "agent_pool", None)
     session_manager = getattr(request.app.state, "session_manager", None)
 
-    # Always prefer the module-level _orchestrator — AgentToolHandler writes
-    # sub-agent states to this instance, so we must read from the same one.
     orchestrator = None
     try:
         from openakita.main import _orchestrator
@@ -1107,7 +1104,6 @@ async def get_topology(request: Request):
                     }
                 )
 
-    # Sub-agent states from orchestrator
     if orchestrator and pool:
         for entry in pool.get_stats().get("sessions", []):
             sid = entry["session_id"]
@@ -1168,10 +1164,6 @@ async def get_topology(request: Request):
             except Exception as exc:
                 logger.warning(f"[Topology] sub-agent states error for {sid}: {exc}")
 
-    # Include sessions from session_manager that aren't in the pool
-    # (e.g. conversations whose agent instances were reaped due to idle timeout).
-    # Use chat_id as node ID to stay consistent with pool-based nodes (which use
-    # conversation_id), ensuring the frontend sees stable node IDs.
     pool_session_ids = {
         n["id"].split("::")[0] for n in nodes if not n["id"].startswith("dormant::")
     }
@@ -1224,7 +1216,6 @@ async def get_topology(request: Request):
         except Exception as exc:
             logger.warning(f"[Topology] session_manager fallback error: {exc}")
 
-    # Always include system presets as dormant neurons when not active (skip hidden)
     active_profile_ids = {n["profile_id"] for n in nodes}
     for pid, pinfo in profile_map.items():
         if pid in hidden_profile_ids:
@@ -1251,7 +1242,6 @@ async def get_topology(request: Request):
                     }
                 )
 
-    # Aggregate stats
     total_req = 0
     successful = 0
     failed = 0
