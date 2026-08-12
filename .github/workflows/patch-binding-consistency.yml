@@ -1,0 +1,106 @@
+name: One-shot Hermes binding consistency patch
+
+on:
+  push:
+    branches:
+      - feature/hermes-multi-agent
+    paths:
+      - .github/workflows/patch-binding-consistency.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feature/hermes-multi-agent
+          fetch-depth: 0
+
+      - name: Apply exact source edits
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/openakita/api/routes/execution_instances.py')
+          text = path.read_text('utf-8')
+          old = '''def _bound_profiles(instance_id: str) -> list[str]:
+    profiles: list[str] = []
+    for config in AgentExecutionStore().list():
+        bound = config.hermes_instance_id == instance_id
+        shared = (
+            instance_id == HermesLifecycleService.SHARED_ID
+            and config.execution_mode == ExecutionMode.HERMES
+            and config.hermes_instance_mode == HermesInstanceMode.SHARED
+        )
+        if bound or shared:
+            profiles.append(config.profile_id)
+    return sorted(set(profiles))
+'''
+          new = '''def _bound_profiles(instance_id: str) -> list[str]:
+    profiles: set[str] = set()
+    for config in AgentExecutionStore().list():
+        bound = config.hermes_instance_id == instance_id
+        shared = (
+            instance_id == HermesLifecycleService.SHARED_ID
+            and config.execution_mode == ExecutionMode.HERMES
+            and config.hermes_instance_mode == HermesInstanceMode.SHARED
+        )
+        if bound or shared:
+            profiles.add(config.profile_id)
+    for binding in AgentHermesBindingStore().list():
+        if instance_id in binding.hermes_node_ids:
+            profiles.add(binding.profile_id)
+    return sorted(profiles)
+'''
+          if old not in text:
+              raise SystemExit('bound profile helper pattern changed; refusing broad edit')
+          text = text.replace(old, new, 1)
+
+          old_list = '''        bindings = [
+            item.to_dict()
+            for item in executions
+            if item.hermes_instance_id == instance.id
+            or (
+                instance.id == "shared"
+                and item.execution_mode == ExecutionMode.HERMES
+                and item.hermes_instance_mode == HermesInstanceMode.SHARED
+            )
+        ]
+        data["agents"] = bindings
+        data["agent_count"] = len(bindings)
+'''
+          new_list = '''        bound_profile_ids = _bound_profiles(instance.id)
+        execution_by_profile = {item.profile_id: item for item in executions}
+        bindings = [
+            execution_by_profile[profile_id].to_dict()
+            if profile_id in execution_by_profile
+            else {"profile_id": profile_id, "binding_only": True}
+            for profile_id in bound_profile_ids
+        ]
+        data["agents"] = bindings
+        data["agent_count"] = len(bound_profile_ids)
+'''
+          if old_list not in text:
+              raise SystemExit('instance list binding pattern changed; refusing broad edit')
+          path.write_text(text.replace(old_list, new_list, 1), 'utf-8')
+
+          test = Path('tests/hermes/test_binding_consistency.py')
+          test.write_text('''from pathlib import Path\n\nfrom openakita.hermes.bindings import AgentHermesBinding, AgentHermesBindingStore\nfrom openakita.hermes.execution import AgentExecutionStore\nfrom openakita.hermes.models import HermesRuntimeProvider\n\n\ndef test_binding_only_reference_is_detectable(tmp_path: Path, monkeypatch):\n    from openakita.api.routes import execution_instances as routes\n\n    binding_path = tmp_path / "bindings.json"\n    execution_path = tmp_path / "execution.json"\n    AgentHermesBindingStore(binding_path).upsert(\n        AgentHermesBinding(\n            profile_id="customer",\n            runtime_provider=HermesRuntimeProvider.HERMES,\n            hermes_node_ids=["dedicated-customer"],\n        )\n    )\n    monkeypatch.setattr(routes, "AgentHermesBindingStore", lambda: AgentHermesBindingStore(binding_path))\n    monkeypatch.setattr(routes, "AgentExecutionStore", lambda: AgentExecutionStore(execution_path))\n\n    assert routes._bound_profiles("dedicated-customer") == ["customer"]\n''', 'utf-8')
+          PY
+
+      - name: Verify and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q src/openakita/api/routes/execution_instances.py tests/hermes/test_binding_consistency.py
+          git diff --check
+          git config user.name "openakita-maintenance-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/openakita/api/routes/execution_instances.py tests/hermes/test_binding_consistency.py
+          git commit -m "fix: keep Hermes instance bindings consistent"
+          git push origin HEAD:feature/hermes-multi-agent
