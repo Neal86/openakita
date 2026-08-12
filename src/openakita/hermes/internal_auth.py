@@ -5,6 +5,8 @@ import os
 import secrets
 from pathlib import Path
 
+from filelock import FileLock
+
 
 def _default_secret_path() -> Path:
     explicit = os.environ.get("OPENAKITA_HERMES_AUTH_FILE", "").strip()
@@ -22,34 +24,32 @@ def internal_gateway_secret() -> str:
     An explicitly configured environment value wins. Otherwise a cryptographically
     random token is generated once and persisted outside source control. This keeps
     desktop/local installs zero-configuration while avoiding a published default key.
+    Creation is serialized across backend processes so concurrent first startup cannot
+    observe a just-created-but-not-yet-written empty secret file.
     """
     configured = os.environ.get("OPENAKITA_HERMES_LLM_API_KEY", "").strip()
     if configured:
         return configured
 
     path = _default_secret_path()
-    try:
-        current = path.read_text("utf-8").strip()
-        if current:
-            return current
-    except OSError:
-        pass
-
-    token = secrets.token_urlsafe(48)
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        current = path.read_text("utf-8").strip()
-        if current:
-            return current
-        raise RuntimeError(f"Hermes auth secret file is empty: {path}") from None
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(token + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
-    return token
+    lock = FileLock(str(path) + ".lock")
+    with lock:
+        try:
+            current = path.read_text("utf-8").strip()
+            if current:
+                return current
+        except OSError:
+            pass
+
+        token = secrets.token_urlsafe(48)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(token + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return token
