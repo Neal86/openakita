@@ -30,6 +30,18 @@ def _lock_for_path(path: Path) -> threading.Lock:
         return lock
 
 
+def _unique_temp_path(path: Path) -> Path:
+    """Return a temp path unique across processes and threads.
+
+    The previous fixed ``*.tmp`` name was safe only inside one process because
+    :func:`_lock_for_path` is process-local. A CLI and the running backend could
+    otherwise write/unlink the same temp file concurrently.
+    """
+    return path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp"
+    )
+
+
 def _fsync_parent_dir(path: Path) -> None:
     """Best-effort directory fsync so a committed rename survives power loss."""
     if os.name == "nt":
@@ -55,16 +67,16 @@ def safe_write(
 ) -> None:
     """Atomic text write with optional .bak backup and Windows retry.
 
-    Flow: backup existing → write to .tmp → (fsync) → rename .tmp → target.
-    On Windows, PermissionError on rename is retried up to *retries* times
-    before falling back to a direct (non-atomic) write, unless
+    Flow: backup existing → write to a unique temp file → (fsync) → rename to
+    target. On Windows, PermissionError on rename is retried up to *retries*
+    times before falling back to a direct (non-atomic) write, unless
     ``allow_fallback`` is disabled.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
 
     with _lock_for_path(path):
+        tmp = _unique_temp_path(path)
         if backup and path.exists():
             bak = path.with_suffix(path.suffix + ".bak")
             try:
@@ -129,8 +141,6 @@ def atomic_json_write(
 
 def append_jsonl(path: Path, obj: dict, *, fsync: bool = False) -> None:
     """Append a single JSON object as one line to a JSONL file (append-only)."""
-    import os
-
     line = json.dumps(obj, ensure_ascii=False, default=str) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
@@ -165,12 +175,14 @@ def read_json_safe(path: Path) -> dict | None:
 
         if p == bak:
             logger.warning("Restored config from backup %s", p)
+            tmp = _unique_temp_path(path)
             try:
-                tmp = path.with_suffix(path.suffix + ".tmp")
                 tmp.write_text(bak.read_text(encoding="utf-8"), encoding="utf-8")
                 tmp.replace(path)
             except OSError as e:
                 logger.warning("Failed to restore primary from backup: %s", e)
+            finally:
+                tmp.unlink(missing_ok=True)
         return data
 
     return None
