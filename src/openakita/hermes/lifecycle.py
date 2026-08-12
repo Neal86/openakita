@@ -229,7 +229,11 @@ class HermesLifecycleService:
     async def remove(self, instance: HermesInstance, *, delete_data: bool = False) -> None:
         if instance.mode == HermesInstanceMode.SHARED:
             raise ContainerManagerError("不能删除默认共享实例")
-        if not self.is_native(instance) and HermesContainerManager.available():
+        if not self.is_native(instance):
+            if not HermesContainerManager.available():
+                raise ContainerManagerError(
+                    "Docker socket unavailable; cannot safely remove Hermes container"
+                )
             await self.containers.remove(instance, delete_data=delete_data)
         self.instances.delete(instance.id)
         get_hermes_store().delete(instance.id)
