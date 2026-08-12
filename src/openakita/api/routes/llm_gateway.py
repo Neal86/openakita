@@ -9,10 +9,10 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -24,6 +24,7 @@ from openakita.hermes.internal_auth import internal_gateway_secret
 from openakita.llm.client import LLMClient
 
 router = APIRouter(prefix="/v1", tags=["LLM Gateway"])
+_PROFILE_ID_RE = re.compile(r"^[a-z0-9_-]{1,64}$")
 
 
 class ChatCompletionRequest(BaseModel):
@@ -45,11 +46,21 @@ def _require_internal_gateway(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Internal Hermes gateway authentication required")
 
 
+def _validated_profile_id(value: Any) -> str | None:
+    if value is None:
+        return None
+    profile_id = str(value).strip()
+    if not profile_id:
+        return None
+    if not _PROFILE_ID_RE.fullmatch(profile_id):
+        raise HTTPException(status_code=400, detail="Invalid Agent profile id")
+    return profile_id
+
+
 def _profile_id(model: str, payload: ChatCompletionRequest) -> str | None:
     if model.startswith("agent:"):
-        return model.split(":", 1)[1].strip() or None
-    value = payload.metadata.get("agent_profile_id")
-    return str(value).strip() if value else None
+        return _validated_profile_id(model.split(":", 1)[1])
+    return _validated_profile_id(payload.metadata.get("agent_profile_id"))
 
 
 def _profile_from_app(request: Request, profile_id: str) -> Any | None:
@@ -65,16 +76,11 @@ def _profile_from_app(request: Request, profile_id: str) -> Any | None:
             if profile is not None:
                 return profile
     try:
-        from openakita.config import settings
-        roots = [Path(settings.project_root) / "data" / "agents" / "profiles", Path(settings.project_root) / "data" / "profiles"]
-        from openakita.agents.profile import AgentProfile
-        for root in roots:
-            path = root / f"{profile_id}.json"
-            if path.exists():
-                return AgentProfile.from_dict(json.loads(path.read_text("utf-8")))
+        from openakita.agents.profile import get_profile_store
+
+        return get_profile_store().get(profile_id)
     except Exception:
-        pass
-    return None
+        return None
 
 
 def _clients_for(request: Request, payload: ChatCompletionRequest) -> tuple[list[LLMClient], str]:
