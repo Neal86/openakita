@@ -13,6 +13,16 @@ export type AgentExecutionConfig = {
   hermes_sub_agent_memory_mode: SubAgentMemoryMode;
 };
 
+export type RuntimeInfo = {
+  transport: "native_windows" | "native" | "docker" | string;
+  native: boolean;
+  available?: boolean;
+  running?: boolean;
+  pid?: number | null;
+  version?: string;
+  process_model?: string;
+};
+
 export type ExecutionInstance = {
   id: string;
   name: string;
@@ -33,6 +43,15 @@ export type ExecutionInstance = {
   agent_count?: number;
   agents?: AgentExecutionConfig[];
   container?: Record<string, unknown>;
+  runtime?: RuntimeInfo;
+};
+
+export type ExecutionInstanceList = {
+  instances: ExecutionInstance[];
+  docker_available: boolean;
+  native_available?: boolean;
+  native_default?: boolean;
+  platform?: string;
 };
 
 export const defaultExecution = (profileId: string): AgentExecutionConfig => ({
@@ -64,7 +83,7 @@ export async function saveAgentExecution(apiBase: string, profileId: string, exe
   return result.execution;
 }
 
-export async function listExecutionInstances(apiBase: string): Promise<{ instances: ExecutionInstance[]; docker_available: boolean }> {
+export async function listExecutionInstances(apiBase: string): Promise<ExecutionInstanceList> {
   return json(await safeFetch(`${apiBase}/api/execution/instances`));
 }
 
