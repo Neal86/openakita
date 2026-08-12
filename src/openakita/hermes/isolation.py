@@ -6,17 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from .execution import safe_id
+from .paths import hermes_data_path
 
 
 class HermesIsolationManager:
     def __init__(self, root: Path | None = None) -> None:
-        if root is None:
-            try:
-                from openakita.config import settings
-                root = Path(settings.project_root) / "data" / "hermes_agents"
-            except Exception:
-                root = Path.cwd() / "data" / "hermes_agents"
-        self.root = Path(root).resolve()
+        self.root = Path(root or hermes_data_path("hermes_agents")).resolve()
 
     def profile_root(self, profile_id: str) -> Path:
         profile_id = safe_id(profile_id)
@@ -25,7 +20,12 @@ class HermesIsolationManager:
             raise ValueError("invalid profile path")
         return path
 
-    def ensure(self, profile_id: str, *, metadata: dict[str, Any] | None = None) -> dict[str, str]:
+    def ensure(
+        self,
+        profile_id: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
         base = self.profile_root(profile_id)
         paths = {
             "root": base,
@@ -41,12 +41,24 @@ class HermesIsolationManager:
             path.mkdir(parents=True, exist_ok=True)
         if metadata is not None:
             target = paths["config"] / "profile.json"
-            temp = target.with_suffix(".tmp")
-            temp.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), "utf-8")
-            temp.replace(target)
+            temp = target.with_name(f".{target.name}.tmp")
+            try:
+                temp.write_text(
+                    json.dumps(metadata, ensure_ascii=False, indent=2),
+                    "utf-8",
+                )
+                temp.replace(target)
+            finally:
+                temp.unlink(missing_ok=True)
         return {key: str(value) for key, value in paths.items()}
 
-    def sub_agent_root(self, parent_id: str, child_id: str, *, ephemeral: bool) -> Path:
+    def sub_agent_root(
+        self,
+        parent_id: str,
+        child_id: str,
+        *,
+        ephemeral: bool,
+    ) -> Path:
         parent = self.profile_root(parent_id)
         child = safe_id(child_id)
         bucket = "ephemeral" if ephemeral else "persistent"
