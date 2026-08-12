@@ -87,6 +87,27 @@ def test_binding_defaults_are_backward_compatible(tmp_path: Path):
     assert binding.hermes_node_ids == []
 
 
+def test_legacy_local_binding_discards_stale_node_ids(tmp_path: Path):
+    path = tmp_path / "bindings.json"
+    path.write_text(
+        json.dumps(
+            {
+                "bindings": [
+                    {
+                        "profile_id": "customer",
+                        "runtime_provider": "local",
+                        "hermes_node_ids": ["dedicated-customer"],
+                    }
+                ]
+            }
+        ),
+        "utf-8",
+    )
+    binding = AgentHermesBindingStore(path).get("customer")
+    assert binding.runtime_provider == HermesRuntimeProvider.LOCAL
+    assert binding.hermes_node_ids == []
+
+
 def test_binding_roundtrip(tmp_path: Path):
     store = AgentHermesBindingStore(tmp_path / "bindings.json")
     store.upsert(
