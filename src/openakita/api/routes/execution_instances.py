@@ -82,7 +82,7 @@ def _native_logs(instance, tail: int) -> str:
 
 
 def _bound_profiles(instance_id: str) -> list[str]:
-    profiles: list[str] = []
+    profiles: set[str] = set()
     for config in AgentExecutionStore().list():
         bound = config.hermes_instance_id == instance_id
         shared = (
@@ -91,8 +91,11 @@ def _bound_profiles(instance_id: str) -> list[str]:
             and config.hermes_instance_mode == HermesInstanceMode.SHARED
         )
         if bound or shared:
-            profiles.append(config.profile_id)
-    return sorted(set(profiles))
+            profiles.add(config.profile_id)
+    for binding in AgentHermesBindingStore().list():
+        if instance_id in binding.hermes_node_ids:
+            profiles.add(binding.profile_id)
+    return sorted(profiles)
 
 
 @router.get("/agents/{profile_id}")
@@ -160,18 +163,16 @@ async def list_instances() -> dict:
                 "available": False,
                 "error": "Docker socket unavailable",
             }
+        bound_profile_ids = _bound_profiles(instance.id)
+        execution_by_profile = {item.profile_id: item for item in executions}
         bindings = [
-            item.to_dict()
-            for item in executions
-            if item.hermes_instance_id == instance.id
-            or (
-                instance.id == "shared"
-                and item.execution_mode == ExecutionMode.HERMES
-                and item.hermes_instance_mode == HermesInstanceMode.SHARED
-            )
+            execution_by_profile[profile_id].to_dict()
+            if profile_id in execution_by_profile
+            else {"profile_id": profile_id, "binding_only": True}
+            for profile_id in bound_profile_ids
         ]
         data["agents"] = bindings
-        data["agent_count"] = len(bindings)
+        data["agent_count"] = len(bound_profile_ids)
         rows.append(data)
     return {
         "instances": rows,
