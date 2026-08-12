@@ -45,7 +45,9 @@ jobs:
         run: |
           python scripts/integrate_windows_connector.py
           python - <<'PY'
+          from pathlib import Path
           import scripts.finalize_windows_connector as f
+
           f.add_launch_tool()
           f.add_generic_pairing_aliases()
           f.point_connector_at_generic_pair_api()
@@ -53,6 +55,15 @@ jobs:
           f.harden_executor()
           f.harden_resource_identity()
           f.harden_manager_identity_and_state()
+
+          manager = Path("src/openakita/windows_connector/manager.py")
+          text = manager.read_text("utf-8")
+          text = text.replace(
+              '    kind: str\n    stable_identity: str = ""\n    volatile_window_id: str = ""\n    app_name: str\n',
+              '    kind: str\n    app_name: str\n    stable_identity: str = ""\n    volatile_window_id: str = ""\n',
+          )
+          manager.write_text(text, "utf-8")
+
           f.fix_hermes_capability_category_check()
           f.normalize_native_hermes_instances()
           f.remove_stale_runtime_routing_script()
