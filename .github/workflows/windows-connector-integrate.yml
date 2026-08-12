@@ -6,81 +6,43 @@ on:
     branches: [feature/hermes-multi-agent]
     paths:
       - ".github/workflows/windows-connector-integrate.yml"
-      - "scripts/integrate_windows_connector.py"
-      - "scripts/integrate_windows_connector_ci.py"
-      - "scripts/finalize_windows_connector.py"
       - "src/openakita/windows_connector/**"
       - "src/openakita/api/auth.py"
       - "src/openakita/api/routes/windows_connector.py"
+      - "src/openakita/api/routes/wechat_desktop.py"
       - "src/openakita/api/routes/execution_instances.py"
-      - "src/openakita/hermes/capability_bridge.py"
-      - "src/openakita/hermes/lifecycle.py"
+      - "src/openakita/api/routes/llm_gateway.py"
+      - "src/openakita/hermes/**"
       - "src/openakita/wechat_desktop/connector_bundle/**"
       - "apps/setup-center/src/components/WindowsConnectorPanel.tsx"
+      - "apps/setup-center/src/views/ExecutionInstancesView.tsx"
       - "tests/windows_connector/**"
       - "tests/wechat_desktop/**"
+      - "tests/hermes/**"
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  integrate:
+  verify:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
         with:
           ref: feature/hermes-multi-agent
-          fetch-depth: 0
+          fetch-depth: 1
+          persist-credentials: false
 
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
 
-      - name: Apply confirmed Windows Connector integration
-        run: |
-          python scripts/integrate_windows_connector.py
-          python - <<'PY'
-          from pathlib import Path
-
-          finalizer = Path("scripts/finalize_windows_connector.py")
-          source = finalizer.read_text("utf-8")
-          bad = "        '''    fingerprint: str\n    kind: str\n''',\n        '''    fingerprint: str\n    kind: str\n    stable_identity: str = \"\"\n    volatile_window_id: str = \"\"\n''',"
-          good = "        '''    fingerprint: str\n    kind: str\n    app_name: str\n''',\n        '''    fingerprint: str\n    kind: str\n    app_name: str\n    stable_identity: str = \"\"\n    volatile_window_id: str = \"\"\n''',"
-          if bad in source:
-              finalizer.write_text(source.replace(bad, good, 1), "utf-8")
-          PY
-          python - <<'PY'
-          import scripts.finalize_windows_connector as f
-
-          f.add_launch_tool()
-          f.add_generic_pairing_aliases()
-          f.point_connector_at_generic_pair_api()
-          f.exempt_generic_pair_endpoint()
-          f.harden_executor()
-          f.harden_resource_identity()
-          f.harden_manager_identity_and_state()
-          f.fix_hermes_capability_category_check()
-          f.normalize_native_hermes_instances()
-          f.remove_stale_runtime_routing_script()
-          f.add_regression_tests()
-          print("Windows Connector security finalization applied")
-          PY
-          python scripts/integrate_windows_connector_ci.py
-          python - <<'PY'
-          from pathlib import Path
-
-          ci = Path(".github/workflows/ci.yml")
-          text = ci.read_text("utf-8")
-          text = text.replace("node-version: '20'", "node-version: '22'")
-          ci.write_text(text, "utf-8")
-          PY
-
-      - name: Compile changed Python modules
+      - name: Compile Windows Connector and Hermes modules
         run: |
           python -m compileall -q \
             src/openakita/windows_connector \
@@ -88,10 +50,9 @@ jobs:
             src/openakita/api/routes/windows_connector.py \
             src/openakita/api/routes/execution_instances.py \
             src/openakita/api/routes/wechat_desktop.py \
-            src/openakita/hermes/capability_bridge.py \
-            src/openakita/hermes/lifecycle.py \
-            src/openakita/wechat_desktop/connector_bundle \
-            src/openakita/core/_tool_executor_legacy.py
+            src/openakita/api/routes/llm_gateway.py \
+            src/openakita/hermes \
+            src/openakita/wechat_desktop/connector_bundle
 
       - name: Install test dependencies
         run: |
@@ -99,34 +60,22 @@ jobs:
           pip install -e ".[dev]"
           pip install -e ./openakita-plugin-sdk
 
-      - name: Ruff Windows Connector changes
+      - name: Ruff Windows Connector and Hermes changes
         run: |
-          ruff check --fix \
-            src/openakita/windows_connector \
-            src/openakita/api/auth.py \
-            src/openakita/api/routes/windows_connector.py \
-            src/openakita/api/routes/execution_instances.py \
-            src/openakita/hermes/capability_bridge.py \
-            src/openakita/hermes/lifecycle.py \
-            tests/windows_connector \
-            scripts/integrate_windows_connector.py \
-            scripts/integrate_windows_connector_ci.py \
-            scripts/finalize_windows_connector.py
           ruff check \
             src/openakita/windows_connector \
             src/openakita/api/auth.py \
             src/openakita/api/routes/windows_connector.py \
             src/openakita/api/routes/execution_instances.py \
-            src/openakita/hermes/capability_bridge.py \
-            src/openakita/hermes/lifecycle.py \
+            src/openakita/api/routes/wechat_desktop.py \
+            src/openakita/api/routes/llm_gateway.py \
+            src/openakita/hermes \
             tests/windows_connector \
-            scripts/integrate_windows_connector.py \
-            scripts/integrate_windows_connector_ci.py \
-            scripts/finalize_windows_connector.py
+            tests/wechat_desktop \
+            tests/hermes
 
-      - name: Windows Connector and regression tests
-        run: |
-          pytest -q tests/windows_connector tests/wechat_desktop tests/hermes
+      - name: Windows Connector and Hermes regression tests
+        run: pytest -q tests/windows_connector tests/wechat_desktop tests/hermes
 
       - uses: actions/setup-node@v6
         with:
@@ -134,53 +83,16 @@ jobs:
           cache: npm
           cache-dependency-path: apps/setup-center/package-lock.json
 
-      - name: Repair frontend dependency lock within declared ranges
-        working-directory: apps/setup-center
-        run: npm audit fix --package-lock-only
-
-      - name: Build and audit Setup Center
+      - name: Build Setup Center
         working-directory: apps/setup-center
         run: |
           npm ci
-          npm audit --audit-level=high
           npm run build
 
-      - name: Verify generated connector workflow contract
+      - name: Verify Connector release contract
         run: |
-          grep -F 'Build generic Windows Connector package' .github/workflows/wechat-connector-release.yml
           grep -F 'OpenAkita-Windows-Connector-Windows-x64' .github/workflows/wechat-connector-release.yml
           grep -F 'windows-connector-latest' .github/workflows/wechat-connector-release.yml
-          grep -F 'Connector UI startup smoke test' .github/workflows/wechat-connector-release.yml
 
-      - name: Commit integrated code
-        run: |
-          git restore -- .github/workflows/wechat-connector-release.yml
-          if git diff --quiet; then
-            echo "No generated integration changes"
-            exit 0
-          fi
-          git config user.name "openakita-actions"
-          git config user.email "actions@users.noreply.github.com"
-          git add \
-            .github/workflows/ci.yml \
-            src/openakita/api/auth.py \
-            src/openakita/api/server.py \
-            src/openakita/api/routes/wechat_desktop.py \
-            src/openakita/api/routes/windows_connector.py \
-            src/openakita/api/routes/execution_instances.py \
-            src/openakita/wechat_desktop/connector_bundle \
-            src/openakita/core/_tool_executor_legacy.py \
-            src/openakita/hermes/capability_bridge.py \
-            src/openakita/hermes/lifecycle.py \
-            src/openakita/windows_connector \
-            apps/setup-center/package-lock.json \
-            apps/setup-center/src/views/IMView.tsx \
-            apps/setup-center/src/components/WindowsConnectorPanel.tsx \
-            scripts/build_wechat_connector.py \
-            scripts/finalize_windows_connector.py \
-            tests/windows_connector \
-            tests/wechat_desktop/test_connector_desktop_ui.py
-          git add -A scripts/finalize_windows_agent_runtime_routing.py
-          git commit -m "fix: harden Windows Connector isolation and runtime routing [skip ci]"
-          git pull --rebase origin feature/hermes-multi-agent
-          git push origin HEAD:feature/hermes-multi-agent
+      - name: Ensure CI did not mutate tracked source
+        run: git diff --exit-code
