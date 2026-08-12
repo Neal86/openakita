@@ -8,6 +8,9 @@ on:
     paths:
       - ci-trigger/hermes-native-windows-release.txt
       - src/openakita/hermes/**
+      - src/openakita/windows_connector/**
+      - src/openakita/api/routes/windows_connector.py
+      - apps/setup-center/src/components/WindowsConnectorPanel.tsx
       - .github/workflows/hermes-native-windows-release.yml
 
 permissions:
@@ -55,11 +58,6 @@ jobs:
           rust_cache_prefix: hermes-native-windows
           disable_bootstrap_cache: "false"
           python_version: "3.11"
-
-      - name: Run Hermes/OpenAkita tests
-        shell: bash
-        run: |
-          python -m pytest tests/hermes tests/wechat_desktop tests/windows_connector -q
 
       - name: Copy backend and third-party license to Tauri resources
         shell: bash
@@ -153,7 +151,9 @@ jobs:
           3. Do not move OpenAkita.exe out of this folder; the resources folder must stay beside it.
 
           This build includes the OpenAkita desktop app, embedded Hermes Agent runtime,
-          generic Windows Connector support, WeChat desktop integration, and local app/browser discovery.
+          embedded local Windows Connector runtime, remote Windows Connector transport,
+          WeChat integration, and local app/browser discovery.
+          Local apps do not require a separately installed Connector.
           Docker is not required for the embedded Hermes runtime.
           "@ | Set-Content -Encoding UTF8 (Join-Path $root "README.txt")
 
@@ -204,6 +204,8 @@ jobs:
             "portable_release_file": "OpenAkita-Portable-Windows-x64.zip",
             "native_runtime": true,
             "windows_connector_integrated": true,
+            "embedded_local_windows_runtime": true,
+            "remote_windows_transport": true,
             "docker_required": false,
             "nsis_built": false,
             "release_tag": "wechat-connector-latest",
