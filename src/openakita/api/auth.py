@@ -51,6 +51,7 @@ AUTH_EXEMPT_PATHS = frozenset(
         # Keep only the redemption endpoint public; node management and
         # pairing-code creation still require normal web authentication.
         "/api/wechat-desktop/pair",
+        "/api/windows-connector/pair",
     }
 )
 AUTH_EXEMPT_PREFIXES = ("/web/", "/web", "/ws/", "/docs", "/openapi.json", "/redoc", "/user-docs")

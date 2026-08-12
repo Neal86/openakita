@@ -5,7 +5,9 @@ import ctypes
 import io
 import json
 import os
+import re
 import subprocess
+import time
 import urllib.request
 from typing import Any
 
@@ -32,9 +34,11 @@ class WindowsCommandExecutor:
             if item.get("id") == resource_id:
                 return item
         if fingerprint:
-            for item in resources:
-                if item.get("fingerprint") == fingerprint:
-                    return item
+            matches = [item for item in resources if item.get("fingerprint") == fingerprint]
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise ConnectorPermissionError("resource fingerprint is ambiguous; refresh the grant")
         raise RuntimeError("resource is no longer available")
 
     def _authorize(self, payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -46,8 +50,14 @@ class WindowsCommandExecutor:
         grant = self._grants.get(grant_id)
         if not grant or str(grant.get("agent_profile_id") or "") != agent_id:
             raise ConnectorPermissionError("invalid Agent grant")
-        if str(grant.get("resource_id") or "") != resource_id and str(grant.get("fingerprint") or "") != fingerprint:
-            raise ConnectorPermissionError("grant does not match requested resource")
+        grant_resource_id = str(grant.get("resource_id") or "")
+        grant_fingerprint = str(grant.get("fingerprint") or "")
+        if grant_resource_id != resource_id:
+            if not fingerprint or grant_fingerprint != fingerprint:
+                raise ConnectorPermissionError("grant does not match requested resource")
+            matches = [item for item in self.resources() if item.get("fingerprint") == fingerprint]
+            if len(matches) != 1 or str(matches[0].get("id") or "") != resource_id:
+                raise ConnectorPermissionError("grant fallback identity is ambiguous or stale")
         permissions = grant.get("permissions") or {}
         required = {
             "inspect": "read", "read_ui": "read", "browser_read": "read",
@@ -63,10 +73,18 @@ class WindowsCommandExecutor:
     @staticmethod
     def _focus(hwnd: int) -> None:
         if os.name != "nt" or not hwnd:
-            return
+            raise RuntimeError("authorized Windows window is unavailable")
         user32 = ctypes.windll.user32
+        if not user32.IsWindow(hwnd):
+            raise RuntimeError("authorized Windows window is no longer available")
         user32.ShowWindow(hwnd, 9)
-        user32.SetForegroundWindow(hwnd)
+        if not user32.SetForegroundWindow(hwnd):
+            raise RuntimeError("could not focus the authorized Windows window")
+        for _ in range(5):
+            if int(user32.GetForegroundWindow()) == int(hwnd):
+                return
+            time.sleep(0.03)
+        raise RuntimeError("authorized Windows window did not receive foreground focus")
 
     @staticmethod
     def _uia_window(resource: dict[str, Any]):
@@ -76,7 +94,7 @@ class WindowsCommandExecutor:
         if hwnd:
             return Desktop(backend="uia").window(handle=hwnd)
         title = str(resource.get("title") or "")
-        return Desktop(backend="uia").window(title_re=f".*{title}.*")
+        return Desktop(backend="uia").window(title_re=f".*{re.escape(title)}.*")
 
     def _select_uia_tab(self, resource: dict[str, Any]) -> None:
         if resource.get("automation") != "uia_tab":
@@ -118,9 +136,16 @@ class WindowsCommandExecutor:
             window = self._uia_window(resource)
             image = window.capture_as_image()
         except Exception:
-            from PIL import ImageGrab
+            try:
+                window = self._uia_window(resource)
+                rect = window.rectangle()
+                if rect.width() <= 0 or rect.height() <= 0:
+                    raise RuntimeError("authorized window has no capturable area")
+                from PIL import ImageGrab
 
-            image = ImageGrab.grab(all_screens=True)
+                image = ImageGrab.grab(bbox=(rect.left, rect.top, rect.right, rect.bottom), all_screens=True)
+            except Exception as fallback_exc:
+                raise RuntimeError("unable to capture only the authorized window") from fallback_exc
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
         return {"mime_type": "image/png", "base64": base64.b64encode(buffer.getvalue()).decode("ascii")}
@@ -139,6 +164,9 @@ class WindowsCommandExecutor:
         x, y = int(args.get("x") or 0), int(args.get("y") or 0)
         if not x and not y:
             raise ValueError("target or x/y is required")
+        rect = window.rectangle()
+        if not (rect.left <= x < rect.right and rect.top <= y < rect.bottom):
+            raise ConnectorPermissionError("click coordinates are outside the authorized window")
         from pywinauto import mouse
 
         if bool(args.get("double", False)):
@@ -299,9 +327,17 @@ class WindowsCommandExecutor:
             return {"ok": True, "result": {"sent": args.get("keys")}}
         if action == "scroll":
             self._select_uia_tab(resource)
+            window = self._uia_window(resource)
+            rect = window.rectangle()
+            x = int(args.get("x") if args.get("x") is not None else (rect.left + rect.right) // 2)
+            y = int(args.get("y") if args.get("y") is not None else (rect.top + rect.bottom) // 2)
+            if not (rect.left <= x < rect.right and rect.top <= y < rect.bottom):
+                raise ConnectorPermissionError("scroll coordinates are outside the authorized window")
+            self._focus(int(resource.get("hwnd") or 0))
             from pywinauto import mouse
-            mouse.scroll(coords=(int(args.get("x") or 0), int(args.get("y") or 0)), wheel_dist=int(args.get("amount") or -3))
-            return {"ok": True, "result": {"scrolled": True}}
+
+            mouse.scroll(coords=(x, y), wheel_dist=int(args.get("amount") or -3))
+            return {"ok": True, "result": {"scrolled": True, "coords": [x, y]}}
         if action.startswith("browser_"):
             return {"ok": True, "result": self._browser_action(resource, action, args)}
         if action == "launch":

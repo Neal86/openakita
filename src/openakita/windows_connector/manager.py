@@ -13,7 +13,16 @@ from openakita.wechat_desktop import wechat_desktop_manager
 
 from .executor import WindowsCommandExecutor
 
-STATE_PATH = Path("data/windows_connector/state.json")
+
+def _default_state_path() -> Path:
+    explicit = os.environ.get("OPENAKITA_DATA_DIR", "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve() / "windows_connector" / "state.json"
+    return Path.home() / ".openakita" / "data" / "windows_connector" / "state.json"
+
+
+STATE_PATH = _default_state_path()
+LEGACY_STATE_PATH = Path("data/windows_connector/state.json")
 LOCAL_NODE_ID = "local"
 
 
@@ -23,6 +32,8 @@ class WindowsResource:
     fingerprint: str
     kind: str
     app_name: str
+    stable_identity: str = ""
+    volatile_window_id: str = ""
     process_name: str = ""
     pid: int = 0
     hwnd: int = 0
@@ -50,6 +61,7 @@ class AgentResourceGrant:
     agent_profile_id: str
     resource_id: str
     fingerprint: str
+    stable_identity: str = ""
     remark: str = ""
     read: bool = True
     screenshot: bool = True
@@ -109,7 +121,17 @@ class WindowsConnectorManager:
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._lock = asyncio.Lock()
         self._local_executor = WindowsCommandExecutor()
+        self._migrate_legacy_state()
         self._load()
+
+    def _migrate_legacy_state(self) -> None:
+        if self.path.exists() or self.path == LEGACY_STATE_PATH or not LEGACY_STATE_PATH.exists():
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_bytes(LEGACY_STATE_PATH.read_bytes())
+        except OSError:
+            pass
 
     @property
     def local_available(self) -> bool:
@@ -134,7 +156,7 @@ class WindowsConnectorManager:
     def _save_locked(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "version": 2,
+            "version": 3,
             "grants": [asdict(grant) for grant in self._grants.values()],
             "resources": {
                 node_id: [asdict(resource) for resource in rows.values()]
@@ -187,14 +209,25 @@ class WindowsConnectorManager:
         async with self._lock:
             rows = list(self._resources.get(node_id, {}).values())
             grants = list(self._grants.values())
+        identity_counts: dict[str, int] = {}
+        for item in rows:
+            identity = item.stable_identity or item.fingerprint
+            identity_counts[identity] = identity_counts.get(identity, 0) + 1
         result: list[dict[str, Any]] = []
         for item in rows:
+            identity = item.stable_identity or item.fingerprint
             raw = asdict(item)
             raw["grants"] = [
                 self._grant_dict(grant)
                 for grant in grants
                 if grant.node_id == node_id
-                and (grant.resource_id == item.id or grant.fingerprint == item.fingerprint)
+                and (
+                    grant.resource_id == item.id
+                    or (
+                        identity_counts.get(identity) == 1
+                        and (grant.stable_identity or grant.fingerprint) == identity
+                    )
+                )
             ]
             result.append(raw)
         return result
@@ -230,6 +263,7 @@ class WindowsConnectorManager:
                 agent_profile_id=agent_id,
                 resource_id=resource.id,
                 fingerprint=resource.fingerprint,
+                stable_identity=resource.stable_identity or resource.fingerprint,
                 remark=str(raw.get("remark") or "").strip(),
                 read=bool(permissions.get("read", raw.get("read", True))),
                 screenshot=bool(permissions.get("screenshot", raw.get("screenshot", True))),
@@ -308,13 +342,28 @@ class WindowsConnectorManager:
             resource = resources.get(resource_id)
             if resource is None:
                 raise PermissionError("Windows resource is offline or unknown")
-            candidates = [
+            exact = [
                 grant
                 for grant in self._grants.values()
                 if grant.node_id == node_id
                 and grant.agent_profile_id == agent_profile_id
-                and (grant.resource_id == resource.id or grant.fingerprint == resource.fingerprint)
+                and grant.resource_id == resource.id
             ]
+            candidates = exact
+            if not candidates:
+                identity = resource.stable_identity or resource.fingerprint
+                collisions = [
+                    item for item in resources.values()
+                    if (item.stable_identity or item.fingerprint) == identity
+                ]
+                if len(collisions) == 1:
+                    candidates = [
+                        grant
+                        for grant in self._grants.values()
+                        if grant.node_id == node_id
+                        and grant.agent_profile_id == agent_profile_id
+                        and (grant.stable_identity or grant.fingerprint) == identity
+                    ]
         if not candidates:
             raise PermissionError("Agent is not authorized for this Windows resource")
         grant = candidates[0]

@@ -88,11 +88,15 @@ def _uia_browser_tabs(window_row: dict[str, Any]) -> list[dict[str, Any]]:
         app_name = str(window_row.get("app_name") or "Browser")
         process_name = str(window_row.get("process_name") or "")
         exe_path = str(window_row.get("exe_path") or "")
-        fingerprint = _fingerprint("browser_tab", exe_path or process_name, title)
+        stable_identity = _fingerprint("browser_tab", exe_path or process_name, title)
+        volatile_window_id = _fingerprint("browser_tab", hwnd, index, title)
+        fingerprint = stable_identity
         rows.append(
             {
                 "id": _resource_id("browser_tab", hwnd, index, title),
                 "fingerprint": fingerprint,
+                "stable_identity": stable_identity,
+                "volatile_window_id": volatile_window_id,
                 "kind": "browser_tab",
                 "app_name": app_name,
                 "process_name": process_name,
@@ -148,11 +152,15 @@ def _enum_windows() -> list[dict[str, Any]]:
             kind = "browser_window"
             app_name = _browser_name(process_name, app_name)
             limited = True
-        fingerprint = _fingerprint(kind, exe_path or lowered, account_name or title)
+        stable_identity = _fingerprint(kind, exe_path or lowered, account_name or title)
+        volatile_window_id = _fingerprint(kind, int(pid.value), int(hwnd), title)
+        fingerprint = stable_identity
         rows.append(
             {
                 "id": _resource_id(kind, int(pid.value), int(hwnd), title),
                 "fingerprint": fingerprint,
+                "stable_identity": stable_identity,
+                "volatile_window_id": volatile_window_id,
                 "kind": kind,
                 "app_name": app_name,
                 "process_name": process_name,
@@ -195,11 +203,15 @@ def _cdp_tabs(port: int, browser_name: str) -> list[dict[str, Any]]:
         ws_url = str(target.get("webSocketDebuggerUrl") or "").strip()
         if not tab_id or not ws_url:
             continue
-        fingerprint = _fingerprint("browser_tab", browser_name, url or title)
+        stable_identity = _fingerprint("browser_tab", browser_name, title or url)
+        volatile_window_id = _fingerprint("browser_tab", browser_name, port, tab_id)
+        fingerprint = stable_identity
         rows.append(
             {
                 "id": _resource_id("browser_tab", browser_name, port, tab_id),
                 "fingerprint": fingerprint,
+                "stable_identity": stable_identity,
+                "volatile_window_id": volatile_window_id,
                 "kind": "browser_tab",
                 "app_name": browser_name,
                 "process_name": "",

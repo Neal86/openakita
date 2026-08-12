@@ -34,8 +34,13 @@ class ExecutionPayload(BaseModel):
     hermes_sub_agent_memory_mode: SubAgentMemoryMode = SubAgentMemoryMode.EPHEMERAL
 
 
+def _normalized_instance(instance):
+    return HermesLifecycleService().normalize_instance(instance)
+
+
 def _native_info(instance) -> dict:
-    is_native = instance.base_url.startswith("native://") or HermesLifecycleService.native_default()
+    instance = _normalized_instance(instance)
+    is_native = HermesLifecycleService.is_native(instance)
     if not is_native:
         return {"transport": "docker", "native": False}
     available = NativeHermesRuntime.available()
@@ -181,7 +186,8 @@ async def test_instance(instance_id: str) -> dict:
         raise HTTPException(status_code=404, detail="执行模式实例不存在")
     if not instance.enabled or instance.lifecycle_status != InstanceLifecycle.RUNNING:
         raise HTTPException(status_code=409, detail="Hermes 实例尚未启动")
-    if instance.base_url.startswith("native://"):
+    instance = _normalized_instance(instance)
+    if HermesLifecycleService.is_native(instance):
         if not NativeHermesRuntime.available():
             raise HTTPException(status_code=503, detail="Embedded Hermes runtime unavailable")
         updated = replace(instance, health_status="healthy", last_success_at=datetime.now(UTC).isoformat(), last_error=None)
@@ -198,7 +204,8 @@ async def instance_logs(instance_id: str, tail: int = Query(200, ge=1, le=1000))
     instance = HermesInstanceStore().get(instance_id)
     if instance is None:
         raise HTTPException(status_code=404, detail="执行模式实例不存在")
-    if instance.base_url.startswith("native://") or HermesLifecycleService.native_default():
+    instance = _normalized_instance(instance)
+    if HermesLifecycleService.is_native(instance):
         return {"logs": _native_logs(instance, tail)}
     if not HermesContainerManager.available():
         raise HTTPException(status_code=503, detail="Docker socket unavailable")

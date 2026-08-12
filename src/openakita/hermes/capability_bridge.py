@@ -328,7 +328,18 @@ async def _execute_openakita_tool(
     profile = _profile(profile_id)
     if profile is None:
         return json.dumps({"error": f"Unknown Agent profile: {profile_id}"}, ensure_ascii=False)
-    if not _tool_allowed(profile, tool_name=tool_name):
+    windows_tool_names: set[str] = set()
+    try:
+        from openakita.windows_connector.tools import WINDOWS_CONNECTOR_TOOLS
+
+        for raw in WINDOWS_CONNECTOR_TOOLS:
+            normalized = _to_hermes_schema(raw)
+            if normalized:
+                windows_tool_names.add(str(normalized["name"]))
+    except Exception:
+        pass
+    category = "Windows Connector" if tool_name in windows_tool_names else ""
+    if not _tool_allowed(profile, tool_name=tool_name, category=category):
         return json.dumps({"error": f"Tool '{tool_name}' is not enabled for Agent '{profile_id}'"}, ensure_ascii=False)
     if tool_name == "call_mcp_tool":
         server = str(args.get("server") or args.get("server_name") or "")

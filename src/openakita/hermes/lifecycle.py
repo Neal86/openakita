@@ -43,9 +43,19 @@ class HermesLifecycleService:
     def _native_url(instance_id: str) -> str:
         return f"native://{instance_id}"
 
-    @staticmethod
-    def is_native(instance: HermesInstance) -> bool:
-        return instance.base_url.startswith("native://")
+    @classmethod
+    def is_native(cls, instance: HermesInstance) -> bool:
+        return instance.base_url.startswith("native://") or cls.native_default()
+
+    def normalize_instance(self, instance: HermesInstance) -> HermesInstance:
+        if not self.native_default() or instance.base_url.startswith("native://"):
+            return instance
+        normalized = replace(instance, base_url=self._native_url(instance.id))
+        if instance.enabled:
+            normalized = self._native_state(normalized)
+        self.instances.upsert(normalized)
+        self._register_node(normalized)
+        return normalized
 
     def _native_state(self, instance: HermesInstance) -> HermesInstance:
         available = NativeHermesRuntime.available()
