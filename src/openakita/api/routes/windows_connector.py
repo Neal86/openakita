@@ -19,8 +19,21 @@ router = APIRouter(prefix="/api/windows-connector", tags=["Windows Connector"])
 RELEASE_FILENAME = "OpenAkita-Windows-Connector-Windows-x64.zip"
 DEFAULT_RELEASE_URL = (
     "https://github.com/Neal86/openakita/releases/download/"
-    f"wechat-connector-latest/{RELEASE_FILENAME}"
+    f"windows-connector-latest/{RELEASE_FILENAME}"
 )
+
+
+class PairingCreatePayload(BaseModel):
+    node_name: str = Field(default="Windows 电脑", min_length=1, max_length=100)
+    ttl_seconds: int = Field(default=3600, ge=60, le=3600)
+
+
+class PairingConsumePayload(BaseModel):
+    code: str = Field(min_length=6, max_length=20)
+
+
+class PairingClosePayload(BaseModel):
+    code: str = Field(min_length=6, max_length=20)
 
 
 class GrantPayload(BaseModel):
@@ -43,6 +56,26 @@ class ExecutePayload(BaseModel):
     action: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: int = Field(default=60, ge=1, le=300)
+
+
+@router.post("/pairing-code")
+async def create_pairing_code(body: PairingCreatePayload) -> dict[str, Any]:
+    code = await wechat_desktop_manager.create_pairing_code(body.node_name, body.ttl_seconds)
+    return {"code": code, "expires_in": body.ttl_seconds}
+
+
+@router.post("/pairing-code/close")
+async def close_pairing_code(body: PairingClosePayload) -> dict[str, bool]:
+    return {"ok": True, "closed": await wechat_desktop_manager.cancel_pairing_code(body.code)}
+
+
+@router.post("/pair")
+async def pair_connector(body: PairingConsumePayload) -> dict[str, str]:
+    try:
+        node_id, node_token, node_name = await wechat_desktop_manager.consume_pairing_code(body.code)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="配对码无效或已过期") from exc
+    return {"node_id": node_id, "node_token": node_token, "node_name": node_name}
 
 
 @router.get("/nodes")

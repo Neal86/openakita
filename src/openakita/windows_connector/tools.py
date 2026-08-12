@@ -128,6 +128,12 @@ WINDOWS_CONNECTOR_TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "windows_launch_app",
+        "category": "Windows Connector",
+        "description": "Launch another instance of an authorized Windows application using the exact executable path discovered for that grant. Requires launch permission.",
+        "input_schema": {"type": "object", "properties": _base_properties(), "required": ["node_id", "resource_id"]},
+    },
+    {
         "name": "windows_close_app",
         "category": "Windows Connector",
         "description": "Close one authorized Windows app/window. This is a side-effecting action and requires the grant's close permission.",
@@ -148,6 +154,7 @@ _TOOL_ACTION = {
     "windows_browser_navigate": "browser_navigate",
     "windows_browser_click": "browser_click",
     "windows_browser_type": "browser_type",
+    "windows_launch_app": "launch",
     "windows_close_app": "close",
 }
 
@@ -167,6 +174,7 @@ class WindowsConnectorToolHandler:
         "windows_browser_navigate": ApprovalClass.EXEC_CAPABLE,
         "windows_browser_click": ApprovalClass.EXEC_CAPABLE,
         "windows_browser_type": ApprovalClass.EXEC_CAPABLE,
+        "windows_launch_app": ApprovalClass.EXEC_CAPABLE,
         "windows_close_app": ApprovalClass.EXEC_CAPABLE,
     }
 

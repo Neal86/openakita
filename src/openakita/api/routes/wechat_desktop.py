@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from openakita.wechat_desktop import wechat_desktop_manager
+from openakita.windows_connector import windows_connector_manager
 
 router = APIRouter(prefix="/api/wechat-desktop")
 RELEASE_FILENAME = "OpenAkita-WeChat-Connector-Windows-x64.zip"
@@ -205,6 +206,8 @@ async def connector_websocket(websocket: WebSocket) -> None:
     await websocket.send_json({"version": 1, "event": "node.ready", "node_id": node_id})
     for command in _configured_bots_for_node(node_id):
         await websocket.send_json(command)
+    for command in await windows_connector_manager.commands_for_attach(node_id):
+        await websocket.send_json(command)
 
     try:
         while True:
@@ -219,6 +222,12 @@ async def connector_websocket(websocket: WebSocket) -> None:
                 payload = {}
             if event == "node.heartbeat":
                 await wechat_desktop_manager.heartbeat(node_id)
+            elif event == "windows.resources.sync":
+                await windows_connector_manager.sync_resources(node_id, payload.get("resources") or [])
+            elif event == "windows.command.result":
+                request_id = str(envelope.get("request_id") or payload.get("request_id") or "")
+                if request_id:
+                    await windows_connector_manager.handle_result(request_id, payload)
             elif event == "wechat.accounts.sync":
                 await wechat_desktop_manager.sync_accounts(node_id, payload.get("accounts") or [])
             elif event == "wechat.conversations.sync":

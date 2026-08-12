@@ -230,6 +230,20 @@ def resolve_capabilities(
     selected_skill_ids: list[str] = []
     instruction_blocks: list[str] = []
 
+    # Windows Connector tools are global capabilities; per-Agent app grants are
+    # enforced again by the handler/connector and do not create private tool copies.
+    try:
+        from openakita.windows_connector.tools import WINDOWS_CONNECTOR_TOOLS
+    except Exception:
+        WINDOWS_CONNECTOR_TOOLS = []
+    for raw in WINDOWS_CONNECTOR_TOOLS:
+        normalized = _to_hermes_schema(raw)
+        if not normalized:
+            continue
+        original = str(normalized["name"])
+        if _tool_allowed(profile, tool_name=original, category="Windows Connector"):
+            original_schemas[original] = normalized
+
     for raw in explicit_tools or []:
         normalized = _to_hermes_schema(raw)
         if not normalized:
@@ -329,12 +343,17 @@ async def _execute_openakita_tool(
     except Exception:
         agent = None
 
-    if agent is not None and getattr(agent, "tool_executor", None) is not None:
-        result, _hint = await agent.tool_executor.execute_tool(tool_name, args, session_id=session_id or None)
-    else:
-        from openakita.tools.handlers import default_handler_registry
+    from openakita.windows_connector.context import current_agent_profile_id
+    profile_token = current_agent_profile_id.set(profile_id)
+    try:
+        if agent is not None and getattr(agent, "tool_executor", None) is not None:
+            result, _hint = await agent.tool_executor.execute_tool(tool_name, args, session_id=session_id or None)
+        else:
+            from openakita.tools.handlers import default_handler_registry
 
-        result = await default_handler_registry.execute_by_tool(tool_name, args)
+            result = await default_handler_registry.execute_by_tool(tool_name, args)
+    finally:
+        current_agent_profile_id.reset(profile_token)
 
     result_text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
     # Only persist relationships after a successful-looking control-plane operation.

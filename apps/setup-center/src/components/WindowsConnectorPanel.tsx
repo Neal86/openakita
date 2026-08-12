@@ -83,11 +83,13 @@ function resourceLabel(resource: Resource): string {
 }
 
 function ResourceCard({
+  api,
   node,
   resource,
   profiles,
   reload,
 }: {
+  api: string;
   node: NodeInfo;
   resource: Resource;
   profiles: AgentProfile[];
@@ -102,7 +104,7 @@ function ResourceCard({
     if (!agentId) return;
     setSaving(true);
     try {
-      const response = await safeFetch(`${DEFAULT_API}/api/windows-connector/grants`, {
+      const response = await safeFetch(`${api}/api/windows-connector/grants`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -125,7 +127,7 @@ function ResourceCard({
   };
 
   const removeGrant = async (grantId: string) => {
-    const response = await safeFetch(`${DEFAULT_API}/api/windows-connector/grants/${encodeURIComponent(grantId)}`, { method: "DELETE" });
+    const response = await safeFetch(`${api}/api/windows-connector/grants/${encodeURIComponent(grantId)}`, { method: "DELETE" });
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
       toast.error(data.detail || "取消授权失败");
@@ -317,7 +319,7 @@ export function WindowsConnectorPanel({ apiBaseUrl = DEFAULT_API }: { apiBaseUrl
               </div>
             </div>
             <div className="space-y-3">
-              {resources.map((resource) => <ResourceCard key={resource.id} node={node} resource={resource} profiles={profiles} reload={load} />)}
+              {resources.map((resource) => <ResourceCard key={resource.id} api={api} node={node} resource={resource} profiles={profiles} reload={load} />)}
               {!resources.length && <div className="rounded-lg border border-dashed py-10 text-center text-sm text-muted-foreground">暂未发现运行中的可见应用。启动 Connector 后点击“扫描应用”。</div>}
             </div>
           </Card>

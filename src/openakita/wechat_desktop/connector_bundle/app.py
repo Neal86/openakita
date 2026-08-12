@@ -14,7 +14,7 @@ from .connector_service import ConnectorService
 class ConnectorApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("OpenAkita 微信 Connector")
+        self.title("OpenAkita Windows Connector")
         self.geometry("620x480")
         self.minsize(560, 430)
         self.protocol("WM_DELETE_WINDOW", self._close)
@@ -32,8 +32,8 @@ class ConnectorApp(tk.Tk):
     def _build(self) -> None:
         root = ttk.Frame(self, padding=20)
         root.pack(fill="both", expand=True)
-        ttk.Label(root, text="OpenAkita 微信 Connector", font=("Microsoft YaHei UI", 18, "bold")).pack(anchor="w")
-        ttk.Label(root, text="连接 Windows 微信电脑版与 OpenAkita", foreground="#666").pack(anchor="w", pady=(3, 18))
+        ttk.Label(root, text="OpenAkita Windows Connector", font=("Microsoft YaHei UI", 18, "bold")).pack(anchor="w")
+        ttk.Label(root, text="连接本机应用、浏览器、微信与 OpenAkita", foreground="#666").pack(anchor="w", pady=(3, 18))
 
         form = ttk.LabelFrame(root, text="配对设置", padding=14)
         form.pack(fill="x")
@@ -95,7 +95,7 @@ class ConnectorApp(tk.Tk):
 
     def _pair_worker(self, url: str, code: str, node_name: str, auto_start: bool) -> None:
         try:
-            response = requests.post(f"{url}/api/wechat-desktop/pair", json={"code": code}, timeout=30)
+            response = requests.post(f"{url}/api/windows-connector/pair", json={"code": code}, timeout=30)
             data = response.json() if response.content else {}
             if not response.ok:
                 detail = data.get("detail") if isinstance(data, dict) else None
