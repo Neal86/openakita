@@ -1,6 +1,11 @@
 """Agent execution-mode and Hermes instance management API."""
 from __future__ import annotations
 
+import os
+import sys
+from dataclasses import replace
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
@@ -11,9 +16,11 @@ from openakita.hermes.execution import (
     ExecutionMode,
     HermesInstanceMode,
     HermesInstanceStore,
+    InstanceLifecycle,
     SubAgentMemoryMode,
 )
 from openakita.hermes.lifecycle import HermesLifecycleService
+from openakita.hermes.native_runtime import NativeHermesRuntime
 from openakita.hermes.router import HermesRouter
 
 router = APIRouter(prefix="/api/execution", tags=["执行模式"])
@@ -25,6 +32,42 @@ class ExecutionPayload(BaseModel):
     hermes_instance_id: str | None = None
     hermes_allow_sub_agents: bool = False
     hermes_sub_agent_memory_mode: SubAgentMemoryMode = SubAgentMemoryMode.EPHEMERAL
+
+
+def _native_info(instance) -> dict:
+    is_native = instance.base_url.startswith("native://") or HermesLifecycleService.native_default()
+    if not is_native:
+        return {"transport": "docker", "native": False}
+    available = NativeHermesRuntime.available()
+    running = bool(instance.enabled and available and instance.lifecycle_status == InstanceLifecycle.RUNNING)
+    return {
+        "transport": "native_windows" if sys.platform == "win32" else "native",
+        "native": True,
+        "available": available,
+        "running": running,
+        "pid": os.getpid() if available else None,
+        "version": NativeHermesRuntime.version(),
+        "process_model": "embedded_backend",
+    }
+
+
+def _native_logs(instance, tail: int) -> str:
+    info = _native_info(instance)
+    rows = [
+        f"[{datetime.now(UTC).isoformat()}] Hermes embedded runtime",
+        f"instance={instance.id}",
+        f"transport={info.get('transport')}",
+        f"version={info.get('version')}",
+        f"pid={info.get('pid')}",
+        f"enabled={instance.enabled}",
+        f"lifecycle={instance.lifecycle_status.value}",
+        f"health={instance.health_status}",
+        f"base_url={instance.base_url}",
+        f"last_success_at={instance.last_success_at or '-'}",
+        f"last_error={instance.last_error or '-'}",
+        "Native Hermes executes inside the OpenAkita backend process; no Docker container is required.",
+    ]
+    return "\n".join(rows[-max(1, tail):])
 
 
 @router.get("/agents/{profile_id}")
@@ -55,7 +98,13 @@ async def list_instances() -> dict:
     rows = []
     for instance in service.instances.list():
         data = instance.to_dict()
-        if HermesContainerManager.available():
+        runtime = _native_info(instance)
+        data["runtime"] = runtime
+        if runtime.get("native"):
+            data["container"] = {"available": False, "exists": False, "running": runtime.get("running", False), "native": True}
+            if runtime.get("available") and instance.enabled:
+                data["health_status"] = "healthy"
+        elif HermesContainerManager.available():
             try:
                 data["container"] = await service.containers.inspect(instance)
             except Exception as exc:
@@ -65,16 +114,18 @@ async def list_instances() -> dict:
         bindings = [
             x.to_dict() for x in executions
             if x.hermes_instance_id == instance.id
-            or (
-                instance.id == "shared"
-                and x.execution_mode == ExecutionMode.HERMES
-                and x.hermes_instance_mode == HermesInstanceMode.SHARED
-            )
+            or (instance.id == "shared" and x.execution_mode == ExecutionMode.HERMES and x.hermes_instance_mode == HermesInstanceMode.SHARED)
         ]
         data["agents"] = bindings
         data["agent_count"] = len(bindings)
         rows.append(data)
-    return {"instances": rows, "docker_available": HermesContainerManager.available()}
+    return {
+        "instances": rows,
+        "docker_available": HermesContainerManager.available(),
+        "native_available": NativeHermesRuntime.available(),
+        "native_default": HermesLifecycleService.native_default(),
+        "platform": sys.platform,
+    }
 
 
 @router.get("/instances/{instance_id}")
@@ -82,7 +133,9 @@ def get_instance(instance_id: str) -> dict:
     instance = HermesInstanceStore().get(instance_id)
     if instance is None:
         raise HTTPException(status_code=404, detail="执行模式实例不存在")
-    return {"instance": instance.to_dict()}
+    data = instance.to_dict()
+    data["runtime"] = _native_info(instance)
+    return {"instance": data}
 
 
 @router.post("/instances/{instance_id}/start")
@@ -91,11 +144,10 @@ async def start_instance(instance_id: str) -> dict:
     if instance is None:
         raise HTTPException(status_code=404, detail="执行模式实例不存在")
     try:
-        updated = await HermesContainerManager().create_or_start(instance)
+        updated = await HermesLifecycleService().start(instance)
     except ContainerManagerError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    HermesInstanceStore().upsert(updated)
-    return {"instance": updated.to_dict()}
+    return {"instance": updated.to_dict(), "runtime": _native_info(updated)}
 
 
 @router.post("/instances/{instance_id}/stop")
@@ -107,7 +159,7 @@ async def stop_instance(instance_id: str) -> dict:
         updated = await HermesLifecycleService().stop(instance)
     except ContainerManagerError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"instance": updated.to_dict()}
+    return {"instance": updated.to_dict(), "runtime": _native_info(updated)}
 
 
 @router.post("/instances/{instance_id}/restart")
@@ -119,11 +171,22 @@ async def restart_instance(instance_id: str) -> dict:
         updated = await HermesLifecycleService().restart(instance)
     except ContainerManagerError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return {"instance": updated.to_dict()}
+    return {"instance": updated.to_dict(), "runtime": _native_info(updated)}
 
 
 @router.post("/instances/{instance_id}/test")
 async def test_instance(instance_id: str) -> dict:
+    instance = HermesInstanceStore().get(instance_id)
+    if instance is None:
+        raise HTTPException(status_code=404, detail="执行模式实例不存在")
+    if not instance.enabled or instance.lifecycle_status != InstanceLifecycle.RUNNING:
+        raise HTTPException(status_code=409, detail="Hermes 实例尚未启动")
+    if instance.base_url.startswith("native://"):
+        if not NativeHermesRuntime.available():
+            raise HTTPException(status_code=503, detail="Embedded Hermes runtime unavailable")
+        updated = replace(instance, health_status="healthy", last_success_at=datetime.now(UTC).isoformat(), last_error=None)
+        HermesInstanceStore().upsert(updated)
+        return {"ok": True, "instance_id": instance.id, "runtime": _native_info(updated), "message": "Windows 内嵌 Hermes Runtime 可用"}
     try:
         return await HermesRouter().test_node(instance_id)
     except KeyError:
@@ -135,6 +198,8 @@ async def instance_logs(instance_id: str, tail: int = Query(200, ge=1, le=1000))
     instance = HermesInstanceStore().get(instance_id)
     if instance is None:
         raise HTTPException(status_code=404, detail="执行模式实例不存在")
+    if instance.base_url.startswith("native://") or HermesLifecycleService.native_default():
+        return {"logs": _native_logs(instance, tail)}
     if not HermesContainerManager.available():
         raise HTTPException(status_code=503, detail="Docker socket unavailable")
     return {"logs": await HermesContainerManager().logs(instance, tail=tail)}
