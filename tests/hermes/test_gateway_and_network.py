@@ -1,7 +1,10 @@
+import pytest
+from fastapi import HTTPException
 from starlette.requests import Request
 
 from openakita.api.auth import is_private_direct_request
 from openakita.api.openai_compat import convert_tools, split_system
+from openakita.api.routes.llm_gateway import _validated_profile_id
 from openakita.hermes.client import HermesClient
 from openakita.hermes.models import HermesNode
 
@@ -53,3 +56,10 @@ def test_openai_conversion_preserves_system_and_tools():
     assert system == "Be useful"
     assert messages[0].role == "user"
     assert tools and tools[0].name == "lookup"
+
+
+def test_llm_gateway_rejects_unsafe_profile_ids():
+    assert _validated_profile_id("customer_agent-1") == "customer_agent-1"
+    with pytest.raises(HTTPException) as exc_info:
+        _validated_profile_id("../secrets")
+    assert exc_info.value.status_code == 400
