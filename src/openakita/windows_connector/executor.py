@@ -99,14 +99,30 @@ class WindowsCommandExecutor:
     def _select_uia_tab(self, resource: dict[str, Any]) -> None:
         if resource.get("automation") != "uia_tab":
             return
+        window = self._uia_window(resource)
+        tab_id = str(resource.get("tab_id") or "")
+        try:
+            index = int(tab_id.split(":", 1)[1]) if tab_id.startswith("uia:") else -1
+        except ValueError:
+            index = -1
+        controls = window.descendants(control_type="TabItem")
+        if 0 <= index < len(controls):
+            control = controls[index]
+            try:
+                control.select()
+            except Exception:
+                control.click_input()
+            return
         title = str(resource.get("title") or "").strip()
         if not title:
-            return
-        window = self._uia_window(resource)
+            raise RuntimeError("authorized UIA tab is no longer available")
+        matches = [item for item in controls if str(item.window_text() or "").strip() == title]
+        if len(matches) != 1:
+            raise ConnectorPermissionError("authorized UIA tab identity is ambiguous or stale")
         try:
-            window.child_window(title=title, control_type="TabItem").select()
+            matches[0].select()
         except Exception:
-            window.child_window(title=title, control_type="TabItem").click_input()
+            matches[0].click_input()
 
     def _inspect(self, resource: dict[str, Any]) -> dict[str, Any]:
         result = dict(resource)
@@ -244,8 +260,6 @@ class WindowsCommandExecutor:
     @classmethod
     def _browser_action(cls, resource: dict[str, Any], action: str, args: dict[str, Any]) -> Any:
         if resource.get("automation") != "cdp":
-            # UIA fallback still keeps tabs separately authorized, but cannot
-            # safely promise DOM semantics or URL reads.
             if action == "browser_read":
                 return {"limited": True, "message": "该 Tab 仅有 UIA 权限；请用 windows_inspect_app 读取可访问控件。"}
             raise RuntimeError("该 Tab 未启用 CDP；可使用 windows_focus/click/type 的 UIA 操作，或开启 Chrome/Edge remote debugging 获得 DOM 控制")
@@ -277,10 +291,13 @@ class WindowsCommandExecutor:
             text = str(args.get("text") or "")
             if not selector:
                 raise ValueError("selector is required")
+            clear_first = bool(args.get("clear_first", True))
             expression = f"""(() => {{
               const el=document.querySelector({cls._js(selector)}); if(!el) return {{ok:false,error:'element not found'}};
               el.focus();
-              const value={cls._js(text)};
+              const incoming={cls._js(text)};
+              const clearFirst={str(clear_first).lower()};
+              const value=clearFirst?incoming:String(el.value||'')+incoming;
               const proto=el instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
               const setter=Object.getOwnPropertyDescriptor(proto,'value')?.set;
               if(setter) setter.call(el,value); else el.value=value;
@@ -300,6 +317,22 @@ class WindowsCommandExecutor:
             raise RuntimeError("该授权资源没有可重新启动的可执行文件路径")
         process = subprocess.Popen([exe_path], close_fds=True)  # noqa: S603 - exact discovered executable only
         return {"launched": exe_path, "pid": process.pid}
+
+    def _close(self, resource: dict[str, Any]) -> dict[str, Any]:
+        if resource.get("automation") == "cdp" and resource.get("kind") == "browser_tab":
+            tab_id = str(resource.get("tab_id") or "")
+            self._cdp_command(resource, "Target.closeTarget", {"targetId": tab_id})
+            return {"closed": resource.get("id"), "scope": "tab"}
+        if resource.get("automation") == "uia_tab" and resource.get("kind") == "browser_tab":
+            self._select_uia_tab(resource)
+            self._focus(int(resource.get("hwnd") or 0))
+            from pywinauto.keyboard import send_keys
+
+            send_keys("^w")
+            return {"closed": resource.get("id"), "scope": "tab"}
+        window = self._uia_window(resource)
+        window.close()
+        return {"closed": resource.get("id"), "scope": "window"}
 
     async def execute(self, payload: dict[str, Any]) -> dict[str, Any]:
         _grant, resource = self._authorize(payload)
@@ -343,8 +376,5 @@ class WindowsCommandExecutor:
         if action == "launch":
             return {"ok": True, "result": self._launch(resource)}
         if action == "close":
-            self._select_uia_tab(resource)
-            window = self._uia_window(resource)
-            window.close()
-            return {"ok": True, "result": {"closed": resource.get("id")}}
+            return {"ok": True, "result": self._close(resource)}
         raise ValueError(f"unsupported action: {action}")
