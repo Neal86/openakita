@@ -15,7 +15,7 @@ import {
 
 const statusLabel = (value: string) => ({
   running: "运行正常",
-  stopped: "已停止",
+  stopped: "已停用",
   pending: "等待启动",
   starting: "启动中",
   error: "异常",
@@ -23,7 +23,7 @@ const statusLabel = (value: string) => ({
   degraded: "不稳定",
   unhealthy: "不可用",
   unknown: "未知",
-  disabled: "已停止",
+  disabled: "已停用",
 }[value] || value);
 
 type PageMode = "hermes" | "windows";
@@ -84,7 +84,7 @@ export function ExecutionInstancesView({ apiBaseUrl = "http://127.0.0.1:18900" }
     setBusy(`${instance.id}:${action}`);
     try {
       await instanceAction(apiBaseUrl, instance.id, action);
-      setMessage(action === "test" ? "Hermes Runtime 测试通过" : "操作已完成");
+      setMessage(action === "test" ? "Hermes Runtime 端到端测试通过" : "操作已完成");
       await refresh();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "操作失败");
@@ -136,7 +136,7 @@ export function ExecutionInstancesView({ apiBaseUrl = "http://127.0.0.1:18900" }
 
       {nativeDefault && (
         <Card className="border-emerald-300 bg-emerald-50/50 dark:bg-emerald-950/20">
-          <CardContent className="pt-6 text-sm"><strong>Windows 原生模式已启用。</strong> Hermes 直接运行在 OpenAkita 后端进程中，无需 Docker。内嵌 Runtime：{nativeAvailable ? "可用" : "不可用"}{platform ? ` · ${platform}` : ""}</CardContent>
+          <CardContent className="pt-6 text-sm"><strong>Windows 原生模式已启用。</strong> Hermes 作为 OpenAkita 后端内嵌 Runtime 运行，无独立 Windows 进程，也不需要 Docker。内嵌 Runtime：{nativeAvailable ? "可用" : "不可用"}{platform ? ` · ${platform}` : ""}</CardContent>
         </Card>
       )}
       {!nativeDefault && !dockerAvailable && (
@@ -159,9 +159,9 @@ export function ExecutionInstancesView({ apiBaseUrl = "http://127.0.0.1:18900" }
                     <CardTitle className="flex flex-wrap items-center gap-2 text-base">
                       {instance.name}
                       <Badge variant={instance.mode === "shared" ? "secondary" : "outline"}>{instance.mode === "shared" ? "共享实例" : "独立实例"}</Badge>
-                      <Badge variant="outline">{isNative ? "Windows 本机" : "Docker"}</Badge>
+                      <Badge variant="outline">{isNative ? "内嵌 Runtime" : "Docker"}</Badge>
                     </CardTitle>
-                    <CardDescription className="mt-1">{isNative ? `内嵌 Hermes ${instance.runtime?.version || ""}` : instance.container_name}</CardDescription>
+                    <CardDescription className="mt-1">{isNative ? `Hermes ${instance.runtime?.version || ""} · OpenAkita 后端内运行` : instance.container_name}</CardDescription>
                   </div>
                   <Badge variant={running ? "default" : instance.lifecycle_status === "error" ? "destructive" : "secondary"}>{statusLabel(instance.lifecycle_status)}</Badge>
                 </div>
@@ -171,7 +171,7 @@ export function ExecutionInstancesView({ apiBaseUrl = "http://127.0.0.1:18900" }
                   <div><div className="text-muted-foreground">绑定 Agent</div><div className="mt-1 font-medium">{instance.agent_count || 0}</div></div>
                   <div><div className="text-muted-foreground">健康状态</div><div className="mt-1 font-medium">{statusLabel(instance.health_status)}</div></div>
                   <div><div className="text-muted-foreground">当前任务</div><div className="mt-1 font-medium">{instance.current_inflight}/{instance.max_concurrency}</div></div>
-                  <div><div className="text-muted-foreground">{isNative ? "PID" : "网络"}</div><div className="mt-1 truncate font-medium" title={isNative ? String(instance.runtime?.pid || "-") : instance.network}>{isNative ? (instance.runtime?.pid || "-") : instance.network}</div></div>
+                  <div><div className="text-muted-foreground">{isNative ? "后端 PID" : "网络"}</div><div className="mt-1 truncate font-medium" title={isNative ? String(instance.runtime?.pid || "-") : instance.network}>{isNative ? (instance.runtime?.pid || "-") : instance.network}</div></div>
                 </div>
 
                 <div className="rounded-lg border bg-muted/20 p-3 text-sm">
@@ -182,10 +182,10 @@ export function ExecutionInstancesView({ apiBaseUrl = "http://127.0.0.1:18900" }
                 {instance.last_error && <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{instance.last_error}</div>}
 
                 <div className="flex flex-wrap gap-2">
-                  <Button size="sm" variant="outline" disabled={actionBusy || !manageable || running} onClick={() => void run(instance, "start")}><Play className="mr-1 h-4 w-4" />启动</Button>
-                  <Button size="sm" variant="outline" disabled={actionBusy || !manageable || !running || (!isNative && instance.mode === "shared")} onClick={() => void run(instance, "stop")}><Square className="mr-1 h-4 w-4" />停止</Button>
-                  <Button size="sm" variant="outline" disabled={actionBusy || !manageable} onClick={() => void run(instance, "restart")}><RotateCw className="mr-1 h-4 w-4" />重启</Button>
-                  <Button size="sm" variant="outline" disabled={actionBusy || !running} onClick={() => void run(instance, "test")}><Activity className="mr-1 h-4 w-4" />测试</Button>
+                  <Button size="sm" variant="outline" disabled={actionBusy || !manageable || running} onClick={() => void run(instance, "start")}><Play className="mr-1 h-4 w-4" />{isNative ? "启用" : "启动"}</Button>
+                  <Button size="sm" variant="outline" disabled={actionBusy || !manageable || !running || (!isNative && instance.mode === "shared")} onClick={() => void run(instance, "stop")}><Square className="mr-1 h-4 w-4" />{isNative ? "停用" : "停止"}</Button>
+                  <Button size="sm" variant="outline" disabled={actionBusy || !manageable} onClick={() => void run(instance, "restart")}><RotateCw className="mr-1 h-4 w-4" />{isNative ? "重新初始化" : "重启"}</Button>
+                  <Button size="sm" variant="outline" disabled={actionBusy || !running} onClick={() => void run(instance, "test")}><Activity className="mr-1 h-4 w-4" />端到端测试</Button>
                   <Button size="sm" variant="outline" disabled={actionBusy || (!isNative && !dockerAvailable)} onClick={() => void showLogs(instance)}><FileText className="mr-1 h-4 w-4" />日志</Button>
                   {instance.mode === "dedicated" && <Button size="sm" variant="destructive" disabled={actionBusy} onClick={() => void remove(instance)}><Trash2 className="mr-1 h-4 w-4" />删除实例</Button>}
                 </div>
