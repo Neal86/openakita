@@ -424,6 +424,20 @@ def get_profile_store(base_dir: str | Path | None = None) -> ProfileStore:
         return _global_store
 
 
+def resolve_agent_profile(profile_id: str) -> AgentProfile | None:
+    """Resolve a persisted/ephemeral profile or an undeployed system preset."""
+    profile = get_profile_store().get(profile_id)
+    if profile is not None:
+        return profile
+    from openakita.agents.presets import get_preset_by_id
+
+    return get_preset_by_id(profile_id)
+
+
+def agent_profile_exists(profile_id: str) -> bool:
+    return resolve_agent_profile(profile_id) is not None
+
+
 class ProfileStore:
     """
     AgentProfile 持久化存储 + 临时 (ephemeral) 内存存储。

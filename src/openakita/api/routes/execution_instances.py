@@ -105,9 +105,9 @@ def get_agent_execution(profile_id: str) -> dict:
 
 @router.put("/agents/{profile_id}")
 async def set_agent_execution(profile_id: str, payload: ExecutionPayload) -> dict:
-    from openakita.agents.profile import get_profile_store
+    from openakita.agents.profile import agent_profile_exists
 
-    if not get_profile_store().exists(profile_id):
+    if not agent_profile_exists(profile_id):
         raise HTTPException(status_code=404, detail="Agent profile not found")
     config = AgentExecutionConfig(profile_id=profile_id, **payload.model_dump())
     service = HermesLifecycleService()

@@ -244,6 +244,10 @@ async def list_grants(node_id: str | None = None) -> dict[str, Any]:
 
 @router.post("/grants")
 async def save_grant(body: GrantPayload) -> dict[str, Any]:
+    from openakita.agents.profile import agent_profile_exists
+
+    if not agent_profile_exists(body.agent_profile_id):
+        raise HTTPException(status_code=404, detail="Agent profile not found")
     try:
         grant = await windows_connector_manager.upsert_grant(body.model_dump())
     except ValueError as exc:
@@ -269,6 +273,10 @@ async def delete_grant(grant_id: str) -> dict[str, bool]:
 
 @router.post("/execute")
 async def execute(body: ExecutePayload) -> dict[str, Any]:
+    from openakita.agents.profile import agent_profile_exists
+
+    if not agent_profile_exists(body.agent_profile_id):
+        raise HTTPException(status_code=404, detail="Agent profile not found")
     try:
         return await windows_connector_manager.execute(
             node_id=body.node_id,

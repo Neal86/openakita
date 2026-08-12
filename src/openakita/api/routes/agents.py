@@ -321,6 +321,10 @@ async def create_bot(body: BotCreateRequest):
         )
     if not isinstance(body.credentials, dict):
         raise HTTPException(status_code=400, detail="credentials must be a dict")
+    from openakita.agents.profile import agent_profile_exists
+
+    if not agent_profile_exists(body.agent_profile_id):
+        raise HTTPException(status_code=404, detail="Agent profile not found")
 
     existing_ids = {b.get("id") for b in settings.im_bots if isinstance(b, dict)}
     if body.id in existing_ids:
@@ -371,6 +375,10 @@ async def update_bot(bot_id: str, body: BotUpdateRequest):
     if body.name is not None:
         bot["name"] = body.name
     if body.agent_profile_id is not None:
+        from openakita.agents.profile import agent_profile_exists
+
+        if not agent_profile_exists(body.agent_profile_id):
+            raise HTTPException(status_code=404, detail="Agent profile not found")
         bot["agent_profile_id"] = body.agent_profile_id
     if body.enabled is not None:
         bot["enabled"] = body.enabled
@@ -672,6 +680,20 @@ async def delete_agent_profile(profile_id: str):
 
     store = get_profile_store()
 
+    from openakita.config import settings
+
+    referencing_bots = [
+        str(bot.get("id") or "")
+        for bot in settings.im_bots
+        if isinstance(bot, dict)
+        and str(bot.get("agent_profile_id") or "default") == profile_id
+    ]
+    if referencing_bots:
+        raise HTTPException(
+            status_code=409,
+            detail="Agent is still used by bots: " + ", ".join(sorted(referencing_bots)),
+        )
+
     try:
         deleted = store.delete(profile_id)
     except PermissionError as e:
@@ -711,6 +733,24 @@ async def delete_agent_profile(profile_id: str):
     finally:
         execution_store.delete(profile_id)
         binding_store.delete(profile_id)
+
+    from openakita.windows_connector import windows_connector_manager
+
+    for grant in await windows_connector_manager.list_grants():
+        if str(grant.get("agent_profile_id") or "") != profile_id:
+            continue
+        grant_id = str(grant.get("id") or "")
+        if not grant_id:
+            continue
+        try:
+            await windows_connector_manager.delete_grant(grant_id)
+        except Exception as exc:
+            logger.warning(
+                "[Agents API] Windows grant cleanup failed for %s/%s: %s",
+                profile_id,
+                grant_id,
+                exc,
+            )
 
     logger.info(f"[Agents API] Deleted profile: {profile_id}")
     emit_agent_profiles_changed("deleted", profile_id=profile_id)

@@ -76,9 +76,9 @@ def _profile_from_app(request: Request, profile_id: str) -> Any | None:
             if profile is not None:
                 return profile
     try:
-        from openakita.agents.profile import get_profile_store
+        from openakita.agents.profile import resolve_agent_profile
 
-        return get_profile_store().get(profile_id)
+        return resolve_agent_profile(profile_id)
     except Exception:
         return None
 

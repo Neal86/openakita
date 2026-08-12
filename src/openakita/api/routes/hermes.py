@@ -72,9 +72,9 @@ def _bound_profiles(node_id: str) -> list[str]:
 
 
 def _require_agent_profile(profile_id: str) -> None:
-    from openakita.agents.profile import get_profile_store
+    from openakita.agents.profile import agent_profile_exists
 
-    if not get_profile_store().exists(profile_id):
+    if not agent_profile_exists(profile_id):
         raise HTTPException(status_code=404, detail="Agent profile not found")
 
 
