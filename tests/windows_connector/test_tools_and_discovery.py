@@ -77,6 +77,17 @@ async def test_tool_handler_requires_executor_owned_agent_identity(monkeypatch: 
 async def test_list_tool_filters_other_agent_resources(monkeypatch: pytest.MonkeyPatch) -> None:
     handler = WindowsConnectorToolHandler()
 
+    async def local_node(*, refresh: bool = False):
+        return {
+            "id": "local",
+            "name": "本机",
+            "status": "online",
+            "transport": "local",
+            "embedded": True,
+            "resources": [],
+            "grants": [],
+        }
+
     async def nodes():
         return [{"id": "node-1", "name": "客服电脑", "status": "online"}]
 
@@ -97,6 +108,7 @@ async def test_list_tool_filters_other_agent_resources(monkeypatch: pytest.Monke
             },
         ]
 
+    monkeypatch.setattr("openakita.windows_connector.tools.windows_connector_manager.local_node", local_node)
     monkeypatch.setattr("openakita.windows_connector.tools.wechat_desktop_manager.list_nodes", nodes)
     monkeypatch.setattr("openakita.windows_connector.tools.windows_connector_manager.list_resources", resources)
     token = current_agent_profile_id.set("support")
