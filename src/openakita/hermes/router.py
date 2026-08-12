@@ -55,6 +55,28 @@ class HermesRouter:
             node.current_inflight = latest.current_inflight
             self.store.upsert(latest)
 
+    async def _mark_success(self, node: HermesNode) -> None:
+        """Update health without overwriting another request's inflight count."""
+        async with self._lock:
+            latest = self.store.get(node.id) or node
+            latest.mark_success()
+            self.store.upsert(latest)
+            node.health_status = latest.health_status
+            node.consecutive_failures = latest.consecutive_failures
+            node.last_success_at = latest.last_success_at
+            node.last_error = latest.last_error
+
+    async def _mark_failure(self, node: HermesNode, error: str) -> None:
+        """Update health from the latest persisted node snapshot."""
+        async with self._lock:
+            latest = self.store.get(node.id) or node
+            latest.mark_failure(error)
+            self.store.upsert(latest)
+            node.health_status = latest.health_status
+            node.consecutive_failures = latest.consecutive_failures
+            node.last_success_at = latest.last_success_at
+            node.last_error = latest.last_error
+
     async def _ordered(
         self,
         nodes: list[HermesNode],
@@ -132,12 +154,10 @@ class HermesRouter:
                     tools=tools,
                     metadata=metadata,
                 )
-                node.mark_success()
-                self.store.upsert(node)
+                await self._mark_success(node)
                 return response
             except Exception as exc:
-                node.mark_failure(str(exc))
-                self.store.upsert(node)
+                await self._mark_failure(node, str(exc))
                 errors.append(f"{node.id}: {exc}")
                 if not allow_failover or index == len(ordered) - 1:
                     break
@@ -186,12 +206,10 @@ class HermesRouter:
                     if isinstance(event, dict):
                         event.setdefault("node_id", node.id)
                     yield event
-                node.mark_success()
-                self.store.upsert(node)
+                await self._mark_success(node)
                 return
             except Exception as exc:
-                node.mark_failure(str(exc))
-                self.store.upsert(node)
+                await self._mark_failure(node, str(exc))
                 errors.append(f"{node.id}: {exc}")
                 if emitted or not allow_failover or index == len(ordered) - 1:
                     break
@@ -206,11 +224,11 @@ class HermesRouter:
             raise KeyError(node_id)
         try:
             result = await HermesClient(node).health()
-            node.mark_success()
+            await self._mark_success(node)
             ok = True
         except Exception as exc:
-            node.mark_failure(str(exc))
+            await self._mark_failure(node, str(exc))
             result = {"error": str(exc)}
             ok = False
-        self.store.upsert(node)
-        return {"ok": ok, "node": node.to_dict(), "result": result}
+        latest = self.store.get(node_id) or node
+        return {"ok": ok, "node": latest.to_dict(), "result": result}
