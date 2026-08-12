@@ -164,3 +164,23 @@ async def test_volume_inspect_daemon_failure_propagates(monkeypatch):
     monkeypatch.setattr(manager, "_run", run)
     with pytest.raises(ContainerManagerError, match="Cannot connect"):
         await manager.remove(instance, delete_data=True)
+
+
+def test_docker_desktop_cli_counts_as_available_on_windows(monkeypatch):
+    from openakita.hermes import container_manager as module
+
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    monkeypatch.setattr(module.os.path, "exists", lambda _path: False)
+    monkeypatch.setattr(module.sys, "platform", "win32")
+    monkeypatch.setattr(module.shutil, "which", lambda name: "C:/Docker/docker.exe" if name == "docker" else None)
+    assert HermesContainerManager.available()
+
+
+def test_linux_without_socket_does_not_assume_cli_means_daemon(monkeypatch):
+    from openakita.hermes import container_manager as module
+
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    monkeypatch.setattr(module.os.path, "exists", lambda _path: False)
+    monkeypatch.setattr(module.sys, "platform", "linux")
+    monkeypatch.setattr(module.shutil, "which", lambda _name: "/usr/bin/docker")
+    assert not HermesContainerManager.available()
