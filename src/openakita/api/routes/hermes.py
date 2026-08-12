@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from openakita.hermes.bindings import AgentHermesBinding, AgentHermesBindingStore
+from openakita.hermes.execution import HermesInstanceStore
 from openakita.hermes.models import HermesNode
 from openakita.hermes.router import HermesRouter
 from openakita.hermes.store import get_hermes_store
@@ -37,6 +38,28 @@ class AgentBindingPayload(BaseModel):
     required_capabilities: list[str] = Field(default_factory=list)
 
 
+def _managed_instance(node_id: str):
+    return HermesInstanceStore().get(node_id)
+
+
+def _ensure_external_node_mutable(node_id: str) -> None:
+    if _managed_instance(node_id) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="该 Hermes node 由执行实例管理，请在“执行实例”中修改、启停或删除",
+        )
+
+
+def _bound_profiles(node_id: str) -> list[str]:
+    return sorted(
+        {
+            binding.profile_id
+            for binding in AgentHermesBindingStore().list()
+            if node_id in binding.hermes_node_ids
+        }
+    )
+
+
 @router.get("/nodes")
 def list_nodes() -> dict:
     return {"nodes": [node.to_dict() for node in get_hermes_store().list()]}
@@ -45,7 +68,7 @@ def list_nodes() -> dict:
 @router.post("/nodes")
 def create_node(payload: HermesNodePayload) -> dict:
     store = get_hermes_store()
-    if store.get(payload.id):
+    if store.get(payload.id) or _managed_instance(payload.id) is not None:
         raise HTTPException(status_code=409, detail="Hermes node already exists")
     node = HermesNode(**payload.model_dump())
     store.upsert(node)
@@ -64,6 +87,7 @@ def get_node(node_id: str) -> dict:
 def update_node(node_id: str, payload: HermesNodePayload) -> dict:
     if payload.id != node_id:
         raise HTTPException(status_code=400, detail="Node id cannot be changed")
+    _ensure_external_node_mutable(node_id)
     store = get_hermes_store()
     if store.get(node_id) is None:
         raise HTTPException(status_code=404, detail="Hermes node not found")
@@ -74,6 +98,14 @@ def update_node(node_id: str, payload: HermesNodePayload) -> dict:
 
 @router.delete("/nodes/{node_id}")
 def delete_node(node_id: str) -> dict:
+    _ensure_external_node_mutable(node_id)
+    profiles = _bound_profiles(node_id)
+    if profiles:
+        raise HTTPException(
+            status_code=409,
+            detail="Hermes node 仍被 Agent 使用，请先修改这些 Agent 的绑定: "
+            + ", ".join(profiles),
+        )
     if not get_hermes_store().delete(node_id):
         raise HTTPException(status_code=404, detail="Hermes node not found")
     return {"deleted": True, "id": node_id}
@@ -81,6 +113,7 @@ def delete_node(node_id: str) -> dict:
 
 @router.post("/nodes/{node_id}/enable")
 def enable_node(node_id: str) -> dict:
+    _ensure_external_node_mutable(node_id)
     store = get_hermes_store()
     node = store.get(node_id)
     if node is None:
@@ -92,6 +125,7 @@ def enable_node(node_id: str) -> dict:
 
 @router.post("/nodes/{node_id}/disable")
 def disable_node(node_id: str) -> dict:
+    _ensure_external_node_mutable(node_id)
     store = get_hermes_store()
     node = store.get(node_id)
     if node is None:
@@ -130,7 +164,7 @@ def get_binding(profile_id: str) -> dict:
 def update_binding(profile_id: str, payload: AgentBindingPayload) -> dict:
     try:
         binding = AgentHermesBinding(profile_id=profile_id, **payload.model_dump())
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     known_nodes = {node.id for node in get_hermes_store().list()}
     missing = [node_id for node_id in binding.hermes_node_ids if node_id not in known_nodes]
