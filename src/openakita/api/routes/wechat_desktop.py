@@ -420,7 +420,9 @@ async def connector_websocket(websocket: WebSocket) -> None:
                     )
                     if not bot_id:
                         raise ValueError("bot_id is required")
-                    await wechat_desktop_manager.dispatch_inbound(bot_id, payload)
+                    await wechat_desktop_manager.dispatch_inbound(
+                        node_id, bot_id, payload
+                    )
                 elif event in {
                     "wechat.message.accepted",
                     "wechat.message.sent",

@@ -472,9 +472,19 @@ class WeChatDesktopManager:
         async with self._lock:
             self._callbacks.pop(bot_id, None)
 
-    async def dispatch_inbound(self, bot_id: str, payload: dict[str, Any]) -> None:
+    async def dispatch_inbound(
+        self, node_id: str, bot_id: str, payload: dict[str, Any]
+    ) -> None:
+        account_id = str(payload.get("wechat_account_id") or "").strip()
+        if not account_id:
+            raise ValueError("wechat_account_id is required")
         async with self._lock:
-            callback = self._callbacks.get(bot_id)
+            bound_bot = self._bindings.get((node_id, account_id))
+            callback = self._callbacks.get(bot_id) if bound_bot == bot_id else None
+        if bound_bot != bot_id:
+            raise PermissionError(
+                "connector message does not match the server-side WeChat Bot binding"
+            )
         if callback is None:
             raise ValueError(f"wechat desktop bot is not running: {bot_id}")
         await callback(payload)
