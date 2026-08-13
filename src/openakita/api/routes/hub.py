@@ -167,6 +167,44 @@ def _write_profile_identity_files(
         )
 
 
+def _snapshot_import_identity(
+    profile_store, profile_id: str, identity_files: dict | None
+) -> dict[str, bytes | None]:
+    if not isinstance(identity_files, dict):
+        return {}
+    identity_dir = profile_store.get_profile_dir(profile_id) / "identity"
+    snapshot: dict[str, bytes | None] = {}
+    for filename, content in identity_files.items():
+        if filename not in PROFILE_IDENTITY_FILENAMES or not isinstance(content, str):
+            continue
+        target = identity_dir / filename
+        snapshot[filename] = target.read_bytes() if target.is_file() else None
+    return snapshot
+
+
+def _restore_imported_profile(
+    profile_store,
+    profile_id: str,
+    previous_profile,
+    identity_snapshot: dict[str, bytes | None],
+) -> None:
+    from openakita.utils.atomic_io import safe_write_bytes
+
+    if previous_profile is None:
+        profile_store.delete(profile_id)
+        return
+    profile_store.save(previous_profile)
+    identity_dir = profile_store.ensure_profile_dir(profile_id) / "identity"
+    for filename, previous in identity_snapshot.items():
+        target = identity_dir / filename
+        if previous is None:
+            target.unlink(missing_ok=True)
+        else:
+            safe_write_bytes(
+                target, previous, backup=False, fsync=True, allow_fallback=False
+            )
+
+
 def _invalidate_imported_profile_runtime(request: Request, profile_id: str) -> None:
     try:
         from openakita.prompt.builder import clear_prompt_section_cache
@@ -477,6 +515,8 @@ async def import_agent(
             data = _json.loads(content)
         except (ValueError, UnicodeDecodeError) as e:
             raise HTTPException(400, f"无效的 JSON 文件: {e}")
+        if not isinstance(data, dict):
+            raise HTTPException(400, "无效的 Agent JSON：根节点必须是对象")
 
         if data.get("format") == "akita-agent-batch":
             raw_agents = data.get("agents")
@@ -491,43 +531,74 @@ async def import_agent(
 
         imported = []
         skipped = []
-        for item in raw_agents:
-            if isinstance(item, dict) and isinstance(item.get("profile"), dict):
-                pdata = dict(item.get("profile", {}))
-                identity_files = item.get("identity_files")
-            else:
-                pdata = dict(item) if isinstance(item, dict) else {}
-                identity_files = pdata.pop("identity_files", None)
-            if not pdata or not isinstance(pdata, dict):
-                continue
-            pid = pdata.get("id", "")
-            pdata["type"] = "custom"
-            for k in ("ephemeral", "inherit_from", "user_customized", "hidden"):
-                pdata.pop(k, None)
+        committed: list[tuple[str, object | None, dict[str, bytes | None]]] = []
+        try:
+            for item in raw_agents:
+                if isinstance(item, dict) and isinstance(item.get("profile"), dict):
+                    pdata = dict(item.get("profile", {}))
+                    identity_files = item.get("identity_files")
+                else:
+                    pdata = dict(item) if isinstance(item, dict) else {}
+                    identity_files = pdata.pop("identity_files", None)
+                if not pdata:
+                    raise HTTPException(400, "批量 Agent JSON 包含无效条目")
+                pid = pdata.get("id", "")
+                pdata["type"] = "custom"
+                for key in ("ephemeral", "inherit_from", "user_customized", "hidden"):
+                    pdata.pop(key, None)
 
-            if profile_store.exists(pid) and not force:
-                suffix = 1
-                while profile_store.exists(f"{pid}-{suffix}"):
-                    suffix += 1
-                old_id = pid
-                pid = f"{pid}-{suffix}"
-                pdata["id"] = pid
-                skipped.append(f"{old_id} → {pid}")
+                if profile_store.exists(pid) and not force:
+                    suffix = 1
+                    while profile_store.exists(f"{pid}-{suffix}"):
+                        suffix += 1
+                    old_id = pid
+                    pid = f"{pid}-{suffix}"
+                    pdata["id"] = pid
+                    skipped.append(f"{old_id} → {pid}")
 
-            profile = AgentProfile.from_dict(pdata)
-            try:
-                profile_store.save(profile)
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid Agent profile: {exc}",
-                ) from exc
-            _write_profile_identity_files(profile_store, profile.id, identity_files)
-            _invalidate_imported_profile_runtime(request, profile.id)
-            imported.append(profile.to_dict())
+                try:
+                    profile = AgentProfile.from_dict(pdata)
+                    profile_store.get_profile_dir(profile.id)
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(
+                        status_code=400, detail=f"Invalid Agent profile: {exc}"
+                    ) from exc
 
-        if not imported:
-            raise HTTPException(400, "文件中没有可导入的有效 Agent")
+                previous_profile = profile_store.get(profile.id)
+                identity_snapshot = _snapshot_import_identity(
+                    profile_store, profile.id, identity_files
+                )
+                try:
+                    profile_store.save(profile)
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=400, detail=f"Invalid Agent profile: {exc}"
+                    ) from exc
+                committed.append((profile.id, previous_profile, identity_snapshot))
+                _write_profile_identity_files(profile_store, profile.id, identity_files)
+                _invalidate_imported_profile_runtime(request, profile.id)
+                imported.append(profile.to_dict())
+
+            if not imported:
+                raise HTTPException(400, "文件中没有可导入的有效 Agent")
+        except Exception:
+            rollback_errors: list[str] = []
+            for committed_id, previous_profile, identity_snapshot in reversed(committed):
+                try:
+                    _restore_imported_profile(
+                        profile_store,
+                        committed_id,
+                        previous_profile,
+                        identity_snapshot,
+                    )
+                except Exception as rollback_exc:
+                    rollback_errors.append(f"{committed_id}: {rollback_exc}")
+            if rollback_errors:
+                logger.error(
+                    "[AgentPackage] JSON import rollback incomplete: %s",
+                    "; ".join(rollback_errors),
+                )
+            raise
 
         _reload_skills(request)
         imported_ids = [str(p.get("id", "")) for p in imported if p.get("id")]

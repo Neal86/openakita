@@ -164,7 +164,26 @@ class NativeHermesRuntime:
                     raise NativeHermesExecutionError(f"Hermes conversation failed: {exc}") from exc
                 return result if isinstance(result, dict) else {"final_response": str(result)}
 
-            result = await asyncio.to_thread(_execute)
+            worker_task = asyncio.create_task(asyncio.to_thread(_execute))
+            cancelled: asyncio.CancelledError | None = None
+            result: dict[str, Any] | None = None
+            try:
+                result = await asyncio.shield(worker_task)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+            finally:
+                stream_closed.set()
+                if not worker_task.done():
+                    try:
+                        result = await asyncio.shield(worker_task)
+                    except asyncio.CancelledError:
+                        result = await worker_task
+                elif result is None and not worker_task.cancelled():
+                    result = worker_task.result()
+                if cancelled is not None:
+                    raise cancelled
+            if result is None:
+                raise NativeHermesExecutionError("Hermes conversation produced no result")
         return {
             "content": str(result.get("final_response") or result.get("content") or ""),
             "usage": result.get("usage") or {},
@@ -192,7 +211,8 @@ class NativeHermesRuntime:
         scoped_session = cls._scoped_session_id(agent_id, session_id)
         async with cls._session_guard(scoped_session):
             loop = asyncio.get_running_loop()
-            queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+            queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=128)
+            stream_closed = threading.Event()
             snapshot = prepare_native_hermes_capabilities(
                 agent_id,
                 session_id=scoped_session,
@@ -200,6 +220,20 @@ class NativeHermesRuntime:
             )
             effective_system = cls._merged_system(system, snapshot.system_context)
             emitted_delta = threading.Event()
+
+            def _enqueue(event: dict[str, Any] | None) -> None:
+                if stream_closed.is_set():
+                    return
+                future = asyncio.run_coroutine_threadsafe(queue.put(event), loop)
+                while not stream_closed.is_set():
+                    try:
+                        future.result(timeout=0.5)
+                        return
+                    except TimeoutError:
+                        continue
+                    except Exception:
+                        return
+                future.cancel()
 
             def _on_delta(delta: Any) -> None:
                 if isinstance(delta, str):
@@ -210,9 +244,8 @@ class NativeHermesRuntime:
                     text = str(delta or "")
                 if text:
                     emitted_delta.set()
-                    loop.call_soon_threadsafe(
-                        queue.put_nowait,
-                        {"type": "text_delta", "content": text, "runtime": "native"},
+                    _enqueue(
+                        {"type": "text_delta", "content": text, "runtime": "native"}
                     )
 
             def _worker() -> None:
@@ -232,16 +265,29 @@ class NativeHermesRuntime:
                         raise NativeHermesExecutionError(f"Hermes conversation failed: {exc}") from exc
                     final = result.get("final_response") if isinstance(result, dict) else str(result)
                     if final and not emitted_delta.is_set():
-                        loop.call_soon_threadsafe(
-                            queue.put_nowait,
-                            {"type": "final", "content": str(final), "runtime": "native"},
+                        _enqueue(
+                            {"type": "final", "content": str(final), "runtime": "native"}
                         )
                 except NativeHermesUnavailable as exc:
-                    loop.call_soon_threadsafe(queue.put_nowait, {"type": "error", "error_kind": "unavailable", "error": str(exc), "runtime": "native"})
+                    _enqueue(
+                        {
+                            "type": "error",
+                            "error_kind": "unavailable",
+                            "error": str(exc),
+                            "runtime": "native",
+                        }
+                    )
                 except Exception as exc:
-                    loop.call_soon_threadsafe(queue.put_nowait, {"type": "error", "error_kind": "execution", "error": str(exc), "runtime": "native"})
+                    _enqueue(
+                        {
+                            "type": "error",
+                            "error_kind": "execution",
+                            "error": str(exc),
+                            "runtime": "native",
+                        }
+                    )
                 finally:
-                    loop.call_soon_threadsafe(queue.put_nowait, None)
+                    _enqueue(None)
 
             worker_task = asyncio.create_task(asyncio.to_thread(_worker))
             cancelled: asyncio.CancelledError | None = None

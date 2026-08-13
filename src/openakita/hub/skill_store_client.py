@@ -33,28 +33,7 @@ from ..agents.manifest import (
     validate_external_skill_source,
     validate_file_safety,
 )
-from ..agents.manifest import (
-    MAX_PACKAGE_SIZE,
-    MAX_SINGLE_FILE_SIZE,
-    validate_external_skill_source,
-    validate_file_safety,
-)
-from ..agents.manifest import (
-    MAX_PACKAGE_SIZE,
-    MAX_SINGLE_FILE_SIZE,
-    validate_external_skill_source,
-    validate_file_safety,
-)
-from ..agents.manifest import (
-    MAX_PACKAGE_SIZE,
-    MAX_SINGLE_FILE_SIZE,
-    validate_external_skill_source,
-    validate_file_safety,
-)
 from ..config import settings
-from ..utils.atomic_io import atomic_json_write, safe_write
-from ..utils.atomic_io import atomic_json_write, safe_write
-from ..utils.atomic_io import atomic_json_write, safe_write
 from ..utils.atomic_io import atomic_json_write, safe_write
 
 logger = logging.getLogger(__name__)
@@ -194,41 +173,42 @@ class SkillStoreClient:
 
     @staticmethod
     def _write_origin(skill_dir: Path, install_url: str) -> None:
-        """Write provenance files to track skill source."""
-        try:
-            origin = {
-                "source": install_url,
-                "type": "platform_store",
-                "installed_at": datetime.now(UTC).isoformat(),
-            }
-            skill_md = skill_dir / "SKILL.md"
-            if skill_md.exists():
-                import re
-
+        """Persist mandatory provenance before a staged Skill becomes active."""
+        origin = {
+            "source": install_url,
+            "type": "platform_store",
+            "installed_at": datetime.now(UTC).isoformat(),
+        }
+        skill_md = skill_dir / "SKILL.md"
+        if skill_md.exists():
+            try:
                 import yaml
 
-                m = re.match(r"^---\s*\n(.*?)\n---", skill_md.read_text("utf-8"), re.DOTALL)
-                if m:
-                    fm = yaml.safe_load(m.group(1)) or {}
-                    if fm.get("version"):
-                        origin["version"] = fm["version"]
-            atomic_json_write(
-                skill_dir / ".openakita-origin.json",
-                origin,
-                backup=True,
-                fsync=True,
-                allow_fallback=False,
-            )
-            # Also write .openakita-source for compatibility with bridge/frontend matching
-            safe_write(
-                skill_dir / ".openakita-source",
-                install_url,
-                backup=True,
-                fsync=True,
-                allow_fallback=False,
-            )
-        except Exception as e:
-            logger.debug(f"Failed to write origin tracking: {e}")
+                match = re.match(
+                    r"^---\s*\n(.*?)\n---",
+                    skill_md.read_text("utf-8"),
+                    re.DOTALL,
+                )
+                if match:
+                    frontmatter = yaml.safe_load(match.group(1)) or {}
+                    if frontmatter.get("version"):
+                        origin["version"] = frontmatter["version"]
+            except Exception as exc:
+                logger.debug("Unable to read Skill version metadata: %s", exc)
+        atomic_json_write(
+            skill_dir / ".openakita-origin.json",
+            origin,
+            backup=True,
+            fsync=True,
+            allow_fallback=False,
+        )
+        safe_write(
+            skill_dir / ".openakita-source",
+            install_url,
+            backup=True,
+            fsync=True,
+            allow_fallback=False,
+        )
 
     async def install_skill(
         self,
@@ -474,10 +454,37 @@ class SkillStoreClient:
         tmp_dir = tmp_parent / "repo"
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as zf:
-                for name in zf.namelist():
-                    normalized = os.path.normpath(name)
-                    if name.startswith("/") or name.startswith("\\") or normalized.startswith(".."):
-                        raise RuntimeError(f"Zip Slip detected: dangerous member '{name}'")
+                total = 0
+                seen: set[str] = set()
+                for info in zf.infolist():
+                    errors = validate_file_safety(info.filename)
+                    if errors:
+                        raise RuntimeError(
+                            f"Unsafe GitHub Skill ZIP member: {'; '.join(errors)}"
+                        )
+                    key = "/".join(
+                        part.rstrip(" .").casefold()
+                        for part in info.filename.replace("\\", "/").split("/")
+                    )
+                    if key in seen:
+                        raise RuntimeError(
+                            f"Duplicate GitHub Skill ZIP member: {info.filename}"
+                        )
+                    seen.add(key)
+                    if info.file_size > MAX_SINGLE_FILE_SIZE:
+                        raise RuntimeError(
+                            f"GitHub Skill ZIP member too large: {info.filename}"
+                        )
+                    total += info.file_size
+                    if total > MAX_PACKAGE_SIZE:
+                        raise RuntimeError("GitHub Skill ZIP expands beyond safety limit")
+                    if info.external_attr >> 16 & 0o120000 == 0o120000:
+                        raise RuntimeError(
+                            f"GitHub Skill ZIP symlink not allowed: {info.filename}"
+                        )
+                bad_member = zf.testzip()
+                if bad_member is not None:
+                    raise RuntimeError(f"Corrupt GitHub Skill ZIP member: {bad_member}")
                 zf.extractall(tmp_parent)
 
             children = list(tmp_parent.iterdir())
@@ -521,13 +528,15 @@ class SkillStoreClient:
 
     @staticmethod
     def _copy_skill_tree(source: Path, target: Path) -> None:
-        """Copy a Skill tree without following symlinks or oversized payloads."""
+        """Copy a Skill tree without Git metadata, symlinks or oversized payloads."""
         target.mkdir(parents=True, exist_ok=True)
         total = 0
         for item in source.rglob("*"):
+            rel = item.relative_to(source)
+            if ".git" in rel.parts:
+                continue
             if item.is_symlink():
                 raise RuntimeError(f"Skill symlink not allowed: {item}")
-            rel = item.relative_to(source)
             dest = target / rel
             if item.is_dir():
                 dest.mkdir(parents=True, exist_ok=True)
@@ -546,13 +555,10 @@ class SkillStoreClient:
 
     @staticmethod
     def _extract_skill_from_repo(tmp_dir: Path, skill_name: str, skill_dir: Path) -> bool:
-        """Extract skill directory from a cloned/downloaded repo tree."""
+        """Extract only a directory that actually contains a Skill definition."""
         skill_md_at_root = tmp_dir / "SKILL.md"
         if skill_md_at_root.exists():
             SkillStoreClient._copy_skill_tree(tmp_dir, skill_dir)
-            git_dir = skill_dir / ".git"
-            if git_dir.exists():
-                shutil.rmtree(git_dir)
             return True
 
         candidates = [
@@ -577,11 +583,7 @@ class SkillStoreClient:
                 SkillStoreClient._copy_skill_tree(skill_md.parent, skill_dir)
                 return True
 
-        SkillStoreClient._copy_skill_tree(tmp_dir, skill_dir)
-        git_dir = skill_dir / ".git"
-        if git_dir.exists():
-            shutil.rmtree(git_dir)
-        return True
+        return False
 
     async def rate(
         self, skill_id: str, score: int, comment: str = "", token: str = ""

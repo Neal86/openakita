@@ -81,7 +81,12 @@ def _data_dir() -> Path:
     configured = os.environ.get("OPENAKITA_DATA_DIR", "").strip()
     if configured:
         return Path(configured).expanduser().resolve()
-    return Path.home() / ".openakita" / "data"
+    try:
+        from openakita.config import settings
+
+        return Path(settings.data_dir).resolve()
+    except Exception:
+        return Path.home() / ".openakita" / "data"
 
 
 def _release_cache_path() -> Path:

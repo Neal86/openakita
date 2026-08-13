@@ -95,12 +95,11 @@ class ChildManager:
                 lock = self.locks.get(profile_id)
                 if lock is not None and not lock.locked():
                     self.locks.pop(profile_id, None)
-                lock = self.locks.get(profile_id)
-                if lock is not None and not lock.locked():
-                    self.locks.pop(profile_id, None)
-                lock = self.locks.get(profile_id)
-                if lock is not None and not lock.locked():
-                    self.locks.pop(profile_id, None)
+
+    def _drop_idle_lock(self, profile_id: str, lock: asyncio.Lock) -> None:
+        current = self.locks.get(profile_id)
+        if current is lock and not lock.locked() and profile_id not in self.children:
+            self.locks.pop(profile_id, None)
 
     async def ensure(self, profile_id: str) -> Child:
         profile_id = safe_id(profile_id)
@@ -114,14 +113,28 @@ class ChildManager:
                 self.children.pop(profile_id, None)
                 self._dispose(existing)
             if len(self.children) >= MAX_CHILDREN:
+                asyncio.get_running_loop().call_soon(
+                    self._drop_idle_lock, profile_id, lock
+                )
                 raise HTTPException(status_code=503, detail="共享实例已达到最大 Agent 数")
 
             home = Path(tempfile.mkdtemp(prefix=f"{profile_id}-", dir=RUNTIME_ROOT)).resolve()
             if RUNTIME_ROOT not in home.parents:
+                shutil.rmtree(home, ignore_errors=True)
+                asyncio.get_running_loop().call_soon(
+                    self._drop_idle_lock, profile_id, lock
+                )
                 raise HTTPException(status_code=400, detail="invalid Agent id")
             workspace = home / "workspace"
             workspace.mkdir(parents=True, exist_ok=True)
-            port = free_port(profile_id)
+            try:
+                port = free_port(profile_id)
+            except Exception:
+                shutil.rmtree(home, ignore_errors=True)
+                asyncio.get_running_loop().call_soon(
+                    self._drop_idle_lock, profile_id, lock
+                )
+                raise
             env = os.environ.copy()
             env.update({
                 "HOME": str(home),
@@ -151,6 +164,9 @@ class ChildManager:
             except Exception:
                 log_handle.close()
                 shutil.rmtree(home, ignore_errors=True)
+                asyncio.get_running_loop().call_soon(
+                    self._drop_idle_lock, profile_id, lock
+                )
                 raise
             child = Child(profile_id, port, process, home, time.time(), log_handle)
             self.children[profile_id] = child
@@ -161,7 +177,12 @@ class ChildManager:
                     if process.poll() is not None:
                         self.children.pop(profile_id, None)
                         self._dispose(child)
-                        raise HTTPException(status_code=502, detail=f"Hermes Agent {profile_id} 启动失败")
+                        asyncio.get_running_loop().call_soon(
+                            self._drop_idle_lock, profile_id, lock
+                        )
+                        raise HTTPException(
+                            status_code=502, detail=f"Hermes Agent {profile_id} 启动失败"
+                        )
                     try:
                         response = await client.get(f"http://127.0.0.1:{port}/health")
                         if response.is_success:
@@ -170,6 +191,9 @@ class ChildManager:
                         pass
                     await asyncio.sleep(1)
             self.stop(profile_id)
+            asyncio.get_running_loop().call_soon(
+                self._drop_idle_lock, profile_id, lock
+            )
             raise HTTPException(status_code=504, detail=f"Hermes Agent {profile_id} 启动超时")
 
     def stop(self, profile_id: str) -> None:
