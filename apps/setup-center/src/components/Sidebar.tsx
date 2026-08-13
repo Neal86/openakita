@@ -86,7 +86,6 @@ export function Sidebar({
   const openExecutionPage = useCallback((page: ExecPage) => {
     setExecutionPage(page);
     window.sessionStorage.setItem(EXEC_PAGE_KEY, page);
-    setExpandedGroups(prev => ({ ...prev, multiAgent: true }));
     onViewChange("execution_instances");
     window.dispatchEvent(new CustomEvent(EXEC_PAGE_EVENT, { detail: { page } }));
   }, [onViewChange]);
@@ -132,7 +131,7 @@ export function Sidebar({
 
   const capViews: ViewId[] = ["skills", "mcp", "plugins", "memory", "scheduler"];
   const monViews: ViewId[] = ["token_stats", "skill_usage", "security", "pending_approvals"];
-  const maViews: ViewId[] = ["dashboard", "org_editor", "pixel_office", "agent_manager", "execution_instances"];
+  const maViews: ViewId[] = ["dashboard", "org_editor", "pixel_office", "agent_manager"];
   const stViews: ViewId[] = ["agent_store", "skill_store"];
   const prevViewRef = useRef(view);
   useEffect(() => {
@@ -177,9 +176,10 @@ export function Sidebar({
         <div className={`navItem ${view === "org_editor" ? "navItemActive" : ""}`} onClick={() => onViewChange("org_editor")} role="button" tabIndex={0}><IconLayoutGrid size={16} />{!collapsed && <span>{t("sidebar.orgEditor")} {BETA_SUP}</span>}</div>
         <div className={`navItem ${view === "pixel_office" ? "navItemActive" : ""}`} onClick={() => onViewChange("pixel_office")} role="button" tabIndex={0}><IconBuilding size={16} />{!collapsed && <span>{t("sidebar.pixelOffice")} {BETA_SUP}</span>}</div>
         <div className={`navItem ${view === "agent_manager" ? "navItemActive" : ""}`} onClick={() => onViewChange("agent_manager")} role="button" tabIndex={0}><IconBot size={16} />{!collapsed && <span>{t("sidebar.agentManager")}</span>}</div>
-        <div className={`navItem ${view === "execution_instances" && executionPage === "hermes" ? "navItemActive" : ""}`} onClick={() => openExecutionPage("hermes")} role="button" tabIndex={0} title="执行模式实例"><IconGear size={16} />{!collapsed && <span>执行模式实例</span>}</div>
-        <div className={`navItem ${view === "execution_instances" && executionPage === "windows" ? "navItemActive" : ""}`} onClick={() => openExecutionPage("windows")} role="button" tabIndex={0} title="Windows 设备"><MonitorSmartphone size={16} />{!collapsed && <span>Windows 设备</span>}</div>
       </div>}
+
+      <div className={`navItem ${view === "execution_instances" && executionPage === "hermes" ? "navItemActive" : ""}`} onClick={() => openExecutionPage("hermes")} role="button" tabIndex={0} title="Hermes"><IconGear size={16} />{!collapsed && <span>Hermes</span>}</div>
+      <div className={`navItem ${view === "execution_instances" && executionPage === "windows" ? "navItemActive" : ""}`} onClick={() => openExecutionPage("windows")} role="button" tabIndex={0} title="Windows Connector"><MonitorSmartphone size={16} />{!collapsed && <span>Windows Connector</span>}</div>
 
       {storeVisible && <><NavGroupHeader collapsed={collapsed} icon={<IconStorefront size={GROUP_ICON_SIZE} />} label={t("sidebar.groupStore")} expanded={stExpanded} onToggle={() => toggleGroup("store")} />{(collapsed || stExpanded) && <div className="navGroupItems"><div className={`navItem ${view === "agent_store" ? "navItemActive" : ""}`} onClick={() => onViewChange("agent_store")} role="button" tabIndex={0}><IconStorefront size={16} />{!collapsed && <span>{t("sidebar.agentStore")} {BETA_SUP}</span>}</div><div className={`navItem ${view === "skill_store" ? "navItemActive" : ""}`} onClick={() => onViewChange("skill_store")} role="button" tabIndex={0}><IconPuzzle size={16} />{!collapsed && <span>{t("sidebar.skillStore")} {BETA_SUP}</span>}</div></div>}</>}
     </div>
