@@ -171,6 +171,16 @@ async def get_delivery(request_id: str) -> dict[str, Any]:
     return receipt
 
 
+def _is_valid_release_zip(path: Path | None) -> bool:
+    if path is None or not path.is_file():
+        return False
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return bool(archive.namelist()) and archive.testzip() is None
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+
 def _local_release_path() -> Path | None:
     configured = os.environ.get("OPENAKITA_WECHAT_CONNECTOR_PACKAGE", "").strip()
     candidates = [
@@ -178,7 +188,7 @@ def _local_release_path() -> Path | None:
         _release_cache_path(),
         Path(__file__).resolve().parents[4] / "dist" / RELEASE_FILENAME,
     ]
-    return next((path for path in candidates if path and path.is_file()), None)
+    return next((path for path in candidates if _is_valid_release_zip(path)), None)
 
 
 def _download_release_to_cache() -> Path:
