@@ -271,10 +271,19 @@ class WindowsConnectorManager:
             # Never replace a known-good backup with a corrupted primary file.
             # This matters after startup has recovered successfully from .bak.
             if self._main_state_is_valid():
+                backup_tmp = self._backup_path.with_name(
+                    f".{self._backup_path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+                )
                 try:
-                    self._backup_path.write_bytes(self.path.read_bytes())
+                    shutil.copy2(self.path, backup_tmp)
+                    os.replace(backup_tmp, self._backup_path)
                 except OSError:
                     pass
+                finally:
+                    try:
+                        backup_tmp.unlink(missing_ok=True)
+                    except OSError:
+                        pass
             tmp = self.path.with_name(
                 f".{self.path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
             )

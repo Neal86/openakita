@@ -56,6 +56,21 @@ def _fsync_parent_dir(path: Path) -> None:
         os.close(fd)
 
 
+def _replace_backup_atomically(source: Path, backup: Path, *, fsync: bool) -> None:
+    """Replace a backup without ever exposing a partially copied .bak file."""
+    temp = _unique_temp_path(backup)
+    try:
+        shutil.copy2(source, temp)
+        if fsync:
+            with open(temp, "rb") as handle:
+                os.fsync(handle.fileno())
+        os.replace(temp, backup)
+        if fsync:
+            _fsync_parent_dir(backup)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
 def safe_write(
     path: Path,
     content: str,
@@ -74,9 +89,7 @@ def safe_write(
         if backup and path.exists():
             bak = path.with_suffix(path.suffix + ".bak")
             try:
-                shutil.copy2(path, bak)
-                if fsync:
-                    _fsync_parent_dir(path)
+                _replace_backup_atomically(path, bak, fsync=fsync)
             except OSError as e:
                 logger.warning("Failed to create backup %s: %s", bak, e)
 
@@ -137,9 +150,7 @@ def safe_write_bytes(
         if backup and path.exists():
             bak = path.with_suffix(path.suffix + ".bak")
             try:
-                shutil.copy2(path, bak)
-                if fsync:
-                    _fsync_parent_dir(path)
+                _replace_backup_atomically(path, bak, fsync=fsync)
             except OSError as e:
                 logger.warning("Failed to create backup %s: %s", bak, e)
 
