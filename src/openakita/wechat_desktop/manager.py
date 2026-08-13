@@ -111,10 +111,19 @@ class WeChatDesktopManager:
         with self._file_lock:
             if self._state_path.exists() or not LEGACY_STATE_PATH.exists():
                 return
+            temp = self._state_path.with_name(
+                f".{self._state_path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+            )
             try:
-                shutil.copy2(LEGACY_STATE_PATH, self._state_path)
+                shutil.copy2(LEGACY_STATE_PATH, temp)
+                os.replace(temp, self._state_path)
             except OSError:
                 pass
+            finally:
+                try:
+                    temp.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     @staticmethod
     def _hash(value: str) -> str:

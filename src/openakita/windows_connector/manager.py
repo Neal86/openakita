@@ -177,7 +177,17 @@ class WindowsConnectorManager:
             return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_bytes(LEGACY_STATE_PATH.read_bytes())
+            temp = self.path.with_name(
+                f".{self.path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+            )
+            try:
+                shutil.copy2(LEGACY_STATE_PATH, temp)
+                os.replace(temp, self.path)
+            finally:
+                try:
+                    temp.unlink(missing_ok=True)
+                except OSError:
+                    pass
         except OSError:
             pass
 
