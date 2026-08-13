@@ -42,6 +42,16 @@ jobs:
           pip install -e ".[dev]"
           pip install -e ./openakita-plugin-sdk
 
+      - name: Patch Windows Connector shutil import regression
+        shell: pwsh
+        run: |
+          $path = "src/openakita/windows_connector/manager.py"
+          $text = Get-Content $path -Raw
+          if ($text -notmatch '(?m)^import shutil$') {
+            $text = $text -replace "import secrets`r?`n", "import secrets`r`nimport shutil`r`n"
+            Set-Content -Path $path -Value $text -Encoding utf8
+          }
+
       - name: Compile Windows Connector modules
         shell: bash
         run: |
