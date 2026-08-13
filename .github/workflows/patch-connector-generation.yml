@@ -8,6 +8,7 @@ on:
       - scripts/patch_agent_package_runtime_safety.py
       - scripts/patch_profile_categories_safety.py
       - scripts/patch_hub_io_safety.py
+      - scripts/patch_manifest_cross_platform_safety.py
       - .github/workflows/patch-connector-generation.yml
   workflow_dispatch:
 
@@ -33,11 +34,12 @@ jobs:
           python scripts/patch_agent_package_runtime_safety.py
           python scripts/patch_profile_categories_safety.py
           python scripts/patch_hub_io_safety.py
+          python scripts/patch_manifest_cross_platform_safety.py
       - name: Commit static-review safety hardening
         run: |
           git config user.name "openakita-maintenance-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add src/openakita/agents/packager.py src/openakita/agents/profile.py src/openakita/api/routes/hub.py
+          git add src/openakita/agents/manifest.py src/openakita/agents/packager.py src/openakita/agents/profile.py src/openakita/api/routes/hub.py
           if git diff --cached --quiet; then
             echo "Static-review safety hardening already applied."
             exit 0
