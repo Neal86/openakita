@@ -172,7 +172,6 @@ class NativeHermesRuntime:
             except asyncio.CancelledError as exc:
                 cancelled = exc
             finally:
-                stream_closed.set()
                 if not worker_task.done():
                     try:
                         result = await asyncio.shield(worker_task)
@@ -315,6 +314,7 @@ class NativeHermesRuntime:
             except asyncio.CancelledError as exc:
                 cancelled = exc
             finally:
+                stream_closed.set()
                 if not worker_task.done():
                     try:
                         await asyncio.shield(worker_task)
