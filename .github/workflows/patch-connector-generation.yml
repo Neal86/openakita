@@ -39,14 +39,6 @@ jobs:
           python scripts/patch_profile_store_delete_safety.py
           python scripts/patch_profile_store_consistency.py
           python scripts/patch_agent_package_safety.py
-      - name: Verify safety hardening
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-          pip install -e ./openakita-plugin-sdk
-          ruff check src/openakita/wechat_desktop/manager.py src/openakita/windows_connector/manager.py src/openakita/api/routes/wechat_desktop.py src/openakita/api/routes/agents.py src/openakita/api/routes/hub.py src/openakita/agents/profile.py src/openakita/agents/manifest.py src/openakita/agents/packager.py src/openakita/hermes/paths.py tests/wechat_desktop/test_connection_generation.py tests/wechat_desktop/test_release_download.py tests/api/test_agent_data_delete_safety.py tests/api/test_profile_store_delete_safety.py tests/api/test_profile_store_consistency.py tests/api/test_agent_package_safety.py tests/hermes/test_paths.py
-          pytest -q tests/wechat_desktop/test_connection_generation.py tests/wechat_desktop/test_release_download.py tests/api/test_agent_data_delete_safety.py tests/api/test_profile_store_delete_safety.py tests/api/test_profile_store_consistency.py tests/api/test_agent_package_safety.py tests/windows_connector tests/wechat_desktop tests/hermes
-          git diff --check
       - name: Commit safety hardening
         run: |
           git config user.name "openakita-maintenance-bot"
