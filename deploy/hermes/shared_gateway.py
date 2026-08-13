@@ -92,6 +92,9 @@ class ChildManager:
             if child.process.poll() is not None:
                 self.children.pop(profile_id, None)
                 self._dispose(child)
+                lock = self.locks.get(profile_id)
+                if lock is not None and not lock.locked():
+                    self.locks.pop(profile_id, None)
 
     async def ensure(self, profile_id: str) -> Child:
         profile_id = safe_id(profile_id)
@@ -164,9 +167,13 @@ class ChildManager:
             raise HTTPException(status_code=504, detail=f"Hermes Agent {profile_id} 启动超时")
 
     def stop(self, profile_id: str) -> None:
-        child = self.children.pop(safe_id(profile_id), None)
+        profile_id = safe_id(profile_id)
+        child = self.children.pop(profile_id, None)
         if child:
             self._dispose(child, terminate=True)
+        lock = self.locks.get(profile_id)
+        if lock is not None and not lock.locked():
+            self.locks.pop(profile_id, None)
 
     def shutdown(self) -> None:
         for profile_id in list(self.children):
