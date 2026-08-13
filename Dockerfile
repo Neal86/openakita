@@ -1,5 +1,5 @@
 # ── Stage 1: Build web frontend ──
-FROM node:20-slim AS frontend
+FROM node:22-slim AS frontend
 
 WORKDIR /app/apps/setup-center
 COPY apps/setup-center/package.json apps/setup-center/package-lock.json ./
