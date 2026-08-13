@@ -390,33 +390,70 @@ class AgentInstaller:
             if self.profile_store.exists(profile_id) and not force:
                 profile_id = self._resolve_conflict(profile_id)
 
-            installed_skills = self._install_skills(
-                zf, manifest.bundled_skills, agent_id=manifest.id
-            )
-
-            ext_results = self._fetch_external_skills(
-                manifest.required_external_skills, agent_id=manifest.id
-            )
-            installed_skills.extend(ext_results)
-
             profile_data["id"] = profile_id
             profile_data["type"] = "custom"
             profile_data.pop("ephemeral", None)
             profile_data.pop("inherit_from", None)
-
-            if installed_skills:
-                existing_skills = profile_data.get("skills", [])
-                for s in installed_skills:
-                    if s not in existing_skills:
-                        existing_skills.append(s)
-                profile_data["skills"] = existing_skills
-
             if hub_source:
                 profile_data["hub_source"] = hub_source
 
-            profile = AgentProfile.from_dict(profile_data)
-            self.profile_store.save(profile)
-            self._install_identity_files(zf, profile.id)
+            # Validate the profile and filesystem-safe ID before touching any
+            # shared Skill directory. This prevents a malformed package from
+            # changing runtime state before failing on profile persistence.
+            AgentProfile.from_dict(profile_data)
+            self.profile_store.get_profile_dir(profile_id)
+            previous_profile = self.profile_store.get(profile_id)
+            identity_snapshot = self._snapshot_identity_files(zf, profile_id)
+
+            import tempfile
+
+            self.skills_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(
+                dir=self.skills_dir, prefix=f".agent-install-{profile_id}-"
+            ) as transaction_dir:
+                skill_snapshot = self._snapshot_skill_targets(
+                    manifest, Path(transaction_dir)
+                )
+                profile_saved = False
+                try:
+                    installed_skills = self._install_skills(
+                        zf, manifest.bundled_skills, agent_id=manifest.id
+                    )
+                    ext_results = self._fetch_external_skills(
+                        manifest.required_external_skills, agent_id=manifest.id
+                    )
+                    installed_skills.extend(ext_results)
+
+                    if installed_skills:
+                        existing_skills = list(profile_data.get("skills", []) or [])
+                        for skill_name in installed_skills:
+                            if skill_name not in existing_skills:
+                                existing_skills.append(skill_name)
+                        profile_data["skills"] = existing_skills
+
+                    profile = AgentProfile.from_dict(profile_data)
+                    self.profile_store.save(profile)
+                    profile_saved = True
+                    self._install_identity_files(zf, profile.id)
+                except Exception as exc:
+                    rollback_errors: list[str] = []
+                    try:
+                        self._restore_skill_targets(skill_snapshot)
+                    except Exception as rollback_exc:
+                        rollback_errors.append(f"skills: {rollback_exc}")
+                    if profile_saved:
+                        try:
+                            self._restore_profile_after_failed_install(
+                                profile_id, previous_profile, identity_snapshot
+                            )
+                        except Exception as rollback_exc:
+                            rollback_errors.append(f"profile: {rollback_exc}")
+                    if rollback_errors:
+                        raise PackageError(
+                            "Agent installation failed and rollback was incomplete: "
+                            + "; ".join(rollback_errors)
+                        ) from exc
+                    raise
 
         logger.info(
             f"Agent installed: {profile_id} "
@@ -425,6 +462,89 @@ class AgentInstaller:
             f"total installed: {installed_skills})"
         )
         return profile
+
+    def _snapshot_identity_files(
+        self, zf: zipfile.ZipFile, profile_id: str
+    ) -> dict[str, bytes | None]:
+        members = {
+            Path(name).name
+            for name in zf.namelist()
+            if name.startswith("identity/")
+            and not name.endswith("/")
+            and Path(name).name in PROFILE_IDENTITY_FILENAMES
+        }
+        if not members:
+            return {}
+        identity_dir = self.profile_store.get_profile_dir(profile_id) / "identity"
+        snapshot: dict[str, bytes | None] = {}
+        for filename in members:
+            target = identity_dir / filename
+            snapshot[filename] = target.read_bytes() if target.is_file() else None
+        return snapshot
+
+    def _snapshot_skill_targets(
+        self, manifest: AgentManifest, transaction_dir: Path
+    ) -> dict[Path, Path | None]:
+        import shutil
+
+        targets: list[Path] = [
+            self.skills_dir / "custom" / skill_name
+            for skill_name in manifest.bundled_skills
+        ]
+        targets.extend(
+            self.skills_dir / "community" / ref.id
+            for ref in manifest.required_external_skills
+        )
+        snapshot: dict[Path, Path | None] = {}
+        for index, target in enumerate(dict.fromkeys(targets)):
+            if target.exists() and not target.is_dir():
+                raise PackageError(f"Skill target is not a directory: {target}")
+            if not target.exists():
+                snapshot[target] = None
+                continue
+            backup = transaction_dir / f"skill-{index}"
+            shutil.copytree(target, backup, symlinks=True)
+            snapshot[target] = backup
+        return snapshot
+
+    @staticmethod
+    def _restore_skill_targets(snapshot: dict[Path, Path | None]) -> None:
+        import shutil
+
+        for target, backup in reversed(list(snapshot.items())):
+            if target.exists():
+                if target.is_dir():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+            if backup is not None and backup.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                backup.replace(target)
+
+    def _restore_profile_after_failed_install(
+        self,
+        profile_id: str,
+        previous_profile: AgentProfile | None,
+        identity_snapshot: dict[str, bytes | None],
+    ) -> None:
+        if previous_profile is None:
+            self.profile_store.delete(profile_id)
+            return
+
+        self.profile_store.save(previous_profile)
+        identity_dir = self.profile_store.ensure_profile_dir(profile_id) / "identity"
+        for filename, previous in identity_snapshot.items():
+            target = identity_dir / filename
+            if previous is None:
+                target.unlink(missing_ok=True)
+            else:
+                safe_write_bytes(
+                    target,
+                    previous,
+                    backup=False,
+                    fsync=True,
+                    allow_fallback=False,
+                )
 
     def _install_identity_files(self, zf: zipfile.ZipFile, profile_id: str) -> None:
         identity_members = [

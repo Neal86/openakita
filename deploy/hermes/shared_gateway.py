@@ -95,6 +95,9 @@ class ChildManager:
                 lock = self.locks.get(profile_id)
                 if lock is not None and not lock.locked():
                     self.locks.pop(profile_id, None)
+                lock = self.locks.get(profile_id)
+                if lock is not None and not lock.locked():
+                    self.locks.pop(profile_id, None)
 
     async def ensure(self, profile_id: str) -> Child:
         profile_id = safe_id(profile_id)
