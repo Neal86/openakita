@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 from openakita.memory.types import normalize_tags
 
@@ -19,6 +20,7 @@ _ID_PATTERN = re.compile(r"^[a-z0-9]([a-z0-9-]{1,62}[a-z0-9])?$")
 _NO_DOUBLE_HYPHEN = re.compile(r"--")
 _SEMVER_PATTERN = re.compile(r"^\d+\.\d+\.\d+")
 _SKILL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_REPO_PART_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 MAX_PACKAGE_SIZE = 50 * 1024 * 1024  # 50MB
 MAX_SINGLE_FILE_SIZE = 10 * 1024 * 1024  # 10MB
@@ -46,6 +48,60 @@ FORBIDDEN_EXTENSIONS = frozenset(
         ".rpm",
     }
 )
+
+
+def validate_external_skill_source(source: str) -> bool:
+    """Return whether an external skill source is a safe GitHub repository reference.
+
+    Accepted forms are ``owner/repo``, ``owner/repo@skill-id`` and the HTTPS
+    equivalents under ``github.com``. Arbitrary hosts, non-HTTPS URLs, ports,
+    credentials, query strings, fragments and path traversal are rejected so
+    installing an untrusted Agent package cannot turn ``git clone`` into an
+    SSRF/arbitrary-network primitive.
+    """
+    if not isinstance(source, str) or not source or source != source.strip():
+        return False
+
+    repo_part = source
+    skill_part = ""
+    if "@" in source:
+        repo_part, skill_part = source.rsplit("@", 1)
+        if not _SKILL_ID_PATTERN.fullmatch(skill_part):
+            return False
+
+    if repo_part.startswith("https://"):
+        parsed = urlsplit(repo_part)
+        try:
+            port = parsed.port
+        except ValueError:
+            return False
+        if (
+            parsed.scheme != "https"
+            or (parsed.hostname or "").lower() != "github.com"
+            or parsed.username is not None
+            or parsed.password is not None
+            or port is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            return False
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) != 2:
+            return False
+        owner, repo = parts
+    else:
+        if "://" in repo_part or "\\" in repo_part:
+            return False
+        parts = repo_part.split("/")
+        if len(parts) != 2:
+            return False
+        owner, repo = parts
+
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    if owner in {".", ".."} or repo in {"", ".", ".."}:
+        return False
+    return bool(_REPO_PART_PATTERN.fullmatch(owner) and _REPO_PART_PATTERN.fullmatch(repo))
 
 
 @dataclass
@@ -163,8 +219,8 @@ class AgentManifest:
                     continue
                 if not _SKILL_ID_PATTERN.fullmatch(ref.id or ""):
                     errors.append(f"Invalid required_external_skills id: {ref.id!r}")
-                if not isinstance(ref.source, str) or not ref.source.strip():
-                    errors.append(f"External skill source is required for {ref.id!r}")
+                if not validate_external_skill_source(ref.source):
+                    errors.append(f"Invalid external skill source for {ref.id!r}: {ref.source!r}")
 
         return errors
 
