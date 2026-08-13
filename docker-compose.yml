@@ -14,6 +14,11 @@ services:
       API_HOST: 0.0.0.0
       API_PORT: 18900
       OPENAKITA_HERMES_AUTH_FILE: /run/openakita-hermes-auth/internal_gateway_token
+      # Desktop remote mode runs inside Tauri/WebView, so POST requests such as
+      # Windows Connector pairing use a cross-origin preflight. Keep the fixed
+      # desktop/mobile app origins explicitly allowed even when the mounted .env
+      # defines CORS_ORIGINS for browser access.
+      CORS_ORIGINS: "tauri://localhost,http://tauri.localhost,https://tauri.localhost,http://localhost,capacitor://localhost"
     labels:
       - "traefik.http.services.openakita.loadbalancer.server.port=18900"
     networks:
