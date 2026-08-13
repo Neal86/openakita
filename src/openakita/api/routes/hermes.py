@@ -107,11 +107,16 @@ def update_node(node_id: str, payload: HermesNodePayload) -> dict:
         raise HTTPException(status_code=400, detail="Node id cannot be changed")
     _ensure_external_node_mutable(node_id)
     store = get_hermes_store()
-    if store.get(node_id) is None:
+    existing = store.get(node_id)
+    if existing is None:
         raise HTTPException(status_code=404, detail="Hermes node not found")
-    node = HermesNode(**payload.model_dump())
-    store.upsert(node)
-    return {"node": node.to_dict()}
+    data = payload.model_dump()
+    for key, value in data.items():
+        setattr(existing, key, value)
+    # Preserve runtime-owned health/load metadata across an operator edit.
+    existing.__post_init__()
+    store.upsert(existing)
+    return {"node": existing.to_dict()}
 
 
 @router.delete("/nodes/{node_id}")
