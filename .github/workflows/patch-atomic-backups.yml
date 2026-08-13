@@ -1,0 +1,68 @@
+name: One-shot atomic backup writes
+
+on:
+  push:
+    branches:
+      - feature/hermes-multi-agent
+    paths:
+      - .github/workflows/patch-atomic-backups.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feature/hermes-multi-agent
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Patch product files
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          atomic = Path('src/openakita/utils/atomic_io.py')
+          text = atomic.read_text('utf-8')
+          helper_marker = '''def _fsync_parent_dir(path: Path) -> None:\n    """Best-effort directory fsync so a committed rename survives power loss."""\n    if os.name == "nt":\n        return\n    try:\n        fd = os.open(path.parent, os.O_RDONLY)\n    except OSError:\n        return\n    try:\n        os.fsync(fd)\n    finally:\n        os.close(fd)\n\n\n'''
+          helper_new = helper_marker + '''def _replace_backup_atomically(source: Path, backup: Path, *, fsync: bool) -> None:\n    """Replace a backup without ever exposing a partially copied .bak file."""\n    temp = _unique_temp_path(backup)\n    try:\n        shutil.copy2(source, temp)\n        if fsync:\n            with open(temp, "rb") as handle:\n                os.fsync(handle.fileno())\n        os.replace(temp, backup)\n        if fsync:\n            _fsync_parent_dir(backup)\n    finally:\n        temp.unlink(missing_ok=True)\n\n\n'''
+          if 'def _replace_backup_atomically(' not in text:
+              if helper_marker not in text:
+                  raise SystemExit('atomic helper marker changed')
+              text = text.replace(helper_marker, helper_new, 1)
+
+          old = '''            try:\n                shutil.copy2(path, bak)\n                if fsync:\n                    _fsync_parent_dir(path)\n            except OSError as e:\n                logger.warning("Failed to create backup %s: %s", bak, e)\n'''
+          new = '''            try:\n                _replace_backup_atomically(path, bak, fsync=fsync)\n            except OSError as e:\n                logger.warning("Failed to create backup %s: %s", bak, e)\n'''
+          count = text.count(old)
+          if count:
+              text = text.replace(old, new)
+          elif text.count(new) < 2:
+              raise SystemExit('safe_write backup marker changed')
+          atomic.write_text(text, 'utf-8')
+
+          manager = Path('src/openakita/windows_connector/manager.py')
+          text = manager.read_text('utf-8')
+          old = '''            if self._main_state_is_valid():\n                try:\n                    self._backup_path.write_bytes(self.path.read_bytes())\n                except OSError:\n                    pass\n            tmp = self.path.with_name(\n'''
+          new = '''            if self._main_state_is_valid():\n                backup_tmp = self._backup_path.with_name(\n                    f".{self._backup_path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"\n                )\n                try:\n                    shutil.copy2(self.path, backup_tmp)\n                    os.replace(backup_tmp, self._backup_path)\n                except OSError:\n                    pass\n                finally:\n                    try:\n                        backup_tmp.unlink(missing_ok=True)\n                    except OSError:\n                        pass\n            tmp = self.path.with_name(\n'''
+          if new not in text:
+              if old not in text:
+                  raise SystemExit('windows backup marker changed')
+              text = text.replace(old, new, 1)
+          manager.write_text(text, 'utf-8')
+          PY
+          git diff --check
+      - name: Commit product fix
+        run: |
+          git config user.name "openakita-maintenance-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/openakita/utils/atomic_io.py src/openakita/windows_connector/manager.py
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "fix: make persistent backups atomic"
+          git pull --rebase origin feature/hermes-multi-agent
+          git push origin HEAD:feature/hermes-multi-agent
