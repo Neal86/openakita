@@ -830,18 +830,49 @@ class ProfileStore:
     # ── 分类管理 ────────────────────────────────────────────────────────
 
     def _load_categories(self) -> None:
-        if not self._categories_file.exists():
+        data = read_json_safe(self._categories_file)
+        if data is None:
             return
-        try:
-            data = json.loads(self._categories_file.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                self._custom_categories = data
-                logger.info(f"Loaded {len(data)} custom category(ies)")
-        except Exception as e:
-            logger.warning(f"Failed to load categories: {e}")
+        if not isinstance(data, list):
+            logger.warning("Failed to load categories: root must be a list")
+            return
 
-    def _persist_categories(self) -> None:
-        atomic_json_write(self._categories_file, self._custom_categories)
+        loaded: list[dict[str, Any]] = []
+        seen = set(_BUILTIN_IDS)
+        for row in data:
+            if not isinstance(row, dict):
+                logger.warning("Skipping malformed category row: %r", row)
+                continue
+            cat_id = row.get("id")
+            label = row.get("label")
+            color = row.get("color")
+            if (
+                not isinstance(cat_id, str)
+                or not cat_id.strip()
+                or cat_id != cat_id.strip()
+                or cat_id in seen
+                or not isinstance(label, str)
+                or not label.strip()
+                or not isinstance(color, str)
+                or not color.strip()
+            ):
+                logger.warning("Skipping invalid category row: %r", row)
+                continue
+            loaded.append({"id": cat_id, "label": label, "color": color})
+            seen.add(cat_id)
+
+        self._custom_categories = loaded
+        if loaded:
+            logger.info("Loaded %d custom category(ies)", len(loaded))
+
+    def _persist_categories(self, categories: list[dict[str, Any]]) -> None:
+        atomic_json_write(
+            self._categories_file,
+            categories,
+            backup=True,
+            fsync=True,
+            allow_fallback=False,
+        )
 
     def list_categories(self, profiles: Iterable[AgentProfile] | None = None) -> list[dict[str, Any]]:
         """返回所有分类（内置 + 自定义），每项含 agent_count。"""
@@ -872,13 +903,24 @@ class ProfileStore:
 
     def add_category(self, cat_id: str, label: str, color: str) -> dict[str, Any]:
         """新增自定义分类。id 不能与已有分类重复。"""
+        if (
+            not isinstance(cat_id, str)
+            or not cat_id.strip()
+            or cat_id != cat_id.strip()
+            or not isinstance(label, str)
+            or not label.strip()
+            or not isinstance(color, str)
+            or not color.strip()
+        ):
+            raise ValueError("分类 ID、名称和颜色不能为空，ID 不能包含首尾空白")
         with self._lock:
             existing_ids = _BUILTIN_IDS | {c["id"] for c in self._custom_categories}
             if cat_id in existing_ids:
                 raise ValueError(f"分类 ID 已存在: {cat_id}")
             entry: dict[str, Any] = {"id": cat_id, "label": label, "color": color}
-            self._custom_categories.append(entry)
-            self._persist_categories()
+            updated = [*self._custom_categories, entry]
+            self._persist_categories(updated)
+            self._custom_categories = updated
         logger.info(f"Added custom category: {cat_id} ({label})")
         return {**entry, "builtin": False, "agent_count": 0}
 
@@ -895,9 +937,10 @@ class ProfileStore:
                     f"分类 '{cat_id}' 下还有 {agent_count} 个 Agent，请先移除或更换分类"
                 )
             before = len(self._custom_categories)
-            self._custom_categories = [c for c in self._custom_categories if c["id"] != cat_id]
-            if len(self._custom_categories) == before:
+            updated = [c for c in self._custom_categories if c["id"] != cat_id]
+            if len(updated) == before:
                 return False
-            self._persist_categories()
+            self._persist_categories(updated)
+            self._custom_categories = updated
         logger.info(f"Removed custom category: {cat_id}")
         return True
