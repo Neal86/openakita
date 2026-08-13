@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import uuid
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
@@ -67,6 +69,56 @@ def _get_stores():
 
     skills_dir = Path(settings.skills_path)
     return profile_store, skills_dir, root
+
+
+def _agent_packages_dir() -> Path:
+    from openakita.config import settings
+
+    directory = Path(settings.data_dir) / "agent_packages"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _safe_export_path(requested: str, *, default_name: str) -> Path:
+    base = _agent_packages_dir().resolve()
+    relative = Path(requested or default_name)
+    if (
+        relative.is_absolute()
+        or relative.drive
+        or relative.root
+        or ".." in relative.parts
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="output_path must stay inside the OpenAkita agent_packages directory",
+        )
+    target = (base / relative).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="output_path escapes the OpenAkita agent_packages directory",
+        ) from exc
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+async def _read_upload_limited(file: UploadFile, *, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Uploaded Agent package exceeds {limit} bytes",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _read_profile_identity_files(profile_store, profile_id: str) -> dict[str, str]:
@@ -208,8 +260,8 @@ async def export_agent(req: ExportRequest):
     """Export an agent profile as a .akita-agent package."""
     from openakita.agents.packager import AgentPackager, PackageError
 
-    profile_store, skills_dir, root = _get_stores()
-    output_dir = root / "data" / "agent_packages"
+    profile_store, skills_dir, _ = _get_stores()
+    output_dir = _agent_packages_dir()
 
     packager = AgentPackager(
         profile_store=profile_store,
@@ -247,9 +299,8 @@ async def batch_export_agents(req: BatchExportRequest):
     if len(req.profile_ids) > 20:
         raise HTTPException(status_code=400, detail="最多同时导出 20 个 Agent")
 
-    profile_store, skills_dir, root = _get_stores()
-    output_dir = root / "data" / "agent_packages"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    profile_store, skills_dir, _ = _get_stores()
+    output_dir = _agent_packages_dir()
 
     packager = AgentPackager(
         profile_store=profile_store,
@@ -280,10 +331,20 @@ async def batch_export_agents(req: BatchExportRequest):
             filename=exported[0].name,
         )
 
-    zip_path = output_dir / "batch_export.zip"
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+    from openakita.utils.atomic_io import safe_write_bytes
+
+    zip_path = output_dir / f"batch_export_{uuid.uuid4().hex}.zip"
+    payload = BytesIO()
+    with zipfile.ZipFile(payload, "w", zipfile.ZIP_DEFLATED) as zf:
         for p in exported:
             zf.write(p, p.name)
+    safe_write_bytes(
+        zip_path,
+        payload.getvalue(),
+        backup=False,
+        fsync=True,
+        allow_fallback=False,
+    )
 
     return FileResponse(
         path=str(zip_path),
@@ -318,9 +379,16 @@ async def export_agent_json(req: ExportJsonRequest):
     }
 
     if req.output_path:
-        out = Path(req.output_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(_json.dumps(export_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        from openakita.utils.atomic_io import atomic_json_write
+
+        out = _safe_export_path(req.output_path, default_name=f"{profile.id}.json")
+        atomic_json_write(
+            out,
+            export_data,
+            backup=True,
+            fsync=True,
+            allow_fallback=False,
+        )
         return {"ok": True, "path": str(out)}
 
     from fastapi.responses import JSONResponse
@@ -365,9 +433,19 @@ async def batch_export_agents_json(req: BatchExportJsonRequest):
     }
 
     if req.output_path:
-        out = Path(req.output_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(_json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        from openakita.utils.atomic_io import atomic_json_write
+
+        out = _safe_export_path(
+            req.output_path,
+            default_name=f"agents_batch_{uuid.uuid4().hex}.json",
+        )
+        atomic_json_write(
+            out,
+            result,
+            backup=True,
+            fsync=True,
+            allow_fallback=False,
+        )
         return {"ok": True, "path": str(out)}
 
     from fastapi.responses import JSONResponse
@@ -384,10 +462,11 @@ async def import_agent(
     """Import an agent from .akita-agent (ZIP) or .json file."""
     import json as _json
 
+    from openakita.agents.manifest import MAX_PACKAGE_SIZE
     from openakita.agents.profile import AgentProfile
 
     profile_store, skills_dir, _ = _get_stores()
-    content = await file.read()
+    content = await _read_upload_limited(file, limit=MAX_PACKAGE_SIZE)
     filename = file.filename or ""
 
     if filename.endswith(".json"):
@@ -490,10 +569,12 @@ async def inspect_package(file: UploadFile = File(...)):
     """Preview the contents of an uploaded .akita-agent package."""
     from openakita.agents.packager import AgentInstaller, PackageError
 
+    from openakita.agents.manifest import MAX_PACKAGE_SIZE
+
     profile_store, skills_dir, _ = _get_stores()
 
     with tempfile.NamedTemporaryFile(suffix=".akita-agent", delete=False) as tmp:
-        content = await file.read()
+        content = await _read_upload_limited(file, limit=MAX_PACKAGE_SIZE)
         tmp.write(content)
         tmp_path = Path(tmp.name)
 
