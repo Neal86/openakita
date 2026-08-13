@@ -310,6 +310,16 @@ async def run() -> None:
                                         != message_payload["wechat_account_id"]
                                     ):
                                         continue
+                                    allowed_chats = {
+                                        str(value)
+                                        for value in (
+                                            list(cfg.get("allowed_groups") or [])
+                                            + list(cfg.get("allowed_contacts") or [])
+                                        )
+                                        if str(value)
+                                    }
+                                    if str(message_payload.get("chat_id") or "") not in allowed_chats:
+                                        continue
                                     await socket.send(
                                         json.dumps(
                                             {
@@ -403,6 +413,19 @@ async def run() -> None:
                                 )
                             elif event == "wechat.message.send":
                                 request_id = str(envelope.get("request_id") or "")
+                                if bot_id not in bot_configs:
+                                    await socket.send(
+                                        json.dumps(
+                                            {
+                                                "event": "wechat.message.failed",
+                                                "request_id": request_id,
+                                                "bot_id": bot_id,
+                                                "payload": {"detail": "Bot configuration is no longer active"},
+                                            },
+                                            ensure_ascii=False,
+                                        )
+                                    )
+                                    continue
                                 await socket.send(
                                     json.dumps(
                                         {
