@@ -12,6 +12,7 @@ on:
       - scripts/patch_skill_backup_cleanup.py
       - scripts/patch_hub_json_transaction.py
       - scripts/patch_native_hermes_runtime.py
+      - scripts/patch_skill_store_followup.py
       - .github/workflows/patch-app-runtime.yml
   workflow_dispatch:
 
@@ -38,6 +39,7 @@ jobs:
           python scripts/patch_skill_backup_cleanup.py
           python scripts/patch_hub_json_transaction.py
           python scripts/patch_native_hermes_runtime.py
+          python scripts/patch_skill_store_followup.py
       - name: Verify product syntax and diff
         run: |
           python -m compileall -q src/openakita/api/routes/hub.py src/openakita/hub/skill_store_client.py src/openakita/agents/packager.py src/openakita/hermes/native_runtime.py deploy/hermes/shared_gateway.py
