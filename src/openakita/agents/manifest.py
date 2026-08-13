@@ -18,7 +18,7 @@ SUPPORTED_SPEC_VERSIONS = {"1.0", "1.1"}
 
 _ID_PATTERN = re.compile(r"^[a-z0-9]([a-z0-9-]{1,62}[a-z0-9])?$")
 _NO_DOUBLE_HYPHEN = re.compile(r"--")
-_SEMVER_PATTERN = re.compile(r"^\d+\.\d+\.\d+")
+_SEMVER_PATTERN = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
 _SKILL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _REPO_PART_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 
@@ -279,15 +279,38 @@ class AgentManifest:
 
 
 def validate_file_safety(filepath: str) -> list[str]:
-    """校验文件路径安全性"""
-    errors = []
+    """Validate archive member names using cross-platform filesystem rules."""
+    errors: list[str] = []
+    if not isinstance(filepath, str) or not filepath:
+        return [f"Invalid empty file path: {filepath!r}"]
+    if "\x00" in filepath:
+        errors.append(f"NUL byte not allowed in path: {filepath!r}")
+
     normalized = filepath.replace("\\", "/")
+    parts = normalized.split("/")
+    meaningful_parts = parts[:-1] if parts and parts[-1] == "" else parts
 
-    if ".." in normalized.split("/"):
-        errors.append(f"Path traversal detected: {filepath}")
-
-    if normalized.startswith("/"):
+    if normalized.startswith("/") or normalized.startswith("//"):
         errors.append(f"Absolute path not allowed: {filepath}")
+    if re.match(r"^[A-Za-z]:", normalized):
+        errors.append(f"Windows drive path not allowed: {filepath}")
+
+    windows_reserved = {
+        "CON", "PRN", "AUX", "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }
+    for part in meaningful_parts:
+        if part in {"", ".", ".."}:
+            errors.append(f"Unsafe path segment {part!r}: {filepath}")
+            continue
+        if ":" in part:
+            errors.append(f"Colon/ADS path segment not allowed: {filepath}")
+        if part.endswith((" ", ".")):
+            errors.append(f"Windows-normalized path segment not allowed: {filepath}")
+        stem = part.split(".", 1)[0].rstrip(" .").upper()
+        if stem in windows_reserved:
+            errors.append(f"Windows reserved filename not allowed: {filepath}")
 
     ext = "." + normalized.rsplit(".", 1)[-1].lower() if "." in normalized else ""
     if ext in FORBIDDEN_EXTENSIONS:

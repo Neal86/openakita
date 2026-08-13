@@ -28,9 +28,11 @@ from .manifest import (
     validate_external_skill_source,
     validate_external_skill_source,
     validate_external_skill_source,
+    validate_external_skill_source,
     validate_file_safety,
 )
 from .profile import AgentProfile, ProfileStore
+from openakita.utils.atomic_io import atomic_json_write, safe_write, safe_write_bytes
 from openakita.utils.atomic_io import atomic_json_write, safe_write, safe_write_bytes
 from openakita.utils.atomic_io import atomic_json_write, safe_write, safe_write_bytes
 from openakita.utils.atomic_io import atomic_json_write, safe_write, safe_write_bytes
@@ -486,9 +488,12 @@ class AgentInstaller:
             if errors:
                 raise PackageError(f"Security violation: {'; '.join(errors)}")
             normalized_name = info.filename.replace("\\", "/")
-            if normalized_name in seen_names:
+            collision_key = "/".join(
+                part.rstrip(" .").casefold() for part in normalized_name.split("/")
+            )
+            if collision_key in seen_names:
                 raise PackageError(f"Duplicate ZIP member not allowed: {info.filename}")
-            seen_names.add(normalized_name)
+            seen_names.add(collision_key)
             if info.file_size > MAX_SINGLE_FILE_SIZE:
                 raise PackageError(f"File too large: {info.filename} ({info.file_size} bytes)")
             total_uncompressed += info.file_size
