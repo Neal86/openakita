@@ -45,7 +45,14 @@ from ..agents.manifest import (
     validate_external_skill_source,
     validate_file_safety,
 )
+from ..agents.manifest import (
+    MAX_PACKAGE_SIZE,
+    MAX_SINGLE_FILE_SIZE,
+    validate_external_skill_source,
+    validate_file_safety,
+)
 from ..config import settings
+from ..utils.atomic_io import atomic_json_write, safe_write
 from ..utils.atomic_io import atomic_json_write, safe_write
 from ..utils.atomic_io import atomic_json_write, safe_write
 from ..utils.atomic_io import atomic_json_write, safe_write
@@ -503,7 +510,14 @@ class SkillStoreClient:
             raise
         else:
             if backup_dir.exists():
-                shutil.rmtree(backup_dir)
+                try:
+                    shutil.rmtree(backup_dir)
+                except OSError as exc:
+                    logger.warning(
+                        "Skill replacement succeeded but backup cleanup failed (%s): %s",
+                        backup_dir,
+                        exc,
+                    )
 
     @staticmethod
     def _copy_skill_tree(source: Path, target: Path) -> None:

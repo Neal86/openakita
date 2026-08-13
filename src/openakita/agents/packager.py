@@ -546,6 +546,89 @@ class AgentInstaller:
                     allow_fallback=False,
                 )
 
+    def _snapshot_identity_files(
+        self, zf: zipfile.ZipFile, profile_id: str
+    ) -> dict[str, bytes | None]:
+        members = {
+            Path(name).name
+            for name in zf.namelist()
+            if name.startswith("identity/")
+            and not name.endswith("/")
+            and Path(name).name in PROFILE_IDENTITY_FILENAMES
+        }
+        if not members:
+            return {}
+        identity_dir = self.profile_store.get_profile_dir(profile_id) / "identity"
+        snapshot: dict[str, bytes | None] = {}
+        for filename in members:
+            target = identity_dir / filename
+            snapshot[filename] = target.read_bytes() if target.is_file() else None
+        return snapshot
+
+    def _snapshot_skill_targets(
+        self, manifest: AgentManifest, transaction_dir: Path
+    ) -> dict[Path, Path | None]:
+        import shutil
+
+        targets: list[Path] = [
+            self.skills_dir / "custom" / skill_name
+            for skill_name in manifest.bundled_skills
+        ]
+        targets.extend(
+            self.skills_dir / "community" / ref.id
+            for ref in manifest.required_external_skills
+        )
+        snapshot: dict[Path, Path | None] = {}
+        for index, target in enumerate(dict.fromkeys(targets)):
+            if target.exists() and not target.is_dir():
+                raise PackageError(f"Skill target is not a directory: {target}")
+            if not target.exists():
+                snapshot[target] = None
+                continue
+            backup = transaction_dir / f"skill-{index}"
+            shutil.copytree(target, backup, symlinks=True)
+            snapshot[target] = backup
+        return snapshot
+
+    @staticmethod
+    def _restore_skill_targets(snapshot: dict[Path, Path | None]) -> None:
+        import shutil
+
+        for target, backup in reversed(list(snapshot.items())):
+            if target.exists():
+                if target.is_dir():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+            if backup is not None and backup.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                backup.replace(target)
+
+    def _restore_profile_after_failed_install(
+        self,
+        profile_id: str,
+        previous_profile: AgentProfile | None,
+        identity_snapshot: dict[str, bytes | None],
+    ) -> None:
+        if previous_profile is None:
+            self.profile_store.delete(profile_id)
+            return
+
+        self.profile_store.save(previous_profile)
+        identity_dir = self.profile_store.ensure_profile_dir(profile_id) / "identity"
+        for filename, previous in identity_snapshot.items():
+            target = identity_dir / filename
+            if previous is None:
+                target.unlink(missing_ok=True)
+            else:
+                safe_write_bytes(
+                    target,
+                    previous,
+                    backup=False,
+                    fsync=True,
+                    allow_fallback=False,
+                )
+
     def _install_identity_files(self, zf: zipfile.ZipFile, profile_id: str) -> None:
         identity_members = [
             name
@@ -875,7 +958,14 @@ class AgentInstaller:
             raise
         else:
             if backup_dir.exists():
-                shutil.rmtree(backup_dir)
+                try:
+                    shutil.rmtree(backup_dir)
+                except OSError as exc:
+                    logger.warning(
+                        "Skill replacement succeeded but backup cleanup failed (%s): %s",
+                        backup_dir,
+                        exc,
+                    )
 
     def _install_from_source(self, skill_id: str, source: str) -> Path:
         """Fetch a skill from an approved GitHub source and return the install dir."""
