@@ -1,4 +1,4 @@
-name: OpenAkita Portable Windows Release
+name: OpenAkita Windows Release
 
 on:
   workflow_dispatch:
@@ -31,7 +31,7 @@ env:
   HERMES_AGENT_VERSION: "0.19.0"
 
 jobs:
-  windows-portable:
+  windows-release:
     runs-on: windows-latest
     timeout-minutes: 180
     steps:
@@ -136,7 +136,7 @@ jobs:
           cargo fetch --locked
           cargo check
 
-      - name: Build portable OpenAkita desktop executable
+      - name: Build OpenAkita Windows NSIS installer
         working-directory: apps/setup-center
         shell: bash
         env:
@@ -144,7 +144,21 @@ jobs:
           NO_STRIP: true
         run: |
           set -euo pipefail
-          npx tauri build --no-bundle --no-sign
+          npx tauri build --bundles nsis --no-sign
+
+      - name: Collect Windows installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "release-artifacts" | Out-Null
+          $bundleDir = "apps/setup-center/src-tauri/target/release/bundle/nsis"
+          $installer = Get-ChildItem -Path $bundleDir -Filter "*.exe" -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $installer) { throw "NSIS installer not found under $bundleDir" }
+          $stable = "release-artifacts/OpenAkitaDesktop-1.27.26-Windows-x64-Setup.exe"
+          Copy-Item $installer.FullName $stable -Force
+          if (!(Test-Path $stable)) { throw "Stable installer copy was not created" }
+          Write-Host "Installer source: $($installer.FullName)"
+          Write-Host "Installer output: $stable"
+          Get-FileHash $stable -Algorithm SHA256 | Format-List
 
       - name: Build unzip-and-run portable package
         shell: pwsh
@@ -196,23 +210,26 @@ jobs:
           if ($proc.HasExited) { throw "Portable OpenAkita exited during startup: $($proc.ExitCode)" }
           Stop-Process -Id $proc.Id -Force
 
-      - name: Upload portable Windows artifact
+      - name: Upload Windows release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: OpenAkita-Portable-Windows-x64
-          path: release-artifacts/OpenAkita-Portable-Windows-x64.zip
+          name: OpenAkita-Windows-x64
+          path: |
+            release-artifacts/OpenAkitaDesktop-1.27.26-Windows-x64-Setup.exe
+            release-artifacts/OpenAkita-Portable-Windows-x64.zip
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish portable package to GitHub Release
+      - name: Publish Windows packages to GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "openakita-windows-latest"
-          $file = "release-artifacts/OpenAkita-Portable-Windows-x64.zip"
+          $installer = "release-artifacts/OpenAkitaDesktop-1.27.26-Windows-x64-Setup.exe"
+          $portable = "release-artifacts/OpenAkita-Portable-Windows-x64.zip"
           gh release view $tag --repo "${{ github.repository }}" *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "OpenAkita Portable Windows x64" --notes "OpenAkita Windows portable build with embedded Hermes and Windows Connector runtime."
+            gh release create $tag --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "OpenAkita Windows x64" --notes "OpenAkita Windows build with NSIS currentUser installer, embedded Hermes runtime, Windows Connector and portable package."
           }
-          gh release upload $tag $file --repo "${{ github.repository }}" --clobber
+          gh release upload $tag $installer $portable --repo "${{ github.repository }}" --clobber
