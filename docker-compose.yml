@@ -20,12 +20,11 @@ services:
       agents:
         aliases:
           - openakita
-    depends_on:
-      hermes-shared:
-        condition: service_healthy
 
   # Default shared Hermes instance. Multiple Agents share this container while
   # keeping memory, sessions, identity, skills, and workspaces isolated.
+  # It intentionally does not gate the OpenAkita service: Hermes can recover
+  # independently without making the main web/API service unavailable.
   hermes-shared:
     build:
       context: ./deploy/hermes
@@ -68,6 +67,5 @@ networks:
 volumes:
   hermes_shared_data:
     name: openakita_hermes_shared_data
-    external: true
   hermes_auth_data:
     name: openakita_hermes_auth_data
