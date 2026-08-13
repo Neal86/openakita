@@ -1,18 +1,11 @@
-name: One-shot APP runtime patch
+name: One-shot final code repair
 
 on:
   push:
     branches:
       - feature/hermes-multi-agent
     paths:
-      - scripts/patch_hub_runtime_cleanup.py
-      - scripts/patch_skill_store_runtime.py
-      - scripts/patch_hermes_shared_runtime.py
-      - scripts/patch_agent_installer_transaction.py
-      - scripts/patch_skill_backup_cleanup.py
-      - scripts/patch_hub_json_transaction.py
-      - scripts/patch_native_hermes_runtime.py
-      - scripts/patch_skill_store_followup.py
+      - scripts/finalize_runtime_code.py
       - .github/workflows/patch-app-runtime.yml
   workflow_dispatch:
 
@@ -30,28 +23,22 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-      - name: Apply product patches
-        run: |
-          python scripts/patch_hub_runtime_cleanup.py
-          python scripts/patch_skill_store_runtime.py
-          python scripts/patch_hermes_shared_runtime.py
-          python scripts/patch_agent_installer_transaction.py
-          python scripts/patch_skill_backup_cleanup.py
-          python scripts/patch_hub_json_transaction.py
-          python scripts/patch_native_hermes_runtime.py
-          python scripts/patch_skill_store_followup.py
-      - name: Verify product syntax and diff
-        run: |
-          python -m compileall -q src/openakita/api/routes/hub.py src/openakita/hub/skill_store_client.py src/openakita/agents/packager.py src/openakita/hermes/native_runtime.py deploy/hermes/shared_gateway.py
-          git diff --check
-      - name: Commit product patches
+      - name: Apply final code repairs
+        run: python scripts/finalize_runtime_code.py
+      - name: Commit product repairs
         run: |
           git config user.name "openakita-maintenance-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add src/openakita/api/routes/hub.py src/openakita/hub/skill_store_client.py src/openakita/agents/packager.py src/openakita/hermes/native_runtime.py deploy/hermes/shared_gateway.py
+          git add \
+            src/openakita/api/routes/hub.py \
+            src/openakita/hub/skill_store_client.py \
+            src/openakita/agents/packager.py \
+            src/openakita/hermes/native_runtime.py \
+            deploy/hermes/shared_gateway.py \
+            src/openakita/api/routes/windows_connector.py
           if git diff --cached --quiet; then
             exit 0
           fi
-          git commit -m "fix: harden APP runtime installation and cancellation"
+          git commit -m "fix: finalize runtime safety and transaction repairs"
           git pull --rebase origin feature/hermes-multi-agent
           git push origin HEAD:feature/hermes-multi-agent
