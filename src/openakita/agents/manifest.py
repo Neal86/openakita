@@ -18,6 +18,7 @@ SUPPORTED_SPEC_VERSIONS = {"1.0", "1.1"}
 _ID_PATTERN = re.compile(r"^[a-z0-9]([a-z0-9-]{1,62}[a-z0-9])?$")
 _NO_DOUBLE_HYPHEN = re.compile(r"--")
 _SEMVER_PATTERN = re.compile(r"^\d+\.\d+\.\d+")
+_SKILL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 MAX_PACKAGE_SIZE = 50 * 1024 * 1024  # 50MB
 MAX_SINGLE_FILE_SIZE = 10 * 1024 * 1024  # 10MB
@@ -141,6 +142,29 @@ class AgentManifest:
 
         if self.min_platform_version and not _SEMVER_PATTERN.match(self.min_platform_version):
             errors.append(f"Invalid min_platform_version: {self.min_platform_version!r}")
+
+        for field_name, skill_ids in (
+            ("bundled_skills", self.bundled_skills),
+            ("required_builtin_skills", self.required_builtin_skills),
+        ):
+            if not isinstance(skill_ids, list):
+                errors.append(f"{field_name} must be a list")
+                continue
+            for skill_id in skill_ids:
+                if not isinstance(skill_id, str) or not _SKILL_ID_PATTERN.fullmatch(skill_id):
+                    errors.append(f"Invalid {field_name} id: {skill_id!r}")
+
+        if not isinstance(self.required_external_skills, list):
+            errors.append("required_external_skills must be a list")
+        else:
+            for ref in self.required_external_skills:
+                if not isinstance(ref, ExternalSkillRef):
+                    errors.append(f"Invalid external skill reference: {ref!r}")
+                    continue
+                if not _SKILL_ID_PATTERN.fullmatch(ref.id or ""):
+                    errors.append(f"Invalid required_external_skills id: {ref.id!r}")
+                if not isinstance(ref.source, str) or not ref.source.strip():
+                    errors.append(f"External skill source is required for {ref.id!r}")
 
         return errors
 
