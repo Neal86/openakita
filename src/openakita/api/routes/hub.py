@@ -346,10 +346,13 @@ async def batch_export_agents(req: BatchExportRequest):
         allow_fallback=False,
     )
 
+    from starlette.background import BackgroundTask
+
     return FileResponse(
         path=str(zip_path),
         media_type="application/zip",
         filename=f"agents_batch_{len(exported)}.zip",
+        background=BackgroundTask(zip_path.unlink, missing_ok=True),
     )
 
 
@@ -476,11 +479,13 @@ async def import_agent(
             raise HTTPException(400, f"无效的 JSON 文件: {e}")
 
         if data.get("format") == "akita-agent-batch":
-            raw_agents = data.get("agents", [])
-        elif isinstance(data.get("profile"), dict):
+            raw_agents = data.get("agents")
+            if not isinstance(raw_agents, list) or not raw_agents:
+                raise HTTPException(400, "无效的批量 Agent JSON：agents 必须是非空列表")
+        elif data.get("format") == "akita-agent" or "profile" in data:
+            if not isinstance(data.get("profile"), dict) or not data.get("profile"):
+                raise HTTPException(400, "无效的 Agent JSON：缺少有效的 profile")
             raw_agents = [data]
-        elif data.get("format") == "akita-agent":
-            raw_agents = [{}]
         else:
             raise HTTPException(400, "无法识别的 JSON 格式，缺少 profile 或 agents 字段")
 
@@ -520,6 +525,9 @@ async def import_agent(
             _write_profile_identity_files(profile_store, profile.id, identity_files)
             _invalidate_imported_profile_runtime(request, profile.id)
             imported.append(profile.to_dict())
+
+        if not imported:
+            raise HTTPException(400, "文件中没有可导入的有效 Agent")
 
         _reload_skills(request)
         imported_ids = [str(p.get("id", "")) for p in imported if p.get("id")]
