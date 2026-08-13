@@ -6,6 +6,7 @@ on:
       - feature/hermes-multi-agent
     paths:
       - scripts/patch_agent_package_runtime_safety.py
+      - scripts/patch_profile_categories_safety.py
       - .github/workflows/patch-connector-generation.yml
   workflow_dispatch:
 
@@ -26,17 +27,19 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-      - name: Apply Agent package safety patch
-        run: python scripts/patch_agent_package_runtime_safety.py
-      - name: Commit Agent package safety hardening
+      - name: Apply static-review safety patches
+        run: |
+          python scripts/patch_agent_package_runtime_safety.py
+          python scripts/patch_profile_categories_safety.py
+      - name: Commit static-review safety hardening
         run: |
           git config user.name "openakita-maintenance-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add src/openakita/agents/packager.py
+          git add src/openakita/agents/packager.py src/openakita/agents/profile.py
           if git diff --cached --quiet; then
-            echo "Agent package safety hardening already applied."
+            echo "Static-review safety hardening already applied."
             exit 0
           fi
-          git commit -m "fix: harden Agent package installation"
+          git commit -m "fix: harden Agent package and Profile persistence"
           git pull --rebase origin feature/hermes-multi-agent
           git push origin HEAD:feature/hermes-multi-agent
