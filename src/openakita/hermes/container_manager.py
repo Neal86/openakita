@@ -11,6 +11,7 @@ from dataclasses import replace
 from typing import Any
 
 from .execution import HermesInstance, InstanceLifecycle
+from .internal_auth import internal_gateway_secret
 
 
 class ContainerManagerError(RuntimeError):
@@ -121,7 +122,7 @@ class HermesContainerManager:
         env = [
             "-e", "API_SERVER_HOST=0.0.0.0",
             "-e", "API_SERVER_PORT=8642",
-            "-e", "OPENAI_API_KEY=openakita-internal",
+            "-e", f"OPENAI_API_KEY={internal_gateway_secret()}",
             "-e", "OPENAI_BASE_URL=http://openakita:18900/v1",
             "-e", f"OPENAI_MODEL=agent:{profile_id}",
             "-e", f"OPENAKITA_AGENT_PROFILE_ID={profile_id}",

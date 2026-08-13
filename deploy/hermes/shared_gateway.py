@@ -33,6 +33,24 @@ HOST = os.environ.get("API_SERVER_HOST", "0.0.0.0")
 PORT = int(os.environ.get("API_SERVER_PORT", "8642"))
 CHILD_START_TIMEOUT = int(os.environ.get("HERMES_CHILD_START_TIMEOUT", "120"))
 MAX_CHILDREN = int(os.environ.get("HERMES_SHARED_MAX_AGENTS", "32"))
+AUTH_FILE = os.environ.get("OPENAKITA_HERMES_AUTH_FILE", "").strip()
+
+
+def openakita_gateway_key() -> str:
+    configured = os.environ.get("OPENAKITA_HERMES_LLM_API_KEY", "").strip()
+    if configured:
+        return configured
+    if AUTH_FILE:
+        try:
+            value = Path(AUTH_FILE).read_text("utf-8").strip()
+        except OSError:
+            value = ""
+        if value:
+            return value
+    raise HTTPException(
+        status_code=503,
+        detail="OpenAkita internal gateway token is not available yet",
+    )
 
 
 def safe_id(value: str) -> str:
@@ -144,7 +162,7 @@ class ChildManager:
                 "API_SERVER_PORT": str(port),
                 "API_SERVER_MODEL_NAME": f"agent:{profile_id}",
                 "API_SERVER_KEY": env.get("API_SERVER_KEY", "openakita-internal"),
-                "OPENAI_API_KEY": env.get("OPENAI_API_KEY", "openakita-internal"),
+                "OPENAI_API_KEY": openakita_gateway_key(),
                 "OPENAI_BASE_URL": env.get("OPENAI_BASE_URL", "http://openakita:18900/v1"),
                 "OPENAI_MODEL": f"agent:{profile_id}",
                 "OPENAKITA_AGENT_PROFILE_ID": profile_id,
