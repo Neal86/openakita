@@ -1,0 +1,49 @@
+name: One-shot atomic backup fsync mode
+
+on:
+  push:
+    branches:
+      - feature/hermes-multi-agent
+    paths:
+      - .github/workflows/patch-atomic-fsync-mode.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feature/hermes-multi-agent
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Patch product file
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/openakita/utils/atomic_io.py')
+          text = path.read_text('utf-8')
+          old = '            with open(temp, "rb") as handle:\n                os.fsync(handle.fileno())\n'
+          new = '            with open(temp, "rb+") as handle:\n                os.fsync(handle.fileno())\n'
+          if new not in text:
+              if old not in text:
+                  raise SystemExit('fsync marker changed')
+              text = text.replace(old, new, 1)
+          path.write_text(text, 'utf-8')
+          PY
+          git diff --check
+      - name: Commit product fix
+        run: |
+          git config user.name "openakita-maintenance-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/openakita/utils/atomic_io.py
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "fix: fsync atomic backups through writable descriptors"
+          git pull --rebase origin feature/hermes-multi-agent
+          git push origin HEAD:feature/hermes-multi-agent
