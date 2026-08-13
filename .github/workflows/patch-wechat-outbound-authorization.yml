@@ -1,0 +1,49 @@
+name: One-shot outbound WeChat authorization
+
+on:
+  push:
+    branches:
+      - feature/hermes-multi-agent
+    paths:
+      - .github/workflows/patch-wechat-outbound-authorization.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feature/hermes-multi-agent
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Patch product file
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/openakita/channels/adapters/wechat_desktop.py')
+          text = path.read_text('utf-8')
+          old = '''    async def send_message(self, message: OutgoingMessage) -> str:\n        if not self._running:\n            raise ChannelDeliveryUnavailable("微信（桌面版）Bot 未运行", channel=self.channel_name, chat_id=message.chat_id, reason="bot_not_running")\n        text = message.content.text if message.content else ""\n'''
+          new = '''    async def send_message(self, message: OutgoingMessage) -> str:\n        if not self._running:\n            raise ChannelDeliveryUnavailable("微信（桌面版）Bot 未运行", channel=self.channel_name, chat_id=message.chat_id, reason="bot_not_running")\n        chat_id = str(message.chat_id or "")\n        outbound_allowed = chat_id in self.allowed_groups or (\n            self.private_chat_enabled and chat_id in self.allowed_contacts\n        )\n        if not outbound_allowed:\n            raise ChannelDeliveryUnavailable(\n                "目标微信会话未获当前 Bot 授权",\n                channel=self.channel_name,\n                chat_id=chat_id,\n                reason="chat_not_allowed",\n                retryable=False,\n            )\n        text = message.content.text if message.content else ""\n'''
+          if new not in text:
+              if old not in text:
+                  raise SystemExit('send_message marker changed')
+              text = text.replace(old, new, 1)
+          path.write_text(text, 'utf-8')
+          PY
+          git diff --check
+      - name: Commit product fix
+        run: |
+          git config user.name "openakita-maintenance-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/openakita/channels/adapters/wechat_desktop.py
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "fix: enforce outbound WeChat chat allowlist"
+          git pull --rebase origin feature/hermes-multi-agent
+          git push origin HEAD:feature/hermes-multi-agent
