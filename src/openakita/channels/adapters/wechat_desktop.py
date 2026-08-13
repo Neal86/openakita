@@ -238,6 +238,18 @@ class WeChatDesktopAdapter(ChannelAdapter):
     async def send_message(self, message: OutgoingMessage) -> str:
         if not self._running:
             raise ChannelDeliveryUnavailable("微信（桌面版）Bot 未运行", channel=self.channel_name, chat_id=message.chat_id, reason="bot_not_running")
+        chat_id = str(message.chat_id or "")
+        outbound_allowed = chat_id in self.allowed_groups or (
+            self.private_chat_enabled and chat_id in self.allowed_contacts
+        )
+        if not outbound_allowed:
+            raise ChannelDeliveryUnavailable(
+                "目标微信会话未获当前 Bot 授权",
+                channel=self.channel_name,
+                chat_id=chat_id,
+                reason="chat_not_allowed",
+                retryable=False,
+            )
         text = message.content.text if message.content else ""
         if not text:
             raise ValueError("wechat_desktop currently supports text messages only")
