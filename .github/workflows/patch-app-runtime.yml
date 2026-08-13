@@ -11,6 +11,7 @@ on:
       - scripts/patch_agent_installer_transaction.py
       - scripts/patch_skill_backup_cleanup.py
       - scripts/patch_hub_json_transaction.py
+      - scripts/patch_native_hermes_runtime.py
       - .github/workflows/patch-app-runtime.yml
   workflow_dispatch:
 
@@ -36,18 +37,19 @@ jobs:
           python scripts/patch_agent_installer_transaction.py
           python scripts/patch_skill_backup_cleanup.py
           python scripts/patch_hub_json_transaction.py
+          python scripts/patch_native_hermes_runtime.py
       - name: Verify product syntax and diff
         run: |
-          python -m compileall -q src/openakita/api/routes/hub.py src/openakita/hub/skill_store_client.py src/openakita/agents/packager.py deploy/hermes/shared_gateway.py
+          python -m compileall -q src/openakita/api/routes/hub.py src/openakita/hub/skill_store_client.py src/openakita/agents/packager.py src/openakita/hermes/native_runtime.py deploy/hermes/shared_gateway.py
           git diff --check
       - name: Commit product patches
         run: |
           git config user.name "openakita-maintenance-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add src/openakita/api/routes/hub.py src/openakita/hub/skill_store_client.py src/openakita/agents/packager.py deploy/hermes/shared_gateway.py
+          git add src/openakita/api/routes/hub.py src/openakita/hub/skill_store_client.py src/openakita/agents/packager.py src/openakita/hermes/native_runtime.py deploy/hermes/shared_gateway.py
           if git diff --cached --quiet; then
             exit 0
           fi
-          git commit -m "fix: harden APP runtime installation transactions"
+          git commit -m "fix: harden APP runtime installation and cancellation"
           git pull --rebase origin feature/hermes-multi-agent
           git push origin HEAD:feature/hermes-multi-agent
