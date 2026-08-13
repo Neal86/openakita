@@ -1,0 +1,58 @@
+name: One-shot atomic Connector state migration
+
+on:
+  push:
+    branches:
+      - feature/hermes-multi-agent
+    paths:
+      - .github/workflows/patch-state-migration-atomic.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: feature/hermes-multi-agent
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Patch migrations
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/openakita/wechat_desktop/manager.py')
+          text = path.read_text('utf-8')
+          old = '''        self._state_path.parent.mkdir(parents=True, exist_ok=True)\n        with self._file_lock:\n            if self._state_path.exists() or not LEGACY_STATE_PATH.exists():\n                return\n            try:\n                shutil.copy2(LEGACY_STATE_PATH, self._state_path)\n            except OSError:\n                pass\n'''
+          new = '''        self._state_path.parent.mkdir(parents=True, exist_ok=True)\n        with self._file_lock:\n            if self._state_path.exists() or not LEGACY_STATE_PATH.exists():\n                return\n            temp = self._state_path.with_name(\n                f".{self._state_path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"\n            )\n            try:\n                shutil.copy2(LEGACY_STATE_PATH, temp)\n                os.replace(temp, self._state_path)\n            except OSError:\n                pass\n            finally:\n                try:\n                    temp.unlink(missing_ok=True)\n                except OSError:\n                    pass\n'''
+          if new not in text:
+              if old not in text:
+                  raise SystemExit('wechat migration marker changed')
+              path.write_text(text.replace(old, new, 1), 'utf-8')
+
+          path = Path('src/openakita/windows_connector/manager.py')
+          text = path.read_text('utf-8')
+          old = '''        try:\n            self.path.parent.mkdir(parents=True, exist_ok=True)\n            self.path.write_bytes(LEGACY_STATE_PATH.read_bytes())\n        except OSError:\n            pass\n'''
+          new = '''        try:\n            self.path.parent.mkdir(parents=True, exist_ok=True)\n            temp = self.path.with_name(\n                f".{self.path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"\n            )\n            try:\n                shutil.copy2(LEGACY_STATE_PATH, temp)\n                os.replace(temp, self.path)\n            finally:\n                try:\n                    temp.unlink(missing_ok=True)\n                except OSError:\n                    pass\n        except OSError:\n            pass\n'''
+          if new not in text:
+              if old not in text:
+                  raise SystemExit('windows migration marker changed')
+              path.write_text(text.replace(old, new, 1), 'utf-8')
+          PY
+          git diff --check
+      - name: Commit product fix
+        run: |
+          git config user.name "openakita-maintenance-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/openakita/wechat_desktop/manager.py src/openakita/windows_connector/manager.py
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "fix: make Connector state migration atomic"
+          git pull --rebase origin feature/hermes-multi-agent
+          git push origin HEAD:feature/hermes-multi-agent
