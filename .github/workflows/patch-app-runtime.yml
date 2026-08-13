@@ -7,6 +7,7 @@ on:
     paths:
       - scripts/patch_hub_runtime_cleanup.py
       - scripts/patch_skill_store_runtime.py
+      - scripts/patch_hermes_shared_runtime.py
       - .github/workflows/patch-app-runtime.yml
   workflow_dispatch:
 
@@ -28,18 +29,19 @@ jobs:
         run: |
           python scripts/patch_hub_runtime_cleanup.py
           python scripts/patch_skill_store_runtime.py
+          python scripts/patch_hermes_shared_runtime.py
       - name: Verify product syntax and diff
         run: |
-          python -m compileall -q src/openakita/api/routes/hub.py src/openakita/hub/skill_store_client.py
+          python -m compileall -q src/openakita/api/routes/hub.py src/openakita/hub/skill_store_client.py deploy/hermes/shared_gateway.py
           git diff --check
       - name: Commit product patches
         run: |
           git config user.name "openakita-maintenance-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add src/openakita/api/routes/hub.py src/openakita/hub/skill_store_client.py
+          git add src/openakita/api/routes/hub.py src/openakita/hub/skill_store_client.py deploy/hermes/shared_gateway.py
           if git diff --cached --quiet; then
             exit 0
           fi
-          git commit -m "fix: harden Hub runtime installation and cleanup"
+          git commit -m "fix: harden Hub and Hermes runtime lifecycle"
           git pull --rebase origin feature/hermes-multi-agent
           git push origin HEAD:feature/hermes-multi-agent
