@@ -65,13 +65,7 @@ def safe_write(
     fsync: bool = False,
     allow_fallback: bool = True,
 ) -> None:
-    """Atomic text write with optional .bak backup and Windows retry.
-
-    Flow: backup existing → write to a unique temp file → (fsync) → rename to
-    target. On Windows, PermissionError on rename is retried up to *retries*
-    times before falling back to a direct (non-atomic) write, unless
-    ``allow_fallback`` is disabled.
-    """
+    """Atomic text write with optional .bak backup and Windows retry."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -125,6 +119,69 @@ def safe_write(
             tmp.unlink(missing_ok=True)
 
 
+def safe_write_bytes(
+    path: Path,
+    content: bytes,
+    *,
+    backup: bool = True,
+    retries: int = 3,
+    fsync: bool = False,
+    allow_fallback: bool = True,
+) -> None:
+    """Atomic binary write with the same durability semantics as :func:`safe_write`."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with _lock_for_path(path):
+        tmp = _unique_temp_path(path)
+        if backup and path.exists():
+            bak = path.with_suffix(path.suffix + ".bak")
+            try:
+                shutil.copy2(path, bak)
+                if fsync:
+                    _fsync_parent_dir(path)
+            except OSError as e:
+                logger.warning("Failed to create backup %s: %s", bak, e)
+
+        try:
+            with open(tmp, "wb") as f:
+                f.write(content)
+                if fsync:
+                    f.flush()
+                    os.fsync(f.fileno())
+
+            last_err: Exception | None = None
+            for attempt in range(retries):
+                try:
+                    tmp.replace(path)
+                    if fsync:
+                        _fsync_parent_dir(path)
+                    return
+                except PermissionError as e:
+                    last_err = e
+                    if attempt < retries - 1:
+                        time.sleep(0.2 * (attempt + 1))
+
+            if not allow_fallback:
+                raise PermissionError(
+                    f"Atomic replace failed after {retries} attempts for {path}"
+                ) from last_err
+
+            logger.warning(
+                "Atomic binary rename failed after %d retries (%s), falling back to direct write",
+                retries,
+                last_err,
+            )
+            path.write_bytes(content)
+            if fsync:
+                with open(path, "rb+") as f:
+                    f.flush()
+                    os.fsync(f.fileno())
+                _fsync_parent_dir(path)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+
 def atomic_json_write(
     path: Path,
     data: Any,
@@ -150,15 +207,12 @@ def append_jsonl(path: Path, obj: dict, *, fsync: bool = False) -> None:
             os.fsync(f.fileno())
 
 
-def read_json_safe(path: Path) -> dict | None:
+def read_json_safe(path: Path) -> Any | None:
     """Read JSON from *path*, falling back to .bak if primary is missing or corrupt.
 
     When the backup is used successfully, it is restored to the primary path
     WITHOUT overwriting the existing .bak (avoids the trap of backing up a
     corrupt file over a good backup).
-
-    Returns:
-        Parsed dict, or None if neither file is readable.
     """
     path = Path(path)
     bak = path.with_suffix(path.suffix + ".bak")
