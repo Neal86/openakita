@@ -1,3 +1,4 @@
+# Rebuild latest Windows Connector package
 name: Windows Connector Release
 
 on:
