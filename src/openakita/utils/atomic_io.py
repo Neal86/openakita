@@ -62,7 +62,7 @@ def _replace_backup_atomically(source: Path, backup: Path, *, fsync: bool) -> No
     try:
         shutil.copy2(source, temp)
         if fsync:
-            with open(temp, "rb") as handle:
+            with open(temp, "rb+") as handle:
                 os.fsync(handle.fileno())
         os.replace(temp, backup)
         if fsync:
