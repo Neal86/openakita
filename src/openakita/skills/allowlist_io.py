@@ -3,25 +3,26 @@
 
 目标：
 - 所有 API/工具/后台模块读写 skills.json 必须经过此模块，避免多路径写入导致的竞争或格式漂移。
-- 写入保证原子性（写临时文件 + os.replace），避免崩溃导致半写文件。
-- 进程内并发写入互斥（``_WRITE_LOCK``）。
+- 写入使用项目统一原子 I/O，并保留可恢复备份。
+- 进程内和跨进程读改写都互斥，避免多个 OpenAkita 进程互相覆盖。
 
 返回约定：
 - ``external_allowlist is None`` 表示 ``data/skills.json`` 不存在或未声明 allowlist（业务语义：全部启用）。
-- ``external_allowlist is set()`` 表示用户显式禁用所有外部技能。
+- ``external_allowlist is set()`` 表示用户显式禁用所有外部技能，或已有文件损坏且无法从备份恢复（安全失败关闭）。
 
 该模块本身**不**触发缓存失效或 agent 通知，调用方需在写入后调用 ``Agent.propagate_skill_change``。
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-import tempfile
 import threading
 from datetime import datetime
 from pathlib import Path
+
+from filelock import FileLock
+
+from openakita.utils.atomic_io import atomic_json_write, read_json_safe
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +30,28 @@ _WRITE_LOCK = threading.RLock()
 
 
 def _skills_json_path() -> Path:
-    """解析当前工作区的 data/skills.json 路径。"""
+    """解析 durable data root 下的 ``skills.json`` 路径。"""
     try:
         from ..config import settings
 
-        return Path(settings.project_root) / "data" / "skills.json"
+        return Path(settings.data_dir) / "skills.json"
     except Exception:
         return Path.cwd() / "data" / "skills.json"
+
+
+def _file_lock(path: Path) -> FileLock:
+    return FileLock(str(path) + ".lock")
+
+
+def _read_config(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    cfg = read_json_safe(path)
+    if cfg is None:
+        return None
+    if not isinstance(cfg, dict):
+        raise ValueError(f"Invalid skills.json root in {path}: expected object")
+    return cfg
 
 
 def read_allowlist() -> tuple[Path, set[str] | None]:
@@ -43,49 +59,37 @@ def read_allowlist() -> tuple[Path, set[str] | None]:
 
     Returns:
         (path, allowlist) 元组：
-        - path: 当前工作区的 skills.json 绝对路径
-        - allowlist: 从文件中读到的显式 allowlist；当文件不存在/损坏/未声明时为 ``None``
+        - path: 当前 durable data root 的 skills.json 绝对路径
+        - allowlist: 显式 allowlist；文件不存在/未声明时为 ``None``。
+          如果已有文件损坏且备份也不可恢复，则返回空集合以 fail-closed。
     """
     path = _skills_json_path()
     if not path.exists():
         return path, None
     try:
-        raw = path.read_text(encoding="utf-8")
-        cfg = json.loads(raw) if raw.strip() else {}
-        al = cfg.get("external_allowlist", None)
-        if isinstance(al, list):
-            return path, {str(x).strip() for x in al if str(x).strip()}
-        return path, None
-    except Exception as e:
-        logger.warning("Failed to read %s: %s", path, e)
-        return path, None
+        cfg = _read_config(path)
+    except (OSError, ValueError) as exc:
+        logger.error("Failed to read %s safely: %s", path, exc)
+        return path, set()
+    if cfg is None:
+        logger.error("%s exists but is not recoverable; disabling external skills", path)
+        return path, set()
+    al = cfg.get("external_allowlist", None)
+    if isinstance(al, list):
+        return path, {str(x).strip() for x in al if str(x).strip()}
+    return path, None
 
 
 def _atomic_write_json(path: Path, content: dict) -> None:
-    """原子地把 JSON 写入 path：先写临时文件，再 os.replace 覆盖。"""
+    """通过统一原子 I/O 写入 JSON，并保留上一版备份。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    serialized = json.dumps(content, ensure_ascii=False, indent=2) + "\n"
-
-    tmp_fd, tmp_path_str = tempfile.mkstemp(
-        prefix=".skills.", suffix=".json.tmp", dir=str(path.parent)
+    atomic_json_write(
+        path,
+        content,
+        backup=True,
+        fsync=True,
+        allow_fallback=False,
     )
-    tmp_path = Path(tmp_path_str)
-    try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8", newline="") as fh:
-            fh.write(serialized)
-            fh.flush()
-            try:
-                os.fsync(fh.fileno())
-            except OSError:
-                pass
-        os.replace(tmp_path, path)
-    except Exception:
-        try:
-            if tmp_path.exists():
-                tmp_path.unlink()
-        except Exception:
-            pass
-        raise
 
 
 def _compose_content(allowlist: set[str]) -> dict:
@@ -97,17 +101,10 @@ def _compose_content(allowlist: set[str]) -> dict:
 
 
 def overwrite_allowlist(allowlist: set[str] | None) -> Path:
-    """用完整 allowlist 覆盖 ``data/skills.json``。
-
-    Args:
-        allowlist: 目标 allowlist 集合；传入 ``None`` 视为空集合（禁用所有外部技能）。
-
-    Returns:
-        实际写入的文件路径。
-    """
+    """用完整 allowlist 覆盖 ``data/skills.json``。"""
     path = _skills_json_path()
     final = set(allowlist) if allowlist else set()
-    with _WRITE_LOCK:
+    with _WRITE_LOCK, _file_lock(path):
         _atomic_write_json(path, _compose_content(final))
     logger.info("[skills.json] overwrite allowlist (%d ids) -> %s", len(final), path)
     return path
@@ -116,25 +113,19 @@ def overwrite_allowlist(allowlist: set[str] | None) -> Path:
 def upsert_skill_ids(skill_ids: set[str]) -> Path | None:
     """原子地把给定 skill_ids 合并进现有 allowlist。
 
-    - 当 skills.json 不存在时：**不**创建新文件，返回 ``None``
-      （语义保持“未声明 allowlist = 全部启用”）；此时新装技能已经默认启用，无需写盘。
-    - 当 skills.json 存在但没有 external_allowlist 字段时：与上同义，返回 ``None``。
-    - 当 skills.json 已有 external_allowlist：把 skill_ids 合并后原子写回。
+    没有显式 allowlist 时不创建新文件，保持“全部启用”语义。
+    已存在但不可恢复的文件会直接报错，避免损坏状态被静默改成更宽权限。
     """
     if not skill_ids:
         return None
 
-    with _WRITE_LOCK:
-        path = _skills_json_path()
+    path = _skills_json_path()
+    with _WRITE_LOCK, _file_lock(path):
         if not path.exists():
             return None
-
-        try:
-            raw = path.read_text(encoding="utf-8")
-            cfg = json.loads(raw) if raw.strip() else {}
-        except Exception as e:
-            logger.warning("skills.json unreadable, skip upsert: %s", e)
-            return None
+        cfg = _read_config(path)
+        if cfg is None:
+            raise OSError(f"skills.json is not recoverable: {path}")
 
         current = cfg.get("external_allowlist", None)
         if not isinstance(current, list):
@@ -150,23 +141,17 @@ def upsert_skill_ids(skill_ids: set[str]) -> Path | None:
 
 
 def remove_skill_ids(skill_ids: set[str]) -> Path | None:
-    """从现有 allowlist 中移除给定 skill_ids（卸载场景）。
-
-    skills.json 不存在或没有 allowlist 时返回 ``None`` 表示无操作。
-    """
+    """从现有 allowlist 中移除给定 skill_ids（卸载场景）。"""
     if not skill_ids:
         return None
 
-    with _WRITE_LOCK:
-        path = _skills_json_path()
+    path = _skills_json_path()
+    with _WRITE_LOCK, _file_lock(path):
         if not path.exists():
             return None
-        try:
-            raw = path.read_text(encoding="utf-8")
-            cfg = json.loads(raw) if raw.strip() else {}
-        except Exception as e:
-            logger.warning("skills.json unreadable, skip remove: %s", e)
-            return None
+        cfg = _read_config(path)
+        if cfg is None:
+            raise OSError(f"skills.json is not recoverable: {path}")
 
         current = cfg.get("external_allowlist", None)
         if not isinstance(current, list):
