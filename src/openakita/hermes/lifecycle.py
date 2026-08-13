@@ -207,7 +207,11 @@ class HermesLifecycleService:
         else:
             if instance.mode == HermesInstanceMode.SHARED:
                 raise ContainerManagerError("共享容器实例不能在这里停止")
-            updated = await self.containers.stop(instance) if HermesContainerManager.available() else replace(instance, lifecycle_status=InstanceLifecycle.STOPPED)
+            if not HermesContainerManager.available():
+                raise ContainerManagerError(
+                    "Docker socket unavailable; cannot verify or stop Hermes container"
+                )
+            updated = await self.containers.stop(instance)
         self.instances.upsert(updated)
         self._register_node(updated)
         return updated
