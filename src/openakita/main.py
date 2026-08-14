@@ -2309,12 +2309,30 @@ def serve(
 
             _watch_task = asyncio.create_task(_file_watcher())
 
-        # 保持运行，使用 Event 来优雅关闭
+        # 保持运行，同时监控 shutdown_event 和 HTTP API task。
+        # 如果 uvicorn/API task 在未收到正常 shutdown 的情况下提前结束，
+        # 不能继续让主进程假活；先走 finally 的 graceful cleanup，再把失败向上抛出。
+        _shutdown_wait_task = asyncio.create_task(shutdown_event.wait())
         try:
-            await shutdown_event.wait()
+            _wait_set = {_shutdown_wait_task}
+            if api_task is not None:
+                _wait_set.add(api_task)
+            _done, _pending = await asyncio.wait(
+                _wait_set,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if api_task is not None and api_task in _done and not shutdown_event.is_set():
+                if api_task.cancelled():
+                    raise RuntimeError("HTTP API task exited unexpectedly (cancelled)")
+                _api_exc = api_task.exception()
+                if _api_exc is not None:
+                    raise RuntimeError("HTTP API task exited unexpectedly") from _api_exc
+                raise RuntimeError("HTTP API task exited unexpectedly without an error")
         except asyncio.CancelledError:
             pass
         finally:
+            if not _shutdown_wait_task.done():
+                _shutdown_wait_task.cancel()
             if _watch_task and not _watch_task.done():
                 _watch_task.cancel()
             if not shutdown_triggered:
