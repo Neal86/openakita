@@ -1,5 +1,8 @@
 # ── Stage 1: Build web frontend ──
-FROM node:22-slim AS frontend
+# Pin production build bases to immutable version tags. Coolify builds with
+# `docker compose build --pull`; floating tags such as `node:22-slim` can move
+# between deployments and force fresh metadata resolution at deploy time.
+FROM node:22.23.1-bookworm-slim AS frontend
 
 WORKDIR /app/apps/setup-center
 COPY apps/setup-center/package.json apps/setup-center/package-lock.json ./
@@ -9,7 +12,7 @@ COPY src/openakita/llm/registries/providers.json /app/src/openakita/llm/registri
 RUN npm run build:web
 
 # ── Stage 2: Build Python package ──
-FROM python:3.11-slim AS builder
+FROM python:3.11.15-slim-bookworm AS builder
 
 WORKDIR /app
 
@@ -45,7 +48,7 @@ RUN if [ "$INSTALL_FINANCE_AUTO" = "1" ]; then \
     && pip install --no-cache-dir ./openakita-plugin-sdk
 
 # ── Stage 3: Final runtime image ──
-FROM python:3.11-slim
+FROM python:3.11.15-slim-bookworm
 
 WORKDIR /app
 

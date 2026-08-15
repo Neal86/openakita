@@ -26,19 +26,20 @@ services:
         aliases:
           - openakita
 
-  # Default shared Hermes instance. Multiple Agents share this container while
-  # keeping memory, sessions, identity, skills, and workspaces isolated.
-  # It intentionally does not gate the OpenAkita service: Hermes can recover
-  # independently without making the main web/API service unavailable.
+  # Default shared Hermes instance. Use a pinned upstream runtime image directly
+  # instead of rebuilding a second service during every Coolify deployment.
+  # The OpenAkita gateway is bind-mounted read-only and executed through the
+  # upstream image's existing /init + main-wrapper ENTRYPOINT.
   hermes-shared:
-    build:
-      context: ./deploy/hermes
-      dockerfile: Dockerfile
-    image: openakita-hermes-runtime:latest
+    image: nousresearch/hermes-agent:v2026.7.20
     restart: unless-stopped
+    command:
+      - /opt/hermes/.venv/bin/python
+      - /opt/openakita/shared_gateway.py
     expose:
       - "8642"
     volumes:
+      - ./deploy/hermes:/opt/openakita:ro
       - hermes_shared_data:/opt/data
       - hermes_auth_data:/run/openakita-hermes-auth:ro
     environment:
