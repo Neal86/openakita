@@ -19,6 +19,8 @@ class ConnectorPermissionError(PermissionError):
 
 
 class WindowsCommandExecutor:
+    _active_tabs: dict[str, str] = {}
+
     def __init__(self) -> None:
         self._grants: dict[str, dict[str, Any]] = {}
 
@@ -181,12 +183,8 @@ class WindowsCommandExecutor:
             result["controls"] = [
                 {
                     "name": str(control.window_text() or ""),
-                    "type": str(
-                        getattr(control.element_info, "control_type", "") or ""
-                    ),
-                    "automation_id": str(
-                        getattr(control.element_info, "automation_id", "") or ""
-                    ),
+                    "type": str(getattr(control.element_info, "control_type", "") or ""),
+                    "automation_id": str(getattr(control.element_info, "automation_id", "") or ""),
                 }
                 for control in window.descendants()[:250]
             ]
@@ -221,9 +219,7 @@ class WindowsCommandExecutor:
                     all_screens=True,
                 )
             except Exception as fallback_exc:
-                raise RuntimeError(
-                    "unable to capture only the authorized window"
-                ) from fallback_exc
+                raise RuntimeError("unable to capture only the authorized window") from fallback_exc
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
         return {
@@ -231,9 +227,7 @@ class WindowsCommandExecutor:
             "base64": base64.b64encode(buffer.getvalue()).decode("ascii"),
         }
 
-    def _uia_click(
-        self, resource: dict[str, Any], args: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _uia_click(self, resource: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
         self._select_uia_tab(resource)
         window = self._uia_window(resource)
         target = str(args.get("target") or "").strip()
@@ -252,22 +246,16 @@ class WindowsCommandExecutor:
             raise ValueError("target or x/y is required")
         rect = window.rectangle()
         if not (rect.left <= x < rect.right and rect.top <= y < rect.bottom):
-            raise ConnectorPermissionError(
-                "click coordinates are outside the authorized window"
-            )
+            raise ConnectorPermissionError("click coordinates are outside the authorized window")
         from pywinauto import mouse
 
         if bool(args.get("double", False)):
-            mouse.double_click(
-                button=str(args.get("button") or "left"), coords=(x, y)
-            )
+            mouse.double_click(button=str(args.get("button") or "left"), coords=(x, y))
         else:
             mouse.click(button=str(args.get("button") or "left"), coords=(x, y))
         return {"clicked": [x, y]}
 
-    def _type(
-        self, resource: dict[str, Any], args: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _type(self, resource: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
         self._select_uia_tab(resource)
         self._focus(int(resource.get("hwnd") or 0))
         text = str(args.get("text") or "")
@@ -288,25 +276,45 @@ class WindowsCommandExecutor:
         return {"typed": len(text)}
 
     @staticmethod
-    def _cdp_target(resource: dict[str, Any]) -> dict[str, Any]:
+    def _cdp_port(resource: dict[str, Any]) -> int:
         profile = str(resource.get("browser_profile") or "")
         if not profile.startswith("cdp:"):
-            raise RuntimeError(
-                "browser tab does not expose CDP; use its UIA tab resource instead"
-            )
-        port = int(profile.split(":", 1)[1])
-        tab_id = str(resource.get("tab_id") or "")
+            raise RuntimeError("browser resource does not expose CDP")
+        raw = profile.split(":", 2)[1]
+        return int(raw)
+
+    @classmethod
+    def _profile_key(cls, resource: dict[str, Any]) -> str:
+        return f"{cls._cdp_port(resource)}:{resource.get('account_name') or resource.get('browser_profile') or ''}"
+
+    @classmethod
+    def _cdp_tabs(cls, resource: dict[str, Any]) -> list[dict[str, Any]]:
+        port = cls._cdp_port(resource)
         request = urllib.request.Request(
             f"http://127.0.0.1:{port}/json",
             headers={"User-Agent": "OpenAkita-Windows-Connector/1.0"},
         )
         with urllib.request.urlopen(request, timeout=2) as response:  # noqa: S310
-            tabs = json.loads(response.read().decode("utf-8"))
-        target = next(
-            (item for item in tabs if str(item.get("id") or "") == tab_id), None
-        )
-        if target is None or not target.get("webSocketDebuggerUrl"):
-            raise RuntimeError("browser tab is no longer available")
+            rows = json.loads(response.read().decode("utf-8"))
+        return [
+            item
+            for item in (rows if isinstance(rows, list) else [])
+            if isinstance(item, dict)
+            and item.get("type") in {"page", "webview"}
+            and item.get("webSocketDebuggerUrl")
+        ]
+
+    @classmethod
+    def _cdp_target(cls, resource: dict[str, Any]) -> dict[str, Any]:
+        tabs = cls._cdp_tabs(resource)
+        if not tabs:
+            raise RuntimeError("browser profile has no controllable tabs")
+        key = cls._profile_key(resource)
+        requested = cls._active_tabs.get(key) or str(resource.get("tab_id") or "")
+        target = next((item for item in tabs if str(item.get("id") or "") == requested), None)
+        if target is None:
+            target = tabs[0]
+            cls._active_tabs[key] = str(target.get("id") or "")
         return target
 
     @classmethod
@@ -326,15 +334,10 @@ class WindowsCommandExecutor:
             close_timeout=1,
             max_size=16 * 1024 * 1024,
         ) as socket:
-            request_id = 1
-            socket.send(
-                json.dumps(
-                    {"id": request_id, "method": method, "params": params or {}}
-                )
-            )
+            socket.send(json.dumps({"id": 1, "method": method, "params": params or {}}))
             while True:
                 message = json.loads(socket.recv(timeout=8))
-                if message.get("id") != request_id:
+                if message.get("id") != 1:
                     continue
                 if message.get("error"):
                     raise RuntimeError(str(message["error"]))
@@ -354,9 +357,7 @@ class WindowsCommandExecutor:
         )
         remote = result.get("result") or {}
         if remote.get("subtype") == "error":
-            raise RuntimeError(
-                str(remote.get("description") or "browser evaluation failed")
-            )
+            raise RuntimeError(str(remote.get("description") or "browser evaluation failed"))
         return remote.get("value")
 
     @staticmethod
@@ -364,9 +365,97 @@ class WindowsCommandExecutor:
         return json.dumps(value, ensure_ascii=False)
 
     @classmethod
-    def _browser_action(
-        cls, resource: dict[str, Any], action: str, args: dict[str, Any]
-    ) -> Any:
+    def _cdp_upload_input(cls, resource: dict[str, Any], selector: str, paths: list[str]) -> dict[str, Any]:
+        from websockets.sync.client import connect
+
+        target = cls._cdp_target(resource)
+        with connect(
+            str(target["webSocketDebuggerUrl"]),
+            open_timeout=3,
+            close_timeout=1,
+            max_size=16 * 1024 * 1024,
+        ) as socket:
+            request_id = 0
+
+            def call(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+                nonlocal request_id
+                request_id += 1
+                socket.send(json.dumps({"id": request_id, "method": method, "params": params or {}}))
+                while True:
+                    message = json.loads(socket.recv(timeout=8))
+                    if message.get("id") != request_id:
+                        continue
+                    if message.get("error"):
+                        raise RuntimeError(str(message["error"]))
+                    return dict(message.get("result") or {})
+
+            doc = call("DOM.getDocument", {"depth": 1})
+            root_id = int((doc.get("root") or {}).get("nodeId") or 0)
+            if not root_id:
+                raise RuntimeError("unable to read browser DOM")
+            found = call("DOM.querySelector", {"nodeId": root_id, "selector": selector})
+            node_id = int(found.get("nodeId") or 0)
+            if not node_id:
+                raise LookupError("file input not found")
+            call("DOM.setFileInputFiles", {"nodeId": node_id, "files": paths})
+            return {"uploaded": paths, "mode": "dom-file-input"}
+
+    @staticmethod
+    def _native_file_picker_upload(paths: list[str]) -> dict[str, Any]:
+        if os.name != "nt":
+            raise RuntimeError("native file picker fallback is only available on Windows")
+        if not paths:
+            raise ValueError("at least one upload path is required")
+        from pywinauto import Desktop
+
+        deadline = time.monotonic() + 5.0
+        dialog = None
+        while time.monotonic() < deadline and dialog is None:
+            try:
+                windows = Desktop(backend="uia").windows()
+                for candidate in windows:
+                    title = str(candidate.window_text() or "").strip().lower()
+                    if any(token in title for token in ("open", "choose", "select", "打开", "选择", "上传")):
+                        dialog = candidate
+                        break
+            except Exception:
+                pass
+            if dialog is None:
+                time.sleep(0.1)
+        if dialog is None:
+            raise RuntimeError("native Windows file picker did not appear")
+
+        value = " ".join(f'"{path}"' for path in paths)
+        edits = dialog.descendants(control_type="Edit")
+        if not edits:
+            raise RuntimeError("native file picker filename field was not found")
+        edit = edits[-1]
+        try:
+            edit.set_edit_text(value)
+        except Exception:
+            edit.click_input()
+            try:
+                import pyperclip
+                from pywinauto.keyboard import send_keys
+
+                pyperclip.copy(value)
+                send_keys("^a^v")
+            except Exception as exc:
+                raise RuntimeError("unable to enter upload file path") from exc
+
+        buttons = dialog.descendants(control_type="Button")
+        for button in buttons:
+            text = str(button.window_text() or "").strip().lower().replace("&", "")
+            if text in {"open", "打开", "choose", "select", "选择"}:
+                button.click_input()
+                return {"uploaded": paths, "mode": "native-file-picker"}
+        from pywinauto.keyboard import send_keys
+
+        send_keys("{ENTER}")
+        return {"uploaded": paths, "mode": "native-file-picker"}
+
+    @classmethod
+    def _browser_action(cls, resource: dict[str, Any], action: str, args: dict[str, Any]) -> Any:
         if resource.get("automation") != "cdp":
             if action == "browser_read":
                 return {
@@ -374,20 +463,81 @@ class WindowsCommandExecutor:
                     "message": "该 Tab 仅有 UIA 权限；请用 windows_inspect_app 读取可访问控件。",
                 }
             raise RuntimeError(
-                "该 Tab 未启用 CDP；可使用 windows_focus/click/type 的 UIA 操作，"
-                "或开启 Chrome/Edge remote debugging 获得 DOM 控制"
+                "该浏览器未启用 CDP；可使用 Windows Connector UIA 操作，"
+                "或开启 Chromium remote debugging 获得完整 Browser Adapter 能力"
             )
+
+        operation = str(args.get("operation") or "").strip()
         if action == "browser_read":
-            return cls._cdp_eval(
-                resource,
-                "({title:document.title,url:location.href,text:(document.body&&document.body.innerText||'').slice(0,100000)})",
-            )
+            if operation == "list_tabs":
+                tabs = cls._cdp_tabs(resource)
+                active = cls._active_tabs.get(cls._profile_key(resource)) or str(resource.get("tab_id") or "")
+                return [
+                    {
+                        "index": index,
+                        "id": str(tab.get("id") or ""),
+                        "title": str(tab.get("title") or ""),
+                        "url": str(tab.get("url") or ""),
+                        "active": str(tab.get("id") or "") == active,
+                    }
+                    for index, tab in enumerate(tabs)
+                ]
+            if operation == "wait":
+                selector = str(args.get("selector") or "").strip()
+                timeout_ms = max(0, int(args.get("timeout") or 30000))
+                deadline = time.monotonic() + timeout_ms / 1000
+                while time.monotonic() <= deadline:
+                    if not selector or cls._cdp_eval(resource, f"Boolean(document.querySelector({cls._js(selector)}))"):
+                        return {"ready": True, "selector": selector or None}
+                    time.sleep(0.1)
+                raise TimeoutError(f"browser wait timed out for selector: {selector}")
+            selector = str(args.get("selector") or "").strip()
+            fmt = str(args.get("format") or "text").lower()
+            if selector:
+                expression = f"""(() => {{const el=document.querySelector({cls._js(selector)}); if(!el)return {{ok:false,error:'element not found'}}; return {{ok:true,title:document.title,url:location.href,content:{'el.outerHTML' if fmt == 'html' else "(el.innerText||el.textContent||'')"}}};}})()"""
+            else:
+                expression = "({ok:true,title:document.title,url:location.href,content:" + ("document.documentElement.outerHTML" if fmt == "html" else "(document.body&&document.body.innerText||'')") + "})"
+            result = cls._cdp_eval(resource, expression)
+            if isinstance(result, dict) and result.get("ok") is False:
+                raise RuntimeError(str(result.get("error")))
+            if isinstance(result, dict) and "content" in result:
+                result["text"] = result.get("content")
+            return result
+
         if action == "browser_navigate":
             url = str(args.get("url") or "").strip()
+            if operation == "new_tab":
+                port = cls._cdp_port(resource)
+                endpoint = f"http://127.0.0.1:{port}/json/new"
+                request = urllib.request.Request(endpoint, method="PUT")
+                with urllib.request.urlopen(request, timeout=2) as response:  # noqa: S310
+                    created = json.loads(response.read().decode("utf-8"))
+                tab_id = str(created.get("id") or "")
+                if tab_id:
+                    cls._active_tabs[cls._profile_key(resource)] = tab_id
+                if url:
+                    return cls._cdp_command(resource, "Page.navigate", {"url": url})
+                return {"created": tab_id}
             if not url:
                 raise ValueError("url is required")
             return cls._cdp_command(resource, "Page.navigate", {"url": url})
+
         if action == "browser_click":
+            if operation == "switch_tab":
+                tabs = cls._cdp_tabs(resource)
+                index = int(args.get("index") or 0)
+                if not (0 <= index < len(tabs)):
+                    raise IndexError("browser tab index out of range")
+                tab_id = str(tabs[index].get("id") or "")
+                cls._active_tabs[cls._profile_key(resource)] = tab_id
+                cls._cdp_command(resource, "Target.activateTarget", {"targetId": tab_id})
+                return {"switched": index, "tab_id": tab_id}
+            if operation == "close_tab":
+                target = cls._cdp_target(resource)
+                tab_id = str(target.get("id") or "")
+                result = cls._cdp_command(resource, "Target.closeTarget", {"targetId": tab_id})
+                cls._active_tabs.pop(cls._profile_key(resource), None)
+                return {"closed": tab_id, **result}
             selector = str(args.get("selector") or "").strip()
             text = str(args.get("text") or "").strip()
             expression = f"""(() => {{
@@ -403,7 +553,32 @@ class WindowsCommandExecutor:
             if isinstance(result, dict) and result.get("ok") is False:
                 raise RuntimeError(str(result.get("error")))
             return result
+
         if action == "browser_type":
+            if operation == "execute_js":
+                return cls._cdp_eval(resource, str(args.get("script") or ""))
+            if operation == "upload":
+                paths = [str(value or "").strip() for value in (args.get("paths") or []) if str(value or "").strip()]
+                if not paths:
+                    raise ValueError("at least one upload path is required")
+                missing = [path for path in paths if not os.path.isfile(path)]
+                if missing:
+                    raise FileNotFoundError(f"upload file not found: {missing[0]}")
+                selector = str(args.get("selector") or "").strip()
+                if not selector:
+                    raise ValueError("selector is required")
+                try:
+                    return cls._cdp_upload_input(resource, selector, paths)
+                except (LookupError, RuntimeError):
+                    # The selected control may be an upload button instead of an
+                    # input[type=file]. Click it and handle the native Windows picker.
+                    click = cls._cdp_eval(
+                        resource,
+                        f"""(() => {{const el=document.querySelector({cls._js(selector)});if(!el)return false;el.click();return true;}})()""",
+                    )
+                    if not click:
+                        raise RuntimeError("upload control not found")
+                    return cls._native_file_picker_upload(paths)
             selector = str(args.get("selector") or "").strip()
             text = str(args.get("text") or "")
             if not selector:
@@ -436,17 +611,11 @@ class WindowsCommandExecutor:
         return {"launched": exe_path, "pid": process.pid}
 
     def _close(self, resource: dict[str, Any]) -> dict[str, Any]:
-        if (
-            resource.get("automation") == "cdp"
-            and resource.get("kind") == "browser_tab"
-        ):
+        if resource.get("automation") == "cdp" and resource.get("kind") == "browser_tab":
             tab_id = str(resource.get("tab_id") or "")
             self._cdp_command(resource, "Target.closeTarget", {"targetId": tab_id})
             return {"closed": resource.get("id"), "scope": "tab"}
-        if (
-            resource.get("automation") == "uia_tab"
-            and resource.get("kind") == "browser_tab"
-        ):
+        if resource.get("automation") == "uia_tab" and resource.get("kind") == "browser_tab":
             self._select_uia_tab(resource)
             self._focus(int(resource.get("hwnd") or 0))
             from pywinauto.keyboard import send_keys
@@ -483,38 +652,31 @@ class WindowsCommandExecutor:
             send_keys(str(args.get("keys") or ""))
             return {"ok": True, "result": {"sent": args.get("keys")}}
         if action == "scroll":
+            if resource.get("automation") == "cdp":
+                amount = int(args.get("amount") or 500)
+                direction = str(args.get("direction") or "down").lower()
+                if direction in {"left", "right"}:
+                    x = -abs(amount) if direction == "left" else abs(amount)
+                    y = 0
+                else:
+                    x = 0
+                    y = -abs(amount) if direction == "up" else abs(amount)
+                result = self._cdp_eval(resource, f"window.scrollBy({x},{y});({{x:window.scrollX,y:window.scrollY}})")
+                return {"ok": True, "result": result}
             self._select_uia_tab(resource)
             window = self._uia_window(resource)
             rect = window.rectangle()
-            x = int(
-                args.get("x")
-                if args.get("x") is not None
-                else (rect.left + rect.right) // 2
-            )
-            y = int(
-                args.get("y")
-                if args.get("y") is not None
-                else (rect.top + rect.bottom) // 2
-            )
+            x = int(args.get("x") if args.get("x") is not None else (rect.left + rect.right) // 2)
+            y = int(args.get("y") if args.get("y") is not None else (rect.top + rect.bottom) // 2)
             if not (rect.left <= x < rect.right and rect.top <= y < rect.bottom):
-                raise ConnectorPermissionError(
-                    "scroll coordinates are outside the authorized window"
-                )
+                raise ConnectorPermissionError("scroll coordinates are outside the authorized window")
             self._focus(int(resource.get("hwnd") or 0))
             from pywinauto import mouse
 
-            mouse.scroll(
-                coords=(x, y), wheel_dist=int(args.get("amount") or -3)
-            )
-            return {
-                "ok": True,
-                "result": {"scrolled": True, "coords": [x, y]},
-            }
+            mouse.scroll(coords=(x, y), wheel_dist=int(args.get("amount") or -3))
+            return {"ok": True, "result": {"scrolled": True, "coords": [x, y]}}
         if action.startswith("browser_"):
-            return {
-                "ok": True,
-                "result": self._browser_action(resource, action, args),
-            }
+            return {"ok": True, "result": self._browser_action(resource, action, args)}
         if action == "launch":
             return {"ok": True, "result": self._launch(resource)}
         if action == "close":
