@@ -4,6 +4,7 @@ import ctypes
 import hashlib
 import json
 import os
+import re
 import urllib.request
 from ctypes import wintypes
 from pathlib import Path
@@ -46,12 +47,97 @@ def _wechat_account_hint(hwnd: int, title: str) -> str:
 
 
 def _browser_name(process_name: str, fallback: str) -> str:
+    lowered = process_name.lower()
+    if "ixbrowser" in lowered or lowered in {"ix.exe", "ixbrowser.exe"}:
+        return "iXBrowser"
     return {
         "chrome.exe": "Google Chrome",
         "msedge.exe": "Microsoft Edge",
         "firefox.exe": "Mozilla Firefox",
         "brave.exe": "Brave",
-    }.get(process_name.lower(), fallback)
+        "chromium.exe": "Chromium",
+    }.get(lowered, fallback)
+
+
+def _is_browser_process(process_name: str, exe_path: str = "") -> bool:
+    haystack = f"{process_name} {exe_path}".lower()
+    return any(
+        token in haystack
+        for token in (
+            "chrome.exe",
+            "msedge.exe",
+            "firefox.exe",
+            "brave.exe",
+            "chromium.exe",
+            "ixbrowser",
+        )
+    )
+
+
+def _cmd_value(args: list[str], name: str) -> str:
+    prefix = f"{name}="
+    for index, raw in enumerate(args):
+        value = str(raw or "")
+        if value.startswith(prefix):
+            return value[len(prefix) :].strip().strip('"')
+        if value == name and index + 1 < len(args):
+            return str(args[index + 1] or "").strip().strip('"')
+    return ""
+
+
+def _browser_debug_endpoints() -> dict[int, dict[str, Any]]:
+    """Discover Chromium-family remote-debugging ports and profile names."""
+    if os.name != "nt":
+        return {}
+    endpoints: dict[int, dict[str, Any]] = {}
+    try:
+        import psutil
+
+        for process in psutil.process_iter(["pid", "name", "exe", "cmdline"]):
+            info = process.info
+            process_name = str(info.get("name") or "")
+            exe_path = str(info.get("exe") or "")
+            if not _is_browser_process(process_name, exe_path):
+                continue
+            cmdline = [str(value or "") for value in (info.get("cmdline") or [])]
+            raw_port = _cmd_value(cmdline, "--remote-debugging-port")
+            if not raw_port or not raw_port.isdigit():
+                continue
+            port = int(raw_port)
+            if not (1 <= port <= 65535):
+                continue
+            profile = _cmd_value(cmdline, "--profile-directory") or "Default"
+            user_data_dir = _cmd_value(cmdline, "--user-data-dir")
+            browser = _browser_name(process_name, Path(exe_path).stem or "Chromium Browser")
+            endpoints.setdefault(
+                port,
+                {
+                    "browser_name": browser,
+                    "process_name": process_name,
+                    "pid": int(info.get("pid") or 0),
+                    "exe_path": exe_path,
+                    "profile_name": profile,
+                    "user_data_dir": user_data_dir,
+                },
+            )
+    except Exception:
+        pass
+
+    # Keep compatibility with manually configured debugging ports even when
+    # process cmdline access is denied by Windows policy.
+    for port in (9222, 9223, 9225, 9333):
+        endpoints.setdefault(
+            port,
+            {
+                "browser_name": "Chromium Browser",
+                "process_name": "",
+                "pid": 0,
+                "exe_path": "",
+                "profile_name": "Default",
+                "user_data_dir": "",
+            },
+        )
+    return endpoints
 
 
 def _uia_browser_tabs(window_row: dict[str, Any]) -> list[dict[str, Any]]:
@@ -140,7 +226,7 @@ def _enum_windows() -> list[dict[str, Any]]:
         account_name = ""
         automation = "uia"
         limited = False
-        if lowered in {"chrome.exe", "msedge.exe", "firefox.exe", "brave.exe"}:
+        if _is_browser_process(process_name, exe_path):
             kind = "browser_window"
             app_name = _browser_name(process_name, app_name)
             limited = True
@@ -181,7 +267,7 @@ def _enum_windows() -> list[dict[str, Any]]:
     return rows
 
 
-def _cdp_tabs(port: int, browser_name: str) -> list[dict[str, Any]]:
+def _cdp_targets(port: int, metadata: dict[str, Any]) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     try:
         request = urllib.request.Request(
             f"http://127.0.0.1:{port}/json",
@@ -190,16 +276,55 @@ def _cdp_tabs(port: int, browser_name: str) -> list[dict[str, Any]]:
         with urllib.request.urlopen(request, timeout=0.7) as response:  # noqa: S310 - localhost only
             targets = json.loads(response.read().decode("utf-8"))
     except Exception:
-        return []
+        return None, []
+
+    browser_name = str(metadata.get("browser_name") or "Chromium Browser")
+    profile_name = str(metadata.get("profile_name") or "Default")
+    user_data_dir = str(metadata.get("user_data_dir") or "")
+    process_name = str(metadata.get("process_name") or "")
+    exe_path = str(metadata.get("exe_path") or "")
+    pid = int(metadata.get("pid") or 0)
+    page_targets = [
+        target
+        for target in (targets if isinstance(targets, list) else [])
+        if isinstance(target, dict)
+        and target.get("type") in {"page", "webview"}
+        and target.get("webSocketDebuggerUrl")
+    ]
+    if not page_targets:
+        return None, []
+
+    profile_identity = _fingerprint(
+        "browser_profile", browser_name, exe_path or process_name, user_data_dir, profile_name, port
+    )
+    first = page_targets[0]
+    profile_resource = {
+        "id": _resource_id("browser_profile", browser_name, user_data_dir, profile_name, port),
+        "fingerprint": profile_identity,
+        "stable_identity": profile_identity,
+        "volatile_window_id": _fingerprint("cdp", port),
+        "kind": "browser_profile",
+        "app_name": browser_name,
+        "process_name": process_name,
+        "pid": pid,
+        "hwnd": 0,
+        "title": f"{browser_name} · {profile_name}",
+        "exe_path": exe_path,
+        "account_name": profile_name,
+        "browser_profile": f"cdp:{port}:{profile_name}",
+        "tab_id": str(first.get("id") or ""),
+        "url": str(first.get("url") or ""),
+        "automation": "cdp",
+        "controllable": True,
+        "limited": False,
+    }
+
     rows: list[dict[str, Any]] = []
-    for target in targets if isinstance(targets, list) else []:
-        if not isinstance(target, dict) or target.get("type") not in {"page", "webview"}:
-            continue
+    for target in page_targets:
         tab_id = str(target.get("id") or "").strip()
         title = str(target.get("title") or target.get("url") or tab_id).strip()
         url = str(target.get("url") or "").strip()
-        ws_url = str(target.get("webSocketDebuggerUrl") or "").strip()
-        if not tab_id or not ws_url:
+        if not tab_id:
             continue
         stable_identity = _fingerprint("browser_tab", browser_name, port, tab_id)
         rows.append(
@@ -210,13 +335,13 @@ def _cdp_tabs(port: int, browser_name: str) -> list[dict[str, Any]]:
                 "volatile_window_id": stable_identity,
                 "kind": "browser_tab",
                 "app_name": browser_name,
-                "process_name": "",
-                "pid": 0,
+                "process_name": process_name,
+                "pid": pid,
                 "hwnd": 0,
                 "title": title,
-                "exe_path": "",
-                "account_name": "",
-                "browser_profile": f"cdp:{port}",
+                "exe_path": exe_path,
+                "account_name": profile_name,
+                "browser_profile": f"cdp:{port}:{profile_name}",
                 "tab_id": tab_id,
                 "url": url,
                 "automation": "cdp",
@@ -224,26 +349,30 @@ def _cdp_tabs(port: int, browser_name: str) -> list[dict[str, Any]]:
                 "limited": False,
             }
         )
-    return rows
+    return profile_resource, rows
 
 
 def discover_resources() -> list[dict[str, Any]]:
-    """Return app instances plus separately addressable WeChat/browser resources."""
+    """Return app instances plus separately addressable browser/profile resources."""
     windows = _enum_windows()
     uia_tabs: list[dict[str, Any]] = []
     for window in windows:
         uia_tabs.extend(_uia_browser_tabs(window))
 
+    cdp_profiles: list[dict[str, Any]] = []
     cdp_tabs: list[dict[str, Any]] = []
-    for port in (9222, 9223, 9225, 9333):
-        cdp_tabs.extend(_cdp_tabs(port, "Chromium Browser"))
+    for port, metadata in _browser_debug_endpoints().items():
+        profile, tabs = _cdp_targets(port, metadata)
+        if profile:
+            cdp_profiles.append(profile)
+            cdp_tabs.extend(tabs)
 
     cdp_titles = {str(row.get("title") or "").casefold() for row in cdp_tabs if row.get("title")}
     uia_tabs = [row for row in uia_tabs if str(row.get("title") or "").casefold() not in cdp_titles]
 
     seen: set[str] = set()
     result: list[dict[str, Any]] = []
-    for row in [*windows, *cdp_tabs, *uia_tabs]:
+    for row in [*windows, *cdp_profiles, *cdp_tabs, *uia_tabs]:
         key = str(row.get("id") or "")
         if key and key not in seen:
             seen.add(key)
