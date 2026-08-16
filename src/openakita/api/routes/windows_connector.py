@@ -18,6 +18,11 @@ from pydantic import BaseModel, Field
 
 from openakita.wechat_desktop import wechat_desktop_manager
 from openakita.windows_connector import windows_connector_manager
+from openakita.windows_connector.browser_adapter import (
+    clear_browser_binding,
+    get_browser_binding,
+    set_browser_binding,
+)
 from openakita.windows_connector.manager import LOCAL_NODE_ID
 from openakita.windows_connector.preview import preview_focus_resource
 
@@ -53,6 +58,11 @@ class GrantPayload(BaseModel):
     resource_id: str
     remark: str = ""
     permissions: dict[str, bool] = Field(default_factory=dict)
+
+
+class BrowserBindingPayload(BaseModel):
+    node_id: str = Field(min_length=1)
+    resource_id: str = Field(min_length=1)
 
 
 class RemarkPayload(BaseModel):
@@ -208,12 +218,7 @@ async def refresh_resources(node_id: str) -> dict[str, bool]:
 
 @router.post("/preview-focus")
 async def preview_focus(body: PreviewFocusPayload) -> dict[str, Any]:
-    """Focus a discovered target so the operator can verify it before granting it.
-
-    Preview focus is deliberately limited to foreground/tab activation. It
-    cannot click, type, navigate, launch or close anything, and it never creates
-    or changes an Agent permission grant.
-    """
+    """Focus a discovered target so the operator can verify it before granting it."""
     resources = await windows_connector_manager.list_resources(body.node_id)
     if not any(str(row.get("id") or "") == body.resource_id for row in resources):
         raise HTTPException(status_code=404, detail="Windows 目标已离线，请重新扫描应用")
@@ -222,7 +227,7 @@ async def preview_focus(body: PreviewFocusPayload) -> dict[str, Any]:
         try:
             result = await asyncio.to_thread(
                 preview_focus_resource,
-                windows_connector_manager._local_executor,  # noqa: SLF001 - operator preview uses embedded executor
+                windows_connector_manager._local_executor,  # noqa: SLF001
                 body.resource_id,
             )
         except (PermissionError, RuntimeError, ValueError) as exc:
@@ -259,6 +264,39 @@ async def save_grant(body: GrantPayload) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"grant": grant}
+
+
+@router.get("/browser-bindings/{agent_profile_id}")
+async def get_agent_browser_binding(agent_profile_id: str) -> dict[str, Any]:
+    binding = await get_browser_binding(agent_profile_id)
+    return {"binding": binding}
+
+
+@router.put("/browser-bindings/{agent_profile_id}")
+async def save_agent_browser_binding(
+    agent_profile_id: str,
+    body: BrowserBindingPayload,
+) -> dict[str, Any]:
+    """Save a browser/profile binding.
+
+    This intentionally allows staging a binding immediately before a new Agent
+    profile is created. The setup-center removes the staged grant when creation
+    is cancelled; once the profile exists the same grant becomes authoritative.
+    """
+    try:
+        binding = await set_browser_binding(
+            agent_profile_id,
+            body.node_id,
+            body.resource_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"binding": binding}
+
+
+@router.delete("/browser-bindings/{agent_profile_id}")
+async def delete_agent_browser_binding(agent_profile_id: str) -> dict[str, Any]:
+    return {"deleted": await clear_browser_binding(agent_profile_id)}
 
 
 @router.put("/grants/{grant_id}/remark")
