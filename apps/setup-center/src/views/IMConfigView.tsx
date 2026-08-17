@@ -28,7 +28,7 @@ type IMConfigViewProps = {
   wizardMode?: boolean;
 };
 
-const DEFAULT_API = "http://127.0.0.1:18900";
+const DEFAULT_API = "";
 
 const PLATFORMS = [
   { id: "wechat", title: "config.imWechat", logo: LogoWechat, docUrl: "https://developers.weixin.qq.com/doc/" },

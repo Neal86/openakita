@@ -14,7 +14,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { safeFetch } from "../providers";
 
-const DEFAULT_API = "http://127.0.0.1:18900";
+const DEFAULT_API = "";
 
 type Conversation = { id: string; name: string; type: string };
 type Account = {
