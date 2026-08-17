@@ -29,7 +29,11 @@ from fastapi.responses import JSONResponse
 
 import openakita._ensure_utf8  # noqa: F401  # Windows UTF-8 编码保护
 
-from .auth import WebAccessConfig, create_auth_middleware
+from .auth import (
+    WebAccessConfig,
+    create_auth_middleware,
+    resolve_web_access_data_dir,
+)
 from .middleware_setup_gate import create_setup_gate_middleware
 from .routes import (
     _orgs_v2_legacy_redirects,
@@ -39,13 +43,17 @@ from .routes import (
     chat_models,
     config,
     diagnostics,
+    execution_instances,
     feishu_onboard,
     files,
     health,
+    hermes,
+    hermes_ui,
     hub,
     identity,
     im,
     inbox,
+    llm_gateway,
     logs,
     mcp,
     memory,
@@ -64,6 +72,7 @@ from .routes import (
     upload,
     wechat_onboard,
     wecom_onboard,
+    windows_connector,
     workspace_io,
     workspaces,
 )
@@ -95,6 +104,22 @@ logger = logging.getLogger(__name__)
 # at import time, which is too early (``.env`` may not be loaded yet) and
 # made the resolution logic invisible to tests.
 API_PORT = int(os.environ.get("API_PORT", "18900"))
+
+
+def mount_hermes_execution_routes(app: FastAPI) -> None:
+    """Mount Hermes APIs at their canonical public paths exactly once."""
+    if getattr(app.state, "_hermes_execution_routes_mounted", False):
+        return
+    hermes_paths = {
+        getattr(route, "path", "") or getattr(route, "path_format", "")
+        for route in hermes.router.routes
+    }
+    if "/ui" not in hermes_paths:
+        hermes.router.include_router(hermes_ui.router)
+    app.include_router(hermes.router, prefix="/api", tags=["Hermes"])
+    app.include_router(execution_instances.router)
+    app.include_router(llm_gateway.router)
+    app.state._hermes_execution_routes_mounted = True
 
 
 def get_api_host_for_health_display(app_state: Any | None = None) -> str:
@@ -754,12 +779,7 @@ def create_app(
     # Web access authentication — registered BEFORE CORS so that in Starlette's
     # middleware stack (last-added = outermost) CORS wraps auth, ensuring all
     # responses (including 401) carry proper CORS headers.
-    try:
-        from openakita.config import settings
-
-        data_dir = Path(settings.project_root) / "data"
-    except Exception:
-        data_dir = Path.cwd() / "data"
+    data_dir = resolve_web_access_data_dir()
     web_access_config = WebAccessConfig(data_dir)
     app.state.web_access_config = web_access_config
 
@@ -1093,6 +1113,7 @@ def create_app(
     # Mount routes
     app.include_router(auth_routes.router, tags=["认证"])
     app.include_router(agents.router, tags=["智能体"])
+    mount_hermes_execution_routes(app)
     app.include_router(bug_report.router, tags=["反馈"])
     app.include_router(chat.router, tags=["对话"])
     app.include_router(chat_models.router, tags=["模型"])
@@ -1101,6 +1122,7 @@ def create_app(
     app.include_router(feishu_onboard.router, tags=["飞书扫码"])
     app.include_router(qqbot_onboard.router, tags=["QQ扫码"])
     app.include_router(wechat_onboard.router, tags=["微信扫码"])
+    app.include_router(windows_connector.router, tags=["Windows Connector"])
     app.include_router(wecom_onboard.router, tags=["企微扫码"])
     app.include_router(files.router, tags=["文件"])
     app.include_router(health.router, tags=["健康检查"])

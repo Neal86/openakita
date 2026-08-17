@@ -11,16 +11,20 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
+import ipaddress
 import logging
 import os
 import secrets
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from filelock import FileLock
+
+from openakita.utils.atomic_io import atomic_json_write, read_json_safe
 
 from ..core.auth.tokens import TokenClaims, decode_jwt, encode_jwt
 
@@ -46,13 +50,15 @@ AUTH_EXEMPT_PATHS = frozenset(
         "/api/auth/setup",
         "/api/auth/setup-status",
         "/api/logs/frontend",
+        "/openapi.json",
         # Connector pairing is authenticated by a one-time pairing code.
         # Keep only the redemption endpoint public; node management and
         # pairing-code creation still require normal web authentication.
         "/api/wechat-desktop/pair",
+        "/api/windows-connector/pair",
     }
 )
-AUTH_EXEMPT_PREFIXES = ("/web/", "/web", "/ws/", "/docs", "/openapi.json", "/redoc", "/user-docs")
+AUTH_EXEMPT_PREFIXES = ("/web", "/ws", "/docs", "/redoc", "/user-docs")
 
 # ---------------------------------------------------------------------------
 # Password hashing (scrypt, stdlib)
@@ -90,8 +96,79 @@ def _verify_password(password: str, hash_hex: str, salt_hex: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Web Access config (data/web_access.json)
+# Web Access config (durable data root)
 # ---------------------------------------------------------------------------
+
+
+def resolve_web_access_data_dir() -> Path:
+    """Return the durable directory that owns ``web_access.json``.
+
+    ``OPENAKITA_DATA_DIR`` is authoritative for container/VPS deployments.
+    Otherwise reuse ``settings.data_dir`` when available, with the historical
+    ``project_root/data`` directory as fallback. When a durable root is newly
+    introduced, migrate only the authentication JSON and do so through the
+    existing validated atomic-I/O path. Other server data keeps its historical
+    location unless it has its own explicit persistence migration.
+    """
+    explicit = os.environ.get("OPENAKITA_DATA_DIR", "").strip()
+    legacy = Path.cwd() / "data"
+    if explicit:
+        target = Path(explicit).expanduser().resolve()
+        try:
+            from openakita.config import settings
+
+            legacy = (Path(settings.project_root) / "data").resolve()
+        except Exception:
+            legacy = legacy.resolve()
+    else:
+        try:
+            from openakita.config import settings
+
+            legacy = (Path(settings.project_root) / "data").resolve()
+            configured = getattr(settings, "data_dir", None)
+            target = Path(configured).expanduser() if configured else legacy
+            if not target.is_absolute():
+                target = Path(settings.project_root) / target
+            target = target.resolve()
+        except Exception:
+            target = legacy.resolve()
+
+    target.mkdir(parents=True, exist_ok=True)
+    target_file = target / "web_access.json"
+    legacy_file = legacy / "web_access.json"
+    if target != legacy and not target_file.exists() and legacy_file.exists():
+        migration_lock = FileLock(str(target_file) + ".migration.lock")
+        with migration_lock:
+            if not target_file.exists() and legacy_file.exists():
+                legacy_data = read_json_safe(legacy_file)
+                if isinstance(legacy_data, dict):
+                    try:
+                        atomic_json_write(
+                            target_file,
+                            legacy_data,
+                            backup=True,
+                            fsync=True,
+                            allow_fallback=False,
+                        )
+                        logger.info(
+                            "Migrated web access config from %s to durable root %s",
+                            legacy_file,
+                            target_file,
+                        )
+                    except OSError as exc:
+                        logger.warning(
+                            "Failed to migrate web access config from %s to %s: %s",
+                            legacy_file,
+                            target_file,
+                            exc,
+                        )
+                else:
+                    logger.error(
+                        "Legacy web access config %s is not recoverable; "
+                        "leaving durable target absent",
+                        legacy_file,
+                    )
+    return target
 
 
 class WebAccessConfig:
@@ -100,131 +177,132 @@ class WebAccessConfig:
     def __init__(self, data_dir: Path) -> None:
         self._path = data_dir / "web_access.json"
         self._data: dict[str, Any] = {}
-        self._lock = __import__("threading").Lock()
+        self._lock = threading.RLock()
+        self._file_lock = FileLock(str(self._path) + ".lock")
+        self._disk_version: tuple[int, int] | None = None
         self._load()
 
+    def _read_disk_locked(self) -> dict[str, Any]:
+        raw = read_json_safe(self._path)
+        if raw is None:
+            return {}
+        if not isinstance(raw, dict):
+            logger.error("Invalid web access config root in %s; ignoring it", self._path)
+            return {}
+        return dict(raw)
+
+    def _stat_disk_version(self) -> tuple[int, int] | None:
+        try:
+            stat = self._path.stat()
+        except OSError:
+            return None
+        return stat.st_mtime_ns, stat.st_size
+
+    def _save_locked(self) -> None:
+        atomic_json_write(
+            self._path,
+            self._data,
+            backup=True,
+            fsync=True,
+            allow_fallback=False,
+        )
+        self._disk_version = self._stat_disk_version()
+
     def _load(self) -> None:
-        if self._path.exists():
-            try:
-                self._data = json.loads(self._path.read_text("utf-8"))
-            except Exception:
-                # File is corrupt (e.g. truncated by power loss before fsync
-                # took effect). Log at ERROR with traceback; we regenerate a
-                # fresh config below. User-visible consequence: any previously
-                # stored password is lost, so the user will need to set it
-                # again. We don't keep a backup because the only meaningful
-                # field is the password hash, which is by design non-recoverable.
-                logger.error(
-                    "Failed to read %s — file appears corrupted; "
-                    "regenerating fresh config (any saved password will be lost)",
-                    self._path,
-                    exc_info=True,
+        with self._lock, self._file_lock:
+            self._data = self._read_disk_locked()
+            env_password = os.environ.get(PASSWORD_ENV_VAR, "").strip()
+            needs_save = False
+
+            if not self._data.get("jwt_secret"):
+                self._data["jwt_secret"] = secrets.token_hex(32)
+                needs_save = True
+
+            if not self._data.get("data_epoch"):
+                self._data["data_epoch"] = secrets.token_hex(8)
+                needs_save = True
+
+            if not self._data.get("token_version"):
+                self._data["token_version"] = 1
+                needs_save = True
+
+            if env_password:
+                existing_hash = self._data.get("password_hash", "")
+                existing_salt = self._data.get("password_salt", "")
+                if (
+                    not existing_hash
+                    or not existing_salt
+                    or not _verify_password(env_password, existing_hash, existing_salt)
+                ):
+                    hash_hex, salt_hex = _hash_password(env_password)
+                    self._data["password_hash"] = hash_hex
+                    self._data["password_salt"] = salt_hex
+                    self._data["password_plain_hint"] = _make_hint(env_password)
+                    self._data["password_user_set"] = True
+                    needs_save = True
+                elif not self._data.get("password_user_set"):
+                    self._data["password_user_set"] = True
+                    needs_save = True
+
+            if needs_save:
+                self._data["updated_at"] = time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
                 )
-                self._data = {}
+                self._save_locked()
+            else:
+                self._disk_version = self._stat_disk_version()
 
-        env_password = os.environ.get(PASSWORD_ENV_VAR, "").strip()
-        needs_save = False
+    def _refresh_for_mutation_locked(self) -> None:
+        latest = self._read_disk_locked()
+        if latest:
+            self._data = latest
+        self._disk_version = self._stat_disk_version()
 
-        if not self._data.get("jwt_secret"):
-            self._data["jwt_secret"] = secrets.token_hex(32)
-            needs_save = True
-
-        if not self._data.get("data_epoch"):
-            self._data["data_epoch"] = secrets.token_hex(8)
-            needs_save = True
-
-        if not self._data.get("token_version"):
-            self._data["token_version"] = 1
-            needs_save = True
-
-        if env_password:
-            # Environment variable overrides stored password — but only update
-            # if the password actually changed (avoids needless rehash on every start)
-            existing_hash = self._data.get("password_hash", "")
-            existing_salt = self._data.get("password_salt", "")
-            if (
-                not existing_hash
-                or not existing_salt
-                or not _verify_password(env_password, existing_hash, existing_salt)
-            ):
-                hash_hex, salt_hex = _hash_password(env_password)
-                self._data["password_hash"] = hash_hex
-                self._data["password_salt"] = salt_hex
-                self._data["password_plain_hint"] = _make_hint(env_password)
-                self._data["password_user_set"] = True
-                needs_save = True
-            elif not self._data.get("password_user_set"):
-                self._data["password_user_set"] = True
-                needs_save = True
-        # Note: the auto-generated password branch was intentionally removed in
-        # v1.28. A fresh install now leaves ``password_hash`` empty until the
-        # user completes the Setup flow (see ``middleware_setup_gate``). This
-        # eliminates the previous footgun where the auto-generated password
-        # was only printed once to logs and easily missed in Docker / systemd
-        # deployments.
-
-        if needs_save:
-            self._data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            self._save()
-
-    def _save(self) -> None:
-        """Persist ``self._data`` to disk atomically and durably.
-
-        Sequence: write to ``*.tmp`` → ``flush`` + ``fsync`` the file →
-        ``os.replace`` for atomic swap → ``fsync`` parent dir (POSIX only).
-        This protects against power loss between bytes-flush and rename, which
-        is the most common cause of ``web_access.json`` corruption reports.
-        Windows does not support directory ``fsync`` but ``os.replace`` is
-        atomic on NTFS so the rename itself is durable enough.
-        """
-        with self._lock:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._path.with_suffix(".tmp")
-            payload = json.dumps(self._data, indent=2) + "\n"
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.write(payload)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self._path)
-            if os.name == "posix":
-                try:
-                    dir_fd = os.open(str(self._path.parent), os.O_RDONLY)
-                    try:
-                        os.fsync(dir_fd)
-                    finally:
-                        os.close(dir_fd)
-                except OSError as exc:
-                    logger.warning(
-                        "Failed to fsync data dir %s: %s",
-                        self._path.parent,
-                        exc,
-                    )
+    def _refresh_if_changed(self) -> None:
+        observed = self._stat_disk_version()
+        if observed == self._disk_version:
+            return
+        with self._lock, self._file_lock:
+            observed = self._stat_disk_version()
+            if observed == self._disk_version:
+                return
+            latest = self._read_disk_locked()
+            if latest:
+                self._data = latest
+            self._disk_version = self._stat_disk_version()
 
     @property
     def jwt_secret(self) -> str:
+        self._refresh_if_changed()
         return self._data["jwt_secret"]
 
     @property
     def token_version(self) -> int:
+        self._refresh_if_changed()
         return self._data.get("token_version", 1)
 
     @property
     def data_epoch(self) -> str:
+        self._refresh_if_changed()
         return self._data.get("data_epoch", "")
 
     @property
     def password_hint(self) -> str:
+        self._refresh_if_changed()
         return self._data.get("password_plain_hint", "")
 
     def verify_password(self, password: str) -> bool:
-        h = self._data.get("password_hash", "")
-        s = self._data.get("password_salt", "")
+        self._refresh_if_changed()
+        with self._lock:
+            h = self._data.get("password_hash", "")
+            s = self._data.get("password_salt", "")
         if not h or not s:
             return False
         return _verify_password(password, h, s)
 
     @property
     def password_user_set(self) -> bool:
+        self._refresh_if_changed()
         return self._data.get("password_user_set", False)
 
     @property
@@ -237,17 +315,22 @@ class WebAccessConfig:
         the same condition that :meth:`verify_password` checks before
         comparing.
         """
+        self._refresh_if_changed()
         return bool(self._data.get("password_hash")) and bool(self._data.get("password_salt"))
 
     def change_password(self, new_password: str) -> None:
         hash_hex, salt_hex = _hash_password(new_password)
-        self._data["password_hash"] = hash_hex
-        self._data["password_salt"] = salt_hex
-        self._data["password_plain_hint"] = _make_hint(new_password)
-        self._data["password_user_set"] = True
-        self._data["token_version"] = self.token_version + 1
-        self._data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        self._save()
+        with self._lock, self._file_lock:
+            self._refresh_for_mutation_locked()
+            self._data["password_hash"] = hash_hex
+            self._data["password_salt"] = salt_hex
+            self._data["password_plain_hint"] = _make_hint(new_password)
+            self._data["password_user_set"] = True
+            self._data["token_version"] = int(self._data.get("token_version", 1)) + 1
+            self._data["updated_at"] = time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+            )
+            self._save_locked()
 
     def clear_password(self) -> None:
         """Drop the password hash so the Setup flow is required again.
@@ -262,13 +345,17 @@ class WebAccessConfig:
         them would invalidate session storage signed under those keys, which
         is more disruptive than necessary for a password reset.
         """
-        self._data.pop("password_hash", None)
-        self._data.pop("password_salt", None)
-        self._data.pop("password_plain_hint", None)
-        self._data["password_user_set"] = False
-        self._data["token_version"] = self.token_version + 1
-        self._data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        self._save()
+        with self._lock, self._file_lock:
+            self._refresh_for_mutation_locked()
+            self._data.pop("password_hash", None)
+            self._data.pop("password_salt", None)
+            self._data.pop("password_plain_hint", None)
+            self._data["password_user_set"] = False
+            self._data["token_version"] = int(self._data.get("token_version", 1)) + 1
+            self._data["updated_at"] = time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+            )
+            self._save_locked()
 
     def create_access_token(self) -> str:
         claims = TokenClaims(
@@ -430,17 +517,37 @@ def is_trusted_local(request: Request) -> bool:
     """
     if not _is_local_request(request):
         return False
-    trust_proxy = os.environ.get("TRUST_PROXY", "").lower() in ("1", "true", "yes")
-    if trust_proxy and request.headers.get("x-forwarded-for"):
+    if request.headers.get("x-forwarded-for") or request.headers.get("forwarded"):
         return False
     return True
 
 
+def is_private_direct_request(request: Request) -> bool:
+    """Allow keyless /v1 only for direct private-network peers."""
+    if not request.client:
+        return False
+    if request.headers.get("x-forwarded-for") or request.headers.get("forwarded"):
+        return False
+    try:
+        address = ipaddress.ip_address(request.client.host.removeprefix("::ffff:"))
+    except ValueError:
+        return False
+    return address.is_private or address.is_loopback or address.is_link_local
+
+
 def _is_auth_exempt(path: str) -> bool:
-    """Check if the path is exempt from authentication."""
+    """Check auth exemptions using real path-segment boundaries.
+
+    A raw ``startswith`` would make ``/webhook`` inherit the exemption for
+    ``/web`` and ``/docs-private`` inherit ``/docs``. Only the exact path or a
+    slash-delimited child path is exempt.
+    """
     if path in AUTH_EXEMPT_PATHS:
         return True
-    return any(path.startswith(prefix) for prefix in AUTH_EXEMPT_PREFIXES)
+    return any(
+        path == prefix or path.startswith(prefix.rstrip("/") + "/")
+        for prefix in AUTH_EXEMPT_PREFIXES
+    )
 
 
 def create_auth_middleware(config: WebAccessConfig):
@@ -452,6 +559,12 @@ def create_auth_middleware(config: WebAccessConfig):
             return await call_next(request)
 
         path = request.url.path
+
+        # Hermes uses this OpenAI-compatible gateway only over the direct
+        # Docker/private network. Requests carrying proxy forwarding headers
+        # still go through normal web authentication.
+        if path.startswith("/v1/") and is_private_direct_request(request):
+            return await call_next(request)
 
         # Static files and auth endpoints are always accessible
         if _is_auth_exempt(path):

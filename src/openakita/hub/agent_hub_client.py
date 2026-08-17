@@ -12,17 +12,22 @@ AgentHubClient — 与 OpenAkita Platform Agent Store 交互的客户端
 from __future__ import annotations
 
 import logging
+import os
+import re
+import secrets
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 from ..config import settings
+from ..agents.manifest import MAX_PACKAGE_SIZE
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 30.0
 DOWNLOAD_TIMEOUT = 120.0
+_SAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 class AgentHubClient:
@@ -88,28 +93,70 @@ class AgentHubClient:
         resp.raise_for_status()
         return resp.json()
 
-    async def download(self, agent_id: str, save_dir: Path | None = None) -> Path:
-        """下载 Agent 包到本地，返回文件路径"""
-        client = await self._get_client()
-        resp = await client.get(
-            f"/agents/{agent_id}/download",
-            follow_redirects=True,
-            timeout=DOWNLOAD_TIMEOUT,
-        )
-        resp.raise_for_status()
+    @staticmethod
+    def _safe_package_filename(agent_id: str) -> str:
+        safe_id = _SAFE_FILENAME.sub("-", str(agent_id or "").strip()).strip(".-_")
+        if not safe_id:
+            safe_id = f"agent-{secrets.token_hex(6)}"
+        return f"{safe_id[:128]}.akita-agent"
 
+    async def download(self, agent_id: str, save_dir: Path | None = None) -> Path:
+        """Download an Agent package to the durable data root.
+
+        The remote ``Content-Disposition`` filename is intentionally ignored:
+        Hub metadata is untrusted input and must never be allowed to select a
+        filesystem path. The response is streamed with a strict package-size
+        limit so a broken or hostile Hub cannot exhaust process memory or disk.
+        """
+        client = await self._get_client()
         if save_dir is None:
-            save_dir = settings.project_root / "data" / "agent_packages"
+            save_dir = Path(settings.data_dir) / "agent_packages"
+        save_dir = Path(save_dir).expanduser().resolve()
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        filename = f"{agent_id}.akita-agent"
-        cd = resp.headers.get("content-disposition", "")
-        if "filename=" in cd:
-            filename = cd.split("filename=")[-1].strip('" ')
+        file_path = save_dir / self._safe_package_filename(agent_id)
+        temp_path = save_dir / f".{file_path.name}.{os.getpid()}.{secrets.token_hex(6)}.tmp"
+        total = 0
+        try:
+            async with client.stream(
+                "GET",
+                f"/agents/{agent_id}/download",
+                follow_redirects=True,
+                timeout=DOWNLOAD_TIMEOUT,
+            ) as resp:
+                resp.raise_for_status()
+                declared = resp.headers.get("content-length")
+                if declared:
+                    try:
+                        declared_size = int(declared)
+                    except ValueError:
+                        declared_size = 0
+                    if declared_size > MAX_PACKAGE_SIZE:
+                        raise ValueError(
+                            f"Agent package exceeds safety limit: {declared_size} bytes"
+                        )
 
-        file_path = save_dir / filename
-        file_path.write_bytes(resp.content)
-        logger.info(f"Downloaded agent package: {file_path} ({len(resp.content)} bytes)")
+                with temp_path.open("wb") as out:
+                    async for chunk in resp.aiter_bytes(1024 * 1024):
+                        total += len(chunk)
+                        if total > MAX_PACKAGE_SIZE:
+                            raise ValueError(
+                                f"Agent package exceeds safety limit: {total} bytes"
+                            )
+                        out.write(chunk)
+                    out.flush()
+                    os.fsync(out.fileno())
+
+            if total <= 0:
+                raise ValueError("Downloaded Agent package is empty")
+            os.replace(temp_path, file_path)
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        logger.info("Downloaded agent package: %s (%d bytes)", file_path, total)
         return file_path
 
     async def publish(

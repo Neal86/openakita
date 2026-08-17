@@ -1,15 +1,45 @@
 wechat:
+  # Stable identifier for this logged-in Windows WeChat account / connector instance.
+  account_id: pc01
+
+  # Backward-compatible group allowlist.
   groups:
     - 客户群A
     - 客户群B
+
+  # Optional private chats to monitor.
+  private_chats:
+    - 客户张三
+
+  # Alternative unified form. Entries here are merged with groups/private_chats above.
+  chats:
+    - name: VIP客户群
+      type: group
+    - name: 客户李四
+      type: private
+
   ignore_senders:
     - OpenAkita
     - 客服助手
+
   reply_prefix: ""
   poll_interval_seconds: 1
   min_send_interval_seconds: 3
   merge_window_seconds: 2
   duplicate_ttl_seconds: 600
+
+group_policy:
+  # all | mention | question | mention_or_question
+  mode: mention_or_question
+
+  # Used when mode includes mention. Match the displayed @ name in incoming text.
+  mention_names:
+    - 客服
+    - 客服助手
+
+  # Prefix group replies with textual "@发送人" so the target is explicit.
+  # wxauto4/WeChat-version support determines whether this becomes a native WeChat mention.
+  mention_sender_on_reply: true
 
 openakita:
   command: openakita
@@ -17,17 +47,25 @@ openakita:
   timeout_seconds: 180
   working_directory: ""
   prompt_template: |
-    你正在通过个人微信群接收客户消息。
-    群名称：{group_name}
-    发送人：{sender}
+    你正在通过 Windows 微信消息 Gateway 接收客户消息。
+    微信账号：{account_id}
+    conversation_id：{conversation_id}
+    会话类型：{conversation_type}
+    会话名称：{chat_name}
+    会话 ID：{chat_id}
+    发送人：{sender_name}
+    sender_id：{sender_id}
+    message_id：{message_id}
     客户消息：{message}
 
     请按照 Agent「{agent_id}」中已经配置的身份、规则、知识库、技能和 MCP 处理该消息。
     订单、物流、库存、退货等事实必须通过已配置的领星 WMS MCP 查询，不得猜测。
-    只输出最终要发回微信群的回复正文，不要输出分析过程、Markdown 代码块或系统说明。
+    只输出最终回复正文。不要改变、猜测或输出新的 conversation_id；路由由 Windows Connector 负责。
+    不要输出分析过程、Markdown 代码块或系统说明。
 
 runtime:
   log_level: INFO
   log_file: logs/wechat-bridge.log
   state_file: data/wechat-bridge-state.json
+  event_file: data/wechat-bridge-events.jsonl
   failed_message_file: data/wechat-bridge-failed.jsonl

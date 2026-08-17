@@ -21,6 +21,7 @@ import { WecomQRModal } from "../components/WecomQRModal";
 import { WechatQRModal } from "../components/WechatQRModal";
 import { PluginOnboardModal } from "../components/PluginOnboardModal";
 import { AgentIcon } from "../components/AgentIcon";
+import { WindowsConnectorPanel } from "../components/WindowsConnectorPanel";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -237,7 +238,7 @@ export function IMView({
 }) {
   const { t } = useTranslation();
   const api = apiBaseUrl ?? DEFAULT_API;
-  const [activeTab, setActiveTab] = useState<"messages" | "groupPolicy">("messages");
+  const [activeTab, setActiveTab] = useState<"messages" | "groupPolicy" | "windowsApps">("messages");
 
   if (!serviceRunning) {
     return (
@@ -266,7 +267,7 @@ export function IMView({
           <ToggleGroup
             type="single"
             value={activeTab}
-            onValueChange={(v) => { if (v) setActiveTab(v as "messages" | "groupPolicy"); }}
+            onValueChange={(v) => { if (v) setActiveTab(v as "messages" | "groupPolicy" | "windowsApps" | "windowsApps" | "windowsApps" | "windowsApps"); }}
             variant="outline"
             className="bg-background shadow-sm"
           >
@@ -282,6 +283,12 @@ export function IMView({
             >
               {t("im.tabGroupPolicy")}
             </ToggleGroupItem>
+            <ToggleGroupItem
+              value="windowsApps"
+              className="text-sm px-4 data-[state=on]:bg-primary data-[state=on]:text-primary-foreground data-[state=on]:border-primary"
+            >
+              本机应用
+            </ToggleGroupItem>
           </ToggleGroup>
         </div>
       </div>
@@ -289,6 +296,7 @@ export function IMView({
       <Card className="flex-1 flex overflow-hidden border-border/80 shadow-sm bg-background">
         {activeTab === "messages" && <MessagesTab serviceRunning={serviceRunning} apiBase={api} />}
         {activeTab === "groupPolicy" && <GroupPolicyTab apiBase={api} />}
+        {activeTab === "windowsApps" && <WindowsConnectorPanel apiBaseUrl={api} />}
       </Card>
     </div>
   );

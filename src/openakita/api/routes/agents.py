@@ -39,6 +39,7 @@ VALID_BOT_TYPES = frozenset(
         "onebot_reverse",
         "qqbot",
         "wechat",
+        "wechat_desktop",
     }
 )
 VALID_PROFILE_LIST_MODES = frozenset({"all", "inclusive", "exclusive"})
@@ -320,6 +321,10 @@ async def create_bot(body: BotCreateRequest):
         )
     if not isinstance(body.credentials, dict):
         raise HTTPException(status_code=400, detail="credentials must be a dict")
+    from openakita.agents.profile import agent_profile_exists
+
+    if not agent_profile_exists(body.agent_profile_id):
+        raise HTTPException(status_code=404, detail="Agent profile not found")
 
     existing_ids = {b.get("id") for b in settings.im_bots if isinstance(b, dict)}
     if body.id in existing_ids:
@@ -370,6 +375,10 @@ async def update_bot(bot_id: str, body: BotUpdateRequest):
     if body.name is not None:
         bot["name"] = body.name
     if body.agent_profile_id is not None:
+        from openakita.agents.profile import agent_profile_exists
+
+        if not agent_profile_exists(body.agent_profile_id):
+            raise HTTPException(status_code=404, detail="Agent profile not found")
         bot["agent_profile_id"] = body.agent_profile_id
     if body.enabled is not None:
         bot["enabled"] = body.enabled
@@ -671,13 +680,83 @@ async def delete_agent_profile(profile_id: str):
 
     store = get_profile_store()
 
+    from openakita.config import settings
+
+    referencing_bots = [
+        str(bot.get("id") or "")
+        for bot in settings.im_bots
+        if isinstance(bot, dict)
+        and str(bot.get("agent_profile_id") or "default") == profile_id
+    ]
+    if referencing_bots:
+        raise HTTPException(
+            status_code=409,
+            detail="Agent is still used by bots: " + ", ".join(sorted(referencing_bots)),
+        )
+
     try:
         deleted = store.delete(profile_id)
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
+    except OSError as exc:
+        logger.error("[Agents API] Failed to delete profile %s data: %s", profile_id, exc)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete Agent profile data",
+        ) from exc
 
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found")
+
+    # Profile deletion is authoritative.  Container cleanup is best-effort,
+    # but execution/binding metadata must always be removed so a failed Docker
+    # call cannot leave a ghost Agent bound to Hermes state.
+    from openakita.hermes.bindings import AgentHermesBindingStore
+    from openakita.hermes.execution import (
+        AgentExecutionStore,
+        ExecutionMode,
+        HermesInstanceMode,
+        HermesInstanceStore,
+    )
+    from openakita.hermes.lifecycle import HermesLifecycleService
+
+    execution_store = AgentExecutionStore()
+    binding_store = AgentHermesBindingStore()
+    execution = execution_store.get(profile_id)
+    try:
+        if (
+            execution.execution_mode == ExecutionMode.HERMES
+            and execution.hermes_instance_mode == HermesInstanceMode.DEDICATED
+            and execution.hermes_instance_id
+        ):
+            instance = HermesInstanceStore().get(execution.hermes_instance_id)
+            if instance is not None:
+                await HermesLifecycleService().remove(instance, delete_data=False)
+    except Exception as exc:
+        # Preserve the instance record when Docker cleanup fails so the
+        # execution-instance page/operator can retry removing the resource.
+        logger.warning("[Agents API] Hermes runtime cleanup failed for %s: %s", profile_id, exc)
+    finally:
+        execution_store.delete(profile_id)
+        binding_store.delete(profile_id)
+
+    from openakita.windows_connector import windows_connector_manager
+
+    for grant in await windows_connector_manager.list_grants():
+        if str(grant.get("agent_profile_id") or "") != profile_id:
+            continue
+        grant_id = str(grant.get("id") or "")
+        if not grant_id:
+            continue
+        try:
+            await windows_connector_manager.delete_grant(grant_id)
+        except Exception as exc:
+            logger.warning(
+                "[Agents API] Windows grant cleanup failed for %s/%s: %s",
+                profile_id,
+                grant_id,
+                exc,
+            )
 
     logger.info(f"[Agents API] Deleted profile: {profile_id}")
     emit_agent_profiles_changed("deleted", profile_id=profile_id)
@@ -819,7 +898,27 @@ async def write_profile_identity_file(
     identity_dir.mkdir(parents=True, exist_ok=True)
 
     fp = identity_dir / filename
-    fp.write_text(body.content, encoding="utf-8")
+    from openakita.utils.atomic_io import safe_write
+
+    try:
+        safe_write(
+            fp,
+            body.content,
+            backup=True,
+            fsync=True,
+            allow_fallback=False,
+        )
+    except OSError as exc:
+        logger.error(
+            "[Agents API] Failed to persist identity file %s for %s: %s",
+            filename,
+            profile_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to persist Agent identity file",
+        ) from exc
 
     _invalidate_profile_runtime(request, profile_id, f"profile identity {filename} write")
     logger.info(f"[Agents API] Wrote identity file {filename} for profile {profile_id}")
@@ -866,11 +965,6 @@ async def get_profile_memory_stats(profile_id: str):
             profile_id,
             e.reason,
         )
-        # Surface this in the unified DegradedBanner too. The registry
-        # key is per-profile so two simultaneously-broken profiles
-        # render as two separate banner entries. ``manual_quarantine``
-        # is intentional — there is no generic quarantine target for
-        # arbitrary profile dirs, so the repair is operator-driven.
         try:
             from openakita.storage.degraded import registry as _degraded
 
@@ -912,7 +1006,18 @@ async def delete_profile_data(profile_id: str, request: Request):
 
     profile_dir = store.get_profile_dir(profile_id)
     if profile_dir.is_dir():
-        shutil.rmtree(profile_dir, ignore_errors=True)
+        try:
+            shutil.rmtree(profile_dir)
+        except OSError as exc:
+            logger.error(
+                "[Agents API] Failed to delete profile data for %s: %s",
+                profile_id,
+                exc,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to delete Agent profile data",
+            ) from exc
 
     store.update(
         profile_id,
@@ -953,8 +1058,6 @@ async def get_topology(request: Request):
     pool = getattr(request.app.state, "agent_pool", None)
     session_manager = getattr(request.app.state, "session_manager", None)
 
-    # Always prefer the module-level _orchestrator — AgentToolHandler writes
-    # sub-agent states to this instance, so we must read from the same one.
     orchestrator = None
     try:
         from openakita.main import _orchestrator
@@ -1078,7 +1181,6 @@ async def get_topology(request: Request):
                     }
                 )
 
-    # Sub-agent states from orchestrator
     if orchestrator and pool:
         for entry in pool.get_stats().get("sessions", []):
             sid = entry["session_id"]
@@ -1139,10 +1241,6 @@ async def get_topology(request: Request):
             except Exception as exc:
                 logger.warning(f"[Topology] sub-agent states error for {sid}: {exc}")
 
-    # Include sessions from session_manager that aren't in the pool
-    # (e.g. conversations whose agent instances were reaped due to idle timeout).
-    # Use chat_id as node ID to stay consistent with pool-based nodes (which use
-    # conversation_id), ensuring the frontend sees stable node IDs.
     pool_session_ids = {
         n["id"].split("::")[0] for n in nodes if not n["id"].startswith("dormant::")
     }
@@ -1195,7 +1293,6 @@ async def get_topology(request: Request):
         except Exception as exc:
             logger.warning(f"[Topology] session_manager fallback error: {exc}")
 
-    # Always include system presets as dormant neurons when not active (skip hidden)
     active_profile_ids = {n["profile_id"] for n in nodes}
     for pid, pinfo in profile_map.items():
         if pid in hidden_profile_ids:
@@ -1222,7 +1319,6 @@ async def get_topology(request: Request):
                     }
                 )
 
-    # Aggregate stats
     total_req = 0
     successful = 0
     failed = 0

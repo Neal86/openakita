@@ -1,19 +1,42 @@
 """Persistent runtime registry for Windows WeChat connector nodes."""
-
 from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
+import os
 import secrets
+import shutil
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
+
+from filelock import FileLock
+
+from openakita.utils.atomic_io import atomic_json_write, read_json_safe
 
 SendCallable = Callable[[dict[str, Any]], Awaitable[None]]
 InboundCallback = Callable[[dict[str, Any]], Awaitable[None]]
-STATE_PATH = Path("data/wechat_desktop/nodes.json")
+LEGACY_STATE_PATH = Path("data/wechat_desktop/nodes.json")
+PAIRING_TICKET_MAX = 256
+DELIVERY_RECEIPT_TTL = timedelta(hours=24)
+DELIVERY_RECEIPT_MAX = 2048
+
+
+def _default_state_path() -> Path:
+    explicit = os.environ.get("OPENAKITA_DATA_DIR", "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve() / "wechat_desktop" / "nodes.json"
+    try:
+        from openakita.config import settings
+
+        return Path(settings.data_dir).resolve() / "wechat_desktop" / "nodes.json"
+    except Exception:
+        return Path.home() / ".openakita" / "data" / "wechat_desktop" / "nodes.json"
+
+
+STATE_PATH = _default_state_path()
 
 
 @dataclass(slots=True)
@@ -43,6 +66,7 @@ class WeChatNode:
     last_heartbeat_at: datetime | None = None
     accounts: dict[str, WeChatAccount] = field(default_factory=dict)
     send: SendCallable | None = None
+    connection_id: str = ""
 
 
 @dataclass(slots=True)
@@ -65,57 +89,155 @@ class DeliveryReceipt:
 
 class WeChatDesktopManager:
     def __init__(self, state_path: Path = STATE_PATH) -> None:
-        self._state_path = state_path
+        self._state_path = Path(state_path)
+        self._file_lock = FileLock(str(self._state_path) + ".lock")
         self._nodes: dict[str, WeChatNode] = {}
         self._pairings: dict[str, PairingTicket] = {}
         self._bindings: dict[tuple[str, str], str] = {}
         self._callbacks: dict[str, InboundCallback] = {}
         self._receipts: dict[str, DeliveryReceipt] = {}
         self._lock = asyncio.Lock()
+        self._migrate_legacy_state()
         self._load_state()
+
+    def _migrate_legacy_state(self) -> None:
+        try:
+            same = self._state_path.resolve() == LEGACY_STATE_PATH.resolve()
+        except OSError:
+            same = False
+        if self._state_path.exists() or same or not LEGACY_STATE_PATH.exists():
+            return
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._file_lock:
+            if self._state_path.exists() or not LEGACY_STATE_PATH.exists():
+                return
+            temp = self._state_path.with_name(
+                f".{self._state_path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+            )
+            try:
+                shutil.copy2(LEGACY_STATE_PATH, temp)
+                os.replace(temp, self._state_path)
+            except OSError:
+                pass
+            finally:
+                try:
+                    temp.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     @staticmethod
     def _hash(value: str) -> str:
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
-    def _load_state(self) -> None:
-        if not self._state_path.exists():
-            return
-        try:
-            data = json.loads(self._state_path.read_text("utf-8"))
-            for raw in data.get("nodes", []):
-                accounts: dict[str, WeChatAccount] = {}
-                for item in raw.get("accounts", []):
-                    groups = {g["id"]: WeChatConversation(g["id"], g.get("name", g["id"]), "group") for g in item.get("groups", []) if g.get("id")}
-                    contacts = {c["id"]: WeChatConversation(c["id"], c.get("name", c["id"]), "private") for c in item.get("contacts", []) if c.get("id")}
-                    account = WeChatAccount(
-                        id=str(item["id"]), nickname=str(item.get("nickname") or item["id"]),
-                        avatar_url=str(item.get("avatar_url") or ""),
-                        login_status="offline", groups=groups, contacts=contacts,
-                    )
-                    accounts[account.id] = account
-                node = WeChatNode(
-                    id=str(raw["id"]), name=str(raw.get("name") or raw["id"]),
-                    token_hash=str(raw.get("token_hash") or ""), status="offline",
-                    connector_version=str(raw.get("connector_version") or ""), accounts=accounts,
+    @staticmethod
+    def _conversation_map(items: list[dict[str, Any]], kind: str) -> dict[str, WeChatConversation]:
+        result: dict[str, WeChatConversation] = {}
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id") or "").strip()
+            if item_id:
+                result[item_id] = WeChatConversation(
+                    item_id,
+                    str(item.get("name") or item.get("nickname") or item_id),
+                    kind,
                 )
-                self._nodes[node.id] = node
-            for item in data.get("bindings", []):
-                self._bindings[(str(item["node_id"]), str(item["account_id"]))] = str(item["bot_id"])
-        except Exception:
-            self._nodes = {}
-            self._bindings = {}
+        return result
+
+    def _prune_pairings_locked(self, now: datetime | None = None) -> None:
+        now = now or datetime.now(UTC)
+        expired = [
+            key
+            for key, ticket in self._pairings.items()
+            if ticket.used or ticket.expires_at <= now
+        ]
+        for key in expired:
+            self._pairings.pop(key, None)
+        if len(self._pairings) > PAIRING_TICKET_MAX:
+            oldest = sorted(self._pairings.items(), key=lambda item: item[1].expires_at)
+            for key, _ticket in oldest[: len(self._pairings) - PAIRING_TICKET_MAX]:
+                self._pairings.pop(key, None)
+
+    def _prune_receipts_locked(self, now: datetime | None = None) -> None:
+        now = now or datetime.now(UTC)
+        cutoff = now - DELIVERY_RECEIPT_TTL
+        expired = [
+            request_id
+            for request_id, receipt in self._receipts.items()
+            if receipt.updated_at < cutoff
+        ]
+        for request_id in expired:
+            self._receipts.pop(request_id, None)
+        if len(self._receipts) > DELIVERY_RECEIPT_MAX:
+            oldest = sorted(self._receipts.items(), key=lambda item: item[1].updated_at)
+            for request_id, _receipt in oldest[: len(self._receipts) - DELIVERY_RECEIPT_MAX]:
+                self._receipts.pop(request_id, None)
+
+    def _load_state(self) -> None:
+        with self._file_lock:
+            data = read_json_safe(self._state_path)
+        if not isinstance(data, dict):
+            return
+        nodes: dict[str, WeChatNode] = {}
+        raw_nodes = data.get("nodes", [])
+        for raw in raw_nodes if isinstance(raw_nodes, list) else []:
+            if not isinstance(raw, dict):
+                continue
+            node_id = str(raw.get("id") or "").strip()
+            token_hash = str(raw.get("token_hash") or "").strip()
+            if not node_id or not token_hash:
+                continue
+            accounts: dict[str, WeChatAccount] = {}
+            raw_accounts = raw.get("accounts", [])
+            for item in raw_accounts if isinstance(raw_accounts, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                account_id = str(item.get("id") or "").strip()
+                if not account_id:
+                    continue
+                accounts[account_id] = WeChatAccount(
+                    id=account_id,
+                    nickname=str(item.get("nickname") or account_id),
+                    avatar_url=str(item.get("avatar_url") or ""),
+                    login_status="offline",
+                    groups=self._conversation_map(item.get("groups") or [], "group"),
+                    contacts=self._conversation_map(item.get("contacts") or [], "private"),
+                )
+            nodes[node_id] = WeChatNode(
+                id=node_id,
+                name=str(raw.get("name") or node_id),
+                token_hash=token_hash,
+                status="offline",
+                connector_version=str(raw.get("connector_version") or ""),
+                accounts=accounts,
+            )
+        bindings: dict[tuple[str, str], str] = {}
+        raw_bindings = data.get("bindings", [])
+        for item in raw_bindings if isinstance(raw_bindings, list) else []:
+            if not isinstance(item, dict):
+                continue
+            node_id = str(item.get("node_id") or "").strip()
+            account_id = str(item.get("account_id") or "").strip()
+            bot_id = str(item.get("bot_id") or "").strip()
+            node = nodes.get(node_id)
+            if node_id and account_id and bot_id and node and account_id in node.accounts:
+                bindings[(node_id, account_id)] = bot_id
+        self._nodes = nodes
+        self._bindings = bindings
 
     def _save_state_locked(self) -> None:
-        self._state_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
+            "version": 2,
             "nodes": [
                 {
-                    "id": node.id, "name": node.name, "token_hash": node.token_hash,
+                    "id": node.id,
+                    "name": node.name,
+                    "token_hash": node.token_hash,
                     "connector_version": node.connector_version,
                     "accounts": [
                         {
-                            "id": account.id, "nickname": account.nickname,
+                            "id": account.id,
+                            "nickname": account.nickname,
                             "avatar_url": account.avatar_url,
                             "groups": [{"id": x.id, "name": x.name} for x in account.groups.values()],
                             "contacts": [{"id": x.id, "name": x.name} for x in account.contacts.values()],
@@ -130,23 +252,32 @@ class WeChatDesktopManager:
                 for (node_id, account_id), bot_id in self._bindings.items()
             ],
         }
-        tmp = self._state_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), "utf-8")
-        tmp.replace(self._state_path)
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._file_lock:
+            atomic_json_write(self._state_path, payload)
 
     async def create_pairing_code(self, node_name: str, ttl_seconds: int = 600) -> str:
         code = "".join(str(secrets.randbelow(10)) for _ in range(8))
         async with self._lock:
+            self._prune_pairings_locked()
             self._pairings[self._hash(code)] = PairingTicket(
-                code_hash=self._hash(code), expires_at=datetime.now(UTC) + timedelta(seconds=max(60, ttl_seconds)),
-                node_name=node_name.strip() or "Windows WeChat Connector",
+                self._hash(code),
+                datetime.now(UTC) + timedelta(seconds=max(60, ttl_seconds)),
+                node_name.strip() or "Windows WeChat Connector",
             )
+            self._prune_pairings_locked()
         return code
+
+    async def cancel_pairing_code(self, code: str) -> bool:
+        async with self._lock:
+            self._prune_pairings_locked()
+            return self._pairings.pop(self._hash(code.strip()), None) is not None
 
     async def consume_pairing_code(self, code: str) -> tuple[str, str, str]:
         digest = self._hash(code.strip())
         async with self._lock:
-            ticket = self._pairings.get(digest)
+            self._prune_pairings_locked()
+            ticket = self._pairings.pop(digest, None)
             if ticket is None or ticket.used or ticket.expires_at < datetime.now(UTC):
                 raise ValueError("invalid or expired pairing code")
             ticket.used = True
@@ -162,6 +293,18 @@ class WeChatDesktopManager:
             expected = node.token_hash if node else ""
         return bool(expected) and secrets.compare_digest(expected, self._hash(node_token))
 
+    async def assert_current_connection(self, node_id: str, connection_id: str) -> None:
+        """Reject events from a socket that has already been superseded."""
+        async with self._lock:
+            node = self._nodes.get(node_id)
+            if (
+                node is None
+                or not connection_id
+                or node.connection_id != connection_id
+                or node.send is None
+            ):
+                raise ConnectionError("connector session has been replaced or disconnected")
+
     async def revoke_node(self, node_id: str) -> bool:
         async with self._lock:
             if self._nodes.pop(node_id, None) is None:
@@ -171,70 +314,108 @@ class WeChatDesktopManager:
             self._save_state_locked()
             return True
 
-    async def attach_node(self, node_id: str, *, node_token: str, send: SendCallable, connector_version: str = "") -> WeChatNode:
+    async def attach_node(
+        self,
+        node_id: str,
+        *,
+        node_token: str,
+        send: SendCallable,
+        connector_version: str = "",
+        connection_id: str = "",
+    ) -> WeChatNode:
         if not await self.authenticate_node(node_id, node_token):
             raise PermissionError("invalid connector credentials")
         async with self._lock:
             node = self._nodes[node_id]
             node.send = send
+            node.connection_id = connection_id or secrets.token_hex(12)
             node.status = "online"
             node.connector_version = connector_version
             node.last_heartbeat_at = datetime.now(UTC)
             self._save_state_locked()
             return node
 
-    async def detach_node(self, node_id: str) -> None:
+    async def detach_node(self, node_id: str, *, connection_id: str = "") -> None:
         async with self._lock:
             node = self._nodes.get(node_id)
-            if node:
-                node.status = "offline"
-                node.send = None
-                node.last_heartbeat_at = datetime.now(UTC)
+            if node is None:
+                return
+            if connection_id and node.connection_id and node.connection_id != connection_id:
+                return
+            node.status = "offline"
+            node.send = None
+            node.connection_id = ""
+            node.last_heartbeat_at = datetime.now(UTC)
 
-    async def heartbeat(self, node_id: str) -> None:
+    async def heartbeat(self, node_id: str, *, connection_id: str = "") -> None:
         async with self._lock:
             node = self._nodes.get(node_id)
-            if node:
-                node.status = "online"
-                node.last_heartbeat_at = datetime.now(UTC)
+            if node is None:
+                return
+            if connection_id and node.connection_id != connection_id:
+                raise ConnectionError("stale connector heartbeat")
+            node.status = "online"
+            node.last_heartbeat_at = datetime.now(UTC)
 
-    async def sync_accounts(self, node_id: str, accounts: list[dict[str, Any]]) -> None:
+    async def sync_accounts(
+        self,
+        node_id: str,
+        accounts: list[dict[str, Any]],
+        *,
+        connection_id: str = "",
+    ) -> None:
         async with self._lock:
             node = self._nodes.get(node_id)
             if node is None:
                 raise ValueError("unknown connector node")
+            if connection_id and node.connection_id != connection_id:
+                raise ConnectionError("stale connector account sync")
             previous = node.accounts
             synced: dict[str, WeChatAccount] = {}
-            for item in accounts:
-                account_id = str(item.get("id") or "").strip()
-                if not account_id:
+            for item in accounts if isinstance(accounts, list) else []:
+                if not isinstance(item, dict):
                     continue
-                old = previous.get(account_id)
-                synced[account_id] = WeChatAccount(
-                    id=account_id, nickname=str(item.get("nickname") or account_id),
-                    avatar_url=str(item.get("avatar_url") or ""),
-                    login_status=str(item.get("login_status") or "unknown"),
-                    groups=old.groups if old else {}, contacts=old.contacts if old else {},
-                )
+                account_id = str(item.get("id") or "").strip()
+                if account_id:
+                    old = previous.get(account_id)
+                    synced[account_id] = WeChatAccount(
+                        id=account_id,
+                        nickname=str(item.get("nickname") or account_id),
+                        avatar_url=str(item.get("avatar_url") or ""),
+                        login_status=str(item.get("login_status") or "unknown"),
+                        groups=old.groups if old else {},
+                        contacts=old.contacts if old else {},
+                    )
+            removed_account_ids = set(previous) - set(synced)
+            if removed_account_ids:
+                for key in [
+                    key
+                    for key in self._bindings
+                    if key[0] == node_id and key[1] in removed_account_ids
+                ]:
+                    self._bindings.pop(key, None)
             node.accounts = synced
             self._save_state_locked()
 
-    async def sync_conversations(self, node_id: str, account_id: str, *, groups: list[dict[str, Any]], contacts: list[dict[str, Any]]) -> None:
+    async def sync_conversations(
+        self,
+        node_id: str,
+        account_id: str,
+        *,
+        groups: list[dict[str, Any]],
+        contacts: list[dict[str, Any]],
+        connection_id: str = "",
+    ) -> None:
         async with self._lock:
             node = self._nodes.get(node_id)
+            if node is not None and connection_id and node.connection_id != connection_id:
+                raise ConnectionError("stale connector conversation sync")
             account = node.accounts.get(account_id) if node else None
             if account is None:
                 raise ValueError("unknown WeChat account")
             account.groups = self._conversation_map(groups, "group")
             account.contacts = self._conversation_map(contacts, "private")
             self._save_state_locked()
-
-    @staticmethod
-    def _conversation_map(items: list[dict[str, Any]], kind: str) -> dict[str, WeChatConversation]:
-        return {
-            str(item["id"]): WeChatConversation(str(item["id"]), str(item.get("name") or item.get("nickname") or item["id"]), kind)
-            for item in items if item.get("id")
-        }
 
     async def list_nodes(self) -> list[dict[str, Any]]:
         async with self._lock:
@@ -248,17 +429,21 @@ class WeChatDesktopManager:
     @staticmethod
     def _node_dict(node: WeChatNode) -> dict[str, Any]:
         return {
-            "id": node.id, "name": node.name, "status": node.status,
+            "id": node.id,
+            "name": node.name,
+            "status": node.status,
             "connector_version": node.connector_version,
             "last_heartbeat_at": node.last_heartbeat_at.isoformat() if node.last_heartbeat_at else None,
             "accounts": [
                 {
-                    "id": a.id, "nickname": a.nickname, "avatar_url": a.avatar_url,
-                    "login_status": a.login_status,
-                    "groups": [{"id": x.id, "name": x.name, "type": x.type} for x in a.groups.values()],
-                    "contacts": [{"id": x.id, "name": x.name, "type": x.type} for x in a.contacts.values()],
+                    "id": account.id,
+                    "nickname": account.nickname,
+                    "avatar_url": account.avatar_url,
+                    "login_status": account.login_status,
+                    "groups": [{"id": x.id, "name": x.name, "type": x.type} for x in account.groups.values()],
+                    "contacts": [{"id": x.id, "name": x.name, "type": x.type} for x in account.contacts.values()],
                 }
-                for a in node.accounts.values()
+                for account in node.accounts.values()
             ],
         }
 
@@ -270,7 +455,9 @@ class WeChatDesktopManager:
                 raise ValueError("selected Windows node or WeChat account does not exist")
             existing = self._bindings.get(key)
             if enabled and existing and existing != bot_id:
-                raise ValueError(f"WeChat account {account_id} on node {node_id} is already bound to bot {existing}")
+                raise ValueError(
+                    f"WeChat account {account_id} on node {node_id} is already bound to bot {existing}"
+                )
             if enabled:
                 self._bindings[key] = bot_id
             elif existing == bot_id:
@@ -285,25 +472,57 @@ class WeChatDesktopManager:
         async with self._lock:
             self._callbacks.pop(bot_id, None)
 
-    async def dispatch_inbound(self, bot_id: str, payload: dict[str, Any]) -> None:
+    async def dispatch_inbound(
+        self, node_id: str, bot_id: str, payload: dict[str, Any]
+    ) -> None:
+        account_id = str(payload.get("wechat_account_id") or "").strip()
+        if not account_id:
+            raise ValueError("wechat_account_id is required")
         async with self._lock:
-            callback = self._callbacks.get(bot_id)
+            bound_bot = self._bindings.get((node_id, account_id))
+            callback = self._callbacks.get(bot_id) if bound_bot == bot_id else None
+        if bound_bot != bot_id:
+            raise PermissionError(
+                "connector message does not match the server-side WeChat Bot binding"
+            )
         if callback is None:
             raise ValueError(f"wechat desktop bot is not running: {bot_id}")
         await callback(payload)
 
-    async def update_delivery_receipt(self, *, request_id: str, bot_id: str, node_id: str, status: str, detail: str = "") -> None:
-        if not request_id:
-            return
-        async with self._lock:
-            self._receipts[request_id] = DeliveryReceipt(request_id, bot_id, node_id, status, detail)
+    async def update_delivery_receipt(
+        self,
+        *,
+        request_id: str,
+        bot_id: str,
+        node_id: str,
+        status: str,
+        detail: str = "",
+    ) -> None:
+        if request_id:
+            async with self._lock:
+                self._prune_receipts_locked()
+                self._receipts[request_id] = DeliveryReceipt(
+                    request_id,
+                    bot_id,
+                    node_id,
+                    status,
+                    detail,
+                )
+                self._prune_receipts_locked()
 
     async def get_delivery_receipt(self, request_id: str) -> dict[str, Any] | None:
         async with self._lock:
-            r = self._receipts.get(request_id)
-            return None if r is None else {
-                "request_id": r.request_id, "bot_id": r.bot_id, "node_id": r.node_id,
-                "status": r.status, "detail": r.detail, "updated_at": r.updated_at.isoformat(),
+            self._prune_receipts_locked()
+            receipt = self._receipts.get(request_id)
+            if receipt is None:
+                return None
+            return {
+                "request_id": receipt.request_id,
+                "bot_id": receipt.bot_id,
+                "node_id": receipt.node_id,
+                "status": receipt.status,
+                "detail": receipt.detail,
+                "updated_at": receipt.updated_at.isoformat(),
             }
 
     async def send_command(self, node_id: str, command: dict[str, Any]) -> None:

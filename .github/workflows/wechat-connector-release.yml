@@ -1,0 +1,108 @@
+# Rebuild latest Windows Connector package
+name: Windows Connector Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/hermes-multi-agent]
+    paths:
+      - "src/openakita/windows_connector/**"
+      - "src/openakita/wechat_desktop/connector_bundle/**"
+      - "src/openakita/api/routes/windows_connector.py"
+      - "tests/windows_connector/**"
+      - "tests/wechat_desktop/**"
+      - "tests/hermes/**"
+      - "scripts/build_wechat_connector.py"
+      - "build/wechat_connector_*"
+      - ".github/workflows/wechat-connector-release.yml"
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  windows-connector:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install connector build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r src/openakita/wechat_desktop/connector_bundle/requirements.txt
+          pip install -e ".[dev]"
+          pip install -e ./openakita-plugin-sdk
+
+      - name: Patch Windows Connector shutil import regression
+        shell: pwsh
+        run: |
+          $path = "src/openakita/windows_connector/manager.py"
+          $text = Get-Content $path -Raw
+          if ($text -notmatch '(?m)^import shutil$') {
+            $text = $text -replace "import secrets`r?`n", "import secrets`r`nimport shutil`r`n"
+            Set-Content -Path $path -Value $text -Encoding utf8
+          }
+
+      - name: Compile Windows Connector modules
+        shell: bash
+        run: |
+          python -m compileall -q src/openakita/windows_connector src/openakita/wechat_desktop/connector_bundle src/openakita/api/routes/windows_connector.py
+
+      - name: Windows Connector release regression gate
+        shell: pwsh
+        run: python -m pytest -q tests/windows_connector tests/wechat_desktop tests/hermes
+
+      - name: Build generic Windows Connector package
+        shell: pwsh
+        run: python scripts/build_wechat_connector.py
+
+      - name: Validate release archive
+        shell: pwsh
+        run: |
+          $zip = "dist/OpenAkita-Windows-Connector-Windows-x64.zip"
+          if (!(Test-Path $zip)) { throw "release ZIP missing" }
+          Expand-Archive $zip -DestinationPath dist/package-check -Force
+          $root = "dist/package-check/OpenAkita-Windows-Connector-Windows-x64"
+          @(
+            "$root/OpenAkita-Windows-Connector.exe",
+            "$root/OpenAkita-Windows-Connector-Worker.exe",
+            "$root/README.txt"
+          ) | ForEach-Object { if (!(Test-Path $_)) { throw "missing package file: $_" } }
+
+      - name: Connector UI startup smoke test
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path "dist/OpenAkita-Windows-Connector-Windows-x64/OpenAkita-Windows-Connector.exe"
+          $proc = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 5
+          if ($proc.HasExited) { throw "Connector exited during startup: $($proc.ExitCode)" }
+          Stop-Process -Id $proc.Id -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenAkita-Windows-Connector-Windows-x64
+          path: dist/OpenAkita-Windows-Connector-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish standalone Windows Connector release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "windows-connector-latest"
+          $file = "dist/OpenAkita-Windows-Connector-Windows-x64.zip"
+          gh release view $tag --repo "${{ github.repository }}" *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "OpenAkita Windows Connector Windows x64" --notes "Standalone generic remote Windows Connector for OpenAkita."
+          }
+          gh release upload $tag $file --repo "${{ github.repository }}" --clobber

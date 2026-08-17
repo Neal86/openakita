@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 from openakita.memory.types import normalize_tags
 
@@ -17,7 +18,9 @@ SUPPORTED_SPEC_VERSIONS = {"1.0", "1.1"}
 
 _ID_PATTERN = re.compile(r"^[a-z0-9]([a-z0-9-]{1,62}[a-z0-9])?$")
 _NO_DOUBLE_HYPHEN = re.compile(r"--")
-_SEMVER_PATTERN = re.compile(r"^\d+\.\d+\.\d+")
+_SEMVER_PATTERN = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
+_SKILL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_REPO_PART_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 MAX_PACKAGE_SIZE = 50 * 1024 * 1024  # 50MB
 MAX_SINGLE_FILE_SIZE = 10 * 1024 * 1024  # 10MB
@@ -45,6 +48,60 @@ FORBIDDEN_EXTENSIONS = frozenset(
         ".rpm",
     }
 )
+
+
+def validate_external_skill_source(source: str) -> bool:
+    """Return whether an external skill source is a safe GitHub repository reference.
+
+    Accepted forms are ``owner/repo``, ``owner/repo@skill-id`` and the HTTPS
+    equivalents under ``github.com``. Arbitrary hosts, non-HTTPS URLs, ports,
+    credentials, query strings, fragments and path traversal are rejected so
+    installing an untrusted Agent package cannot turn ``git clone`` into an
+    SSRF/arbitrary-network primitive.
+    """
+    if not isinstance(source, str) or not source or source != source.strip():
+        return False
+
+    repo_part = source
+    skill_part = ""
+    if "@" in source:
+        repo_part, skill_part = source.rsplit("@", 1)
+        if not _SKILL_ID_PATTERN.fullmatch(skill_part):
+            return False
+
+    if repo_part.startswith("https://"):
+        parsed = urlsplit(repo_part)
+        try:
+            port = parsed.port
+        except ValueError:
+            return False
+        if (
+            parsed.scheme != "https"
+            or (parsed.hostname or "").lower() != "github.com"
+            or parsed.username is not None
+            or parsed.password is not None
+            or port is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            return False
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) != 2:
+            return False
+        owner, repo = parts
+    else:
+        if "://" in repo_part or "\\" in repo_part:
+            return False
+        parts = repo_part.split("/")
+        if len(parts) != 2:
+            return False
+        owner, repo = parts
+
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    if owner in {".", ".."} or repo in {"", ".", ".."}:
+        return False
+    return bool(_REPO_PART_PATTERN.fullmatch(owner) and _REPO_PART_PATTERN.fullmatch(repo))
 
 
 @dataclass
@@ -142,6 +199,29 @@ class AgentManifest:
         if self.min_platform_version and not _SEMVER_PATTERN.match(self.min_platform_version):
             errors.append(f"Invalid min_platform_version: {self.min_platform_version!r}")
 
+        for field_name, skill_ids in (
+            ("bundled_skills", self.bundled_skills),
+            ("required_builtin_skills", self.required_builtin_skills),
+        ):
+            if not isinstance(skill_ids, list):
+                errors.append(f"{field_name} must be a list")
+                continue
+            for skill_id in skill_ids:
+                if not isinstance(skill_id, str) or not _SKILL_ID_PATTERN.fullmatch(skill_id):
+                    errors.append(f"Invalid {field_name} id: {skill_id!r}")
+
+        if not isinstance(self.required_external_skills, list):
+            errors.append("required_external_skills must be a list")
+        else:
+            for ref in self.required_external_skills:
+                if not isinstance(ref, ExternalSkillRef):
+                    errors.append(f"Invalid external skill reference: {ref!r}")
+                    continue
+                if not _SKILL_ID_PATTERN.fullmatch(ref.id or ""):
+                    errors.append(f"Invalid required_external_skills id: {ref.id!r}")
+                if not validate_external_skill_source(ref.source):
+                    errors.append(f"Invalid external skill source for {ref.id!r}: {ref.source!r}")
+
         return errors
 
     def to_dict(self) -> dict[str, Any]:
@@ -199,15 +279,38 @@ class AgentManifest:
 
 
 def validate_file_safety(filepath: str) -> list[str]:
-    """校验文件路径安全性"""
-    errors = []
+    """Validate archive member names using cross-platform filesystem rules."""
+    errors: list[str] = []
+    if not isinstance(filepath, str) or not filepath:
+        return [f"Invalid empty file path: {filepath!r}"]
+    if "\x00" in filepath:
+        errors.append(f"NUL byte not allowed in path: {filepath!r}")
+
     normalized = filepath.replace("\\", "/")
+    parts = normalized.split("/")
+    meaningful_parts = parts[:-1] if parts and parts[-1] == "" else parts
 
-    if ".." in normalized.split("/"):
-        errors.append(f"Path traversal detected: {filepath}")
-
-    if normalized.startswith("/"):
+    if normalized.startswith("/") or normalized.startswith("//"):
         errors.append(f"Absolute path not allowed: {filepath}")
+    if re.match(r"^[A-Za-z]:", normalized):
+        errors.append(f"Windows drive path not allowed: {filepath}")
+
+    windows_reserved = {
+        "CON", "PRN", "AUX", "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }
+    for part in meaningful_parts:
+        if part in {"", ".", ".."}:
+            errors.append(f"Unsafe path segment {part!r}: {filepath}")
+            continue
+        if ":" in part:
+            errors.append(f"Colon/ADS path segment not allowed: {filepath}")
+        if part.endswith((" ", ".")):
+            errors.append(f"Windows-normalized path segment not allowed: {filepath}")
+        stem = part.split(".", 1)[0].rstrip(" .").upper()
+        if stem in windows_reserved:
+            errors.append(f"Windows reserved filename not allowed: {filepath}")
 
     ext = "." + normalized.rsplit(".", 1)[-1].lower() if "." in normalized else ""
     if ext in FORBIDDEN_EXTENSIONS:

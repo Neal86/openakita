@@ -119,12 +119,33 @@ class WeChatDesktopAdapter(ChannelAdapter):
 
     async def stop(self) -> None:
         self._running = False
-        for task in self._merge_tasks.values():
+        tasks = list(self._merge_tasks.values())
+        for task in tasks:
             task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         self._merge_tasks.clear()
         self._pending.clear()
+        self._last_send.clear()
+        self._send_locks.clear()
+        try:
+            await wechat_desktop_manager.send_command(
+                self.node_id,
+                {
+                    "version": 1,
+                    "event": "config.remove",
+                    "bot_id": self.bot_id,
+                    "payload": {},
+                },
+            )
+        except ConnectionError:
+            # Reconnect starts from an empty connector-side config snapshot, so
+            # an offline node cannot preserve this stale Bot indefinitely.
+            pass
         await wechat_desktop_manager.unregister_bot_callback(self.bot_id)
-        await wechat_desktop_manager.bind_account(self.node_id, self.wechat_account_id, self.bot_id, False)
+        await wechat_desktop_manager.bind_account(
+            self.node_id, self.wechat_account_id, self.bot_id, False
+        )
 
     def _accept_payload(self, payload: dict[str, Any]) -> tuple[str, str, str] | None:
         if not self._running or not self.auto_reply or self.human_takeover:
@@ -177,7 +198,7 @@ class WeChatDesktopAdapter(ChannelAdapter):
             rows = self._pending.pop(key, [])
             if not rows or not self._running:
                 return
-            first, last = rows[0], rows[-1]
+            last = rows[-1]
             chat_id, sender_id = key
             sender_name = str(last.get("sender_name") or sender_id)
             text = "\n".join(str(row.get("text") or "").strip() for row in rows if str(row.get("text") or "").strip())
@@ -217,6 +238,18 @@ class WeChatDesktopAdapter(ChannelAdapter):
     async def send_message(self, message: OutgoingMessage) -> str:
         if not self._running:
             raise ChannelDeliveryUnavailable("微信（桌面版）Bot 未运行", channel=self.channel_name, chat_id=message.chat_id, reason="bot_not_running")
+        chat_id = str(message.chat_id or "")
+        outbound_allowed = chat_id in self.allowed_groups or (
+            self.private_chat_enabled and chat_id in self.allowed_contacts
+        )
+        if not outbound_allowed:
+            raise ChannelDeliveryUnavailable(
+                "目标微信会话未获当前 Bot 授权",
+                channel=self.channel_name,
+                chat_id=chat_id,
+                reason="chat_not_allowed",
+                retryable=False,
+            )
         text = message.content.text if message.content else ""
         if not text:
             raise ValueError("wechat_desktop currently supports text messages only")

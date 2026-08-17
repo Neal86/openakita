@@ -1,0 +1,8 @@
+Trigger final OpenAkita portable Windows build.
+Hermes Agent: 0.19.0
+Runtime: embedded native AIAgent
+Docker required on Windows: no
+Windows Connector: local embedded + remote connector pairing
+Triggered: 2026-08-11 20:54 PDT
+Workflow: OpenAkita Portable Windows Release
+Reason: package final Windows Devices UI, local embedded connector, remote pairing management, and native Windows Hermes lifecycle.

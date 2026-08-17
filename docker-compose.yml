@@ -7,8 +7,68 @@ services:
     volumes:
       - ./data:/app/data
       - /opt/devops-repos/openakita-secrets/.env:/app/.env:ro
+      # Allows OpenAkita to create, stop, and restore dedicated Hermes instances.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - hermes_auth_data:/run/openakita-hermes-auth
     environment:
       API_HOST: 0.0.0.0
       API_PORT: 18900
+      OPENAKITA_HERMES_AUTH_FILE: /run/openakita-hermes-auth/internal_gateway_token
+      # Desktop remote mode runs inside Tauri/WebView, so POST requests such as
+      # Windows Connector pairing use a cross-origin preflight. Keep the fixed
+      # desktop/mobile app origins explicitly allowed even when the mounted .env
+      # defines CORS_ORIGINS for browser access.
+      CORS_ORIGINS: "tauri://localhost,http://tauri.localhost,https://tauri.localhost,http://localhost,capacitor://localhost"
     labels:
       - "traefik.http.services.openakita.loadbalancer.server.port=18900"
+    networks:
+      agents:
+        aliases:
+          - openakita
+
+  # Default shared Hermes instance. Build a thin project image on top of the
+  # pinned upstream runtime so shared_gateway.py is part of the image rather
+  # than bind-mounted from Coolify's temporary deployment checkout.
+  hermes-shared:
+    build:
+      context: .
+      dockerfile: deploy/hermes/Dockerfile
+    restart: unless-stopped
+    expose:
+      - "8642"
+    volumes:
+      - hermes_shared_data:/opt/data
+      - hermes_auth_data:/run/openakita-hermes-auth:ro
+    environment:
+      API_SERVER_HOST: 0.0.0.0
+      API_SERVER_PORT: 8642
+      OPENAKITA_HERMES_AGENT_ROOT: /opt/data/openakita-agents
+      HERMES_SHARED_MAX_AGENTS: 32
+      OPENAKITA_HERMES_AUTH_FILE: /run/openakita-hermes-auth/internal_gateway_token
+      OPENAI_BASE_URL: http://openakita:18900/v1
+      OPENAI_MODEL: openakita-auto
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -fsS
+        - http://localhost:8642/health
+      interval: 20s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    networks:
+      agents:
+        aliases:
+          - openakita-hermes-shared
+
+networks:
+  agents:
+    name: openakita-agents
+    driver: bridge
+
+volumes:
+  hermes_shared_data:
+    name: openakita_hermes_shared_data
+  hermes_auth_data:
+    name: openakita_hermes_auth_data

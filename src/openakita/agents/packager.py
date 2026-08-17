@@ -25,9 +25,11 @@ from .manifest import (
     AgentManifest,
     ExternalSkillRef,
     ManifestAuthor,
+    validate_external_skill_source,
     validate_file_safety,
 )
 from .profile import AgentProfile, ProfileStore
+from openakita.utils.atomic_io import atomic_json_write, safe_write, safe_write_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +97,10 @@ class AgentPackager:
         builtin_skills: list[str] = []
 
         for skill_name in candidate_skills or []:
+            if not isinstance(skill_name, str) or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", skill_name
+            ):
+                raise PackageError(f"Unsafe skill identifier: {skill_name!r}")
             skill_path = self._find_skill(skill_name)
             if skill_path is None:
                 builtin_skills.append(skill_name)
@@ -167,7 +173,13 @@ class AgentPackager:
                 skill_path = self._find_skill(skill_name)
                 if skill_path:
                     for file in skill_path.rglob("*"):
+                        if file.is_symlink():
+                            raise PackageError(f"Symlinks not allowed in bundled skill: {file}")
                         if file.is_file():
+                            if file.stat().st_size > MAX_SINGLE_FILE_SIZE:
+                                raise PackageError(
+                                    f"File too large: {file} ({file.stat().st_size} bytes)"
+                                )
                             arcname = f"skills/{skill_name}/{file.relative_to(skill_path)}"
                             zf.write(file, arcname)
 
@@ -189,7 +201,13 @@ class AgentPackager:
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         output_path = self.output_dir / f"{slug_id}.akita-agent"
-        output_path.write_bytes(buf.getvalue())
+        safe_write_bytes(
+            output_path,
+            buf.getvalue(),
+            backup=True,
+            fsync=True,
+            allow_fallback=False,
+        )
 
         logger.info(
             f"Agent packaged: {output_path} ({len(buf.getvalue())} bytes, "
@@ -367,38 +385,77 @@ class AgentInstaller:
                 raise PackageError(f"Invalid manifest: {'; '.join(errors)}")
 
             profile_data = json.loads(zf.read("profile.json"))
+            if not isinstance(profile_data, dict):
+                raise PackageError("Invalid profile.json: root must be an object")
 
             profile_id = manifest.id
             if self.profile_store.exists(profile_id) and not force:
                 profile_id = self._resolve_conflict(profile_id)
 
-            installed_skills = self._install_skills(
-                zf, manifest.bundled_skills, agent_id=manifest.id
-            )
-
-            ext_results = self._fetch_external_skills(
-                manifest.required_external_skills, agent_id=manifest.id
-            )
-            installed_skills.extend(ext_results)
-
             profile_data["id"] = profile_id
             profile_data["type"] = "custom"
             profile_data.pop("ephemeral", None)
             profile_data.pop("inherit_from", None)
-
-            if installed_skills:
-                existing_skills = profile_data.get("skills", [])
-                for s in installed_skills:
-                    if s not in existing_skills:
-                        existing_skills.append(s)
-                profile_data["skills"] = existing_skills
-
             if hub_source:
                 profile_data["hub_source"] = hub_source
 
-            profile = AgentProfile.from_dict(profile_data)
-            self.profile_store.save(profile)
-            self._install_identity_files(zf, profile.id)
+            # Validate the profile and filesystem-safe ID before touching any
+            # shared Skill directory. This prevents a malformed package from
+            # changing runtime state before failing on profile persistence.
+            AgentProfile.from_dict(profile_data)
+            self.profile_store.get_profile_dir(profile_id)
+            previous_profile = self.profile_store.get(profile_id)
+            identity_snapshot = self._snapshot_identity_files(zf, profile_id)
+
+            import tempfile
+
+            self.skills_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(
+                dir=self.skills_dir, prefix=f".agent-install-{profile_id}-"
+            ) as transaction_dir:
+                skill_snapshot = self._snapshot_skill_targets(
+                    manifest, Path(transaction_dir)
+                )
+                profile_saved = False
+                try:
+                    installed_skills = self._install_skills(
+                        zf, manifest.bundled_skills, agent_id=manifest.id
+                    )
+                    ext_results = self._fetch_external_skills(
+                        manifest.required_external_skills, agent_id=manifest.id
+                    )
+                    installed_skills.extend(ext_results)
+
+                    if installed_skills:
+                        existing_skills = list(profile_data.get("skills", []) or [])
+                        for skill_name in installed_skills:
+                            if skill_name not in existing_skills:
+                                existing_skills.append(skill_name)
+                        profile_data["skills"] = existing_skills
+
+                    profile = AgentProfile.from_dict(profile_data)
+                    self.profile_store.save(profile)
+                    profile_saved = True
+                    self._install_identity_files(zf, profile.id)
+                except Exception as exc:
+                    rollback_errors: list[str] = []
+                    try:
+                        self._restore_skill_targets(skill_snapshot)
+                    except Exception as rollback_exc:
+                        rollback_errors.append(f"skills: {rollback_exc}")
+                    if profile_saved:
+                        try:
+                            self._restore_profile_after_failed_install(
+                                profile_id, previous_profile, identity_snapshot
+                            )
+                        except Exception as rollback_exc:
+                            rollback_errors.append(f"profile: {rollback_exc}")
+                    if rollback_errors:
+                        raise PackageError(
+                            "Agent installation failed and rollback was incomplete: "
+                            + "; ".join(rollback_errors)
+                        ) from exc
+                    raise
 
         logger.info(
             f"Agent installed: {profile_id} "
@@ -407,6 +464,89 @@ class AgentInstaller:
             f"total installed: {installed_skills})"
         )
         return profile
+
+    def _snapshot_identity_files(
+        self, zf: zipfile.ZipFile, profile_id: str
+    ) -> dict[str, bytes | None]:
+        members = {
+            Path(name).name
+            for name in zf.namelist()
+            if name.startswith("identity/")
+            and not name.endswith("/")
+            and Path(name).name in PROFILE_IDENTITY_FILENAMES
+        }
+        if not members:
+            return {}
+        identity_dir = self.profile_store.get_profile_dir(profile_id) / "identity"
+        snapshot: dict[str, bytes | None] = {}
+        for filename in members:
+            target = identity_dir / filename
+            snapshot[filename] = target.read_bytes() if target.is_file() else None
+        return snapshot
+
+    def _snapshot_skill_targets(
+        self, manifest: AgentManifest, transaction_dir: Path
+    ) -> dict[Path, Path | None]:
+        import shutil
+
+        targets: list[Path] = [
+            self.skills_dir / "custom" / skill_name
+            for skill_name in manifest.bundled_skills
+        ]
+        targets.extend(
+            self.skills_dir / "community" / ref.id
+            for ref in manifest.required_external_skills
+        )
+        snapshot: dict[Path, Path | None] = {}
+        for index, target in enumerate(dict.fromkeys(targets)):
+            if target.exists() and not target.is_dir():
+                raise PackageError(f"Skill target is not a directory: {target}")
+            if not target.exists():
+                snapshot[target] = None
+                continue
+            backup = transaction_dir / f"skill-{index}"
+            shutil.copytree(target, backup, symlinks=True)
+            snapshot[target] = backup
+        return snapshot
+
+    @staticmethod
+    def _restore_skill_targets(snapshot: dict[Path, Path | None]) -> None:
+        import shutil
+
+        for target, backup in reversed(list(snapshot.items())):
+            if target.exists():
+                if target.is_dir():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+            if backup is not None and backup.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                backup.replace(target)
+
+    def _restore_profile_after_failed_install(
+        self,
+        profile_id: str,
+        previous_profile: AgentProfile | None,
+        identity_snapshot: dict[str, bytes | None],
+    ) -> None:
+        if previous_profile is None:
+            self.profile_store.delete(profile_id)
+            return
+
+        self.profile_store.save(previous_profile)
+        identity_dir = self.profile_store.ensure_profile_dir(profile_id) / "identity"
+        for filename, previous in identity_snapshot.items():
+            target = identity_dir / filename
+            if previous is None:
+                target.unlink(missing_ok=True)
+            else:
+                safe_write_bytes(
+                    target,
+                    previous,
+                    backup=False,
+                    fsync=True,
+                    allow_fallback=False,
+                )
 
     def _install_identity_files(self, zf: zipfile.ZipFile, profile_id: str) -> None:
         identity_members = [
@@ -426,15 +566,17 @@ class AgentInstaller:
             filename = Path(member).name
             try:
                 content = zf.read(member).decode("utf-8")
-            except Exception as exc:
-                logger.warning(
-                    "Failed to install identity file %s for profile %s: %s",
-                    member,
-                    profile_id,
-                    exc,
+                safe_write(
+                    identity_dir / filename,
+                    content,
+                    backup=True,
+                    fsync=True,
+                    allow_fallback=False,
                 )
-                continue
-            (identity_dir / filename).write_text(content, encoding="utf-8")
+            except Exception as exc:
+                raise PackageError(
+                    f"Failed to install identity file {member!r} for profile {profile_id}: {exc}"
+                ) from exc
 
     def _validate_file(self, package_path: Path) -> None:
         if not package_path.exists():
@@ -451,16 +593,34 @@ class AgentInstaller:
                 raise PackageError("Missing profile.json in package")
 
     def _security_check(self, zf: zipfile.ZipFile) -> None:
+        total_uncompressed = 0
+        seen_names: set[str] = set()
         for info in zf.infolist():
             errors = validate_file_safety(info.filename)
             if errors:
                 raise PackageError(f"Security violation: {'; '.join(errors)}")
+            normalized_name = info.filename.replace("\\", "/")
+            collision_key = "/".join(
+                part.rstrip(" .").casefold() for part in normalized_name.split("/")
+            )
+            if collision_key in seen_names:
+                raise PackageError(f"Duplicate ZIP member not allowed: {info.filename}")
+            seen_names.add(collision_key)
             if info.file_size > MAX_SINGLE_FILE_SIZE:
                 raise PackageError(f"File too large: {info.filename} ({info.file_size} bytes)")
+            total_uncompressed += info.file_size
+            if total_uncompressed > MAX_PACKAGE_SIZE:
+                raise PackageError(
+                    f"Package expands beyond safety limit: {total_uncompressed} bytes "
+                    f"(max {MAX_PACKAGE_SIZE})"
+                )
             if info.is_dir():
                 continue
             if info.external_attr >> 16 & 0o120000 == 0o120000:
                 raise PackageError(f"Symlinks not allowed: {info.filename}")
+        bad_member = zf.testzip()
+        if bad_member is not None:
+            raise PackageError(f"Corrupt ZIP member: {bad_member}")
 
     # ── Skill version helpers ──
 
@@ -527,8 +687,12 @@ class AgentInstaller:
         }
         if agent_id:
             data["installed_by_agent"] = agent_id
-        (skill_dir / self._ORIGIN_FILE).write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        atomic_json_write(
+            skill_dir / self._ORIGIN_FILE,
+            data,
+            backup=True,
+            fsync=True,
+            allow_fallback=False,
         )
 
     def _find_installed_skill_dir(self, skill_id: str) -> Path | None:
@@ -601,22 +765,34 @@ class AgentInstaller:
                     installed.append(skill_name)
                     continue
 
+            import tempfile
+
             target_dir = custom_skills_dir / skill_name
-            target_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(
+                dir=custom_skills_dir, prefix=f".{skill_name}.stage-"
+            ) as stage_root:
+                staging_dir = Path(stage_root) / "skill"
+                staging_dir.mkdir(parents=True, exist_ok=True)
+                for filename in skill_files:
+                    rel_path = filename[len(skill_prefix) :]
+                    target_file = staging_dir / rel_path
+                    target_file.parent.mkdir(parents=True, exist_ok=True)
+                    safe_write_bytes(
+                        target_file,
+                        zf.read(filename),
+                        backup=False,
+                        fsync=True,
+                        allow_fallback=False,
+                    )
 
-            for filename in skill_files:
-                rel_path = filename[len(skill_prefix) :]
-                target_file = target_dir / rel_path
-                target_file.parent.mkdir(parents=True, exist_ok=True)
-                target_file.write_bytes(zf.read(filename))
-
-            self._write_origin(
-                target_dir,
-                source="bundled",
-                version=incoming_ver,
-                origin_type="bundled",
-                agent_id=agent_id,
-            )
+                self._write_origin(
+                    staging_dir,
+                    source="bundled",
+                    version=incoming_ver,
+                    origin_type="bundled",
+                    agent_id=agent_id,
+                )
+                self._replace_skill_directory(staging_dir, target_dir)
             installed.append(skill_name)
             logger.info(
                 f"Installed bundled skill: {skill_name} v{incoming_ver or '?'} -> {target_dir}"
@@ -680,13 +856,41 @@ class AgentInstaller:
     def _skill_exists_locally(self, skill_id: str) -> bool:
         return self._find_installed_skill_dir(skill_id) is not None
 
-    def _install_from_source(self, skill_id: str, source: str) -> Path:
-        """Fetch a skill from its source and return the install dir.
+    def _replace_skill_directory(self, staging_dir: Path, target_dir: Path) -> None:
+        """Swap a fully prepared skill directory into place with rollback."""
+        import shutil
+        import uuid
 
-        Best-effort GitHub clone implementation.
-        """
+        backup_dir = target_dir.with_name(f".{target_dir.name}.backup-{uuid.uuid4().hex}")
+        had_existing = target_dir.exists()
+        if had_existing:
+            target_dir.replace(backup_dir)
+        try:
+            staging_dir.replace(target_dir)
+        except Exception:
+            if had_existing and backup_dir.exists() and not target_dir.exists():
+                backup_dir.replace(target_dir)
+            raise
+        else:
+            if backup_dir.exists():
+                try:
+                    shutil.rmtree(backup_dir)
+                except OSError as exc:
+                    logger.warning(
+                        "Skill replacement succeeded but backup cleanup failed (%s): %s",
+                        backup_dir,
+                        exc,
+                    )
+
+    def _install_from_source(self, skill_id: str, source: str) -> Path:
+        """Fetch a skill from an approved GitHub source and return the install dir."""
         import subprocess
         import tempfile
+
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", skill_id):
+            raise PackageError(f"Unsafe external skill identifier: {skill_id!r}")
+        if not validate_external_skill_source(source):
+            raise PackageError(f"Unsafe external skill source: {source!r}")
 
         if "@" in source:
             repo_part, skill_name = source.rsplit("@", 1)
@@ -699,8 +903,9 @@ class AgentInstaller:
         else:
             repo_url = repo_part
 
-        target_dir = self.skills_dir / "community" / skill_id
-        target_dir.mkdir(parents=True, exist_ok=True)
+        community_dir = self.skills_dir / "community"
+        community_dir.mkdir(parents=True, exist_ok=True)
+        target_dir = community_dir / skill_id
 
         with tempfile.TemporaryDirectory() as tmpdir:
             subprocess.run(
@@ -720,11 +925,36 @@ class AgentInstaller:
             if not skill_md.exists():
                 raise FileNotFoundError(f"SKILL.md not found in {src_skill}")
 
-            for file in src_skill.rglob("*"):
-                if file.is_file():
-                    dest = target_dir / file.relative_to(src_skill)
+            with tempfile.TemporaryDirectory(
+                dir=community_dir, prefix=f".{skill_id}.stage-"
+            ) as stage_root:
+                staging_dir = Path(stage_root) / "skill"
+                staging_dir.mkdir(parents=True, exist_ok=True)
+                total_size = 0
+                for file in src_skill.rglob("*"):
+                    if file.is_symlink():
+                        raise PackageError(f"Symlinks not allowed in external skill: {file}")
+                    if not file.is_file():
+                        continue
+                    size = file.stat().st_size
+                    if size > MAX_SINGLE_FILE_SIZE:
+                        raise PackageError(f"External skill file too large: {file} ({size} bytes)")
+                    total_size += size
+                    if total_size > MAX_PACKAGE_SIZE:
+                        raise PackageError(
+                            f"External skill exceeds safety limit: {total_size} bytes"
+                        )
+                    dest = staging_dir / file.relative_to(src_skill)
                     dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_bytes(file.read_bytes())
+                    safe_write_bytes(
+                        dest,
+                        file.read_bytes(),
+                        backup=False,
+                        fsync=True,
+                        allow_fallback=False,
+                    )
+
+                self._replace_skill_directory(staging_dir, target_dir)
 
         return target_dir
 

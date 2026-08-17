@@ -156,7 +156,14 @@ def download_with_retries(url: str, dest: Path, *, attempts: int = 4) -> None:
     for attempt in range(1, attempts + 1):
         try:
             tmp.unlink(missing_ok=True)
-            with urllib.request.urlopen(url, timeout=90) as resp, tmp.open("wb") as fh:
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "OpenAkita-Bootstrap/1.0",
+                    "Accept": "application/octet-stream",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=90) as resp, tmp.open("wb") as fh:
                 shutil.copyfileobj(resp, fh)
             tmp.replace(dest)
             return
@@ -190,7 +197,11 @@ def head_check(url: str, *, attempts: int = 3, timeout: int = 30) -> int:
     """
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
-        req = urllib.request.Request(url, method="HEAD")
+        req = urllib.request.Request(
+            url,
+            method="HEAD",
+            headers={"User-Agent": "OpenAkita-Bootstrap/1.0"},
+        )
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.status

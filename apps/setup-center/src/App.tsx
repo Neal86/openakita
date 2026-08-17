@@ -22,6 +22,7 @@ const MemoryView = lazy(() => import("./views/MemoryView").then(m => ({ default:
 const IdentityView = lazy(() => import("./views/IdentityView").then(m => ({ default: m.IdentityView })));
 const AgentDashboardView = lazy(() => import("./views/AgentDashboardView").then(m => ({ default: m.AgentDashboardView })));
 const AgentManagerView = lazy(() => import("./views/AgentManagerView").then(m => ({ default: m.AgentManagerView })));
+const ExecutionInstancesView = lazy(() => import("./views/ExecutionInstancesView").then(m => ({ default: m.ExecutionInstancesView })));
 const OrgEditorView = lazy(() => import("./views/OrgEditorView").then(m => ({ default: m.OrgEditorView })));
 const PixelOfficeView = lazy(() => import("./views/PixelOfficeView").then(m => ({ default: m.PixelOfficeView })));
 const AgentStoreView = lazy(() => import("./views/AgentStoreView").then(m => ({ default: m.AgentStoreView })));
@@ -157,7 +158,7 @@ const _HASH_TO_VIEW: Record<string, ViewId> = {
   "token-stats": "token_stats", "skill-usage": "skill_usage", "identity": "identity",
   "dashboard": "dashboard", "org-editor": "org_editor",
   "pixel-office": "pixel_office",
-  "agent-manager": "agent_manager", "agent-store": "agent_store",
+  "agent-manager": "agent_manager", "execution-instances": "execution_instances", "agent-store": "agent_store",
   "skill-store": "skill_store", "wizard": "wizard", "docs": "docs",
   "security": "security", "pending-approvals": "pending_approvals",
   "plugins": "plugins", "my_feedback": "my_feedback",
@@ -4615,6 +4616,9 @@ function MainApp() {
           visible={view === "agent_manager"}
         />
       );
+    }
+    if (view === "execution_instances") {
+      return <ExecutionInstancesView apiBaseUrl={apiBaseUrl} />;
     }
     if (view === "agent_store") {
       return (

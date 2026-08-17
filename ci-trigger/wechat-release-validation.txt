@@ -1,0 +1,4 @@
+Run the finalized Windows Connector and Hermes validation workflow.
+Persist the final result for automated verification.
+
+Retriggered after deployment repair: 2026-08-07T01:48:00Z

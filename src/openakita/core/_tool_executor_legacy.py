@@ -859,7 +859,25 @@ class ToolExecutor:
             try:
                 # 通过 handler_registry 执行
                 if self._handler_registry.has_tool(tool_name):
-                    result = await self._handler_registry.execute_by_tool(tool_name, tool_input)
+                    # Bind executor-owned Agent identity for local/Native Windows Connector tools.
+                    # If Hermes already bound an explicit profile, keep that stronger context.
+                    from ..windows_connector.context import current_agent_profile_id
+                    existing_profile = current_agent_profile_id.get("")
+                    profile_token = None
+                    if not existing_profile:
+                        agent_ref = getattr(self, "_agent_ref", None)
+                        derived_profile = (
+                            getattr(agent_ref, "_agent_profile_id", "")
+                            or getattr(agent_ref, "profile_id", "")
+                            or getattr(getattr(agent_ref, "profile", None), "id", "")
+                        )
+                        if derived_profile:
+                            profile_token = current_agent_profile_id.set(str(derived_profile))
+                    try:
+                        result = await self._handler_registry.execute_by_tool(tool_name, tool_input)
+                    finally:
+                        if profile_token is not None:
+                            current_agent_profile_id.reset(profile_token)
                 else:
                     span.set_attribute("error", f"unknown_tool: {tool_name}")
                     suggestion = self._suggest_similar_tool(tool_name)

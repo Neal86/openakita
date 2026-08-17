@@ -25,7 +25,7 @@ from ..core.capabilities import (
     build_capability_id,
     build_namespace,
 )
-from ..utils.atomic_io import atomic_json_write
+from ..utils.atomic_io import atomic_json_write, read_json_safe
 
 logger = logging.getLogger(__name__)
 
@@ -424,6 +424,20 @@ def get_profile_store(base_dir: str | Path | None = None) -> ProfileStore:
         return _global_store
 
 
+def resolve_agent_profile(profile_id: str) -> AgentProfile | None:
+    """Resolve a persisted/ephemeral profile or an undeployed system preset."""
+    profile = get_profile_store().get(profile_id)
+    if profile is not None:
+        return profile
+    from openakita.agents.presets import get_preset_by_id
+
+    return get_preset_by_id(profile_id)
+
+
+def agent_profile_exists(profile_id: str) -> bool:
+    return resolve_agent_profile(profile_id) is not None
+
+
 class ProfileStore:
     """
     AgentProfile 持久化存储 + 临时 (ephemeral) 内存存储。
@@ -451,8 +465,11 @@ class ProfileStore:
         loaded = 0
         for fp in self._profiles_dir.glob("*.json"):
             try:
-                data = json.loads(fp.read_text(encoding="utf-8"))
+                data = read_json_safe(fp)
+                if not isinstance(data, dict):
+                    raise ValueError("profile JSON is not recoverable")
                 profile = AgentProfile.from_dict(data)
+                self._validate_profile_id(profile.id)
                 profile = self._heal_loaded_profile(profile, fp)
                 self._cache[profile.id] = profile
                 loaded += 1
@@ -576,6 +593,7 @@ class ProfileStore:
 
     def save(self, profile: AgentProfile) -> None:
         """保存 Profile。ephemeral=True 的只存内存，否则写磁盘。"""
+        self._validate_profile_id(profile.id)
         with self._lock:
             if profile.ephemeral:
                 self._ephemeral[profile.id] = profile
@@ -588,8 +606,8 @@ class ProfileStore:
             existing = self._cache.get(profile.id)
             if existing and existing.is_system:
                 self._validate_system_update(existing, profile)
-            self._cache[profile.id] = profile
             self._persist(profile)
+            self._cache[profile.id] = profile
         logger.info(f"ProfileStore saved: {profile.id} ({profile.type.value})")
 
     # 仅用于判断"用户是否实质修改了系统 Agent"的字段集（hidden/visibility 不算）
@@ -677,21 +695,34 @@ class ProfileStore:
                 data.pop("memory_mode", None)
             data.update(updates)
             profile = AgentProfile.from_dict(data)
-            self._cache[profile_id] = profile
             self._persist(profile)
+            self._cache[profile_id] = profile
 
         logger.info(f"ProfileStore updated: {profile_id}")
         return profile
 
     _RESERVED_DIR_NAMES = frozenset({"profiles"})
 
-    def get_profile_dir(self, profile_id: str) -> Path:
-        """返回 Profile 专属数据目录 data/agents/{profile_id}/
+    @classmethod
+    def _validate_profile_id(cls, profile_id: str) -> str:
+        """Reject IDs that can escape the Agent storage root on any platform."""
+        if not isinstance(profile_id, str) or not profile_id:
+            raise ValueError("Profile ID must be a non-empty string")
+        if profile_id != profile_id.strip():
+            raise ValueError("Profile ID must not contain leading or trailing whitespace")
+        if (
+            profile_id in cls._RESERVED_DIR_NAMES
+            or profile_id in {".", ".."}
+            or "/" in profile_id
+            or "\\" in profile_id
+            or "\x00" in profile_id
+        ):
+            raise ValueError(f"Unsafe Profile ID: {profile_id!r}")
+        return profile_id
 
-        Raises ValueError if profile_id collides with reserved directory names.
-        """
-        if profile_id in self._RESERVED_DIR_NAMES:
-            raise ValueError(f"Profile ID '{profile_id}' conflicts with a reserved directory name")
+    def get_profile_dir(self, profile_id: str) -> Path:
+        """返回 Profile 专属数据目录 data/agents/{profile_id}/。"""
+        profile_id = self._validate_profile_id(profile_id)
         return self._base_dir / profile_id
 
     def ensure_profile_dir(self, profile_id: str) -> Path:
@@ -702,24 +733,30 @@ class ProfileStore:
         return d
 
     def delete(self, profile_id: str) -> bool:
-        """删除 Profile。SYSTEM 类型禁止删除。同时清理 Profile 专属目录。"""
+        """Delete a custom profile without hiding data-removal failures.
+
+        Profile-owned data is removed first. If that fails, the profile remains
+        fully registered and visible so the operator can retry instead of
+        leaving an apparently deleted Agent with residual private data.
+        """
+        import shutil
+
         with self._lock:
             existing = self._cache.get(profile_id)
             if existing is None:
                 return False
             if existing.is_system:
                 raise PermissionError(f"Cannot delete SYSTEM profile: {profile_id}")
-            del self._cache[profile_id]
+
+            profile_dir = self.get_profile_dir(profile_id)
+            if profile_dir.is_dir():
+                shutil.rmtree(profile_dir)
+                logger.info(f"ProfileStore cleaned profile dir: {profile_dir}")
+
             fp = self._profiles_dir / f"{profile_id}.json"
             if fp.exists():
                 fp.unlink()
-
-        import shutil
-
-        profile_dir = self.get_profile_dir(profile_id)
-        if profile_dir.is_dir():
-            shutil.rmtree(profile_dir, ignore_errors=True)
-            logger.info(f"ProfileStore cleaned profile dir: {profile_dir}")
+            del self._cache[profile_id]
 
         logger.info(f"ProfileStore deleted: {profile_id}")
         return True
@@ -765,8 +802,15 @@ class ProfileStore:
         return count
 
     def _persist(self, profile: AgentProfile) -> None:
-        fp = self._profiles_dir / f"{profile.id}.json"
-        atomic_json_write(fp, profile.to_dict())
+        profile_id = self._validate_profile_id(profile.id)
+        fp = self._profiles_dir / f"{profile_id}.json"
+        atomic_json_write(
+            fp,
+            profile.to_dict(),
+            backup=True,
+            fsync=True,
+            allow_fallback=False,
+        )
 
     @staticmethod
     def _validate_system_update(
@@ -786,18 +830,49 @@ class ProfileStore:
     # ── 分类管理 ────────────────────────────────────────────────────────
 
     def _load_categories(self) -> None:
-        if not self._categories_file.exists():
+        data = read_json_safe(self._categories_file)
+        if data is None:
             return
-        try:
-            data = json.loads(self._categories_file.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                self._custom_categories = data
-                logger.info(f"Loaded {len(data)} custom category(ies)")
-        except Exception as e:
-            logger.warning(f"Failed to load categories: {e}")
+        if not isinstance(data, list):
+            logger.warning("Failed to load categories: root must be a list")
+            return
 
-    def _persist_categories(self) -> None:
-        atomic_json_write(self._categories_file, self._custom_categories)
+        loaded: list[dict[str, Any]] = []
+        seen = set(_BUILTIN_IDS)
+        for row in data:
+            if not isinstance(row, dict):
+                logger.warning("Skipping malformed category row: %r", row)
+                continue
+            cat_id = row.get("id")
+            label = row.get("label")
+            color = row.get("color")
+            if (
+                not isinstance(cat_id, str)
+                or not cat_id.strip()
+                or cat_id != cat_id.strip()
+                or cat_id in seen
+                or not isinstance(label, str)
+                or not label.strip()
+                or not isinstance(color, str)
+                or not color.strip()
+            ):
+                logger.warning("Skipping invalid category row: %r", row)
+                continue
+            loaded.append({"id": cat_id, "label": label, "color": color})
+            seen.add(cat_id)
+
+        self._custom_categories = loaded
+        if loaded:
+            logger.info("Loaded %d custom category(ies)", len(loaded))
+
+    def _persist_categories(self, categories: list[dict[str, Any]]) -> None:
+        atomic_json_write(
+            self._categories_file,
+            categories,
+            backup=True,
+            fsync=True,
+            allow_fallback=False,
+        )
 
     def list_categories(self, profiles: Iterable[AgentProfile] | None = None) -> list[dict[str, Any]]:
         """返回所有分类（内置 + 自定义），每项含 agent_count。"""
@@ -828,13 +903,24 @@ class ProfileStore:
 
     def add_category(self, cat_id: str, label: str, color: str) -> dict[str, Any]:
         """新增自定义分类。id 不能与已有分类重复。"""
+        if (
+            not isinstance(cat_id, str)
+            or not cat_id.strip()
+            or cat_id != cat_id.strip()
+            or not isinstance(label, str)
+            or not label.strip()
+            or not isinstance(color, str)
+            or not color.strip()
+        ):
+            raise ValueError("分类 ID、名称和颜色不能为空，ID 不能包含首尾空白")
         with self._lock:
             existing_ids = _BUILTIN_IDS | {c["id"] for c in self._custom_categories}
             if cat_id in existing_ids:
                 raise ValueError(f"分类 ID 已存在: {cat_id}")
             entry: dict[str, Any] = {"id": cat_id, "label": label, "color": color}
-            self._custom_categories.append(entry)
-            self._persist_categories()
+            updated = [*self._custom_categories, entry]
+            self._persist_categories(updated)
+            self._custom_categories = updated
         logger.info(f"Added custom category: {cat_id} ({label})")
         return {**entry, "builtin": False, "agent_count": 0}
 
@@ -851,9 +937,10 @@ class ProfileStore:
                     f"分类 '{cat_id}' 下还有 {agent_count} 个 Agent，请先移除或更换分类"
                 )
             before = len(self._custom_categories)
-            self._custom_categories = [c for c in self._custom_categories if c["id"] != cat_id]
-            if len(self._custom_categories) == before:
+            updated = [c for c in self._custom_categories if c["id"] != cat_id]
+            if len(updated) == before:
                 return False
-            self._persist_categories()
+            self._persist_categories(updated)
+            self._custom_categories = updated
         logger.info(f"Removed custom category: {cat_id}")
         return True

@@ -13,7 +13,6 @@ import type { EnvMap } from "../types";
 import { envGet, envSet } from "../utils";
 import { copyToClipboard } from "../utils/clipboard";
 import { BotConfigTab } from "./IMView";
-import { WechatDesktopPanel } from "../components/WechatDesktopPanel";
 import { cn } from "@/lib/utils";
 import { AlertCircle, BookOpen, BrainCircuit, ExternalLink, Info, MonitorSmartphone, Terminal } from "lucide-react";
 import { openExternalUrl } from "../platform";
@@ -29,7 +28,7 @@ type IMConfigViewProps = {
   wizardMode?: boolean;
 };
 
-const DEFAULT_API = "http://127.0.0.1:18900";
+const DEFAULT_API = "";
 
 const PLATFORMS = [
   { id: "wechat", title: "config.imWechat", logo: LogoWechat, docUrl: "https://developers.weixin.qq.com/doc/" },
@@ -124,8 +123,6 @@ export function IMConfigView(props: IMConfigViewProps) {
           <p className="text-sm text-muted-foreground leading-relaxed">{t("config.imBotGuide")}</p>
         </div>
       )}
-
-      {!wizardMode && <WechatDesktopPanel apiBaseUrl={apiBaseUrl ?? DEFAULT_API} />}
 
       {!wizardMode && (
         <BotConfigTab

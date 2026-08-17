@@ -7,18 +7,18 @@
 JSON 格式::
 
     {
-      "categories": [
-        {
-          "name": "browser",
-          "description": "网页浏览相关技能",
-          "skills": ["browser-open", "agentic-browser"]
-        },
-        {
-          "name": "code",
-          "description": "编程与代码生成",
-          "skills": ["python-executor"]
-        }
-      ]
+        "categories": [
+            {
+                "name": "browser",
+                "description": "网页浏览相关技能",
+                "skills": ["browser-open", "agentic-browser"]
+            },
+            {
+                "name": "code",
+                "description": "编程与代码生成",
+                "skills": ["python-executor"]
+            }
+        ]
     }
 
 - **categories**: 用户自定义分类列表（name + description + skills）
@@ -26,10 +26,11 @@ JSON 格式::
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 from pathlib import Path
+
+from openakita.utils.atomic_io import atomic_json_write, read_json_safe
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +42,11 @@ def _new_default_data() -> dict:
 
 
 def _default_store_path() -> Path:
-    """Return the default path for ``skill_categories.json``."""
+    """Return the durable path for ``skill_categories.json``."""
     try:
         from openakita.config import settings
 
-        return settings.project_root / "data" / "skills" / "skill_categories.json"
+        return Path(settings.data_dir) / "skills" / "skill_categories.json"
     except Exception:
         return Path.cwd() / "data" / "skills" / "skill_categories.json"
 
@@ -166,28 +167,21 @@ class CategoryStore:
         return None
 
     def _load(self) -> None:
-        if not self._path.exists():
+        data = read_json_safe(self._path)
+        if data is None:
             self._data = _new_default_data()
             return
-        try:
-            raw = self._path.read_text(encoding="utf-8")
-            data = json.loads(raw) if raw.strip() else {}
-            self._data = self._normalize_loaded_data(data)
-        except Exception as e:
-            logger.warning("Failed to load %s: %s", self._path, e)
-            self._data = _new_default_data()
+        self._data = self._normalize_loaded_data(data)
 
     def _save(self) -> None:
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._path.with_suffix(".json.tmp")
-            tmp.write_text(
-                json.dumps(self._data, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            tmp.replace(self._path)
-        except Exception as e:
-            logger.error("Failed to save %s: %s", self._path, e)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_json_write(
+            self._path,
+            self._data,
+            backup=True,
+            fsync=True,
+            allow_fallback=False,
+        )
 
     def reload(self) -> None:
         with self._lock:
@@ -261,7 +255,9 @@ class CategoryStore:
         """删除分类并清除其下所有 skills 归属。"""
         with self._lock:
             before = len(self._data["categories"])
-            self._data["categories"] = [c for c in self._data["categories"] if c["name"] != name]
+            self._data["categories"] = [
+                c for c in self._data["categories"] if c["name"] != name
+            ]
             if len(self._data["categories"]) == before:
                 return False
             self._save()
@@ -295,7 +291,9 @@ class CategoryStore:
                     reordered.append(c)
                     seen.add(name)
 
-            if [c["name"] for c in reordered] == [c["name"] for c in self._data["categories"]]:
+            if [c["name"] for c in reordered] == [
+                c["name"] for c in self._data["categories"]
+            ]:
                 return False
 
             self._data["categories"] = reordered
@@ -305,7 +303,7 @@ class CategoryStore:
     # ── 绑定管理 ─────────────────────────────────────────────────────────
 
     def get_bindings(self) -> dict[str, str]:
-        """返回所有绑定 ``{skill_id: category_name}``。"""
+        """返回所有绑定 ``{skill_id: category_name}``."""
         with self._lock:
             return self._build_bindings_from_categories(self._data["categories"])
 
